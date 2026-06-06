@@ -61,3 +61,363 @@ Incoming: [[object Object],[object Object],[object Object],[object Object],[obje
 [2m19:32:31[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.
 [2m19:33:05[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.
 [2m19:33:20[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.
+[2m19:36:35[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.
+[2m19:37:42[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.
+[2m19:40:58[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22m[vite] Failed to reload /src/components/workspace/GitPanel.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above)
+[2m19:41:05[22m [31m[1m[vite][22m[39m [31mInternal server error: Failed to resolve import "./GitPanel" from "src/components/workspace/WorkspacePage.tsx". Does the file exist?[39m
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx[39m:63:25
+[33m  22 |  import { CommandPalette } from "./CommandPalette";
+  23 |  import { CreateProjectDialog } from "./CreateProjectDialog";
+  24 |  import { GitPanel } from "./GitPanel";
+     |                            ^
+  25 |  import { conversationProfile, useWorkspace } from "./use-workspace";
+  26 |  var _jsxFileName = "C:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx";[39m
+      at TransformPluginContext._formatLog (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30602:39)
+      at TransformPluginContext.error (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30599:14)
+      at normalizeUrl (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27842:18)
+      at async file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27905:30
+      at async Promise.all (index 23)
+      at async TransformPluginContext.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27873:4)
+      at async EnvironmentPluginContainer.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30387:14)
+      at async loadAndTransform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24646:26)
+      at async viteTransformMiddleware (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24440:20)
+[2m19:41:05[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m Pre-transform error: Failed to resolve import "./GitPanel" from "src/components/workspace/WorkspacePage.tsx". Does the file exist?
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx[39m:63:25
+[33m  22 |  import { CommandPalette } from "./CommandPalette";
+  23 |  import { CreateProjectDialog } from "./CreateProjectDialog";
+  24 |  import { GitPanel } from "./GitPanel";
+     |                            ^
+  25 |  import { conversationProfile, useWorkspace } from "./use-workspace";
+  26 |  var _jsxFileName = "C:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx";[39m
+[2m19:41:05[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m Pre-transform error: Failed to resolve import "./GitPanel" from "src/components/workspace/WorkspacePage.tsx". Does the file exist?
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx[39m:63:25
+[33m  22 |  import { CommandPalette } from "./CommandPalette";
+  23 |  import { CreateProjectDialog } from "./CreateProjectDialog";
+  24 |  import { GitPanel } from "./GitPanel";
+     |                            ^
+  25 |  import { conversationProfile, useWorkspace } from "./use-workspace";
+  26 |  var _jsxFileName = "C:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx";[39m
+[2m19:41:05[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22m[vite] Failed to reload /src/components/workspace/WorkspacePage.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above)
+[2m19:41:19[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m Pre-transform error: Failed to resolve import "./GitPanel" from "src/components/workspace/WorkspacePage.tsx". Does the file exist?
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx[39m:63:25
+[33m  22 |  import { CommandPalette } from "./CommandPalette";
+  23 |  import { CreateProjectDialog } from "./CreateProjectDialog";
+  24 |  import { GitPanel } from "./GitPanel";
+     |                            ^
+  25 |  import { conversationProfile, useWorkspace } from "./use-workspace";
+  26 |  var _jsxFileName = "C:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx";[39m
+[2m19:41:19[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m Pre-transform error: Failed to resolve import "./GitPanel" from "src/components/workspace/WorkspacePage.tsx". Does the file exist?
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx[39m:63:25
+[33m  22 |  import { CommandPalette } from "./CommandPalette";
+  23 |  import { CreateProjectDialog } from "./CreateProjectDialog";
+  24 |  import { GitPanel } from "./GitPanel";
+     |                            ^
+  25 |  import { conversationProfile, useWorkspace } from "./use-workspace";
+  26 |  var _jsxFileName = "C:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx";[39m
+[2m19:41:19[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m Pre-transform error: Failed to resolve import "./GitPanel" from "src/components/workspace/WorkspacePage.tsx". Does the file exist?
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx[39m:63:25
+[33m  22 |  import { CommandPalette } from "./CommandPalette";
+  23 |  import { CreateProjectDialog } from "./CreateProjectDialog";
+  24 |  import { GitPanel } from "./GitPanel";
+     |                            ^
+  25 |  import { conversationProfile, useWorkspace } from "./use-workspace";
+  26 |  var _jsxFileName = "C:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx";[39m
+[2m19:41:19[22m [31m[1m[vite][22m[39m [31mInternal server error: Failed to resolve import "./GitPanel" from "src/components/workspace/WorkspacePage.tsx". Does the file exist?[39m
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx[39m:63:25
+[33m  22 |  import { CommandPalette } from "./CommandPalette";
+  23 |  import { CreateProjectDialog } from "./CreateProjectDialog";
+  24 |  import { GitPanel } from "./GitPanel";
+     |                            ^
+  25 |  import { conversationProfile, useWorkspace } from "./use-workspace";
+  26 |  var _jsxFileName = "C:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx";[39m
+      at TransformPluginContext._formatLog (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30602:39)
+      at TransformPluginContext.error (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30599:14)
+      at normalizeUrl (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27842:18)
+      at async file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27905:30
+      at async Promise.all (index 23)
+      at async TransformPluginContext.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27873:4)
+      at async EnvironmentPluginContainer.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30387:14)
+      at async loadAndTransform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24646:26)
+[2m19:41:19[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22m[vite] Failed to reload /src/App.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above)
+[2m19:41:27[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m Pre-transform error: Failed to resolve import "./GitPanel" from "src/components/workspace/WorkspacePage.tsx". Does the file exist?
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx[39m:63:25
+[33m  22 |  import { CommandPalette } from "./CommandPalette";
+  23 |  import { CreateProjectDialog } from "./CreateProjectDialog";
+  24 |  import { GitPanel } from "./GitPanel";
+     |                            ^
+  25 |  import { conversationProfile, useWorkspace } from "./use-workspace";
+  26 |  var _jsxFileName = "C:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx";[39m
+[2m19:41:27[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m Pre-transform error: Failed to resolve import "./GitPanel" from "src/components/workspace/WorkspacePage.tsx". Does the file exist?
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx[39m:63:25
+[33m  22 |  import { CommandPalette } from "./CommandPalette";
+  23 |  import { CreateProjectDialog } from "./CreateProjectDialog";
+  24 |  import { GitPanel } from "./GitPanel";
+     |                            ^
+  25 |  import { conversationProfile, useWorkspace } from "./use-workspace";
+  26 |  var _jsxFileName = "C:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx";[39m
+[2m19:41:27[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m Pre-transform error: Failed to resolve import "./GitPanel" from "src/components/workspace/WorkspacePage.tsx". Does the file exist?
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx[39m:63:25
+[33m  22 |  import { CommandPalette } from "./CommandPalette";
+  23 |  import { CreateProjectDialog } from "./CreateProjectDialog";
+  24 |  import { GitPanel } from "./GitPanel";
+     |                            ^
+  25 |  import { conversationProfile, useWorkspace } from "./use-workspace";
+  26 |  var _jsxFileName = "C:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx";[39m
+[2m19:41:27[22m [31m[1m[vite][22m[39m [31mInternal server error: Failed to resolve import "./GitPanel" from "src/components/workspace/WorkspacePage.tsx". Does the file exist?[39m
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx[39m:63:25
+[33m  22 |  import { CommandPalette } from "./CommandPalette";
+  23 |  import { CreateProjectDialog } from "./CreateProjectDialog";
+  24 |  import { GitPanel } from "./GitPanel";
+     |                            ^
+  25 |  import { conversationProfile, useWorkspace } from "./use-workspace";
+  26 |  var _jsxFileName = "C:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx";[39m
+      at TransformPluginContext._formatLog (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30602:39)
+      at TransformPluginContext.error (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30599:14)
+      at normalizeUrl (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27842:18)
+      at async file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27905:30
+      at async Promise.all (index 23)
+      at async TransformPluginContext.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27873:4)
+      at async EnvironmentPluginContainer.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30387:14)
+      at async loadAndTransform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24646:26)
+[2m19:41:27[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22m[vite] Failed to reload /src/App.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above)
+[2m19:41:35[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m Pre-transform error: Failed to resolve import "./GitPanel" from "src/components/workspace/WorkspacePage.tsx". Does the file exist?
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx[39m:63:25
+[33m  22 |  import { CommandPalette } from "./CommandPalette";
+  23 |  import { CreateProjectDialog } from "./CreateProjectDialog";
+  24 |  import { GitPanel } from "./GitPanel";
+     |                            ^
+  25 |  import { conversationProfile, useWorkspace } from "./use-workspace";
+  26 |  var _jsxFileName = "C:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx";[39m
+[2m19:41:35[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m Pre-transform error: Failed to resolve import "./GitPanel" from "src/components/workspace/WorkspacePage.tsx". Does the file exist?
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx[39m:63:25
+[33m  22 |  import { CommandPalette } from "./CommandPalette";
+  23 |  import { CreateProjectDialog } from "./CreateProjectDialog";
+  24 |  import { GitPanel } from "./GitPanel";
+     |                            ^
+  25 |  import { conversationProfile, useWorkspace } from "./use-workspace";
+  26 |  var _jsxFileName = "C:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx";[39m
+[2m19:41:35[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m Pre-transform error: Failed to resolve import "./GitPanel" from "src/components/workspace/WorkspacePage.tsx". Does the file exist?
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx[39m:63:25
+[33m  22 |  import { CommandPalette } from "./CommandPalette";
+  23 |  import { CreateProjectDialog } from "./CreateProjectDialog";
+  24 |  import { GitPanel } from "./GitPanel";
+     |                            ^
+  25 |  import { conversationProfile, useWorkspace } from "./use-workspace";
+  26 |  var _jsxFileName = "C:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx";[39m
+[2m19:41:35[22m [31m[1m[vite][22m[39m [31mInternal server error: Failed to resolve import "./GitPanel" from "src/components/workspace/WorkspacePage.tsx". Does the file exist?[39m
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx[39m:63:25
+[33m  22 |  import { CommandPalette } from "./CommandPalette";
+  23 |  import { CreateProjectDialog } from "./CreateProjectDialog";
+  24 |  import { GitPanel } from "./GitPanel";
+     |                            ^
+  25 |  import { conversationProfile, useWorkspace } from "./use-workspace";
+  26 |  var _jsxFileName = "C:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx";[39m
+      at TransformPluginContext._formatLog (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30602:39)
+      at TransformPluginContext.error (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30599:14)
+      at normalizeUrl (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27842:18)
+      at async file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27905:30
+      at async Promise.all (index 23)
+      at async TransformPluginContext.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27873:4)
+      at async EnvironmentPluginContainer.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30387:14)
+      at async loadAndTransform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24646:26)
+[2m19:41:35[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22m[vite] Failed to reload /src/App.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above)
+[2m19:41:43[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m Pre-transform error: Failed to resolve import "./GitPanel" from "src/components/workspace/WorkspacePage.tsx". Does the file exist?
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx[39m:63:25
+[33m  22 |  import { CommandPalette } from "./CommandPalette";
+  23 |  import { CreateProjectDialog } from "./CreateProjectDialog";
+  24 |  import { GitPanel } from "./GitPanel";
+     |                            ^
+  25 |  import { conversationProfile, useWorkspace } from "./use-workspace";
+  26 |  var _jsxFileName = "C:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx";[39m
+[2m19:41:43[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m Pre-transform error: Failed to resolve import "./GitPanel" from "src/components/workspace/WorkspacePage.tsx". Does the file exist?
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx[39m:63:25
+[33m  22 |  import { CommandPalette } from "./CommandPalette";
+  23 |  import { CreateProjectDialog } from "./CreateProjectDialog";
+  24 |  import { GitPanel } from "./GitPanel";
+     |                            ^
+  25 |  import { conversationProfile, useWorkspace } from "./use-workspace";
+  26 |  var _jsxFileName = "C:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx";[39m
+[2m19:41:43[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m Pre-transform error: Failed to resolve import "./GitPanel" from "src/components/workspace/WorkspacePage.tsx". Does the file exist?
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx[39m:63:25
+[33m  22 |  import { CommandPalette } from "./CommandPalette";
+  23 |  import { CreateProjectDialog } from "./CreateProjectDialog";
+  24 |  import { GitPanel } from "./GitPanel";
+     |                            ^
+  25 |  import { conversationProfile, useWorkspace } from "./use-workspace";
+  26 |  var _jsxFileName = "C:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx";[39m
+[2m19:41:43[22m [31m[1m[vite][22m[39m [31mInternal server error: Failed to resolve import "./GitPanel" from "src/components/workspace/WorkspacePage.tsx". Does the file exist?[39m
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx[39m:63:25
+[33m  22 |  import { CommandPalette } from "./CommandPalette";
+  23 |  import { CreateProjectDialog } from "./CreateProjectDialog";
+  24 |  import { GitPanel } from "./GitPanel";
+     |                            ^
+  25 |  import { conversationProfile, useWorkspace } from "./use-workspace";
+  26 |  var _jsxFileName = "C:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx";[39m
+      at TransformPluginContext._formatLog (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30602:39)
+      at TransformPluginContext.error (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30599:14)
+      at normalizeUrl (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27842:18)
+      at async file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27905:30
+      at async Promise.all (index 23)
+      at async TransformPluginContext.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27873:4)
+      at async EnvironmentPluginContainer.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30387:14)
+      at async loadAndTransform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24646:26)
+[2m19:41:43[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22m[vite] Failed to reload /src/App.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above)
+[2m19:41:51[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m Pre-transform error: Failed to resolve import "./GitPanel" from "src/components/workspace/WorkspacePage.tsx". Does the file exist?
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx[39m:63:25
+[33m  22 |  import { CommandPalette } from "./CommandPalette";
+  23 |  import { CreateProjectDialog } from "./CreateProjectDialog";
+  24 |  import { GitPanel } from "./GitPanel";
+     |                            ^
+  25 |  import { conversationProfile, useWorkspace } from "./use-workspace";
+  26 |  var _jsxFileName = "C:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx";[39m
+[2m19:41:51[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m Pre-transform error: Failed to resolve import "./GitPanel" from "src/components/workspace/WorkspacePage.tsx". Does the file exist?
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx[39m:63:25
+[33m  22 |  import { CommandPalette } from "./CommandPalette";
+  23 |  import { CreateProjectDialog } from "./CreateProjectDialog";
+  24 |  import { GitPanel } from "./GitPanel";
+     |                            ^
+  25 |  import { conversationProfile, useWorkspace } from "./use-workspace";
+  26 |  var _jsxFileName = "C:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx";[39m
+[2m19:41:51[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m Pre-transform error: Failed to resolve import "./GitPanel" from "src/components/workspace/WorkspacePage.tsx". Does the file exist?
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx[39m:63:25
+[33m  22 |  import { CommandPalette } from "./CommandPalette";
+  23 |  import { CreateProjectDialog } from "./CreateProjectDialog";
+  24 |  import { GitPanel } from "./GitPanel";
+     |                            ^
+  25 |  import { conversationProfile, useWorkspace } from "./use-workspace";
+  26 |  var _jsxFileName = "C:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx";[39m
+[2m19:41:51[22m [31m[1m[vite][22m[39m [31mInternal server error: Failed to resolve import "./GitPanel" from "src/components/workspace/WorkspacePage.tsx". Does the file exist?[39m
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx[39m:63:25
+[33m  22 |  import { CommandPalette } from "./CommandPalette";
+  23 |  import { CreateProjectDialog } from "./CreateProjectDialog";
+  24 |  import { GitPanel } from "./GitPanel";
+     |                            ^
+  25 |  import { conversationProfile, useWorkspace } from "./use-workspace";
+  26 |  var _jsxFileName = "C:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx";[39m
+      at TransformPluginContext._formatLog (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30602:39)
+      at TransformPluginContext.error (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30599:14)
+      at normalizeUrl (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27842:18)
+      at async file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27905:30
+      at async Promise.all (index 23)
+      at async TransformPluginContext.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27873:4)
+      at async EnvironmentPluginContainer.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30387:14)
+      at async loadAndTransform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24646:26)
+[2m19:41:51[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22m[vite] Failed to reload /src/App.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above)
+[2m19:42:05[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m Pre-transform error: Failed to resolve import "./GitPanel" from "src/components/workspace/WorkspacePage.tsx". Does the file exist?
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx[39m:63:25
+[33m  22 |  import { CommandPalette } from "./CommandPalette";
+  23 |  import { CreateProjectDialog } from "./CreateProjectDialog";
+  24 |  import { GitPanel } from "./GitPanel";
+     |                            ^
+  25 |  import { conversationProfile, useWorkspace } from "./use-workspace";
+  26 |  var _jsxFileName = "C:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx";[39m
+[2m19:42:05[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m Pre-transform error: Failed to resolve import "./GitPanel" from "src/components/workspace/WorkspacePage.tsx". Does the file exist?
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx[39m:63:25
+[33m  22 |  import { CommandPalette } from "./CommandPalette";
+  23 |  import { CreateProjectDialog } from "./CreateProjectDialog";
+  24 |  import { GitPanel } from "./GitPanel";
+     |                            ^
+  25 |  import { conversationProfile, useWorkspace } from "./use-workspace";
+  26 |  var _jsxFileName = "C:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx";[39m
+[2m19:42:05[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m Pre-transform error: Failed to resolve import "./GitPanel" from "src/components/workspace/WorkspacePage.tsx". Does the file exist?
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx[39m:63:25
+[33m  22 |  import { CommandPalette } from "./CommandPalette";
+  23 |  import { CreateProjectDialog } from "./CreateProjectDialog";
+  24 |  import { GitPanel } from "./GitPanel";
+     |                            ^
+  25 |  import { conversationProfile, useWorkspace } from "./use-workspace";
+  26 |  var _jsxFileName = "C:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx";[39m
+[2m19:42:05[22m [31m[1m[vite][22m[39m [31mInternal server error: Failed to resolve import "./GitPanel" from "src/components/workspace/WorkspacePage.tsx". Does the file exist?[39m
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx[39m:63:25
+[33m  22 |  import { CommandPalette } from "./CommandPalette";
+  23 |  import { CreateProjectDialog } from "./CreateProjectDialog";
+  24 |  import { GitPanel } from "./GitPanel";
+     |                            ^
+  25 |  import { conversationProfile, useWorkspace } from "./use-workspace";
+  26 |  var _jsxFileName = "C:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx";[39m
+      at TransformPluginContext._formatLog (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30602:39)
+      at TransformPluginContext.error (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30599:14)
+      at normalizeUrl (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27842:18)
+      at async file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27905:30
+      at async Promise.all (index 23)
+      at async TransformPluginContext.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27873:4)
+      at async EnvironmentPluginContainer.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30387:14)
+      at async loadAndTransform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24646:26)
+[2m19:42:05[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22m[vite] Failed to reload /src/App.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above)
+[2m19:42:12[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m Pre-transform error: Failed to resolve import "./GitPanel" from "src/components/workspace/WorkspacePage.tsx". Does the file exist?
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx[39m:63:25
+[33m  22 |  import { CommandPalette } from "./CommandPalette";
+  23 |  import { CreateProjectDialog } from "./CreateProjectDialog";
+  24 |  import { GitPanel } from "./GitPanel";
+     |                            ^
+  25 |  import { conversationProfile, useWorkspace } from "./use-workspace";
+  26 |  var _jsxFileName = "C:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx";[39m
+[2m19:42:12[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m Pre-transform error: Failed to resolve import "./GitPanel" from "src/components/workspace/WorkspacePage.tsx". Does the file exist?
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx[39m:63:25
+[33m  22 |  import { CommandPalette } from "./CommandPalette";
+  23 |  import { CreateProjectDialog } from "./CreateProjectDialog";
+  24 |  import { GitPanel } from "./GitPanel";
+     |                            ^
+  25 |  import { conversationProfile, useWorkspace } from "./use-workspace";
+  26 |  var _jsxFileName = "C:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx";[39m
+[2m19:42:13[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m Pre-transform error: Failed to resolve import "./GitPanel" from "src/components/workspace/WorkspacePage.tsx". Does the file exist?
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx[39m:63:25
+[33m  22 |  import { CommandPalette } from "./CommandPalette";
+  23 |  import { CreateProjectDialog } from "./CreateProjectDialog";
+  24 |  import { GitPanel } from "./GitPanel";
+     |                            ^
+  25 |  import { conversationProfile, useWorkspace } from "./use-workspace";
+  26 |  var _jsxFileName = "C:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx";[39m
+[2m19:42:13[22m [31m[1m[vite][22m[39m [31mInternal server error: Failed to resolve import "./GitPanel" from "src/components/workspace/WorkspacePage.tsx". Does the file exist?[39m
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx[39m:63:25
+[33m  22 |  import { CommandPalette } from "./CommandPalette";
+  23 |  import { CreateProjectDialog } from "./CreateProjectDialog";
+  24 |  import { GitPanel } from "./GitPanel";
+     |                            ^
+  25 |  import { conversationProfile, useWorkspace } from "./use-workspace";
+  26 |  var _jsxFileName = "C:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/WorkspacePage.tsx";[39m
+      at TransformPluginContext._formatLog (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30602:39)
+      at TransformPluginContext.error (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30599:14)
+      at normalizeUrl (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27842:18)
+      at async file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27905:30
+      at async Promise.all (index 23)
+      at async TransformPluginContext.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27873:4)
+      at async EnvironmentPluginContainer.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30387:14)
+      at async loadAndTransform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24646:26)
+[2m19:42:13[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22m[vite] Failed to reload /src/App.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above)
+[2m19:46:15[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.
+[2m19:50:34[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.
+[2m19:57:50[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.
+[2m20:01:02[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.
+[2m20:03:30[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.

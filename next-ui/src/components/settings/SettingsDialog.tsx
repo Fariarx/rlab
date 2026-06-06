@@ -287,7 +287,6 @@ function AgentsSection({
           />
         }
       />
-      {accessMode === "unrestricted" && <Alert severity="warning">{t("unrestrictedAccessHint")}</Alert>}
       <Typography variant="body2" sx={{ color: "text.secondary", mb: 0.5 }}>
         {t("settingsAgentsHint")}
       </Typography>

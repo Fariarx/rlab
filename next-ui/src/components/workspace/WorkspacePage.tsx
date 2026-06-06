@@ -26,7 +26,7 @@ import {
   Tooltip,
   Typography,
 } from "@mui/material";
-import { type DragEvent, type MouseEvent as ReactMouseEvent, useEffect, useRef, useState } from "react";
+import { type DragEvent, type MouseEvent as ReactMouseEvent, useEffect, useMemo, useRef, useState } from "react";
 import { I18nProvider, useI18n } from "../../i18n/I18nProvider";
 import { type HashRoute } from "../../lib/use-hash-route";
 import {
@@ -42,10 +42,12 @@ import {
   ConversationSearch,
   conversationStatusKey,
   DEFAULT_PROFILE,
+  type DiffBlock,
   getAgent,
   normalizeAgentProfile,
   messageToPlainText,
   type ChatMessage,
+  type ComposerDraft,
   type ConversationStatus,
   type ConversationSummary,
   useAgentStatus,
@@ -66,12 +68,17 @@ const SIDEBAR_WIDTH = 300;
 const SIDEBAR_MIN_WIDTH = 240;
 const SIDEBAR_MAX_WIDTH = 520;
 const SIDEBAR_WIDTH_KEY = "next-ui:sidebar-width";
+const COMPOSER_DRAFT_SAVE_DELAY_MS = 350;
+const EMPTY_COMPOSER_DRAFT: ComposerDraft = { text: "", attachments: [] };
 
 function loadSidebarWidth(): number {
   if (typeof window === "undefined") {
     return SIDEBAR_WIDTH;
   }
-  const saved = Number(window.localStorage?.getItem(SIDEBAR_WIDTH_KEY));
+  if (typeof window.localStorage?.getItem !== "function") {
+    return SIDEBAR_WIDTH;
+  }
+  const saved = Number(window.localStorage.getItem(SIDEBAR_WIDTH_KEY));
   return Number.isFinite(saved) && saved >= SIDEBAR_MIN_WIDTH && saved <= SIDEBAR_MAX_WIDTH ? saved : SIDEBAR_WIDTH;
 }
 // The sidebar title bar and the chat pane header share one fixed height so the
@@ -109,6 +116,11 @@ function routeForConversation(workspace: Workspace, conversationId: string): Has
 
 function workspaceConversations(workspace: Workspace): readonly ConversationSummary[] {
   return [...workspace.chats, ...workspace.projects.flatMap((project) => project.conversations)];
+}
+
+function latestAgentDiffBlocks(messages: readonly ChatMessage[]): readonly DiffBlock[] {
+  const lastAgentMessage = [...messages].reverse().find((message) => message.role === "agent" && message.blocks?.some((block) => block.kind === "diff"));
+  return lastAgentMessage?.blocks?.filter((block): block is DiffBlock => block.kind === "diff") ?? [];
 }
 
 function runToastForStatus(status: ConversationStatus, title: string, t: ReturnType<typeof useI18n>["t"]) {
@@ -192,9 +204,16 @@ export function WorkspacePageView({
   const composerRef = useRef<ComposerHandle | null>(null);
   const notifiableRuns = useRef(new Set<string>());
   const previousStatuses = useRef(new Map<string, ConversationStatus>());
+  const sidebarWidthRef = useRef(sidebarWidth);
+  const sidebarShellRef = useRef<HTMLDivElement | null>(null);
+  const sidebarInnerRef = useRef<HTMLDivElement | null>(null);
+  const resizeFrameRef = useRef<number | null>(null);
+  const pendingDraftSaves = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const pendingDraftValues = useRef(new Map<string, ComposerDraft>());
 
   const selected = composingNew ? null : ws.find(ws.selectedId);
   const messages = ws.threads[ws.selectedId] ?? [];
+  const lastTurnDiffs = useMemo(() => latestAgentDiffBlocks(messages), [messages]);
   const composerDraft = ws.composerDrafts[ws.selectedId] ?? { text: "", attachments: [] };
   const selectedCwd = ws.cwdOf(ws.selectedId);
   const draftProject = composingNew?.projectId ? ws.projects.find((p) => p.id === composingNew.projectId) ?? null : null;
@@ -205,6 +224,47 @@ export function WorkspacePageView({
   const routeKind = route?.kind;
   const routeConversationId = route && (route.kind === "chat" || route.kind === "project") ? route.conversationId : undefined;
   const noAgentsAvailable = agentStatusLive && AGENTS.every((agent) => statusOf(agent.id) !== "available" && statusOf(agent.id) !== "running");
+  const workspaceHydrating = !ws.loaded;
+
+  const cancelDraftSave = (id: string) => {
+    const timer = pendingDraftSaves.current.get(id);
+    if (timer) {
+      clearTimeout(timer);
+      pendingDraftSaves.current.delete(id);
+    }
+  };
+
+  const flushDraftSave = (id: string) => {
+    const draft = pendingDraftValues.current.get(id);
+    if (!draft) {
+      cancelDraftSave(id);
+      return;
+    }
+    cancelDraftSave(id);
+    pendingDraftValues.current.delete(id);
+    ws.updateComposerDraft(id, draft);
+  };
+
+  const scheduleDraftSave = (id: string, draft: ComposerDraft) => {
+    pendingDraftValues.current.set(id, {
+      text: draft.text,
+      attachments: draft.attachments.map((attachment) => ({ ...attachment })),
+    });
+    cancelDraftSave(id);
+    pendingDraftSaves.current.set(id, setTimeout(() => flushDraftSave(id), COMPOSER_DRAFT_SAVE_DELAY_MS));
+  };
+
+  useEffect(() => {
+    return () => {
+      for (const id of Array.from(pendingDraftValues.current.keys())) {
+        flushDraftSave(id);
+      }
+      if (resizeFrameRef.current != null) {
+        window.cancelAnimationFrame(resizeFrameRef.current);
+        resizeFrameRef.current = null;
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (selected) {
@@ -364,24 +424,64 @@ export function WorkspacePageView({
 
   useEffect(() => {
     try {
-      window.localStorage?.setItem(SIDEBAR_WIDTH_KEY, String(sidebarWidth));
+      if (typeof window.localStorage?.setItem === "function") {
+        window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(sidebarWidth));
+      }
     } catch {
       // Ignore storage failures (private mode, quota) — width just won't persist.
     }
   }, [sidebarWidth]);
 
+  useEffect(() => {
+    sidebarWidthRef.current = sidebarWidth;
+    if (sidebarShellRef.current) {
+      sidebarShellRef.current.style.width = sidebarCollapsed ? "0px" : `${sidebarWidth}px`;
+    }
+    if (sidebarInnerRef.current) {
+      sidebarInnerRef.current.style.width = `${sidebarWidth}px`;
+    }
+  }, [sidebarCollapsed, sidebarWidth]);
+
   const startSidebarResize = (event: ReactMouseEvent) => {
     event.preventDefault();
     const startX = event.clientX;
-    const startWidth = sidebarWidth;
+    const startWidth = sidebarWidthRef.current;
+    let latestWidth = startWidth;
     setIsResizingSidebar(true);
+    const applyWidth = (next: number) => {
+      latestWidth = next;
+      sidebarWidthRef.current = next;
+      if (resizeFrameRef.current != null) {
+        return;
+      }
+      resizeFrameRef.current = window.requestAnimationFrame(() => {
+        resizeFrameRef.current = null;
+        if (sidebarShellRef.current) {
+          sidebarShellRef.current.style.width = `${sidebarWidthRef.current}px`;
+        }
+        if (sidebarInnerRef.current) {
+          sidebarInnerRef.current.style.width = `${sidebarWidthRef.current}px`;
+        }
+      });
+    };
     const onMove = (moveEvent: MouseEvent) => {
       const next = Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, startWidth + (moveEvent.clientX - startX)));
-      setSidebarWidth(next);
+      applyWidth(next);
     };
     const onUp = () => {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
+      if (resizeFrameRef.current != null) {
+        window.cancelAnimationFrame(resizeFrameRef.current);
+        resizeFrameRef.current = null;
+      }
+      if (sidebarShellRef.current) {
+        sidebarShellRef.current.style.width = `${latestWidth}px`;
+      }
+      if (sidebarInnerRef.current) {
+        sidebarInnerRef.current.style.width = `${latestWidth}px`;
+      }
+      setSidebarWidth(latestWidth);
       setIsResizingSidebar(false);
     };
     window.addEventListener("mousemove", onMove);
@@ -622,6 +722,7 @@ export function WorkspacePageView({
   return (
     <Box sx={{ height: "100dvh", display: "flex", overflow: "hidden", bgcolor: "background.default" }}>
       <Box
+        ref={sidebarShellRef}
         sx={{
           display: { xs: "none", md: "block" },
           width: sidebarCollapsed ? 0 : sidebarWidth,
@@ -630,7 +731,7 @@ export function WorkspacePageView({
           transition: isResizingSidebar ? "none" : "width 200ms ease",
         }}
       >
-        <Box sx={{ width: sidebarWidth, height: "100%" }}>{sidebar}</Box>
+        <Box ref={sidebarInnerRef} sx={{ width: sidebarWidth, height: "100%" }}>{sidebar}</Box>
       </Box>
       {!sidebarCollapsed && (
         <Box
@@ -844,7 +945,9 @@ export function WorkspacePageView({
 
         <Box sx={{ flex: "0 0 auto", borderTop: (t) => `1px solid ${t.custom.borders.subtle}`, backgroundColor: (t) => t.custom.surfaces.s1 }}>
           <Box sx={{ width: "100%", maxWidth: THREAD_MAX_WIDTH, mx: "auto", px: THREAD_PADDING_X, py: 1.5 }}>
-            {composingNew ? (
+            {workspaceHydrating ? (
+              <Box aria-busy="true" sx={{ minHeight: 52 }} />
+            ) : composingNew ? (
               <Composer
                 key="new-draft"
                 ref={composerRef}
@@ -865,17 +968,21 @@ export function WorkspacePageView({
               />
             ) : (
               <Composer
+                key={ws.selectedId}
                 ref={composerRef}
                 placeholder={selected ? t("messagePlaceholder", { title: selected.title }) : t("startPlaceholder")}
-                value={composerDraft.text}
-                attachments={composerDraft.attachments}
+                initialValue={composerDraft.text}
+                initialAttachments={composerDraft.attachments}
                 onDraftChange={(draft) => {
                   if (selected) {
-                    ws.updateComposerDraft(ws.selectedId, draft);
+                    scheduleDraftSave(ws.selectedId, draft);
                   }
                 }}
                 onSend={(text) => {
                   if (selected) {
+                    pendingDraftValues.current.delete(ws.selectedId);
+                    cancelDraftSave(ws.selectedId);
+                    ws.updateComposerDraft(ws.selectedId, EMPTY_COMPOSER_DRAFT);
                     notifiableRuns.current.add(ws.selectedId);
                     ws.sendMessage(ws.selectedId, text);
                   }
@@ -902,7 +1009,7 @@ export function WorkspacePageView({
         onClose={() => setSearchOpen(false)}
         onSelect={openConversation}
       />
-      <GitPanel open={gitOpen} cwd={selectedCwd} onClose={() => setGitOpen(false)} />
+      <GitPanel open={gitOpen} cwd={selectedCwd} lastTurnDiffs={lastTurnDiffs} onClose={() => setGitOpen(false)} />
       <CommandPalette open={commandPaletteOpen} items={commandItems} onClose={() => setCommandPaletteOpen(false)} />
       <CreateProjectDialog open={projectDialogOpen} defaultProfile={ws.settings.agents.defaultProfile} onClose={() => setProjectDialogOpen(false)} onCreate={handleCreateProject} />
       <SettingsDialog

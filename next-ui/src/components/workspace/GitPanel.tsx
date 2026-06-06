@@ -1,13 +1,16 @@
 import CloseIcon from "@mui/icons-material/Close";
 import RefreshIcon from "@mui/icons-material/Refresh";
-import { Alert, Box, Chip, CircularProgress, Drawer, Stack, Typography } from "@mui/material";
-import { useEffect, useState } from "react";
-import { type GitFileStatus, type GitStatusPayload } from "../../lib/git-status";
+import { Alert, Box, Chip, CircularProgress, Drawer, Stack, Tab, Tabs, Typography } from "@mui/material";
+import { useEffect, useMemo, useState } from "react";
 import { type I18nApi, useI18n } from "../../i18n/I18nProvider";
+import { type GitFileStatus, type GitStatusPayload } from "../../lib/git-status";
+import { type DiffBlock } from "../agent";
 import { Button, IconButton } from "../ui";
+import { GitDiffViewer, gitDiffViewerLinesFromBlock, gitDiffViewerLinesFromUnified } from "./GitDiffViewer";
 
 interface GitPanelProps {
   readonly cwd?: string;
+  readonly lastTurnDiffs?: readonly DiffBlock[];
   readonly open: boolean;
   readonly onClose: () => void;
 }
@@ -15,6 +18,15 @@ interface GitPanelProps {
 type GitApiErrorPayload = {
   readonly error?: string;
 };
+
+interface GitDiffPayload {
+  readonly diff: string;
+  readonly mode: "staged" | "worktree";
+  readonly path: string;
+}
+
+type GitPanelTab = "unstaged" | "staged" | "commit" | "last-turn";
+type GitDiffMode = GitDiffPayload["mode"];
 
 async function readGitApiPayload<T>(response: Response): Promise<T | GitApiErrorPayload> {
   try {
@@ -46,14 +58,7 @@ async function fetchGitStatus(cwd: string): Promise<GitStatusPayload> {
   return assertGitApiOk("Git status", response, payload);
 }
 
-interface GitDiffPayload {
-  readonly diff: string;
-  readonly mode: "staged" | "worktree";
-  readonly path: string;
-}
-
-async function fetchGitDiff(cwd: string, file: GitFileStatus): Promise<GitDiffPayload> {
-  const mode = file.unstaged ? "worktree" : "staged";
+async function fetchGitDiff(cwd: string, file: GitFileStatus, mode: GitDiffMode): Promise<GitDiffPayload> {
   const response = await fetch("/api/git-diff", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -118,13 +123,42 @@ function gitFileStatusLabel(file: GitFileStatus, t: I18nApi["t"]): string {
   return t("gitFileChanged");
 }
 
-export function GitPanel({ cwd, open, onClose }: GitPanelProps) {
+function fileTabMode(tab: GitPanelTab): GitDiffMode | null {
+  if (tab === "unstaged") {
+    return "worktree";
+  }
+  if (tab === "staged") {
+    return "staged";
+  }
+  return null;
+}
+
+function changedFilesForTab(status: GitStatusPayload | null, tab: GitPanelTab): readonly GitFileStatus[] {
+  if (!status) {
+    return [];
+  }
+  if (tab === "unstaged") {
+    return status.files.filter((file) => file.unstaged);
+  }
+  if (tab === "staged") {
+    return status.files.filter((file) => file.staged);
+  }
+  return [];
+}
+
+function tabLabel(label: string, count?: number): string {
+  return typeof count === "number" ? `${label} ${count}` : label;
+}
+
+export function GitPanel({ cwd, lastTurnDiffs = [], open, onClose }: GitPanelProps) {
   const { t } = useI18n();
   const [status, setStatus] = useState<GitStatusPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
+  const [activeTab, setActiveTab] = useState<GitPanelTab>("unstaged");
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  const [selectedLastTurnFile, setSelectedLastTurnFile] = useState<string | null>(null);
   const [diff, setDiff] = useState<GitDiffPayload | null>(null);
   const [diffLoading, setDiffLoading] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
@@ -136,6 +170,7 @@ export function GitPanel({ cwd, open, onClose }: GitPanelProps) {
       setError(null);
       setLoading(false);
       setSelectedPath(null);
+      setSelectedLastTurnFile(null);
       setDiff(null);
       return;
     }
@@ -145,16 +180,17 @@ export function GitPanel({ cwd, open, onClose }: GitPanelProps) {
     setError(null);
     void fetchGitStatus(cwd)
       .then((next) => {
-        if (alive) {
-          setStatus(next);
-          setSelectedPath((current) => {
-            if (current && next.files.some((file) => file.gitPath === current)) {
-              return current;
-            }
-            return null;
-          });
-          setDiff(null);
+        if (!alive) {
+          return;
         }
+        setStatus(next);
+        setSelectedPath((current) => {
+          if (current && next.files.some((file) => file.gitPath === current)) {
+            return current;
+          }
+          return null;
+        });
+        setDiff(null);
       })
       .catch((loadError) => {
         if (alive) {
@@ -173,26 +209,69 @@ export function GitPanel({ cwd, open, onClose }: GitPanelProps) {
     };
   }, [cwd, open, reloadKey, t]);
 
-  const selectedFile = status?.files.find((file) => file.gitPath === selectedPath) ?? null;
-  const hasStagedFiles = status?.files.some((file) => file.staged) ?? false;
+  const unstagedFiles = useMemo(() => changedFilesForTab(status, "unstaged"), [status]);
+  const stagedFiles = useMemo(() => changedFilesForTab(status, "staged"), [status]);
+  const activeGitFiles = activeTab === "staged" ? stagedFiles : activeTab === "unstaged" ? unstagedFiles : [];
+  const selectedFile = activeGitFiles.find((file) => file.gitPath === selectedPath) ?? null;
+  const selectedLastTurnDiff = lastTurnDiffs.find((block) => block.file === selectedLastTurnFile) ?? null;
+  const hasStagedFiles = stagedFiles.length > 0;
   const canPush = Boolean(status?.upstream && status.ahead > 0);
 
-  const selectFile = (file: GitFileStatus) => {
-    if (!cwd) {
+  useEffect(() => {
+    if (activeTab !== "unstaged" && activeTab !== "staged") {
       return;
     }
-    setSelectedPath(file.gitPath);
+    setSelectedPath((current) => {
+      if (current && activeGitFiles.some((file) => file.gitPath === current)) {
+        return current;
+      }
+      return activeGitFiles[0]?.gitPath ?? null;
+    });
+  }, [activeGitFiles, activeTab]);
+
+  useEffect(() => {
+    setSelectedLastTurnFile((current) => {
+      if (current && lastTurnDiffs.some((block) => block.file === current)) {
+        return current;
+      }
+      return lastTurnDiffs[0]?.file ?? null;
+    });
+  }, [lastTurnDiffs]);
+
+  useEffect(() => {
+    const mode = fileTabMode(activeTab);
+    if (!open || !cwd || !selectedFile || !mode) {
+      setDiff(null);
+      setDiffLoading(false);
+      return;
+    }
+
+    let alive = true;
     setDiff(null);
     setDiffLoading(true);
     setError(null);
-    void fetchGitDiff(cwd, file)
-      .then(setDiff)
-      .catch((loadError) => {
-        setDiff(null);
-        setError(loadError instanceof Error && loadError.message ? loadError.message : t("gitStatusUnavailable"));
+    void fetchGitDiff(cwd, selectedFile, mode)
+      .then((next) => {
+        if (alive) {
+          setDiff(next);
+        }
       })
-      .finally(() => setDiffLoading(false));
-  };
+      .catch((loadError) => {
+        if (alive) {
+          setDiff(null);
+          setError(loadError instanceof Error && loadError.message ? loadError.message : t("gitStatusUnavailable"));
+        }
+      })
+      .finally(() => {
+        if (alive) {
+          setDiffLoading(false);
+        }
+      });
+
+    return () => {
+      alive = false;
+    };
+  }, [activeTab, cwd, open, selectedFile, t]);
 
   const stageFile = (file: GitFileStatus) => {
     if (!cwd) {
@@ -282,7 +361,7 @@ export function GitPanel({ cwd, open, onClose }: GitPanelProps) {
       slotProps={{
         paper: {
           sx: {
-            width: { xs: "100%", sm: 420 },
+            width: { xs: "100%", sm: 720, lg: 900 },
             backgroundImage: "none",
             backgroundColor: (theme) => theme.custom.surfaces.s1,
           },
@@ -321,7 +400,7 @@ export function GitPanel({ cwd, open, onClose }: GitPanelProps) {
           </Stack>
         </Stack>
 
-        <Stack spacing={2} sx={{ flex: 1, minHeight: 0, overflow: "auto", p: 2 }}>
+        <Stack spacing={1.5} sx={{ flex: 1, minHeight: 0, overflow: "auto", p: 2 }}>
           {!cwd && <Alert severity="info">{t("gitNoProject")}</Alert>}
           {loading && (
             <Stack direction="row" spacing={1} sx={{ alignItems: "center", color: "text.secondary" }}>
@@ -331,161 +410,359 @@ export function GitPanel({ cwd, open, onClose }: GitPanelProps) {
           )}
           {error && <Alert severity="error">{error}</Alert>}
           {status && (
-            <Stack spacing={2}>
-              <Stack spacing={1.25}>
-                <Stack direction="row" spacing={1} sx={{ alignItems: "center", justifyContent: "space-between" }}>
-                  <Typography variant="microLabel" sx={{ color: "text.secondary" }}>
-                    {t("gitBranch")}
-                  </Typography>
-                  <Typography sx={{ fontFamily: (theme) => theme.custom.fonts.mono }}>{status.branch}</Typography>
-                </Stack>
-                {status.upstream && (
-                  <Stack direction="row" spacing={1} sx={{ alignItems: "center", justifyContent: "space-between" }}>
-                    <Typography variant="microLabel" sx={{ color: "text.secondary" }}>
-                      {t("gitUpstream")}
-                    </Typography>
-                    <Typography sx={{ fontFamily: (theme) => theme.custom.fonts.mono, color: "text.secondary" }}>{status.upstream}</Typography>
-                  </Stack>
-                )}
-                <Stack direction="row" spacing={0.75}>
-                  {status.ahead > 0 && <Chip size="small" label={t("gitAhead", { count: status.ahead })} />}
-                  {status.behind > 0 && <Chip size="small" label={t("gitBehind", { count: status.behind })} />}
-                  {status.clean && <Chip size="small" color="success" label={t("gitClean")} />}
-                </Stack>
-                <Stack spacing={0.75}>
-                  <Button variant="subtle" size="small" disabled={!canPush || actionLoading} onClick={pushAheadCommits}>
-                    {t("gitPushCommits")}
-                  </Button>
-                  {!canPush && <Typography sx={{ fontSize: "0.72rem", color: "text.secondary" }}>{t("gitPushNoAhead")}</Typography>}
-                </Stack>
-              </Stack>
+            <Stack spacing={1.5} sx={{ minHeight: 0 }}>
+              <GitStatusSummary status={status} canPush={canPush} actionLoading={actionLoading} onPush={pushAheadCommits} t={t} />
 
-              <Stack spacing={1}>
-                <Typography variant="microLabel" sx={{ color: "text.secondary" }}>
-                  {t("gitCommit")}
-                </Typography>
-                <Box
-                  component="textarea"
-                  aria-label={t("gitCommitMessage")}
-                  placeholder={t("gitCommitMessagePlaceholder")}
-                  value={commitMessage}
-                  onChange={(event) => setCommitMessage(event.currentTarget.value)}
-                  rows={3}
-                  sx={{
-                    width: "100%",
-                    resize: "vertical",
-                    border: (theme) => `1px solid ${theme.custom.borders.subtle}`,
-                    borderRadius: (theme) => `${theme.custom.radii.md}px`,
-                    bgcolor: (theme) => theme.custom.surfaces.s2,
-                    color: "text.primary",
-                    font: "inherit",
-                    fontSize: "0.84rem",
-                    lineHeight: 1.45,
-                    p: 1,
-                    outline: 0,
-                    "&:focus": {
-                      borderColor: (theme) => theme.custom.borders.focus,
-                    },
-                  }}
+              <Tabs value={activeTab} onChange={(_, value: GitPanelTab) => setActiveTab(value)} aria-label={t("gitStatus")}>
+                <Tab value="unstaged" label={tabLabel(t("gitUnstagedTab"), unstagedFiles.length)} />
+                <Tab value="staged" label={tabLabel(t("gitStagedTab"), stagedFiles.length)} />
+                <Tab value="commit" label={t("gitCommitTab")} />
+                <Tab value="last-turn" label={tabLabel(t("gitLastTurnTab"), lastTurnDiffs.length)} />
+              </Tabs>
+
+              {activeTab === "unstaged" && (
+                <GitFileChangesTab
+                  actionLoading={actionLoading}
+                  diff={diff}
+                  diffLoading={diffLoading}
+                  emptyText={t("gitNoUnstagedChanges")}
+                  files={unstagedFiles}
+                  mode="worktree"
+                  onSelect={(file) => setSelectedPath(file.gitPath)}
+                  onStage={stageFile}
+                  selectedFile={selectedFile}
+                  selectedPath={selectedPath}
+                  t={t}
                 />
-                {!hasStagedFiles && <Alert severity="info">{t("gitCommitNoStaged")}</Alert>}
-                <Button
-                  variant="contained"
-                  size="small"
-                  disabled={!hasStagedFiles || actionLoading || commitMessage.trim().length === 0}
-                  onClick={commitStagedFiles}
-                >
-                  {t("gitCommit")}
-                </Button>
-              </Stack>
+              )}
 
-              <Stack spacing={1}>
-                <Typography variant="microLabel" sx={{ color: "text.secondary" }}>
-                  {t("gitChanges")}
-                </Typography>
-                {status.files.length === 0 ? (
-                  <Alert severity="success">{t("gitClean")}</Alert>
-                ) : (
-                  <Stack spacing={0.75}>
-                    {status.files.map((file) => {
-                      const selected = file.gitPath === selectedPath;
-                      const label = gitFileStatusLabel(file, t);
-                      return (
-                      <Button
-                        key={`${file.code}-${file.path}`}
-                        variant="subtle"
-                        aria-label={`${file.path} ${label}`}
-                        onClick={() => selectFile(file)}
-                        sx={{
-                          width: "100%",
-                          alignItems: "center",
-                          justifyContent: "space-between",
-                          p: 1,
-                          borderRadius: (theme) => `${theme.custom.radii.md}px`,
-                          borderColor: (theme) => (selected ? theme.palette.status.running.border : theme.custom.borders.subtle),
-                        }}
-                      >
-                        <Typography noWrap sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.78rem" }}>
-                          {file.path}
-                        </Typography>
-                        <Chip size="small" label={label} />
-                      </Button>
-                      );
-                    })}
-                  </Stack>
-                )}
-              </Stack>
-              {selectedFile && (
-                <Stack spacing={1}>
-                  <Stack direction="row" spacing={1} sx={{ alignItems: "center", justifyContent: "space-between" }}>
-                    <Typography variant="microLabel" sx={{ color: "text.secondary" }}>
-                      {t("gitDiff")}
-                    </Typography>
-                    <Stack direction="row" spacing={0.75}>
-                      {selectedFile.unstaged && (
-                        <Button variant="subtle" size="small" disabled={actionLoading} aria-label={t("gitStageFile", { path: selectedFile.gitPath })} onClick={() => stageFile(selectedFile)}>
-                          {t("gitStage")}
-                        </Button>
-                      )}
-                      {selectedFile.staged && (
-                        <Button variant="subtle" size="small" disabled={actionLoading} aria-label={t("gitUnstageFile", { path: selectedFile.gitPath })} onClick={() => unstageFile(selectedFile)}>
-                          {t("gitUnstage")}
-                        </Button>
-                      )}
-                    </Stack>
-                  </Stack>
-                  {diffLoading ? (
-                    <Stack direction="row" spacing={1} sx={{ alignItems: "center", color: "text.secondary" }}>
-                      <CircularProgress size={16} />
-                      <Typography>{t("gitLoading")}</Typography>
-                    </Stack>
-                  ) : (
-                    <Box
-                      component="pre"
-                      sx={{
-                        m: 0,
-                        maxHeight: 360,
-                        overflow: "auto",
-                        p: 1.25,
-                        borderRadius: (theme) => `${theme.custom.radii.md}px`,
-                        border: (theme) => `1px solid ${theme.custom.borders.subtle}`,
-                        backgroundColor: (theme) => theme.custom.surfaces.s2,
-                        color: "text.primary",
-                        fontFamily: (theme) => theme.custom.fonts.mono,
-                        fontSize: "0.72rem",
-                        lineHeight: 1.55,
-                        whiteSpace: "pre-wrap",
-                      }}
-                    >
-                      {diff?.diff.trim() ? diff.diff : t("gitDiffEmpty")}
-                    </Box>
-                  )}
-                </Stack>
+              {activeTab === "staged" && (
+                <GitFileChangesTab
+                  actionLoading={actionLoading}
+                  diff={diff}
+                  diffLoading={diffLoading}
+                  emptyText={t("gitNoStagedChanges")}
+                  files={stagedFiles}
+                  mode="staged"
+                  onSelect={(file) => setSelectedPath(file.gitPath)}
+                  onUnstage={unstageFile}
+                  selectedFile={selectedFile}
+                  selectedPath={selectedPath}
+                  t={t}
+                />
+              )}
+
+              {activeTab === "commit" && (
+                <GitCommitTab
+                  actionLoading={actionLoading}
+                  commitMessage={commitMessage}
+                  hasStagedFiles={hasStagedFiles}
+                  onCommit={commitStagedFiles}
+                  onMessageChange={setCommitMessage}
+                  stagedFiles={stagedFiles}
+                  t={t}
+                />
+              )}
+
+              {activeTab === "last-turn" && (
+                <LastTurnChangesTab
+                  diffs={lastTurnDiffs}
+                  emptyText={t("gitNoLastTurnChanges")}
+                  onSelect={(block) => setSelectedLastTurnFile(block.file)}
+                  selectedDiff={selectedLastTurnDiff}
+                  selectedFile={selectedLastTurnFile}
+                />
               )}
             </Stack>
           )}
         </Stack>
       </Stack>
     </Drawer>
+  );
+}
+
+function GitStatusSummary({
+  actionLoading,
+  canPush,
+  onPush,
+  status,
+  t,
+}: {
+  readonly actionLoading: boolean;
+  readonly canPush: boolean;
+  readonly onPush: () => void;
+  readonly status: GitStatusPayload;
+  readonly t: I18nApi["t"];
+}) {
+  return (
+    <Stack
+      direction={{ xs: "column", sm: "row" }}
+      spacing={1}
+      sx={{
+        alignItems: { xs: "stretch", sm: "center" },
+        justifyContent: "space-between",
+        p: 1.25,
+        border: (theme) => `1px solid ${theme.custom.borders.subtle}`,
+        borderRadius: (theme) => `${theme.custom.radii.md}px`,
+        backgroundColor: (theme) => theme.custom.surfaces.s2,
+      }}
+    >
+      <Stack spacing={0.5} sx={{ minWidth: 0 }}>
+        <Stack direction="row" spacing={1} sx={{ alignItems: "center", minWidth: 0 }}>
+          <Typography variant="microLabel" sx={{ color: "text.secondary" }}>
+            {t("gitBranch")}
+          </Typography>
+          <Typography noWrap sx={{ fontFamily: (theme) => theme.custom.fonts.mono }}>
+            {status.branch}
+          </Typography>
+        </Stack>
+        {status.upstream && (
+          <Typography noWrap sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.72rem", color: "text.secondary" }}>
+            {t("gitUpstream")}: {status.upstream}
+          </Typography>
+        )}
+      </Stack>
+      <Stack direction="row" spacing={0.75} sx={{ alignItems: "center", flexWrap: "wrap", justifyContent: { xs: "flex-start", sm: "flex-end" } }}>
+        {status.ahead > 0 && <Chip size="small" label={t("gitAhead", { count: status.ahead })} />}
+        {status.behind > 0 && <Chip size="small" label={t("gitBehind", { count: status.behind })} />}
+        {status.clean && <Chip size="small" color="success" label={t("gitClean")} />}
+        <Button variant="subtle" size="small" disabled={!canPush || actionLoading} onClick={onPush}>
+          {t("gitPushCommits")}
+        </Button>
+      </Stack>
+    </Stack>
+  );
+}
+
+function GitFileChangesTab({
+  actionLoading,
+  diff,
+  diffLoading,
+  emptyText,
+  files,
+  mode,
+  onSelect,
+  onStage,
+  onUnstage,
+  selectedFile,
+  selectedPath,
+  t,
+}: {
+  readonly actionLoading: boolean;
+  readonly diff: GitDiffPayload | null;
+  readonly diffLoading: boolean;
+  readonly emptyText: string;
+  readonly files: readonly GitFileStatus[];
+  readonly mode: GitDiffMode;
+  readonly onSelect: (file: GitFileStatus) => void;
+  readonly onStage?: (file: GitFileStatus) => void;
+  readonly onUnstage?: (file: GitFileStatus) => void;
+  readonly selectedFile: GitFileStatus | null;
+  readonly selectedPath: string | null;
+  readonly t: I18nApi["t"];
+}) {
+  if (files.length === 0) {
+    return <Alert severity="info">{emptyText}</Alert>;
+  }
+
+  const diffLines = diff?.diff.trim() ? gitDiffViewerLinesFromUnified(diff.diff) : [];
+
+  return (
+    <Stack direction={{ xs: "column", md: "row" }} spacing={1.5} sx={{ minHeight: 0 }}>
+      <FileList files={files} onSelect={onSelect} selectedPath={selectedPath} t={t} />
+      <Stack spacing={1} sx={{ flex: 1, minWidth: 0 }}>
+        {selectedFile ? (
+          <>
+            <Stack direction="row" spacing={1} sx={{ alignItems: "center", justifyContent: "space-between", minWidth: 0 }}>
+              <Typography noWrap sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.8rem" }}>
+                {selectedFile.gitPath}
+              </Typography>
+              <Stack direction="row" spacing={0.75}>
+                {mode === "worktree" && onStage && (
+                  <Button variant="subtle" size="small" disabled={actionLoading} aria-label={t("gitStageFile", { path: selectedFile.gitPath })} onClick={() => onStage(selectedFile)}>
+                    {t("gitStage")}
+                  </Button>
+                )}
+                {mode === "staged" && onUnstage && (
+                  <Button variant="subtle" size="small" disabled={actionLoading} aria-label={t("gitUnstageFile", { path: selectedFile.gitPath })} onClick={() => onUnstage(selectedFile)}>
+                    {t("gitUnstage")}
+                  </Button>
+                )}
+              </Stack>
+            </Stack>
+            {diffLoading ? (
+              <Stack direction="row" spacing={1} sx={{ alignItems: "center", color: "text.secondary" }}>
+                <CircularProgress size={16} />
+                <Typography>{t("gitLoading")}</Typography>
+              </Stack>
+            ) : (
+              <GitDiffViewer emptyText={t("gitDiffEmpty")} lines={diffLines} />
+            )}
+          </>
+        ) : (
+          <Alert severity="info">{t("gitSelectChangedFile")}</Alert>
+        )}
+      </Stack>
+    </Stack>
+  );
+}
+
+function FileList({
+  files,
+  onSelect,
+  selectedPath,
+  t,
+}: {
+  readonly files: readonly GitFileStatus[];
+  readonly onSelect: (file: GitFileStatus) => void;
+  readonly selectedPath: string | null;
+  readonly t: I18nApi["t"];
+}) {
+  return (
+    <Stack spacing={0.75} sx={{ width: { xs: "100%", md: 280 }, flex: "0 0 auto" }}>
+      {files.map((file) => {
+        const selected = file.gitPath === selectedPath;
+        const label = gitFileStatusLabel(file, t);
+        return (
+          <Button
+            key={`${file.code}-${file.gitPath}`}
+            variant="subtle"
+            aria-label={`${file.path} ${label}`}
+            onClick={() => onSelect(file)}
+            sx={{
+              width: "100%",
+              alignItems: "center",
+              justifyContent: "space-between",
+              p: 1,
+              borderRadius: (theme) => `${theme.custom.radii.md}px`,
+              borderColor: (theme) => (selected ? theme.palette.status.running.border : theme.custom.borders.subtle),
+              gap: 1,
+            }}
+          >
+            <Typography noWrap sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.78rem" }}>
+              {file.path}
+            </Typography>
+            <Chip size="small" label={label} />
+          </Button>
+        );
+      })}
+    </Stack>
+  );
+}
+
+function GitCommitTab({
+  actionLoading,
+  commitMessage,
+  hasStagedFiles,
+  onCommit,
+  onMessageChange,
+  stagedFiles,
+  t,
+}: {
+  readonly actionLoading: boolean;
+  readonly commitMessage: string;
+  readonly hasStagedFiles: boolean;
+  readonly onCommit: () => void;
+  readonly onMessageChange: (value: string) => void;
+  readonly stagedFiles: readonly GitFileStatus[];
+  readonly t: I18nApi["t"];
+}) {
+  return (
+    <Stack spacing={1.25} sx={{ maxWidth: 560 }}>
+      <Typography variant="microLabel" sx={{ color: "text.secondary" }}>
+        {t("gitCommit")}
+      </Typography>
+      <Box
+        component="textarea"
+        aria-label={t("gitCommitMessage")}
+        placeholder={t("gitCommitMessagePlaceholder")}
+        value={commitMessage}
+        onChange={(event) => onMessageChange(event.currentTarget.value)}
+        rows={4}
+        sx={{
+          width: "100%",
+          resize: "vertical",
+          border: (theme) => `1px solid ${theme.custom.borders.subtle}`,
+          borderRadius: (theme) => `${theme.custom.radii.md}px`,
+          bgcolor: (theme) => theme.custom.surfaces.s2,
+          color: "text.primary",
+          font: "inherit",
+          fontSize: "0.84rem",
+          lineHeight: 1.45,
+          p: 1,
+          outline: 0,
+          "&:focus": {
+            borderColor: (theme) => theme.custom.borders.focus,
+          },
+        }}
+      />
+      {stagedFiles.length > 0 && (
+        <Stack direction="row" spacing={0.75} sx={{ flexWrap: "wrap" }}>
+          {stagedFiles.map((file) => (
+            <Chip key={file.gitPath} size="small" label={file.path} />
+          ))}
+        </Stack>
+      )}
+      {!hasStagedFiles && <Alert severity="info">{t("gitCommitNoStaged")}</Alert>}
+      <Button variant="contained" size="small" disabled={!hasStagedFiles || actionLoading || commitMessage.trim().length === 0} onClick={onCommit}>
+        {t("gitCommit")}
+      </Button>
+    </Stack>
+  );
+}
+
+function LastTurnChangesTab({
+  diffs,
+  emptyText,
+  onSelect,
+  selectedDiff,
+  selectedFile,
+}: {
+  readonly diffs: readonly DiffBlock[];
+  readonly emptyText: string;
+  readonly onSelect: (block: DiffBlock) => void;
+  readonly selectedDiff: DiffBlock | null;
+  readonly selectedFile: string | null;
+}) {
+  if (diffs.length === 0) {
+    return <Alert severity="info">{emptyText}</Alert>;
+  }
+
+  return (
+    <Stack direction={{ xs: "column", md: "row" }} spacing={1.5} sx={{ minHeight: 0 }}>
+      <Stack spacing={0.75} sx={{ width: { xs: "100%", md: 280 }, flex: "0 0 auto" }}>
+        {diffs.map((block) => {
+          const selected = block.file === selectedFile;
+          return (
+            <Button
+              key={block.file}
+              variant="subtle"
+              aria-label={block.file}
+              onClick={() => onSelect(block)}
+              sx={{
+                width: "100%",
+                alignItems: "center",
+                justifyContent: "space-between",
+                p: 1,
+                borderRadius: (theme) => `${theme.custom.radii.md}px`,
+                borderColor: (theme) => (selected ? theme.palette.status.running.border : theme.custom.borders.subtle),
+                gap: 1,
+              }}
+            >
+              <Typography noWrap sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.78rem" }}>
+                {block.file}
+              </Typography>
+              <Stack direction="row" spacing={0.5}>
+                <Chip size="small" color="success" label={`+${block.additions}`} />
+                <Chip size="small" color="error" label={`-${block.deletions}`} />
+              </Stack>
+            </Button>
+          );
+        })}
+      </Stack>
+      <Box sx={{ flex: 1, minWidth: 0 }}>
+        <GitDiffViewer emptyText={emptyText} lines={selectedDiff ? gitDiffViewerLinesFromBlock(selectedDiff) : []} />
+      </Box>
+    </Stack>
   );
 }

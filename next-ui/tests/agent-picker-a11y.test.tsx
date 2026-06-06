@@ -84,6 +84,7 @@ describe("AgentPicker a11y", () => {
     renderWithTheme(<AgentPicker open value={DEFAULT_PROFILE} onClose={vi.fn()} onSelect={vi.fn()} />);
 
     expect(screen.getByRole("button", { name: "Opus 4.8" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Opus 4.7" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Sonnet 4.6" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Haiku 4.5" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Opus alias" })).toBeInTheDocument();

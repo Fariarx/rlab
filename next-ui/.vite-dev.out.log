@@ -107,3 +107,22 @@
 [2m19:33:28[22m [36m[1m[vite][22m[39m server restarted.
 [2m19:34:33[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/agent/Message.tsx[22m
 [2m19:35:11[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/agent/Message.tsx[22m
+[2m19:40:36[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/agent/Composer.tsx[22m
+[2m19:40:45[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/WorkspacePage.tsx[22m
+[2m19:40:55[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/WorkspacePage.tsx[22m
+[2m19:40:58[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/GitPanel.tsx[22m
+[2m19:41:05[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/WorkspacePage.tsx[22m
+[2m19:41:19[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx[22m
+[2m19:41:27[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx[22m
+[2m19:41:35[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx[22m
+[2m19:41:43[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx[22m
+[2m19:41:51[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx[22m
+[2m19:42:05[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx[22m
+[2m19:42:12[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx[22m
+[2m19:42:30[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/GitPanel.tsx, /src/App.tsx[22m
+[2m19:42:46[22m [36m[1m[vite][22m[39m [32msrc/i18n/I18nProvider.tsx changed, restarting server...[39m
+[2m19:42:46[22m [36m[1m[vite][22m[39m server restarted.
+[2m19:47:23[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/WorkspacePage.tsx[22m
+[2m19:48:03[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/settings/SettingsDialog.tsx[22m
+[2m20:03:28[22m [36m[1m[vite][22m[39m [32msrc/components/agent/agents.ts changed, restarting server...[39m
+[2m20:03:28[22m [36m[1m[vite][22m[39m server restarted.

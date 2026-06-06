@@ -712,16 +712,23 @@ class WorkspaceStore implements Workspace {
   }
 
   updateComposerDraft(id: string, draft: ComposerDraft): void {
-    this.setState((current) => ({
-      ...current,
-      composerDrafts: {
-        ...current.composerDrafts,
-        [id]: {
-          text: draft.text,
-          attachments: draft.attachments.map((attachment) => ({ ...attachment })),
+    this.setState((current) => {
+      const nextDraft: ComposerDraft = {
+        text: draft.text,
+        attachments: draft.attachments.map((attachment) => ({ ...attachment })),
+      };
+      const currentDraft = current.composerDrafts[id] ?? { text: "", attachments: [] };
+      if (serializableEqual(currentDraft, nextDraft)) {
+        return current;
+      }
+      return {
+        ...current,
+        composerDrafts: {
+          ...current.composerDrafts,
+          [id]: nextDraft,
         },
-      },
-    }));
+      };
+    });
   }
 
   updateSettings(patch: AppSettingsPatch): void {

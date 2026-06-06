@@ -128,14 +128,14 @@ describe("WorkspacePage", () => {
     expect(screen.getByRole("tab", { name: "Внешний вид" })).toBeInTheDocument();
   });
 
-  it("starts a new chat draft and creates it on first send", () => {
+  it("starts a new chat draft and creates it on first send", async () => {
     renderWithTheme(<WorkspacePage />);
 
     fireEvent.click(screen.getByRole("button", { name: "Новый диалог" }));
 
     // Draft mode: no agent-picker confirmation, conversation isn't created until
     // the first message is sent (then it uses the default agent).
-    const input = screen.getByPlaceholderText("Начать новый диалог...");
+    const input = await screen.findByPlaceholderText("Начать новый диалог...");
     fireEvent.change(input, { target: { value: "Set up CI" } });
     fireEvent.keyDown(input, { key: "Enter" });
 
@@ -202,10 +202,10 @@ describe("WorkspacePage", () => {
     expect(screen.queryByRole("dialog", { name: "Удалить диалог?" })).not.toBeInTheDocument();
   });
 
-  it("sends a message into the active conversation", () => {
+  it("sends a message into the active conversation", async () => {
     renderWithTheme(<WorkspacePage />);
 
-    const input = screen.getByPlaceholderText(/^Написать:/);
+    const input = await screen.findByPlaceholderText(/^Написать:/);
     fireEvent.change(input, { target: { value: "Ship it" } });
     fireEvent.keyDown(input, { key: "Enter" });
 
@@ -240,7 +240,9 @@ describe("WorkspacePage", () => {
     firstRender.unmount();
     renderWithTheme(<WorkspacePage />);
 
-    expect(await screen.findByPlaceholderText(/^Написать:/)).toHaveValue("Черновик не из браузера");
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText(/^Написать:/)).toHaveValue("Черновик не из браузера");
+    });
   });
 
   it("persists composer attachment drafts on the server and sends them after remount", async () => {
@@ -449,10 +451,10 @@ describe("WorkspacePage", () => {
     });
   });
 
-  it("shows a stop button for a running conversation", () => {
+  it("shows a stop button for a running conversation", async () => {
     renderWithTheme(<WorkspacePage />);
 
-    expect(screen.getByRole("button", { name: "Остановить запуск" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Остановить запуск" })).toBeInTheDocument();
   });
 
   it("retries loading workspace state after a workspace API error", async () => {
@@ -666,7 +668,7 @@ describe("WorkspacePage", () => {
           ahead: 1,
           behind: 0,
           clean: false,
-          files: [{ code: " M", label: "Modified", path: "src/auth.ts" }],
+          files: [{ code: " M", label: "Modified", path: "src/auth.ts", gitPath: "src/auth.ts", staged: false, unstaged: true }],
         });
       }
       return new Response("not found", { status: 404 });
@@ -688,7 +690,7 @@ describe("WorkspacePage", () => {
       );
     });
     expect(await screen.findByText("main")).toBeInTheDocument();
-    expect(screen.getByText("src/auth.ts")).toBeInTheDocument();
+    expect(screen.getAllByText("src/auth.ts").length).toBeGreaterThan(0);
     expect(screen.getByText("Изменён")).toBeInTheDocument();
     expect(screen.getByText("впереди 1")).toBeInTheDocument();
   });
@@ -820,13 +822,13 @@ describe("WorkspacePage", () => {
     await screen.findByPlaceholderText("Написать: Flaky-тест auth.login...");
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
 
-    expect(await screen.findByRole("tab", { name: /Непоставленные 1/i })).toHaveAttribute("aria-selected", "true");
-    expect(await screen.findByText("src/auth.ts")).toBeInTheDocument();
+    expect(await screen.findByRole("tab", { name: /^Непоставленные 1$/i })).toHaveAttribute("aria-selected", "true");
+    expect((await screen.findAllByText("src/auth.ts")).length).toBeGreaterThan(0);
     expect(await screen.findByText(/worktree old/)).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("tab", { name: /Поставленные 1/i }));
+    fireEvent.click(screen.getByRole("tab", { name: /^Поставленные 1$/i }));
 
-    expect(await screen.findByText("src/session.ts")).toBeInTheDocument();
+    expect((await screen.findAllByText("src/session.ts")).length).toBeGreaterThan(0);
     expect(await screen.findByText(/staged old/)).toBeInTheDocument();
     expect(diffRequests).toContainEqual({ cwd: "/root/workspace/rlab", path: "src/auth.ts", mode: "worktree" });
     expect(diffRequests).toContainEqual({ cwd: "/root/workspace/rlab", path: "src/session.ts", mode: "staged" });
@@ -859,7 +861,7 @@ describe("WorkspacePage", () => {
     fireEvent.click(await screen.findByRole("tab", { name: /Последний ход 1/i }));
 
     expect(await screen.findByText("test/auth/login.test.ts")).toBeInTheDocument();
-    expect(screen.getByText(/vi\.useFakeTimers/)).toBeInTheDocument();
+    expect(screen.getAllByText(/vi\.useFakeTimers/).length).toBeGreaterThan(0);
     expect(fetch).not.toHaveBeenCalledWith("/api/git-diff", expect.anything());
   });
 

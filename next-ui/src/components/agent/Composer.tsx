@@ -110,6 +110,26 @@ async function fileToAttachmentDraft(file: File): Promise<ComposerAttachmentDraf
   return { ...base, content: "", path };
 }
 
+function composerAttachmentsEqual(left: readonly ComposerAttachmentDraft[], right: readonly ComposerAttachmentDraft[]): boolean {
+  return left.length === right.length && left.every((attachment, index) => {
+    const other = right[index];
+    return (
+      other !== undefined
+      && attachment.id === other.id
+      && attachment.name === other.name
+      && attachment.type === other.type
+      && attachment.content === other.content
+      && attachment.size === other.size
+      && attachment.lastModified === other.lastModified
+      && attachment.path === other.path
+    );
+  });
+}
+
+function composerDraftsEqual(left: ComposerDraft, right: ComposerDraft): boolean {
+  return left.text === right.text && composerAttachmentsEqual(left.attachments, right.attachments);
+}
+
 function attachmentIcon(type: string): ReactNode {
   if (type.startsWith("image/")) {
     return <ImageOutlinedIcon sx={{ fontSize: 14 }} />;
@@ -183,6 +203,8 @@ interface ComposerProps {
   readonly mentionableFiles?: readonly string[];
   readonly value?: string;
   readonly attachments?: readonly ComposerAttachmentDraft[];
+  readonly initialValue?: string;
+  readonly initialAttachments?: readonly ComposerAttachmentDraft[];
   /** Non-default work modes the current agent supports (toggleable per chat). */
   readonly modes?: readonly { readonly id: string; readonly label: string }[];
   /** The currently active work mode id ("default" when none). */
@@ -203,6 +225,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     mentionableFiles = [],
     value,
     attachments,
+    initialValue = "",
+    initialAttachments = [],
     modes = [],
     activeMode = "default",
     onModeChange,
@@ -214,8 +238,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   },
   ref,
 ) {
-  const [internalValue, setInternalValue] = useState("");
-  const [internalAttachments, setInternalAttachments] = useState<readonly ComposerAttachmentDraft[]>([]);
+  const [internalValue, setInternalValue] = useState(initialValue);
+  const [internalAttachments, setInternalAttachments] = useState<readonly ComposerAttachmentDraft[]>(initialAttachments);
   const [sending, setSending] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [activeSuggestion, setActiveSuggestion] = useState(0);
@@ -225,11 +249,27 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const singleRowRef = useRef(0);
+  const initialDraftRef = useRef<ComposerDraft>({ text: initialValue, attachments: initialAttachments });
+  const localDraftDirtyRef = useRef(false);
   const { t } = useI18n();
   const composerValue = value ?? internalValue;
   const composerAttachments = attachments ?? internalAttachments;
   const latestDraftRef = useRef<ComposerDraft>({ text: composerValue, attachments: composerAttachments });
   latestDraftRef.current = { text: composerValue, attachments: composerAttachments };
+
+  useEffect(() => {
+    if (value !== undefined || attachments !== undefined || localDraftDirtyRef.current) {
+      return;
+    }
+    const nextInitialDraft: ComposerDraft = { text: initialValue, attachments: initialAttachments };
+    if (composerDraftsEqual(initialDraftRef.current, nextInitialDraft)) {
+      return;
+    }
+    initialDraftRef.current = nextInitialDraft;
+    latestDraftRef.current = nextInitialDraft;
+    setInternalValue(nextInitialDraft.text);
+    setInternalAttachments(nextInitialDraft.attachments);
+  }, [attachments, initialAttachments, initialValue, value]);
 
   // Decide whether the input would need more than one row. When it does, the
   // input lifts into an overlay that grows upward (see render) instead of
@@ -265,6 +305,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const visibleSlashCommands = composerValue.startsWith("/") && !composerValue.includes(" ") ? slashCommands.filter((command) => command.label.startsWith(composerValue)) : [];
 
   const updateDraft = (draft: ComposerDraft) => {
+    localDraftDirtyRef.current = true;
     latestDraftRef.current = draft;
     if (value === undefined) {
       setInternalValue(draft.text);
