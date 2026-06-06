@@ -224,11 +224,11 @@ describe("SettingsDialog agent configuration", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Чтение и запись" }));
+    fireEvent.click(screen.getByRole("button", { name: "Без ограничений" }));
 
     expect(onSettingsChange).toHaveBeenCalledWith({
       agents: {
-        accessMode: "read-write",
+        accessMode: "unrestricted",
       },
     });
   });

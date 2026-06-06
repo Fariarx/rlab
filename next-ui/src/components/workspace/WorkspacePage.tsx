@@ -633,25 +633,24 @@ export function WorkspacePageView({
             <Stack direction="row" spacing={1} sx={{ alignItems: "center", flex: "0 0 auto", "& .MuiIconButton-root": { width: 30, height: 30 } }}>
               {(selected || composingNew) && <AgentBadge profile={profile} onClick={openPicker} compact />}
               <Tooltip title={t("git")}>
-                <IconButton tone="subtle" aria-label={t("git")} onClick={() => setGitOpen(true)}>
+                <IconButton aria-label={t("git")} onClick={() => setGitOpen(true)}>
                   <AccountTreeIcon sx={{ fontSize: 17 }} />
                 </IconButton>
               </Tooltip>
               <Tooltip title={t("replay")}>
-                <IconButton tone="subtle" aria-label={t("replay")} onClick={() => setRunKey((k) => k + 1)}>
+                <IconButton aria-label={t("replay")} onClick={() => setRunKey((k) => k + 1)}>
                   <ReplayIcon sx={{ fontSize: 17 }} />
                 </IconButton>
               </Tooltip>
               {selected?.status === "error" && (
                 <Tooltip title={t("retryRun")}>
-                  <IconButton tone="subtle" aria-label={t("retryRun")} onClick={retryLastUserMessage}>
+                  <IconButton aria-label={t("retryRun")} onClick={retryLastUserMessage}>
                     <RestartAltIcon sx={{ fontSize: 17 }} />
                   </IconButton>
                 </Tooltip>
               )}
               <Tooltip title={mode === "dark" ? t("toggleThemeDark") : t("toggleThemeLight")}>
                 <IconButton
-                  tone="subtle"
                   aria-label={mode === "dark" ? t("toggleThemeDark") : t("toggleThemeLight")}
                   onClick={() => ws.updateSettings({ appearance: { theme: mode === "dark" ? "light" : "dark" } })}
                 >

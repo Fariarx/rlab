@@ -351,8 +351,8 @@ describe("vite agents plugin", () => {
   });
 
   it("maps agent access mode into CLI safety flags", () => {
-    expect(buildClaudeRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "read-write" })).toContain("acceptEdits");
-    expect(buildClaudeRunArgs({ prompt: "hello", model: "opus", reasoning: "max", mode: "plan", accessMode: "read-write" })).toEqual([
+    expect(buildClaudeRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" })).toContain("acceptEdits");
+    expect(buildClaudeRunArgs({ prompt: "hello", model: "opus", reasoning: "max", mode: "plan", accessMode: "unrestricted" })).toEqual([
       "-p",
       "hello",
       "--output-format",
@@ -366,23 +366,22 @@ describe("vite agents plugin", () => {
       "--permission-mode",
       "plan",
     ]);
-    expect(buildCodexRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "read-write" })).toEqual([
+    expect(buildCodexRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" })).toEqual([
       "exec",
       "--json",
-      "--sandbox",
-      "read-only",
+      "--dangerously-bypass-approvals-and-sandbox",
       "--skip-git-repo-check",
       "hello",
     ]);
-    expect(buildGeminiRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "read-write" })).toContain("plan");
+    expect(buildGeminiRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" })).toContain("yolo");
   });
 
-  it("rejects writable runs for adapters without a live permission bridge", () => {
-    expect(validateRunAccessModeForAgent("claude-code", "read-write")).toBeNull();
+  it("allows unrestricted runs for every RUN adapter without a live permission bridge", () => {
+    expect(validateRunAccessModeForAgent("claude-code", "unrestricted")).toBeNull();
     expect(validateRunAccessModeForAgent("codex", "read-only")).toBeNull();
-    expect(validateRunAccessModeForAgent("codex", "read-write")).toContain("does not support interactive approve/deny yet");
-    expect(validateRunAccessModeForAgent("gemini", "read-write")).toContain("does not support interactive approve/deny yet");
-    expect(validateRunAccessModeForAgent("opencode", "read-write")).toContain("does not support interactive approve/deny yet");
+    expect(validateRunAccessModeForAgent("codex", "unrestricted")).toBeNull();
+    expect(validateRunAccessModeForAgent("gemini", "unrestricted")).toBeNull();
+    expect(validateRunAccessModeForAgent("opencode", "unrestricted")).toBeNull();
   });
 
   it("builds Gemini args with the selected model", () => {
@@ -416,7 +415,7 @@ describe("vite agents plugin", () => {
       "high",
       "hello",
     ]);
-    expect(buildOpenCodeRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "read-write" })).not.toContain("--dangerously-skip-permissions");
+    expect(buildOpenCodeRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" })).toContain("--dangerously-skip-permissions");
   });
 
   it("builds OpenCode args with selected provider/model IDs", () => {
@@ -727,14 +726,22 @@ describe("vite agents plugin", () => {
     expect(parseRunRequestPayload("{")).toEqual({ ok: false, error: "Invalid run request payload." });
     expect(parseRunRequestPayload("[]")).toEqual({ ok: false, error: "Invalid run request payload." });
     expect(parseRunRequestPayload(JSON.stringify("hello"))).toEqual({ ok: false, error: "Invalid run request payload." });
-    expect(parseRunRequestPayload(JSON.stringify({ agent: "codex", model: "gpt-5.5", reasoning: "high", mode: "default", accessMode: "read-only", prompt: "hello" }))).toMatchObject({
+    expect(parseRunRequestPayload(JSON.stringify({ agent: "codex", model: "gpt-5.5", reasoning: "high", mode: "default", accessMode: "unrestricted", prompt: "hello" }))).toMatchObject({
       ok: true,
       agent: "codex",
       model: "gpt-5.5",
       reasoning: "high",
       mode: "default",
-      accessMode: "read-only",
+      accessMode: "unrestricted",
       prompt: "hello",
+    });
+  });
+
+  it("migrates legacy read-write run requests to unrestricted access", () => {
+    expect(parseRunRequestPayload(JSON.stringify({ agent: "codex", accessMode: "read-write", prompt: "hello" }))).toMatchObject({
+      ok: true,
+      accessMode: "unrestricted",
+      accessModeValid: true,
     });
   });
 

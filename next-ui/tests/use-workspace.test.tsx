@@ -356,7 +356,7 @@ describe("useWorkspace", () => {
         ...state.settings,
         agents: {
           ...state.settings.agents,
-          accessMode: "read-write",
+          accessMode: "unrestricted",
         },
       },
     };
@@ -366,7 +366,7 @@ describe("useWorkspace", () => {
     screen.getByRole("button", { name: "send" }).click();
 
     await waitFor(() => {
-      expect(runRequests[0]).toMatchObject({ accessMode: "read-write" });
+      expect(runRequests[0]).toMatchObject({ accessMode: "unrestricted" });
     });
   });
 

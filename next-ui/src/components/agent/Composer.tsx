@@ -450,23 +450,24 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           onClose={() => setModeMenuAnchor(null)}
           anchorOrigin={{ vertical: "top", horizontal: "left" }}
           transformOrigin={{ vertical: "bottom", horizontal: "left" }}
+          slotProps={{ list: { dense: true, sx: { py: 0.5 } } }}
         >
           <MenuItem
             onClick={() => {
               setModeMenuAnchor(null);
               fileInputRef.current?.click();
             }}
-            sx={{ gap: 1 }}
+            sx={{ gap: 1, fontSize: "0.8rem", minHeight: 0 }}
           >
-            <AttachFileIcon sx={{ fontSize: 18, color: "text.secondary" }} />
+            <AttachFileIcon sx={{ fontSize: 16, color: "text.secondary" }} />
             <Box component="span">{t("attach")}</Box>
           </MenuItem>
-          {modes.length > 0 && <Divider />}
+          {modes.length > 0 && <Divider sx={{ my: 0.25 }} />}
           {modes.map((mode) => (
-            <MenuItem key={mode.id} onClick={() => onModeChange?.(mode.id === activeMode ? "default" : mode.id)} sx={{ gap: 1 }}>
-              <AutoAwesomeRoundedIcon sx={{ fontSize: 16, color: "text.secondary" }} />
-              <Box component="span" sx={{ flex: 1, minWidth: 130 }}>{mode.label}</Box>
-              <Switch size="small" edge="end" checked={mode.id === activeMode} onChange={() => undefined} tabIndex={-1} sx={{ pointerEvents: "none", ml: 1 }} />
+            <MenuItem key={mode.id} onClick={() => onModeChange?.(mode.id === activeMode ? "default" : mode.id)} sx={{ gap: 1, fontSize: "0.8rem", minHeight: 0 }}>
+              <AutoAwesomeRoundedIcon sx={{ fontSize: 15, color: "text.secondary" }} />
+              <Box component="span" sx={{ flex: 1, minWidth: 84 }}>{mode.label}</Box>
+              <Switch size="small" edge="end" checked={mode.id === activeMode} onChange={() => undefined} tabIndex={-1} sx={{ pointerEvents: "none", ml: 0.5 }} />
             </MenuItem>
           ))}
         </Menu>
