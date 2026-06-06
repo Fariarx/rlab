@@ -37,7 +37,7 @@ describe("Conversation a11y", () => {
         chats={[]}
         selectedId="c-flaky"
         onSelect={vi.fn()}
-        actions={{ onRename: vi.fn(), onArchive: vi.fn(), onDelete: vi.fn() }}
+        actions={{ onRename: vi.fn(), onTogglePin: vi.fn(), onArchive: vi.fn(), onDelete: vi.fn() }}
       />,
     );
 

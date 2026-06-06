@@ -1,19 +1,23 @@
-import ChatBubbleOutlineIcon from "@mui/icons-material/ChatBubbleOutlineRounded";
 import FolderOpenRoundedIcon from "@mui/icons-material/FolderOpenRounded";
 import FolderRoundedIcon from "@mui/icons-material/FolderRounded";
+import ForumOutlinedIcon from "@mui/icons-material/ForumOutlined";
+import ForumRoundedIcon from "@mui/icons-material/ForumRounded";
 import MoreHorizIcon from "@mui/icons-material/MoreHoriz";
+import PushPinOutlinedIcon from "@mui/icons-material/PushPinOutlined";
+import PushPinRoundedIcon from "@mui/icons-material/PushPinRounded";
 import { Box, Collapse, InputBase, Menu, MenuItem, Stack, Tooltip, Typography } from "@mui/material";
-import { type KeyboardEvent, type MouseEvent, useMemo, useRef, useState } from "react";
+import { type KeyboardEvent, type MouseEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import { IconButton, StatusDot } from "../ui";
 import { AgentMonogram } from "./AgentMonogram";
 import { rise } from "./anim";
 import { messageToPlainText } from "./message-actions";
-import { type ChatMessage, conversationStatusKey as statusToKey, type ConversationSummary, type Project } from "./types";
+import { type ChatMessage, conversationStatusKey as statusToKey, type ConversationStatus, type ConversationSummary, type Project } from "./types";
 import { formatCostUsd, formatTokenUsage } from "./usage-cost";
 
 export interface ConversationActions {
   readonly onRename: (id: string, title: string) => void;
+  readonly onTogglePin: (id: string) => void;
   readonly onArchive: (id: string) => void;
   readonly onDelete: (id: string) => void;
 }
@@ -24,8 +28,16 @@ export function conversationMatches(conversation: ConversationSummary, query: st
   return searchable.includes(query);
 }
 
+// Status dots on the avatar are noise for resting conversations, so only the
+// actionable states (running / waiting / error) get one. Idle (gray) and done
+// (green) render the bare monogram.
+const STATUSES_WITH_DOT: ReadonlySet<ConversationStatus> = new Set<ConversationStatus>(["running", "waiting", "error"]);
+
 function ConversationAvatar({ conversation }: { readonly conversation: ConversationSummary }) {
   const { conversationStatus } = useI18n();
+  if (!STATUSES_WITH_DOT.has(conversation.status)) {
+    return <AgentMonogram agent={conversation.agent} size={28} />;
+  }
   return (
     <Box sx={{ position: "relative", flex: "0 0 auto" }}>
       <AgentMonogram agent={conversation.agent} size={28} />
@@ -58,8 +70,24 @@ function ConversationRow({
   const [menuAnchor, setMenuAnchor] = useState<null | HTMLElement>(null);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(conversation.title);
+  const renameInputRef = useRef<HTMLInputElement | null>(null);
   const menuOpen = Boolean(menuAnchor);
   const { t } = useI18n();
+
+  // Focus (and select) the rename field once it mounts. Doing it in an effect —
+  // rather than relying on `autoFocus` — wins the race against the closing menu
+  // restoring focus to its (now unmounted) trigger, which previously blurred the
+  // field immediately and made rename look like a no-op.
+  useEffect(() => {
+    if (!editing) {
+      return;
+    }
+    const handle = requestAnimationFrame(() => {
+      renameInputRef.current?.focus();
+      renameInputRef.current?.select();
+    });
+    return () => cancelAnimationFrame(handle);
+  }, [editing]);
 
   const openMenu = (e: MouseEvent<HTMLElement>) => {
     e.stopPropagation();
@@ -129,12 +157,14 @@ function ConversationRow({
         transition: "background-color 140ms ease, box-shadow 140ms ease",
         "&:hover": { backgroundColor: (t) => t.custom.surfaces.s3 },
         "&:hover .row-more": { opacity: 1 },
-        // Fade the date out on hover so the ⋯ overlay reads cleanly (the date
-        // stays in the layout, just transparent).
+        // Fade the date out whenever the ⋯ overlay is showing (hover or open
+        // menu) so the date never peeks out from under it. The date stays in the
+        // layout, just transparent.
         "&:hover .row-date": { opacity: 0 },
+        ...(menuOpen && { "& .row-date": { opacity: 0 } }),
         "&:focus-visible": {
           outline: (t) => `2px solid ${t.custom.borders.focus}`,
-          outlineOffset: 2,
+          outlineOffset: "-2px",
         },
         ...rise(delay),
       }}
@@ -143,8 +173,8 @@ function ConversationRow({
       <Box sx={{ flex: 1, minWidth: 0 }}>
         {editing ? (
           <InputBase
+            inputRef={renameInputRef}
             value={draft}
-            autoFocus
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={onEditKey}
             onBlur={commitRename}
@@ -157,7 +187,6 @@ function ConversationRow({
               py: 0.25,
               borderRadius: (t) => `${t.custom.radii.sm}px`,
               backgroundColor: (t) => t.custom.surfaces.s1,
-              border: (t) => `1px solid ${t.custom.borders.focus}`,
             }}
           />
         ) : (
@@ -211,8 +240,16 @@ function ConversationRow({
         </Box>
       )}
 
-      <Menu anchorEl={menuAnchor} open={menuOpen} onClose={closeMenu} onClick={(e) => e.stopPropagation()}>
+      <Menu anchorEl={menuAnchor} open={menuOpen} onClose={closeMenu} onClick={(e) => e.stopPropagation()} disableRestoreFocus>
         <MenuItem onClick={startRename}>{t("rename")}</MenuItem>
+        <MenuItem
+          onClick={() => {
+            closeMenu();
+            actions.onTogglePin(conversation.id);
+          }}
+        >
+          {conversation.pinned ? t("unpin") : t("pin")}
+        </MenuItem>
         <MenuItem
           onClick={() => {
             closeMenu();
@@ -235,18 +272,29 @@ function ConversationRow({
   );
 }
 
-function ProjectGroup({
-  project,
+/** A collapsible sidebar group (pinned / project / chats). Headers carry the
+ *  count always; the unread + running indicators surface only while the group
+ *  is collapsed (when expanded the rows themselves convey that). */
+function ConversationGroup({
+  idBase,
+  label,
+  conversations,
   selectedId,
   baseDelay,
+  collapsedIcon,
+  expandedIcon,
   onSelect,
   onMove,
   registerRowRef,
   actions,
 }: {
-  readonly project: Project;
+  readonly idBase: string;
+  readonly label: string;
+  readonly conversations: readonly ConversationSummary[];
   readonly selectedId: string | null;
   readonly baseDelay: number;
+  readonly collapsedIcon: ReactNode;
+  readonly expandedIcon: ReactNode;
   readonly onSelect: (id: string) => void;
   readonly onMove: (id: string, offset: -1 | 1) => void;
   readonly registerRowRef: (id: string, element: HTMLDivElement | null) => void;
@@ -254,8 +302,9 @@ function ProjectGroup({
 }) {
   const [open, setOpen] = useState(true);
   const { t } = useI18n();
-  const runningCount = project.conversations.filter((c) => c.status === "running").length;
-  const panelId = `project-group-${project.id}-conversations`;
+  const runningCount = conversations.filter((c) => c.status === "running").length;
+  const hasUnread = conversations.some((c) => c.unread);
+  const panelId = `${idBase}-conversations`;
 
   const toggleOpen = () => setOpen((value) => !value);
   const onHeaderKey = (e: KeyboardEvent<HTMLDivElement>) => {
@@ -284,103 +333,25 @@ function ProjectGroup({
           cursor: "pointer",
           borderRadius: (t) => `${t.custom.radii.sm}px`,
           "&:hover": { backgroundColor: (t) => t.custom.surfaces.s3 },
-          "&:focus-visible": {
-            outline: (t) => `2px solid ${t.custom.borders.focus}`,
-            outlineOffset: 2,
-          },
+          "&:focus-visible": { outline: (t) => `2px solid ${t.custom.borders.focus}`, outlineOffset: "-2px" },
         }}
       >
-        {open ? (
-          <FolderOpenRoundedIcon sx={{ fontSize: 17, color: "text.secondary" }} />
-        ) : (
-          <FolderRoundedIcon sx={{ fontSize: 17, color: "text.secondary" }} />
-        )}
+        <Box sx={{ display: "flex", color: "text.secondary" }}>{open ? expandedIcon : collapsedIcon}</Box>
         <Typography variant="microLabel" sx={{ color: "text.secondary", flex: 1, minWidth: 0 }} noWrap>
-          {project.name}
+          {label}
         </Typography>
-        {runningCount > 0 && <StatusDot status="running" label={t("runningCount", { count: runningCount })} />}
-        <Typography sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.64rem", color: "text.secondary" }}>{project.conversations.length}</Typography>
+        {/* Collapsed only: a single indicator — running status takes priority,
+            otherwise the unread marker. Never both, and no count badge. */}
+        {!open &&
+          (runningCount > 0 ? (
+            <StatusDot status="running" label={t("runningCount", { count: runningCount })} />
+          ) : hasUnread ? (
+            <Box role="img" aria-label={t("unread")} sx={{ width: 6, height: 6, borderRadius: "50%", backgroundColor: (t) => t.palette.status.running.main }} />
+          ) : null)}
       </Stack>
       <Collapse in={open} unmountOnExit>
         <Stack id={panelId} spacing={0.25} sx={{ mt: 0.25, mb: 0.75 }}>
-          {project.conversations.map((conversation, index) => (
-            <ConversationRow
-              key={conversation.id}
-              conversation={conversation}
-              active={conversation.id === selectedId}
-              delay={baseDelay + index * 50}
-              onSelect={onSelect}
-              onMove={onMove}
-              registerRowRef={registerRowRef}
-              actions={actions}
-            />
-          ))}
-        </Stack>
-      </Collapse>
-    </Box>
-  );
-}
-
-function ChatsGroup({
-  chats,
-  selectedId,
-  baseDelay,
-  onSelect,
-  onMove,
-  registerRowRef,
-  actions,
-}: {
-  readonly chats: readonly ConversationSummary[];
-  readonly selectedId: string | null;
-  readonly baseDelay: number;
-  readonly onSelect: (id: string) => void;
-  readonly onMove: (id: string, offset: -1 | 1) => void;
-  readonly registerRowRef: (id: string, element: HTMLDivElement | null) => void;
-  readonly actions: ConversationActions;
-}) {
-  const [open, setOpen] = useState(true);
-  const { t } = useI18n();
-  const runningCount = chats.filter((c) => c.status === "running").length;
-  const panelId = "chats-group-conversations";
-  const toggleOpen = () => setOpen((value) => !value);
-  const onHeaderKey = (e: KeyboardEvent<HTMLDivElement>) => {
-    if (e.key !== "Enter" && e.key !== " ") {
-      return;
-    }
-    e.preventDefault();
-    toggleOpen();
-  };
-  return (
-    <Box>
-      <Stack
-        role="button"
-        aria-expanded={open}
-        aria-controls={panelId}
-        tabIndex={0}
-        direction="row"
-        spacing={0.75}
-        onClick={toggleOpen}
-        onKeyDown={onHeaderKey}
-        sx={{
-          alignItems: "center",
-          px: 1,
-          py: 0.75,
-          cursor: "pointer",
-          borderRadius: (t) => `${t.custom.radii.sm}px`,
-          "&:hover": { backgroundColor: (t) => t.custom.surfaces.s3 },
-          "&:focus-visible": { outline: (t) => `2px solid ${t.custom.borders.focus}`, outlineOffset: 2 },
-        }}
-      >
-        <ChatBubbleOutlineIcon sx={{ fontSize: 16, color: "text.secondary" }} />
-        <Typography variant="microLabel" sx={{ color: "text.secondary", flex: 1, minWidth: 0 }} noWrap>
-          {t("chats")}
-        </Typography>
-        {runningCount > 0 && <StatusDot status="running" label={t("runningCount", { count: runningCount })} />}
-        <Typography sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.64rem", color: "text.secondary" }}>{chats.length}</Typography>
-      </Stack>
-      <Collapse in={open} unmountOnExit>
-        <Stack id={panelId} spacing={0.25} sx={{ mt: 0.25, mb: 0.75 }}>
-          {chats.map((conversation, index) => (
+          {conversations.map((conversation, index) => (
             <ConversationRow
               key={conversation.id}
               conversation={conversation}
@@ -414,11 +385,23 @@ export function ConversationList({
   const rowRefs = useRef(new Map<string, HTMLDivElement>());
   const { t } = useI18n();
 
-  const empty = projects.length === 0 && chats.length === 0;
-  // Projects first, then chats — flattened for arrow-key navigation.
-  const visibleConversationIds = useMemo(
-    () => [...projects.flatMap((project) => project.conversations.map((c) => c.id)), ...chats.map((c) => c.id)],
+  // Pinned conversations are lifted into a top group and removed from their
+  // original project / chats list.
+  const pinned = useMemo(
+    () => [...chats, ...projects.flatMap((project) => project.conversations)].filter((c) => c.pinned),
     [projects, chats],
+  );
+  const visibleProjects = useMemo(
+    () => projects.map((project) => ({ ...project, conversations: project.conversations.filter((c) => !c.pinned) })),
+    [projects],
+  );
+  const visibleChats = useMemo(() => chats.filter((c) => !c.pinned), [chats]);
+
+  const empty = projects.length === 0 && chats.length === 0;
+  // Pinned first, then projects, then chats — flattened for arrow-key navigation.
+  const visibleConversationIds = useMemo(
+    () => [...pinned.map((c) => c.id), ...visibleProjects.flatMap((project) => project.conversations.map((c) => c.id)), ...visibleChats.map((c) => c.id)],
+    [pinned, visibleProjects, visibleChats],
   );
   const registerRowRef = (id: string, element: HTMLDivElement | null) => {
     if (element) {
@@ -450,22 +433,46 @@ export function ConversationList({
   };
 
   // One unified, full-width scroll list (scrollbar flush at the right edge):
-  // project folder-accordions first, then a chats group. No mode toggle, no
-  // inline search (search is a popup opened from the sidebar header).
+  // pinned group, then project folder-accordions, then a chats group. No mode
+  // toggle, no inline search (search is a popup from the sidebar header).
   return (
     <Box
       role="listbox"
       aria-label={t("conversationList")}
       data-testid="conversation-list-virtual-list"
       data-virtualized="false"
-      sx={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "hidden", pt: 0.5, pb: 1 }}
+      // `scrollbar-gutter: stable both-edges` reserves equal gutters on both
+      // sides so the left/right inset stays even whether or not the scrollbar
+      // is showing.
+      sx={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "hidden", scrollbarGutter: "stable both-edges", px: 1.5, pt: 1.5, pb: 1 }}
     >
-      {projects.map((project, index) => (
-        <Box key={project.id} sx={{ px: 1, pb: 0.5 }}>
-          <ProjectGroup
-            project={project}
+      {pinned.length > 0 && (
+        <Box sx={{ pb: 0.5 }}>
+          <ConversationGroup
+            idBase="pinned-group"
+            label={t("pinned")}
+            conversations={pinned}
             selectedId={selectedId}
-            baseDelay={index * 120}
+            baseDelay={0}
+            collapsedIcon={<PushPinRoundedIcon sx={{ fontSize: 16 }} />}
+            expandedIcon={<PushPinOutlinedIcon sx={{ fontSize: 16 }} />}
+            onSelect={onSelect}
+            onMove={moveConversation}
+            registerRowRef={registerRowRef}
+            actions={actions}
+          />
+        </Box>
+      )}
+      {visibleProjects.map((project, index) => (
+        <Box key={project.id} sx={{ pb: 0.5 }}>
+          <ConversationGroup
+            idBase={`project-group-${project.id}`}
+            label={project.name}
+            conversations={project.conversations}
+            selectedId={selectedId}
+            baseDelay={(index + 1) * 120}
+            collapsedIcon={<FolderRoundedIcon sx={{ fontSize: 17 }} />}
+            expandedIcon={<FolderOpenRoundedIcon sx={{ fontSize: 17 }} />}
             onSelect={onSelect}
             onMove={moveConversation}
             registerRowRef={registerRowRef}
@@ -473,12 +480,16 @@ export function ConversationList({
           />
         </Box>
       ))}
-      {chats.length > 0 && (
-        <Box sx={{ px: 1, pb: 0.5 }}>
-          <ChatsGroup
-            chats={chats}
+      {visibleChats.length > 0 && (
+        <Box sx={{ pb: 0.5 }}>
+          <ConversationGroup
+            idBase="chats-group"
+            label={t("chats")}
+            conversations={visibleChats}
             selectedId={selectedId}
-            baseDelay={projects.length * 120}
+            baseDelay={(visibleProjects.length + 1) * 120}
+            collapsedIcon={<ForumRoundedIcon sx={{ fontSize: 16 }} />}
+            expandedIcon={<ForumOutlinedIcon sx={{ fontSize: 16 }} />}
             onSelect={onSelect}
             onMove={moveConversation}
             registerRowRef={registerRowRef}

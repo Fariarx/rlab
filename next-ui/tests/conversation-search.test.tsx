@@ -28,7 +28,7 @@ function KeyboardProbe() {
   return (
     <div>
       <div data-testid="selected-id">{selectedId}</div>
-      <ConversationList projects={[]} selectedId={selectedId} onSelect={setSelectedId} actions={{ onRename: vi.fn(), onArchive: vi.fn(), onDelete: vi.fn() }} chats={chats} />
+      <ConversationList projects={[]} selectedId={selectedId} onSelect={setSelectedId} actions={{ onRename: vi.fn(), onTogglePin: vi.fn(), onArchive: vi.fn(), onDelete: vi.fn() }} chats={chats} />
     </div>
   );
 }
@@ -40,7 +40,7 @@ describe("conversation list", () => {
         projects={[]}
         selectedId="chat-0"
         onSelect={vi.fn()}
-        actions={{ onRename: vi.fn(), onArchive: vi.fn(), onDelete: vi.fn() }}
+        actions={{ onRename: vi.fn(), onTogglePin: vi.fn(), onArchive: vi.fn(), onDelete: vi.fn() }}
         chats={Array.from({ length: 40 }, (_, index) => ({ ...baseConversation, id: `chat-${index}`, title: `Chat ${index}` }))}
       />,
     );
@@ -105,5 +105,13 @@ describe("conversation search popup", () => {
     renderSearch([]);
 
     expect(screen.getByText("Пока нет диалогов")).toBeInTheDocument();
+  });
+
+  it("focuses the search field when it opens", async () => {
+    renderSearch([baseConversation]);
+
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText("Поиск по названию или сообщению...")).toHaveFocus();
+    });
   });
 });

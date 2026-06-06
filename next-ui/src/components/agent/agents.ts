@@ -279,12 +279,7 @@ export function agentProfileLabels(profile: AgentProfile): readonly string[] {
       labels.push(label);
     }
   }
-  if (profile.mode !== "default") {
-    const label = optionLabel(def.modes, profile.mode);
-    if (label) {
-      labels.push(label);
-    }
-  }
+  // Work mode is surfaced as a removable chat tag (not in the agent badge).
   return labels;
 }
 

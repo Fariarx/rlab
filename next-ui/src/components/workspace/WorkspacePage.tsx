@@ -39,6 +39,8 @@ import {
   ConversationSearch,
   conversationStatusKey,
   DEFAULT_PROFILE,
+  getAgent,
+  normalizeAgentProfile,
   formatCostUsd,
   formatTokenUsage,
   messageToPlainText,
@@ -59,6 +61,12 @@ import { GitPanel } from "./GitPanel";
 import { conversationProfile, type Workspace, useWorkspace } from "./use-workspace";
 
 const SIDEBAR_WIDTH = 300;
+// The sidebar title bar and the chat pane header share one fixed height so the
+// two columns line up across the top.
+const HEADER_MIN_HEIGHT = 53;
+// Shared horizontal inset for the sidebar so the title and the list below it
+// keep an even left/right margin.
+const SIDEBAR_INSET = 1.5;
 // Max width for the centered thread/composer content. The scroll container
 // itself is full-width so its scrollbar sits at the screen edge.
 const THREAD_MAX_WIDTH = 1040;
@@ -309,6 +317,16 @@ export function WorkspacePageView({
     }
   };
 
+  // Work mode is toggled per chat from the composer (not the agent picker).
+  const supportedModes = getAgent(profile.agent).modes.filter((mode) => mode.id !== "default").map((mode) => ({ id: mode.id, label: mode.label }));
+  const handleModeChange = (modeId: string) => {
+    const next = normalizeAgentProfile({ ...profile, mode: modeId });
+    setProfile(next);
+    if (!composingNew && selected) {
+      ws.setConversationProfile(ws.selectedId, next);
+    }
+  };
+
   const handleCreateProject = (input: Parameters<typeof ws.createProject>[0]) => {
     try {
       const created = ws.createProject(input);
@@ -323,6 +341,7 @@ export function WorkspacePageView({
 
   const conversationActions = {
     onRename: ws.rename,
+    onTogglePin: ws.togglePin,
     onArchive: (id: string) => {
       ws.remove(id);
       toast({ message: t("conversationArchived"), severity: "info", duration: 2500 });
@@ -467,31 +486,32 @@ export function WorkspacePageView({
 
   const sidebar = (
     <Stack sx={{ height: "100%", minHeight: 0, backgroundColor: (t) => t.custom.surfaces.s1 }}>
-      <Stack spacing={1.25} sx={{ p: 1.5, borderBottom: (t) => `1px solid ${t.custom.borders.subtle}` }}>
-        <Stack direction="row" sx={{ alignItems: "center", justifyContent: "space-between" }}>
-          <Typography sx={{ fontFamily: (t) => t.custom.fonts.mono, fontWeight: 700, fontSize: "0.9rem" }}>{t("appTitle")}</Typography>
-          <Stack direction="row" spacing={0.5}>
-            <Tooltip title={t("searchConversations")}>
-              <IconButton tone="subtle" aria-label={t("searchConversations")} onClick={() => setSearchOpen(true)}>
-                <SearchIcon sx={{ fontSize: 18 }} />
-              </IconButton>
-            </Tooltip>
-            <Tooltip title={t("settings")}>
-              <IconButton aria-label={t("settings")} onClick={() => setSettingsOpen(true)}>
-                <SettingsIcon sx={{ fontSize: 18 }} />
-              </IconButton>
-            </Tooltip>
-            <Tooltip title={t("newProject")}>
-              <IconButton tone="subtle" aria-label={t("newProject")} onClick={() => setProjectDialogOpen(true)}>
-                <CreateNewFolderIcon sx={{ fontSize: 18 }} />
-              </IconButton>
-            </Tooltip>
-            <Tooltip title={t("newConversation")}>
-              <IconButton tone="subtle" aria-label={t("newConversation")} onClick={startNewChat}>
-                <AddIcon sx={{ fontSize: 18 }} />
-              </IconButton>
-            </Tooltip>
-          </Stack>
+      <Stack
+        direction="row"
+        sx={{ alignItems: "center", justifyContent: "space-between", px: SIDEBAR_INSET, minHeight: HEADER_MIN_HEIGHT, flex: "0 0 auto", borderBottom: (t) => `1px solid ${t.custom.borders.subtle}` }}
+      >
+        <Typography sx={{ fontFamily: (t) => t.custom.fonts.mono, fontWeight: 700, fontSize: "0.9rem" }}>{t("appTitle")}</Typography>
+        <Stack direction="row" spacing={0.25}>
+          <Tooltip title={t("searchConversations")}>
+            <IconButton aria-label={t("searchConversations")} onClick={() => setSearchOpen(true)}>
+              <SearchIcon sx={{ fontSize: 18 }} />
+            </IconButton>
+          </Tooltip>
+          <Tooltip title={t("settings")}>
+            <IconButton aria-label={t("settings")} onClick={() => setSettingsOpen(true)}>
+              <SettingsIcon sx={{ fontSize: 18 }} />
+            </IconButton>
+          </Tooltip>
+          <Tooltip title={t("newProject")}>
+            <IconButton aria-label={t("newProject")} onClick={() => setProjectDialogOpen(true)}>
+              <CreateNewFolderIcon sx={{ fontSize: 18 }} />
+            </IconButton>
+          </Tooltip>
+          <Tooltip title={t("newConversation")}>
+            <IconButton aria-label={t("newConversation")} onClick={startNewChat}>
+              <AddIcon sx={{ fontSize: 18 }} />
+            </IconButton>
+          </Tooltip>
         </Stack>
       </Stack>
 
@@ -508,13 +528,19 @@ export function WorkspacePageView({
       </Drawer>
 
       <Box sx={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
-        <Box component="header" sx={{ flex: "0 0 auto", backgroundColor: (t) => t.custom.surfaces.s1, borderBottom: (t) => `1px solid ${t.custom.borders.subtle}` }}>
-          <Stack direction="row" spacing={1.5} sx={{ alignItems: "center", justifyContent: "space-between", px: { xs: 1.5, sm: 2 }, py: 1.5 }}>
-            <Stack direction="row" spacing={1.25} sx={{ alignItems: "center", minWidth: 0 }}>
+        <Box component="header" sx={{ flex: "0 0 auto", backgroundColor: (t) => t.custom.surfaces.s1 }}>
+          <Stack
+            direction="row"
+            spacing={1.5}
+            sx={{ alignItems: "center", justifyContent: "space-between", px: SIDEBAR_INSET, minHeight: HEADER_MIN_HEIGHT, borderBottom: (t) => `1px solid ${t.custom.borders.subtle}` }}
+          >
+            <Stack direction="row" spacing={1.5} sx={{ alignItems: "center", minWidth: 0 }}>
               <IconButton aria-label={t("openConversations")} onClick={() => setDrawerOpen(true)} sx={{ display: { md: "none" } }}>
                 <MenuIcon sx={{ fontSize: 20 }} />
               </IconButton>
-              {selected && <StatusDot status={conversationStatusKey[selected.status]} label={conversationStatus(selected.status)} pulse={selected.status === "running"} />}
+              {selected && (
+                <StatusDot status={conversationStatusKey[selected.status]} label={conversationStatus(selected.status)} pulse={selected.status === "running"} />
+              )}
               <Box sx={{ minWidth: 0 }}>
                 <Typography noWrap sx={{ fontFamily: (t) => t.custom.fonts.mono, fontWeight: 700, fontSize: "0.9rem" }}>
                   {headerTitle}
@@ -669,6 +695,9 @@ export function WorkspacePageView({
                   onNavigate?.(routeForConversation(ws, id));
                 }}
                 mentionableFiles={mentionableFiles}
+                modes={supportedModes}
+                activeMode={profile.mode}
+                onModeChange={handleModeChange}
                 onAttachmentError={(message) => toast({ message, severity: "error", duration: 3000 })}
               />
             ) : (
@@ -688,6 +717,9 @@ export function WorkspacePageView({
                   }
                 }}
                 mentionableFiles={mentionableFiles}
+                modes={supportedModes}
+                activeMode={profile.mode}
+                onModeChange={handleModeChange}
                 onStop={() => ws.stopRun(ws.selectedId)}
                 onAttachmentError={(message) => toast({ message, severity: "error", duration: 3000 })}
                 running={selected?.status === "running"}

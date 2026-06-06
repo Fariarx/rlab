@@ -5,6 +5,9 @@ import { delimiter, join } from "node:path";
 import {
   agentStatusForDetection,
   agentCliInfoForDetection,
+  agentConfigErrorStatus,
+  appendJsonBodyChunk,
+  attachmentUploadErrorStatus,
   buildClaudeRunArgs,
   buildClaudeSdkOptions,
   buildCodexRunArgs,
@@ -20,7 +23,25 @@ import {
   parseRunApprovalPayload,
   parseRunCancelPayload,
   parseRunInputPayload,
+  parseAttachmentUploadPayload,
+  parseAgentConfigPayload,
+  parseAgentInstallPayload,
   parseGitStatusPorcelain,
+  parseGitCwdPayload,
+  parseGitFilePayload,
+  parseGitCommitPayload,
+  gitErrorStatus,
+  gitPushRequestErrorStatus,
+  jsonBodyReadErrorStatus,
+  parseProjectDirectoryPayload,
+  parseRunRequestPayload,
+  agentInstallErrorStatus,
+  applyRunApprovalDecisionState,
+  applyRunInputSelectionState,
+  cancelBackgroundRunState,
+  cancelBackgroundRunRequestState,
+  finishBackgroundRunState,
+  mergeWorkspacePutState,
   listMentionableFiles,
   migrateSeedWorkspaceState,
   reconcileStaleBackgroundRuns,
@@ -31,9 +52,12 @@ import {
   resolveLaunchCommand,
   resolvePendingRunApproval,
   resolvePendingRunInput,
+  runControlErrorStatus,
+  settleEarlyBackgroundRunState,
   shouldUseShellForBin,
   validateRunAccessModeForAgent,
   windowsCommandLine,
+  workspacePutErrorStatus,
 } from "../vite-agents-plugin";
 import { buildInitialWorkspaceState } from "../src/components/workspace/workspace-state";
 import { type CanUseTool } from "@anthropic-ai/claude-agent-sdk";
@@ -576,6 +600,57 @@ describe("vite agents plugin", () => {
     expect(buildGitPushArgs()).toEqual(["push"]);
   });
 
+  it("validates git cwd payloads without accepting non-object JSON", () => {
+    expect(() => parseGitCwdPayload(JSON.stringify("repo"))).toThrow("Invalid git request payload.");
+    expect(() => parseGitCwdPayload(JSON.stringify({ cwd: "" }))).toThrow("Project directory is required.");
+    expect(parseGitCwdPayload(JSON.stringify({ cwd: " C:\\repo " }))).toEqual({ cwd: "C:\\repo" });
+  });
+
+  it("validates git file payloads without accepting non-object JSON", () => {
+    expect(() => parseGitFilePayload(JSON.stringify([]))).toThrow("Invalid git request payload.");
+    expect(() => parseGitFilePayload(JSON.stringify({ cwd: "C:\\repo", path: "" }))).toThrow("Git file path is required.");
+    expect(parseGitFilePayload(JSON.stringify({ cwd: " C:\\repo ", path: " src/auth.ts ", mode: "staged" }))).toEqual({
+      cwd: "C:\\repo",
+      path: "src/auth.ts",
+      mode: "staged",
+    });
+    expect(parseGitFilePayload(JSON.stringify({ cwd: "C:\\repo", path: "src/auth.ts", mode: "other" })).mode).toBe("worktree");
+  });
+
+  it("validates git commit payloads without accepting non-object JSON", () => {
+    expect(() => parseGitCommitPayload(JSON.stringify(null))).toThrow("Invalid git request payload.");
+    expect(() => parseGitCommitPayload(JSON.stringify({ cwd: "C:\\repo", message: "" }))).toThrow("Commit message is required.");
+    expect(parseGitCommitPayload(JSON.stringify({ cwd: " C:\\repo ", message: " ship it " }))).toEqual({
+      cwd: "C:\\repo",
+      message: "ship it",
+    });
+  });
+
+  it("classifies git validation errors separately from runtime errors", () => {
+    expect(gitErrorStatus(new SyntaxError("Unexpected token"))).toBe(400);
+    expect(gitErrorStatus(new Error("Invalid git request payload."))).toBe(400);
+    expect(gitErrorStatus(new Error("Project directory is required."))).toBe(400);
+    expect(gitErrorStatus(new Error("Git file path contains an invalid null byte."))).toBe(400);
+    expect(gitErrorStatus(new Error("EACCES: permission denied"))).toBe(500);
+  });
+
+  it("classifies git push request errors without masking runtime failures as bad requests", () => {
+    expect(gitPushRequestErrorStatus(new SyntaxError("Unexpected token"))).toBe(400);
+    expect(gitPushRequestErrorStatus(new Error("Invalid git request payload."))).toBe(400);
+    expect(gitPushRequestErrorStatus(new Error("EACCES: permission denied"))).toBe(500);
+  });
+
+  it("bounds streamed JSON request bodies by bytes", () => {
+    const first = appendJsonBodyChunk({ body: "", bytes: 0 }, "аб", 4);
+    expect(first).toEqual({ body: "аб", bytes: 4 });
+    expect(() => appendJsonBodyChunk(first, "!", 4)).toThrow("JSON request body exceeds 4 bytes.");
+  });
+
+  it("classifies oversized JSON request bodies separately from stream errors", () => {
+    expect(jsonBodyReadErrorStatus(new Error("JSON request body exceeds 4 bytes."))).toBe(413);
+    expect(jsonBodyReadErrorStatus(new Error("socket hang up"))).toBe(500);
+  });
+
   it("validates run approval payloads", () => {
     expect(parseRunApprovalPayload(JSON.stringify({ id: "approval-1", decision: "approved" }))).toEqual({
       id: "approval-1",
@@ -595,6 +670,54 @@ describe("vite agents plugin", () => {
   it("validates run cancel payloads", () => {
     expect(parseRunCancelPayload(JSON.stringify({ runId: "run-1" }))).toEqual({ runId: "run-1" });
     expect(() => parseRunCancelPayload(JSON.stringify({ runId: "" }))).toThrow("Run id is required.");
+  });
+
+  it("validates attachment upload payloads without accepting non-object JSON", () => {
+    expect(() => parseAttachmentUploadPayload(JSON.stringify("file"))).toThrow("Invalid attachment upload payload.");
+    expect(() => parseAttachmentUploadPayload(JSON.stringify({ name: "notes.txt" }))).toThrow("Attachment name and data are required.");
+    expect(parseAttachmentUploadPayload(JSON.stringify({ name: " notes.txt ", mimeType: "text/plain", dataBase64: "aGVsbG8=" }))).toEqual({
+      name: "notes.txt",
+      mimeType: "text/plain",
+      dataBase64: "aGVsbG8=",
+    });
+  });
+
+  it("validates agent config payloads without accepting non-object JSON", () => {
+    expect(() => parseAgentConfigPayload(JSON.stringify(null))).toThrow("Invalid agent config payload.");
+    expect(() => parseAgentConfigPayload(JSON.stringify({ agent: "", apiKey: "sk-test" }))).toThrow("Agent id is required.");
+    expect(() => parseAgentConfigPayload(JSON.stringify({ agent: "codex", apiKey: "" }))).toThrow("API key is required.");
+    expect(parseAgentConfigPayload(JSON.stringify({ agent: " codex ", apiKey: " sk-test " }))).toEqual({
+      agent: "codex",
+      apiKey: "sk-test",
+    });
+  });
+
+  it("validates agent install payloads without accepting non-object JSON", () => {
+    expect(() => parseAgentInstallPayload(JSON.stringify([]))).toThrow("Invalid agent install payload.");
+    expect(() => parseAgentInstallPayload(JSON.stringify({ agent: "" }))).toThrow("Agent id is required.");
+    expect(parseAgentInstallPayload(JSON.stringify({ agent: " codex " }))).toEqual({ agent: "codex" });
+  });
+
+  it("validates project directory payloads without accepting non-object JSON", () => {
+    expect(() => parseProjectDirectoryPayload(JSON.stringify([]), "path", "Project path is required.")).toThrow("Invalid project directory payload.");
+    expect(() => parseProjectDirectoryPayload(JSON.stringify({ path: "" }), "path", "Project path is required.")).toThrow("Project path is required.");
+    expect(parseProjectDirectoryPayload(JSON.stringify({ path: " C:\\work\\app " }), "path", "Project path is required.")).toBe("C:\\work\\app");
+    expect(parseProjectDirectoryPayload(JSON.stringify({ cwd: " C:\\work\\app " }), "cwd", "Project directory is required.")).toBe("C:\\work\\app");
+  });
+
+  it("does not mask malformed run payloads as an empty prompt", () => {
+    expect(parseRunRequestPayload("{")).toEqual({ ok: false, error: "Invalid run request payload." });
+    expect(parseRunRequestPayload("[]")).toEqual({ ok: false, error: "Invalid run request payload." });
+    expect(parseRunRequestPayload(JSON.stringify("hello"))).toEqual({ ok: false, error: "Invalid run request payload." });
+    expect(parseRunRequestPayload(JSON.stringify({ agent: "codex", model: "gpt-5.5", reasoning: "high", mode: "default", accessMode: "read-only", prompt: "hello" }))).toMatchObject({
+      ok: true,
+      agent: "codex",
+      model: "gpt-5.5",
+      reasoning: "high",
+      mode: "default",
+      accessMode: "read-only",
+      prompt: "hello",
+    });
   });
 
   it("keeps SDK permission callbacks pending until the UI posts a decision", async () => {
@@ -631,6 +754,27 @@ describe("vite agents plugin", () => {
       updatedInput: { command: "npm test" },
       toolUseID: "toolu_1",
     });
+  });
+
+  it("scopes simultaneous approval callbacks by run id", async () => {
+    const runAEvents: Array<{ readonly type: string; readonly id?: string }> = [];
+    const runBEvents: Array<{ readonly type: string; readonly id?: string }> = [];
+    const runA = createRunApprovalHandler((event) => runAEvents.push(event), "run-a");
+    const runB = createRunApprovalHandler((event) => runBEvents.push(event), "run-b");
+    const abortA = new AbortController();
+    const abortB = new AbortController();
+
+    const resultA = runA("Bash", { command: "npm test" }, { signal: abortA.signal, toolUseID: "toolu_1" });
+    const resultB = runB("Bash", { command: "npm run build" }, { signal: abortB.signal, toolUseID: "toolu_1" });
+
+    await Promise.resolve();
+
+    expect(runAEvents).toEqual([expect.objectContaining({ type: "approval", id: "run-a:toolu_1" })]);
+    expect(runBEvents).toEqual([expect.objectContaining({ type: "approval", id: "run-b:toolu_1" })]);
+    expect(resolvePendingRunApproval({ id: "run-a:toolu_1", decision: "approved" })).toEqual({ id: "run-a:toolu_1", decision: "approved" });
+    expect(resolvePendingRunApproval({ id: "run-b:toolu_1", decision: "rejected" })).toEqual({ id: "run-b:toolu_1", decision: "rejected" });
+    await expect(resultA).resolves.toEqual({ behavior: "allow", updatedInput: { command: "npm test" }, toolUseID: "toolu_1" });
+    await expect(resultB).resolves.toEqual({ behavior: "deny", message: "User rejected this action.", toolUseID: "toolu_1" });
   });
 
   it("keeps AskUserQuestion callbacks pending until every question receives UI input", async () => {
@@ -722,6 +866,520 @@ describe("vite agents plugin", () => {
       },
       toolUseID: "toolu_question",
     });
+  });
+
+  it("scopes simultaneous AskUserQuestion callbacks by run id", async () => {
+    const runAEvents: Array<{ readonly type: string; readonly id?: string }> = [];
+    const runBEvents: Array<{ readonly type: string; readonly id?: string }> = [];
+    const runA = createRunApprovalHandler((event) => runAEvents.push(event), "run-a");
+    const runB = createRunApprovalHandler((event) => runBEvents.push(event), "run-b");
+    const input = {
+      questions: [
+        {
+          question: "Pick output format",
+          options: [{ label: "Summary" }, { label: "Detailed" }],
+        },
+      ],
+    };
+
+    const resultA = runA("AskUserQuestion", input, { signal: new AbortController().signal, toolUseID: "toolu_question" });
+    const resultB = runB("AskUserQuestion", input, { signal: new AbortController().signal, toolUseID: "toolu_question" });
+
+    await Promise.resolve();
+
+    expect(runAEvents).toEqual([expect.objectContaining({ type: "options", id: "run-a:toolu_question:q0" })]);
+    expect(runBEvents).toEqual([expect.objectContaining({ type: "options", id: "run-b:toolu_question:q0" })]);
+    expect(resolvePendingRunInput({ id: "run-a:toolu_question:q0", selected: ["Summary"] })).toEqual({ id: "run-a:toolu_question:q0", selected: ["Summary"] });
+    expect(resolvePendingRunInput({ id: "run-b:toolu_question:q0", selected: ["Detailed"] })).toEqual({ id: "run-b:toolu_question:q0", selected: ["Detailed"] });
+    await expect(resultA).resolves.toEqual({
+      behavior: "allow",
+      updatedInput: { questions: input.questions, answers: { "Pick output format": "Summary" } },
+      toolUseID: "toolu_question",
+    });
+    await expect(resultB).resolves.toEqual({
+      behavior: "allow",
+      updatedInput: { questions: input.questions, answers: { "Pick output format": "Detailed" } },
+      toolUseID: "toolu_question",
+    });
+  });
+
+  it("persists approval decisions and option selections in workspace state", () => {
+    const state = buildInitialWorkspaceState();
+    const pendingState = {
+      ...state,
+      chats: state.chats.map((conversation) => (conversation.id === "chat-2" ? { ...conversation, status: "waiting" as const } : conversation)),
+      threads: {
+        ...state.threads,
+        "chat-2": [
+          ...state.threads["chat-2"],
+          {
+            id: "a-pending-input",
+            role: "agent" as const,
+            blocks: [
+              { kind: "approval" as const, id: "approval-1", title: "Approve Bash?", detail: "npm test" },
+              {
+                kind: "options" as const,
+                id: "toolu_question:q0",
+                prompt: "How should I format it?",
+                options: [
+                  { id: "Summary", label: "Summary" },
+                  { id: "Detailed", label: "Detailed" },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    };
+
+    const approved = applyRunApprovalDecisionState(pendingState, { id: "approval-1", decision: "approved" });
+    const selected = applyRunInputSelectionState(approved, { id: "toolu_question:q0", selected: ["Summary"] });
+    const blocks = selected.threads["chat-2"].find((message) => message.id === "a-pending-input")?.blocks;
+
+    expect(selected.chats.find((conversation) => conversation.id === "chat-2")?.status).toBe("running");
+    expect(blocks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "approval", id: "approval-1", decision: "approved" }),
+        expect.objectContaining({ kind: "options", id: "toolu_question:q0", selected: ["Summary"] }),
+      ]),
+    );
+  });
+
+  it("classifies workspace PUT payload errors separately from server persistence errors", () => {
+    expect(workspacePutErrorStatus(new SyntaxError("Unexpected token"))).toBe(400);
+    expect(workspacePutErrorStatus(new Error("EACCES: permission denied"))).toBe(500);
+  });
+
+  it("classifies run-control payload, pending-request, and persistence errors", () => {
+    expect(runControlErrorStatus(new SyntaxError("Unexpected token"))).toBe(400);
+    expect(runControlErrorStatus(new Error("Invalid approval decision."))).toBe(400);
+    expect(runControlErrorStatus(new Error("Selected options do not match the pending question."))).toBe(400);
+    expect(runControlErrorStatus(new Error("No pending approval request for approval-1."))).toBe(404);
+    expect(runControlErrorStatus(new Error("No pending input request for toolu_question:q0."))).toBe(404);
+    expect(runControlErrorStatus(new Error("EACCES: permission denied"))).toBe(500);
+  });
+
+  it("classifies attachment upload parse errors separately from storage errors", () => {
+    expect(attachmentUploadErrorStatus(new SyntaxError("Unexpected token"))).toBe(400);
+    expect(attachmentUploadErrorStatus(new Error("EACCES: permission denied"))).toBe(500);
+  });
+
+  it("classifies agent config parse errors separately from storage errors", () => {
+    expect(agentConfigErrorStatus(new SyntaxError("Unexpected token"))).toBe(400);
+    expect(agentConfigErrorStatus(new Error("Invalid agent config payload."))).toBe(400);
+    expect(agentConfigErrorStatus(new Error("API key is required."))).toBe(400);
+    expect(agentConfigErrorStatus(new Error("EACCES: permission denied"))).toBe(500);
+  });
+
+  it("classifies agent install parse errors separately from launch errors", () => {
+    expect(agentInstallErrorStatus(new SyntaxError("Unexpected token"))).toBe(400);
+    expect(agentInstallErrorStatus(new Error("Invalid agent install payload."))).toBe(400);
+    expect(agentInstallErrorStatus(new Error("Agent id is required."))).toBe(400);
+    expect(agentInstallErrorStatus(new Error("spawn EACCES"))).toBe(500);
+  });
+
+  it("keeps server-owned background run fields when applying a stale workspace PUT", () => {
+    const current = buildInitialWorkspaceState();
+    const serverState = {
+      ...current,
+      chats: current.chats.map((conversation) =>
+        conversation.id === "chat-2"
+          ? {
+              ...conversation,
+              activeRunId: "run-bg",
+              status: "running" as const,
+              snippet: "server streamed token",
+              time: "10:02",
+              costUsd: 0.25,
+              usage: { totalTokens: 100 },
+            }
+          : conversation,
+      ),
+      threads: {
+        ...current.threads,
+        "chat-2": [
+          ...current.threads["chat-2"],
+          {
+            id: "a-bg",
+            role: "agent" as const,
+            time: "10:02",
+            blocks: [{ kind: "text" as const, text: "server streamed token", streaming: true }],
+          },
+        ],
+      },
+    };
+    const staleClientState = {
+      ...serverState,
+      chats: serverState.chats.map((conversation) =>
+        conversation.id === "chat-2"
+          ? {
+              ...conversation,
+              title: "Renamed while running",
+              activeRunId: "run-bg",
+              status: "running" as const,
+              snippet: "old client token",
+              time: "10:00",
+              costUsd: undefined,
+              usage: undefined,
+            }
+          : conversation,
+      ),
+      threads: {
+        ...serverState.threads,
+        "chat-2": current.threads["chat-2"],
+      },
+      settings: {
+        ...serverState.settings,
+        general: { ...serverState.settings.general, locale: "en" as const },
+      },
+    };
+
+    const merged = mergeWorkspacePutState(staleClientState, serverState);
+    const mergedConversation = merged.chats.find((conversation) => conversation.id === "chat-2");
+
+    expect(mergedConversation).toMatchObject({
+      title: "Renamed while running",
+      activeRunId: "run-bg",
+      status: "running",
+      snippet: "server streamed token",
+      time: "10:02",
+      costUsd: 0.25,
+      usage: { totalTokens: 100 },
+    });
+    expect(merged.threads["chat-2"]).toEqual(serverState.threads["chat-2"]);
+    expect(merged.settings.general.locale).toBe("en");
+  });
+
+  it("does not resurrect a completed background run when applying a stale workspace PUT", () => {
+    const current = buildInitialWorkspaceState();
+    const serverState = {
+      ...current,
+      chats: current.chats.map((conversation) =>
+        conversation.id === "chat-2"
+          ? {
+              ...conversation,
+              activeRunId: undefined,
+              status: "done" as const,
+              snippet: "server final answer",
+              time: "10:03",
+              costUsd: 0.42,
+              usage: { totalTokens: 120, inputTokens: 80, outputTokens: 40 },
+            }
+          : conversation,
+      ),
+      threads: {
+        ...current.threads,
+        "chat-2": [
+          ...current.threads["chat-2"],
+          { id: "u-bg", role: "user" as const, text: "continue in background", time: "10:00" },
+          { id: "a-bg", role: "agent" as const, time: "10:03", blocks: [{ kind: "text" as const, text: "server final answer" }] },
+        ],
+      },
+    };
+    const staleClientState = {
+      ...serverState,
+      chats: serverState.chats.map((conversation) =>
+        conversation.id === "chat-2"
+          ? {
+              ...conversation,
+              title: "Renamed while stale",
+              activeRunId: "run-bg",
+              status: "running" as const,
+              snippet: "server streamed token",
+              time: "10:01",
+              costUsd: undefined,
+              usage: undefined,
+            }
+          : conversation,
+      ),
+      threads: {
+        ...serverState.threads,
+        "chat-2": [
+          ...current.threads["chat-2"],
+          { id: "u-bg", role: "user" as const, text: "continue in background", time: "10:00" },
+          { id: "a-bg", role: "agent" as const, time: "10:01", blocks: [{ kind: "text" as const, text: "server streamed token", streaming: true }] },
+        ],
+      },
+      settings: {
+        ...serverState.settings,
+        general: { ...serverState.settings.general, locale: "en" as const },
+      },
+    };
+
+    const merged = mergeWorkspacePutState(staleClientState, serverState);
+    const mergedConversation = merged.chats.find((conversation) => conversation.id === "chat-2");
+
+    expect(mergedConversation).toMatchObject({
+      title: "Renamed while stale",
+      activeRunId: undefined,
+      status: "done",
+      snippet: "server final answer",
+      time: "10:03",
+      costUsd: 0.42,
+      usage: { totalTokens: 120, inputTokens: 80, outputTokens: 40 },
+    });
+    expect(merged.threads["chat-2"]).toEqual(serverState.threads["chat-2"]);
+    expect(merged.settings.general.locale).toBe("en");
+  });
+
+  it("marks canceled persisted background runs idle immediately", () => {
+    const state = buildInitialWorkspaceState();
+    const runningState = {
+      ...state,
+      chats: state.chats.map((conversation) =>
+        conversation.id === "chat-2"
+          ? {
+              ...conversation,
+              activeRunId: "run-bg",
+              status: "running" as const,
+              snippet: "server streamed token",
+              time: "10:02",
+            }
+          : conversation,
+      ),
+      threads: {
+        ...state.threads,
+        "chat-2": [
+          ...state.threads["chat-2"],
+          {
+            id: "a-bg",
+            role: "agent" as const,
+            time: "10:02",
+            blocks: [
+              { kind: "reasoning" as const, text: "Still running", active: true },
+              { kind: "text" as const, text: "partial", streaming: true },
+            ],
+          },
+        ],
+      },
+    };
+
+    const canceled = cancelBackgroundRunState(runningState, "run-bg");
+    const canceledConversation = canceled.chats.find((conversation) => conversation.id === "chat-2");
+    const canceledBlocks = canceled.threads["chat-2"].find((message) => message.id === "a-bg")?.blocks;
+
+    expect(canceledConversation).toMatchObject({
+      activeRunId: undefined,
+      status: "idle",
+      snippet: "Прогон остановлен",
+    });
+    expect(canceledBlocks).toEqual([
+      { kind: "reasoning", text: "Still running", active: false },
+      { kind: "text", text: "partial", streaming: false },
+      { kind: "status", level: "warn", text: "Прогон остановлен" },
+    ]);
+  });
+
+  it("cancels a persisted background run even when no in-memory handle exists", () => {
+    const state = buildInitialWorkspaceState();
+    const runningState = {
+      ...state,
+      chats: state.chats.map((conversation) =>
+        conversation.id === "chat-2"
+          ? {
+              ...conversation,
+              activeRunId: "run-detached",
+              status: "running" as const,
+              snippet: "still running in persisted state",
+              time: "10:02",
+            }
+          : conversation,
+      ),
+      threads: {
+        ...state.threads,
+        "chat-2": [
+          ...state.threads["chat-2"],
+          {
+            id: "a-detached",
+            role: "agent" as const,
+            time: "10:02",
+            blocks: [{ kind: "reasoning" as const, text: "Still running", active: true }],
+          },
+        ],
+      },
+    };
+
+    const result = cancelBackgroundRunRequestState(runningState, "run-detached", false);
+
+    expect(result).toMatchObject({ canceled: true, hadHandle: false });
+    expect(result.state.chats.find((conversation) => conversation.id === "chat-2")).toMatchObject({
+      activeRunId: undefined,
+      status: "idle",
+      snippet: "Прогон остановлен",
+    });
+    expect(result.state.threads["chat-2"].find((message) => message.id === "a-detached")?.blocks).toEqual([
+      { kind: "reasoning", text: "Still running", active: false },
+      { kind: "status", level: "warn", text: "Прогон остановлен" },
+    ]);
+  });
+
+  it("keeps the canceled status block when a canceled background process finally closes", () => {
+    const state = buildInitialWorkspaceState();
+    const binding = {
+      conversationId: "chat-2",
+      runId: "run-bg",
+      userMessageId: "u-bg",
+      userMessageTime: "10:00",
+      agentMessageId: "a-bg",
+      agentMessageTime: "10:02",
+    };
+    const runningState = {
+      ...state,
+      chats: state.chats.map((conversation) =>
+        conversation.id === "chat-2"
+          ? {
+              ...conversation,
+              activeRunId: "run-bg",
+              status: "running" as const,
+              snippet: "server streamed token",
+              time: "10:02",
+            }
+          : conversation,
+      ),
+      threads: {
+        ...state.threads,
+        "chat-2": [
+          ...state.threads["chat-2"],
+          { id: "u-bg", role: "user" as const, text: "continue in background", time: "10:00" },
+          {
+            id: "a-bg",
+            role: "agent" as const,
+            time: "10:02",
+            blocks: [
+              { kind: "reasoning" as const, text: "Still running", active: true },
+              { kind: "text" as const, text: "partial", streaming: true },
+            ],
+          },
+        ],
+      },
+    };
+    const canceledState = cancelBackgroundRunState(runningState, "run-bg");
+    const finished = finishBackgroundRunState(
+      canceledState,
+      binding,
+      {
+        reasoning: "Still running",
+        hasReasoning: true,
+        started: true,
+        text: "partial",
+        hasText: true,
+        tools: [],
+        approvals: [],
+        options: [],
+        statuses: [],
+        done: false,
+        start: Date.now(),
+      },
+      true,
+    );
+
+    const blocks = finished.threads["chat-2"].find((message) => message.id === "a-bg")?.blocks;
+
+    expect(finished.chats.find((conversation) => conversation.id === "chat-2")).toMatchObject({
+      activeRunId: undefined,
+      status: "idle",
+      snippet: "Прогон остановлен",
+    });
+    expect(blocks).toEqual([
+      { kind: "reasoning", text: "Still running", active: false, duration: expect.stringMatching(/s$/) },
+      { kind: "text", text: "partial", streaming: false },
+      { kind: "status", level: "warn", text: "Прогон остановлен" },
+    ]);
+  });
+
+  it("keeps server-owned background conversations that are missing from a stale workspace PUT", () => {
+    const current = buildInitialWorkspaceState();
+    const serverState = {
+      ...current,
+      chats: [
+        {
+          id: "chat-bg",
+          title: "Background run",
+          snippet: "server streamed token",
+          time: "10:02",
+          status: "running" as const,
+          agent: "claude-code" as const,
+          profile: { agent: "claude-code" as const, model: "default", reasoning: "default", mode: "default" as const },
+          activeRunId: "run-bg",
+        },
+        ...current.chats,
+      ],
+      threads: {
+        ...current.threads,
+        "chat-bg": [
+          { id: "u-bg", role: "user" as const, text: "continue in background", time: "10:00" },
+          { id: "a-bg", role: "agent" as const, time: "10:02", blocks: [{ kind: "text" as const, text: "server streamed token", streaming: true }] },
+        ],
+      },
+    };
+    const staleClientState = {
+      ...serverState,
+      chats: current.chats,
+      threads: current.threads,
+    };
+
+    const merged = mergeWorkspacePutState(staleClientState, serverState);
+
+    expect(merged.chats.find((conversation) => conversation.id === "chat-bg")).toMatchObject({
+      activeRunId: "run-bg",
+      status: "running",
+      snippet: "server streamed token",
+    });
+    expect(merged.threads["chat-bg"]).toEqual(serverState.threads["chat-bg"]);
+  });
+
+  it("keeps server-owned project background conversations that are missing from a stale workspace PUT", () => {
+    const current = buildInitialWorkspaceState();
+    const serverState = {
+      ...current,
+      projects: current.projects.map((project) =>
+        project.id === "auth-service"
+          ? {
+              ...project,
+              conversations: project.conversations.map((conversation) =>
+                conversation.id === "c-flaky"
+                  ? {
+                      ...conversation,
+                      activeRunId: "run-project-bg",
+                      status: "running" as const,
+                      snippet: "project server token",
+                      time: "10:05",
+                    }
+                  : conversation,
+              ),
+            }
+          : project,
+      ),
+      threads: {
+        ...current.threads,
+        "c-flaky": [
+          ...current.threads["c-flaky"],
+          { id: "a-project-bg", role: "agent" as const, time: "10:05", blocks: [{ kind: "text" as const, text: "project server token", streaming: true }] },
+        ],
+      },
+    };
+    const staleClientState = {
+      ...serverState,
+      projects: serverState.projects.map((project) =>
+        project.id === "auth-service"
+          ? { ...project, conversations: project.conversations.filter((conversation) => conversation.id !== "c-flaky") }
+          : project,
+      ),
+      threads: {
+        ...serverState.threads,
+        "c-flaky": current.threads["c-flaky"],
+      },
+    };
+
+    const merged = mergeWorkspacePutState(staleClientState, serverState);
+    const mergedProjectConversation = merged.projects.find((project) => project.id === "auth-service")?.conversations.find((conversation) => conversation.id === "c-flaky");
+
+    expect(mergedProjectConversation).toMatchObject({
+      activeRunId: "run-project-bg",
+      status: "running",
+      snippet: "project server token",
+    });
+    expect(merged.threads["c-flaky"]).toEqual(serverState.threads["c-flaky"]);
   });
 
   it("builds Claude SDK options with a live permission handler for writable runs", () => {
@@ -843,6 +1501,20 @@ describe("vite agents plugin", () => {
               }
             : project,
         ),
+        threads: {
+          ...state.threads,
+          "chat-2": [
+            ...state.threads["chat-2"],
+            {
+              id: "a-stale",
+              role: "agent",
+              blocks: [
+                { kind: "reasoning", text: "Still thinking", active: true },
+                { kind: "text", text: "partial answer", streaming: true },
+              ],
+            },
+          ],
+        },
       },
       new Set(["run-live"]),
     );
@@ -852,10 +1524,101 @@ describe("vite agents plugin", () => {
       status: "error",
       snippet: "Фоновый прогон прерван",
     });
+    const staleBlocks = reconciled.threads["chat-2"].find((message) => message.id === "a-stale")?.blocks;
+    expect(staleBlocks).toEqual([
+      { kind: "reasoning", text: "Still thinking", active: false },
+      { kind: "text", text: "partial answer", streaming: false },
+      { kind: "status", level: "error", text: "Фоновый прогон прерван" },
+    ]);
     expect(reconciled.projects[0]?.conversations.find((conversation) => conversation.id === "c-flaky")).toMatchObject({
       activeRunId: "run-live",
       status: "running",
       snippet: "Still running",
     });
+  });
+
+  it("settles bound background runs that fail before an agent process starts", () => {
+    const state = buildInitialWorkspaceState();
+    const settled = settleEarlyBackgroundRunState(
+      state,
+      {
+        conversationId: "chat-2",
+        runId: "run-early",
+        userMessageId: "u-early",
+        userMessageTime: "10:00",
+        agentMessageId: "a-early",
+        agentMessageTime: "10:01",
+      },
+      {
+        agent: "codex",
+        model: "default",
+        reasoning: "default",
+        mode: "default",
+        prompt: "Use an unsupported profile",
+        accessMode: "read-only",
+      },
+      [
+        { type: "start" },
+        { type: "error", text: "Unknown model 'bad' for codex." },
+      ],
+    );
+
+    expect(settled.chats.find((conversation) => conversation.id === "chat-2")).toMatchObject({
+      activeRunId: undefined,
+      status: "error",
+      snippet: "Прогон упал",
+    });
+    expect(settled.threads["chat-2"]).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "u-early", role: "user", text: "Use an unsupported profile" }),
+        expect.objectContaining({
+          id: "a-early",
+          role: "agent",
+          blocks: expect.arrayContaining([expect.objectContaining({ kind: "status", level: "error", text: "Unknown model 'bad' for codex." })]),
+        }),
+      ]),
+    );
+  });
+
+  it("does not mark early warning-only bound background runs as done", () => {
+    const state = buildInitialWorkspaceState();
+    const settled = settleEarlyBackgroundRunState(
+      state,
+      {
+        conversationId: "chat-2",
+        runId: "run-missing-cli",
+        userMessageId: "u-missing-cli",
+        userMessageTime: "10:00",
+        agentMessageId: "a-missing-cli",
+        agentMessageTime: "10:01",
+      },
+      {
+        agent: "codex",
+        model: "default",
+        reasoning: "default",
+        mode: "default",
+        prompt: "Run with missing CLI",
+        accessMode: "read-only",
+      },
+      [
+        { type: "start" },
+        { type: "status", level: "warn", text: "codex is not installed on this machine" },
+      ],
+    );
+
+    expect(settled.chats.find((conversation) => conversation.id === "chat-2")).toMatchObject({
+      activeRunId: undefined,
+      status: "error",
+      snippet: "Прогон упал",
+    });
+    expect(settled.threads["chat-2"]).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "a-missing-cli",
+          role: "agent",
+          blocks: expect.arrayContaining([expect.objectContaining({ kind: "status", level: "warn", text: "codex is not installed on this machine" })]),
+        }),
+      ]),
+    );
   });
 });

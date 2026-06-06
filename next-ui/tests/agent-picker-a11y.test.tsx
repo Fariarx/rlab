@@ -80,29 +80,13 @@ describe("AgentPicker a11y", () => {
     expect(onSelect).toHaveBeenCalledWith({ agent: "codex", model: "default", reasoning: "default", mode: "default" });
   });
 
-  it("keeps model, reasoning, and work mode as separate profile fields", async () => {
-    const onSelect = vi.fn();
+  it("exposes model and reasoning options but no work-mode control (mode is a chat option)", () => {
+    renderWithTheme(<AgentPicker open value={DEFAULT_PROFILE} onClose={vi.fn()} onSelect={vi.fn()} />);
 
-    renderWithTheme(
-      <AgentPicker
-        open
-        value={DEFAULT_PROFILE}
-        onClose={vi.fn()}
-        onSelect={onSelect}
-      />,
-    );
-
-    fireEvent.click(screen.getByRole("button", { name: "Выбрать Claude Code из CLI" }));
-    fireEvent.click(screen.getByRole("button", { name: "Opus" }));
-    fireEvent.click(screen.getByRole("button", { name: "Max" }));
-    fireEvent.click(screen.getByRole("button", { name: "Plan" }));
-    fireEvent.click(screen.getByRole("button", { name: "Использовать Claude Code" }));
-
-    expect(onSelect).toHaveBeenCalledWith({
-      agent: "claude-code",
-      model: "opus",
-      reasoning: "max",
-      mode: "plan",
-    });
+    // Claude's model + reasoning options are present...
+    expect(screen.getByRole("button", { name: "Opus" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Max" })).toBeInTheDocument();
+    // ...but the work-mode option ("Plan") is no longer in the picker.
+    expect(screen.queryByRole("button", { name: "Plan" })).not.toBeInTheDocument();
   });
 });

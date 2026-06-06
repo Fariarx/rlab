@@ -33,7 +33,7 @@ describe("Composer", () => {
     renderWithTheme(<Composer placeholder="Написать" mentionableFiles={["src/auth.ts", "README.md"]} />);
 
     fireEvent.change(screen.getByPlaceholderText("Написать"), { target: { value: "Read @" } });
-    fireEvent.click(screen.getByRole("button", { name: "src/auth.ts" }));
+    fireEvent.click(screen.getByRole("option", { name: "src/auth.ts" }));
 
     expect(screen.getByPlaceholderText("Написать")).toHaveValue("Read @src/auth.ts ");
   });
@@ -42,9 +42,52 @@ describe("Composer", () => {
     renderWithTheme(<Composer placeholder="Написать" />);
 
     fireEvent.change(screen.getByPlaceholderText("Написать"), { target: { value: "/" } });
-    fireEvent.click(screen.getByRole("button", { name: "/plan" }));
+    fireEvent.click(screen.getByRole("option", { name: "/plan" }));
 
     expect(screen.getByPlaceholderText("Написать")).toHaveValue("Составь план реализации перед изменениями. ");
+  });
+
+  it("navigates the suggestion popover with the arrow keys and selects with Enter", () => {
+    renderWithTheme(<Composer placeholder="Написать" />);
+    const input = screen.getByPlaceholderText("Написать");
+
+    fireEvent.change(input, { target: { value: "/" } });
+    // The list opens with the first item active.
+    expect(screen.getByRole("option", { name: "/plan" })).toHaveAttribute("aria-selected", "true");
+
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    expect(screen.getByRole("option", { name: "/test" })).toHaveAttribute("aria-selected", "true");
+
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(input).toHaveValue("Запусти релевантные тесты и сообщи результат. ");
+  });
+
+  it("shows a drop hint while dragging files and attaches them on drop", async () => {
+    renderWithTheme(<Composer placeholder="Написать" />);
+    const input = screen.getByPlaceholderText("Написать");
+
+    fireEvent.dragEnter(input, { dataTransfer: { types: ["Files"], files: [] } });
+    expect(screen.getByText("Отпустите файлы, чтобы прикрепить")).toBeInTheDocument();
+
+    const file = new File(["payload"], "drop.txt", { type: "text/plain" });
+    fireEvent.drop(input, { dataTransfer: { types: ["Files"], files: [file] } });
+
+    expect(await screen.findByText("drop.txt")).toBeInTheDocument();
+    // The overlay clears once the files are dropped.
+    expect(screen.queryByText("Отпустите файлы, чтобы прикрепить")).not.toBeInTheDocument();
+  });
+
+  it("dismisses the suggestion popover with Escape without sending", () => {
+    const onSend = vi.fn();
+    renderWithTheme(<Composer placeholder="Написать" onSend={onSend} />);
+    const input = screen.getByPlaceholderText("Написать");
+
+    fireEvent.change(input, { target: { value: "/" } });
+    expect(screen.getByRole("listbox", { name: "Подсказки" })).toBeInTheDocument();
+
+    fireEvent.keyDown(input, { key: "Escape" });
+    expect(screen.queryByRole("listbox", { name: "Подсказки" })).not.toBeInTheDocument();
+    expect(onSend).not.toHaveBeenCalled();
   });
 
   it("lifts the input into an overlay when the text becomes multiline", () => {

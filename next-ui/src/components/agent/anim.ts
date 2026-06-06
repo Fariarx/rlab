@@ -25,6 +25,12 @@ export const shimmer = keyframes`
   to { background-position: -200% 0; }
 `;
 
+/** Drop-zone overlay entrance: fade + slight scale-up. */
+export const dropIn = keyframes`
+  from { opacity: 0; transform: scale(0.97); }
+  to { opacity: 1; transform: scale(1); }
+`;
+
 /** Selected check pop. */
 export const pop = keyframes`
   0% { transform: scale(0.4); opacity: 0; }

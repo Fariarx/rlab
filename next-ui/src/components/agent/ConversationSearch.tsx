@@ -1,6 +1,6 @@
 import SearchIcon from "@mui/icons-material/Search";
 import { Box, Dialog, DialogContent, DialogTitle, InputAdornment, InputBase, Stack, Typography } from "@mui/material";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import { StatusDot } from "../ui";
 import { AgentMonogram } from "./AgentMonogram";
@@ -34,12 +34,18 @@ export function ConversationSearch({
 }) {
   const { t, conversationStatus } = useI18n();
   const [query, setQuery] = useState("");
+  const inputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     if (open) {
       setQuery("");
     }
   }, [open]);
+
+  // Focus the field once the dialog transition settles. Doing it on `onEntered`
+  // (rather than `autoFocus`) wins against the Dialog focus-trap, which was
+  // leaving the input unfocused on open.
+  const focusInput = () => inputRef.current?.focus();
 
   const entries = useMemo<readonly SearchEntry[]>(
     () => [
@@ -57,13 +63,14 @@ export function ConversationSearch({
   };
 
   return (
-    <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth aria-labelledby="conversation-search-title">
+    <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth aria-labelledby="conversation-search-title" slotProps={{ transition: { onEntered: focusInput } }}>
       <DialogTitle id="conversation-search-title" sx={{ pb: 1 }}>
         {t("searchConversations")}
       </DialogTitle>
       <DialogContent sx={{ pb: 2.5 }}>
         <Stack spacing={1.5}>
           <InputBase
+            inputRef={inputRef}
             autoFocus
             value={query}
             onChange={(event) => setQuery(event.target.value)}
@@ -108,7 +115,7 @@ export function ConversationSearch({
                     backgroundColor: (theme) => theme.custom.surfaces.s2,
                     transition: "background-color 120ms ease",
                     "&:hover": { backgroundColor: (theme) => theme.custom.surfaces.s3 },
-                    "&:focus-visible": { outline: (theme) => `2px solid ${theme.custom.borders.focus}`, outlineOffset: 2 },
+                    "&:focus-visible": { outline: (theme) => `2px solid ${theme.custom.borders.focus}`, outlineOffset: "-2px" },
                   }}
                 >
                   <AgentMonogram agent={conversation.agent} size={26} />

@@ -195,6 +195,7 @@ export interface Workspace {
   readonly newProjectChat: (projectId: string, profile: AgentProfile) => string;
   readonly setConversationProfile: (id: string, profile: AgentProfile) => void;
   readonly rename: (id: string, title: string) => void;
+  readonly togglePin: (id: string) => void;
   readonly remove: (id: string) => void;
   readonly sendMessage: (id: string, text: string) => void;
   readonly stopRun: (id: string) => void;
@@ -504,6 +505,11 @@ class WorkspaceStore implements Workspace {
     if (trimmed) {
       this.patchConv(id, { title: trimmed });
     }
+  }
+
+  togglePin(id: string): void {
+    const conversation = this.find(id);
+    this.patchConv(id, { pinned: !conversation?.pinned });
   }
 
   remove(id: string): void {

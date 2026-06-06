@@ -10,7 +10,7 @@ describe("usage cost", () => {
         projects={[]}
         selectedId="cost-chat"
         onSelect={vi.fn()}
-        actions={{ onRename: vi.fn(), onArchive: vi.fn(), onDelete: vi.fn() }}
+        actions={{ onRename: vi.fn(), onTogglePin: vi.fn(), onArchive: vi.fn(), onDelete: vi.fn() }}
         chats={[
           {
             id: "cost-chat",

@@ -31,6 +31,7 @@ const WORKSPACE_STATE_DIR = join(PLUGIN_DIR, ".data");
 const WORKSPACE_STATE_FILE = join(WORKSPACE_STATE_DIR, "workspace-state.json");
 const ATTACHMENTS_DIR = join(WORKSPACE_STATE_DIR, "attachments");
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+export const MAX_JSON_BODY_BYTES = 40 * 1024 * 1024;
 const AGENT_CONFIG_FILE = join(WORKSPACE_STATE_DIR, "agent-config.json");
 
 interface Detect {
@@ -307,12 +308,56 @@ function detectAgents(): Record<string, AgentCliInfo> {
 
 /* --------------------------- Server workspace state -------------------------- */
 
-function readJsonBody(req: IncomingMessage, onDone: (body: string) => void): void {
-  let body = "";
-  req.on("data", (chunk) => {
-    body += chunk;
+export interface JsonBodyAccumulator {
+  readonly body: string;
+  readonly bytes: number;
+}
+
+function jsonBodyTooLargeMessage(maxBytes: number): string {
+  return `JSON request body exceeds ${maxBytes} bytes.`;
+}
+
+export function appendJsonBodyChunk(accumulator: JsonBodyAccumulator, chunk: Buffer | string, maxBytes = MAX_JSON_BODY_BYTES): JsonBodyAccumulator {
+  const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+  const bytes = accumulator.bytes + Buffer.byteLength(text, "utf8");
+  if (bytes > maxBytes) {
+    throw new Error(jsonBodyTooLargeMessage(maxBytes));
+  }
+  return { body: accumulator.body + text, bytes };
+}
+
+export function jsonBodyReadErrorStatus(error: unknown): 413 | 500 {
+  return /^JSON request body exceeds \d+ bytes\.$/.test(errorMessage(error)) ? 413 : 500;
+}
+
+function readJsonBody(req: IncomingMessage, res: ServerResponse, onDone: (body: string) => void): void {
+  let accumulator: JsonBodyAccumulator = { body: "", bytes: 0 };
+  let finished = false;
+  req.on("data", (chunk: Buffer | string) => {
+    if (finished) {
+      return;
+    }
+    try {
+      accumulator = appendJsonBodyChunk(accumulator, chunk);
+    } catch (error) {
+      finished = true;
+      sendJson(res, jsonBodyReadErrorStatus(error), { error: errorMessage(error) });
+    }
   });
-  req.on("end", () => onDone(body));
+  req.on("end", () => {
+    if (finished) {
+      return;
+    }
+    finished = true;
+    onDone(accumulator.body);
+  });
+  req.on("error", (error) => {
+    if (finished) {
+      return;
+    }
+    finished = true;
+    sendJson(res, jsonBodyReadErrorStatus(error), { error: errorMessage(error) });
+  });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -485,23 +530,113 @@ function reconcileConversationRun(conversation: WorkspaceConversation, activeRun
   };
 }
 
+function settleLiveBlock(block: AgentBlock): AgentBlock {
+  if (block.kind === "reasoning" && block.active) {
+    return { ...block, active: false };
+  }
+  if (block.kind === "text" && block.streaming) {
+    return { ...block, streaming: false };
+  }
+  return block;
+}
+
+function settleLiveThreadWithStatus(messages: readonly ChatMessage[], statusBlock: Extract<AgentBlock, { kind: "status" }>): ChatMessage[] {
+  const lastAgentIndex = messages.findLastIndex((message) => message.role === "agent");
+  if (lastAgentIndex < 0) {
+    return [...messages];
+  }
+  const message = messages[lastAgentIndex];
+  const blocks = message.blocks ?? [];
+  const hasStatus = blocks.some((block) => block.kind === "status" && block.level === statusBlock.level && block.text === statusBlock.text);
+  const settledBlocks = blocks.map(settleLiveBlock);
+  const nextBlocks = hasStatus ? settledBlocks : [...settledBlocks, statusBlock];
+  return messages.map<ChatMessage>((item, index) => (index === lastAgentIndex ? { ...message, blocks: nextBlocks } : item));
+}
+
+function settleInterruptedThread(messages: readonly ChatMessage[], locale: Locale): ChatMessage[] {
+  return settleLiveThreadWithStatus(messages, { kind: "status", level: "error", text: interruptedRunSnippet[locale] });
+}
+
 export function reconcileStaleBackgroundRuns(state: WorkspaceState, activeRunIds: ReadonlySet<string>): WorkspaceState {
   let changed = false;
   const locale = state.settings.general.locale;
+  const staleConversationIds = new Set<string>();
   const chats = state.chats.map((conversation) => {
     const reconciled = reconcileConversationRun(conversation, activeRunIds, locale);
-    changed ||= reconciled !== conversation;
+    if (reconciled !== conversation) {
+      changed = true;
+      staleConversationIds.add(conversation.id);
+    }
     return reconciled;
   });
   const projects = state.projects.map((project) => {
     const conversations = project.conversations.map((conversation) => {
       const reconciled = reconcileConversationRun(conversation, activeRunIds, locale);
-      changed ||= reconciled !== conversation;
+      if (reconciled !== conversation) {
+        changed = true;
+        staleConversationIds.add(conversation.id);
+      }
       return reconciled;
     });
     return conversations === project.conversations ? project : { ...project, conversations };
   });
-  return changed ? { ...state, chats, projects } : state;
+  if (!changed) {
+    return state;
+  }
+  const threads = { ...state.threads };
+  for (const conversationId of staleConversationIds) {
+    threads[conversationId] = settleInterruptedThread(threads[conversationId] ?? [], locale);
+  }
+  return { ...state, chats, projects, threads };
+}
+
+export function cancelBackgroundRunState(state: WorkspaceState, runId: string): WorkspaceState {
+  const locale = state.settings.general.locale;
+  const snippet = translate(locale, "runCanceledSnippet");
+  const canceledConversationIds = new Set<string>();
+  const cancelConversation = (conversation: WorkspaceConversation): WorkspaceConversation => {
+    if (conversation.activeRunId !== runId || (conversation.status !== "running" && conversation.status !== "waiting")) {
+      return conversation;
+    }
+    canceledConversationIds.add(conversation.id);
+    return {
+      ...conversation,
+      activeRunId: undefined,
+      status: "idle",
+      snippet,
+    };
+  };
+
+  const chats = state.chats.map(cancelConversation);
+  const projects = state.projects.map((project) => ({
+    ...project,
+    conversations: project.conversations.map(cancelConversation),
+  }));
+  if (canceledConversationIds.size === 0) {
+    return state;
+  }
+
+  const statusBlock: Extract<AgentBlock, { kind: "status" }> = { kind: "status", level: "warn", text: snippet };
+  const threads = { ...state.threads };
+  for (const conversationId of canceledConversationIds) {
+    threads[conversationId] = settleLiveThreadWithStatus(state.threads[conversationId] ?? [], statusBlock);
+  }
+  return { ...state, chats, projects, threads };
+}
+
+export interface BackgroundRunCancelStateResult {
+  readonly state: WorkspaceState;
+  readonly canceled: boolean;
+  readonly hadHandle: boolean;
+}
+
+export function cancelBackgroundRunRequestState(state: WorkspaceState, runId: string, hadHandle: boolean): BackgroundRunCancelStateResult {
+  const canceledState = cancelBackgroundRunState(state, runId);
+  return {
+    state: canceledState,
+    canceled: hadHandle || canceledState !== state,
+    hadHandle,
+  };
 }
 
 function readWorkspaceState(): WorkspaceState {
@@ -581,8 +716,126 @@ function sendJson(res: ServerResponse, statusCode: number, payload: unknown): vo
   res.end(JSON.stringify(payload));
 }
 
+export function workspacePutErrorStatus(error: unknown): 400 | 500 {
+  return error instanceof SyntaxError ? 400 : 500;
+}
+
+export function attachmentUploadErrorStatus(error: unknown): 400 | 500 {
+  return error instanceof SyntaxError ? 400 : 500;
+}
+
+const agentConfigBadRequestMessages = new Set(["Invalid agent config payload.", "Agent id is required.", "API key is required."]);
+const agentInstallBadRequestMessages = new Set(["Invalid agent install payload.", "Agent id is required."]);
+
+export function agentConfigErrorStatus(error: unknown): 400 | 500 {
+  return error instanceof SyntaxError || agentConfigBadRequestMessages.has(errorMessage(error)) ? 400 : 500;
+}
+
+export function agentInstallErrorStatus(error: unknown): 400 | 500 {
+  return error instanceof SyntaxError || agentInstallBadRequestMessages.has(errorMessage(error)) ? 400 : 500;
+}
+
+const projectDirectoryBadRequestMessages = new Set(["Invalid project directory payload.", "Project path is required.", "Project directory is required."]);
+
+const runControlBadRequestMessages = new Set([
+  "Approval id is required.",
+  "Invalid approval decision.",
+  "Input request id is required.",
+  "Selected options must be a string array.",
+  "At least one selected option is required.",
+  "Selected options do not match the pending question.",
+  "Run id is required.",
+]);
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function projectDirectoryErrorStatus(error: unknown): 400 | 500 {
+  return error instanceof SyntaxError || projectDirectoryBadRequestMessages.has(errorMessage(error)) ? 400 : 500;
+}
+
+export function runControlErrorStatus(error: unknown): 400 | 404 | 500 {
+  if (error instanceof SyntaxError) {
+    return 400;
+  }
+  const message = errorMessage(error);
+  if (message.startsWith("No pending approval request") || message.startsWith("No pending input request")) {
+    return 404;
+  }
+  return runControlBadRequestMessages.has(message) ? 400 : 500;
+}
+
 function directoryName(path: string): string {
   return basename(path.replace(/[\\/]+$/g, "")) || path;
+}
+
+export function parseProjectDirectoryPayload(body: string, field: "cwd" | "path", requiredMessage: string): string {
+  const parsed = JSON.parse(body || "{}") as unknown;
+  if (!isRecord(parsed)) {
+    throw new Error("Invalid project directory payload.");
+  }
+  const value = typeof parsed[field] === "string" ? parsed[field].trim() : "";
+  if (!value) {
+    throw new Error(requiredMessage);
+  }
+  return value;
+}
+
+export interface AttachmentUploadPayload {
+  readonly name: string;
+  readonly mimeType?: string;
+  readonly dataBase64: string;
+}
+
+export function parseAttachmentUploadPayload(body: string): AttachmentUploadPayload {
+  const parsed = JSON.parse(body || "{}") as unknown;
+  if (!isRecord(parsed)) {
+    throw new Error("Invalid attachment upload payload.");
+  }
+  const name = typeof parsed.name === "string" ? parsed.name.trim() : "";
+  if (!name || typeof parsed.dataBase64 !== "string") {
+    throw new Error("Attachment name and data are required.");
+  }
+  const mimeType = typeof parsed.mimeType === "string" ? parsed.mimeType : undefined;
+  return mimeType ? { name, mimeType, dataBase64: parsed.dataBase64 } : { name, dataBase64: parsed.dataBase64 };
+}
+
+export interface AgentConfigPayload {
+  readonly agent: string;
+  readonly apiKey: string;
+}
+
+export function parseAgentConfigPayload(body: string): AgentConfigPayload {
+  const parsed = JSON.parse(body || "{}") as unknown;
+  if (!isRecord(parsed)) {
+    throw new Error("Invalid agent config payload.");
+  }
+  const agent = typeof parsed.agent === "string" ? parsed.agent.trim() : "";
+  if (!agent) {
+    throw new Error("Agent id is required.");
+  }
+  const apiKey = typeof parsed.apiKey === "string" ? parsed.apiKey.trim() : "";
+  if (!apiKey) {
+    throw new Error("API key is required.");
+  }
+  return { agent, apiKey };
+}
+
+export interface AgentInstallPayload {
+  readonly agent: string;
+}
+
+export function parseAgentInstallPayload(body: string): AgentInstallPayload {
+  const parsed = JSON.parse(body || "{}") as unknown;
+  if (!isRecord(parsed)) {
+    throw new Error("Invalid agent install payload.");
+  }
+  const agent = typeof parsed.agent === "string" ? parsed.agent.trim() : "";
+  if (!agent) {
+    throw new Error("Agent id is required.");
+  }
+  return { agent };
 }
 
 const SKIPPED_FILE_DIRS = new Set([".git", "node_modules", "dist", "build", "coverage", ".next"]);
@@ -648,18 +901,18 @@ function handleWorkspace(req: IncomingMessage, res: ServerResponse): void {
   }
 
   if (req.method === "PUT") {
-    readJsonBody(req, (body) => {
+    readJsonBody(req, res, (body) => {
       try {
         const parsed = JSON.parse(body) as unknown;
         if (!isWorkspaceState(parsed)) {
           sendJson(res, 400, { error: "Invalid workspace state payload." });
           return;
         }
-        const normalized = normalizeSeedProjectPaths(cloneWorkspaceState(parsed));
+        const normalized = mergeWorkspacePutState(normalizeSeedProjectPaths(cloneWorkspaceState(parsed)), readWorkspaceState());
         writeWorkspaceState(normalized);
         sendJson(res, 200, normalized);
       } catch (error) {
-        sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+        sendJson(res, workspacePutErrorStatus(error), { error: error instanceof Error ? error.message : String(error) });
       }
     });
     return;
@@ -679,67 +932,52 @@ function handleFolderPicker(_req: IncomingMessage, res: ServerResponse): void {
 }
 
 function handleFolderInfo(req: IncomingMessage, res: ServerResponse): void {
-  readJsonBody(req, (body) => {
+  readJsonBody(req, res, (body) => {
     try {
-      const parsed = JSON.parse(body || "{}") as { path?: string };
-      const path = parsed.path?.trim() ?? "";
-      if (!path) {
-        sendJson(res, 400, { error: "Project path is required." });
-        return;
-      }
+      const path = parseProjectDirectoryPayload(body, "path", "Project path is required.");
       if (!existsSync(path) || !statSync(path).isDirectory()) {
         sendJson(res, 400, { error: `Project directory does not exist: ${path}` });
         return;
       }
       sendJson(res, 200, { path, name: directoryName(path) });
     } catch (error) {
-      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+      sendJson(res, projectDirectoryErrorStatus(error), { error: errorMessage(error) });
     }
   });
 }
 
 function handleProjectFiles(req: IncomingMessage, res: ServerResponse): void {
-  readJsonBody(req, (body) => {
+  readJsonBody(req, res, (body) => {
     try {
-      const parsed = JSON.parse(body || "{}") as { cwd?: string };
-      const cwd = parsed.cwd?.trim() ?? "";
-      if (!cwd) {
-        sendJson(res, 400, { error: "Project directory is required." });
-        return;
-      }
+      const cwd = parseProjectDirectoryPayload(body, "cwd", "Project directory is required.");
       if (!existsSync(cwd) || !statSync(cwd).isDirectory()) {
         sendJson(res, 400, { error: `Project directory does not exist: ${cwd}` });
         return;
       }
       sendJson(res, 200, { files: listMentionableFilesFromDisk(cwd) });
     } catch (error) {
-      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+      sendJson(res, projectDirectoryErrorStatus(error), { error: errorMessage(error) });
     }
   });
 }
 
 function handleAttachmentUpload(req: IncomingMessage, res: ServerResponse): void {
-  readJsonBody(req, (body) => {
+  readJsonBody(req, res, (body) => {
     try {
-      const parsed = JSON.parse(body || "{}") as { name?: string; mimeType?: string; dataBase64?: string };
-      const name = parsed.name?.trim();
-      if (!name || typeof parsed.dataBase64 !== "string") {
-        sendJson(res, 400, { error: "Attachment name and data are required." });
-        return;
-      }
+      const parsed = parseAttachmentUploadPayload(body);
       const buffer = Buffer.from(parsed.dataBase64, "base64");
       if (buffer.byteLength > MAX_ATTACHMENT_BYTES) {
         sendJson(res, 413, { error: "Attachment exceeds the 25MB limit." });
         return;
       }
       mkdirSync(ATTACHMENTS_DIR, { recursive: true });
-      const safeName = name.replace(/[^a-zA-Z0-9._-]+/g, "_").slice(-80) || "file";
+      const safeName = parsed.name.replace(/[^a-zA-Z0-9._-]+/g, "_").slice(-80) || "file";
       const fileName = `${Math.random().toString(36).slice(2, 10)}-${safeName}`;
       const filePath = join(ATTACHMENTS_DIR, fileName);
       writeFileSync(filePath, buffer);
-      sendJson(res, 200, { path: filePath, name, mimeType: parsed.mimeType ?? "application/octet-stream" });
+      sendJson(res, 200, { path: filePath, name: parsed.name, mimeType: parsed.mimeType ?? "application/octet-stream" });
     } catch (error) {
-      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+      sendJson(res, attachmentUploadErrorStatus(error), { error: errorMessage(error) });
     }
   });
 }
@@ -764,25 +1002,19 @@ function handleAgentConfig(req: IncomingMessage, res: ServerResponse): void {
   }
 
   if (req.method === "PUT") {
-    readJsonBody(req, (body) => {
+    readJsonBody(req, res, (body) => {
       try {
-        const parsed = JSON.parse(body || "{}") as { agent?: string; apiKey?: string };
-        const agent = parsed.agent ?? "";
-        const apiKey = parsed.apiKey?.trim() ?? "";
+        const { agent, apiKey } = parseAgentConfigPayload(body);
         const envVar = DETECT[agent]?.env?.[0];
         if (!envVar) {
           sendJson(res, 400, { error: `Agent ${agent} does not accept API key configuration.` });
-          return;
-        }
-        if (!apiKey) {
-          sendJson(res, 400, { error: "API key is required." });
           return;
         }
         const config = readAgentSecretConfig();
         writeAgentSecretConfig({ env: { ...config.env, [envVar]: apiKey } });
         sendJson(res, 200, { ok: true, agent, envVar, configured: true });
       } catch (error) {
-        sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+        sendJson(res, agentConfigErrorStatus(error), { error: errorMessage(error) });
       }
     });
     return;
@@ -793,10 +1025,9 @@ function handleAgentConfig(req: IncomingMessage, res: ServerResponse): void {
 }
 
 function handleAgentInstall(req: IncomingMessage, res: ServerResponse): void {
-  readJsonBody(req, (body) => {
+  readJsonBody(req, res, (body) => {
     try {
-      const parsed = JSON.parse(body || "{}") as { agent?: string };
-      const agent = parsed.agent ?? "";
+      const { agent } = parseAgentInstallPayload(body);
       const command = INSTALL_COMMANDS[agent];
       if (!command) {
         sendJson(res, 400, { error: `No install command is configured for ${agent}.` });
@@ -829,40 +1060,41 @@ function handleAgentInstall(req: IncomingMessage, res: ServerResponse): void {
         respond(202, { ok: true, agent, command: launch.displayCommand });
       });
     } catch (error) {
-      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+      sendJson(res, agentInstallErrorStatus(error), { error: errorMessage(error) });
     }
   });
 }
 
 function handleRunApproval(req: IncomingMessage, res: ServerResponse): void {
-  readJsonBody(req, (body) => {
+  readJsonBody(req, res, (body) => {
     try {
       const decision = parseRunApprovalPayload(body);
-      sendJson(res, 200, resolvePendingRunApproval(decision));
+      const resolved = resolvePendingRunApproval(decision);
+      writeWorkspaceState(applyRunApprovalDecisionState(readWorkspaceState(), resolved));
+      sendJson(res, 200, resolved);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      sendJson(res, message.startsWith("No pending approval request") ? 404 : 400, { error: message });
+      sendJson(res, runControlErrorStatus(error), { error: errorMessage(error) });
     }
   });
 }
 
 function handleRunInput(req: IncomingMessage, res: ServerResponse): void {
-  readJsonBody(req, (body) => {
+  readJsonBody(req, res, (body) => {
     try {
       const selection = parseRunInputPayload(body);
-      sendJson(res, 200, resolvePendingRunInput(selection));
+      const resolved = resolvePendingRunInput(selection);
+      writeWorkspaceState(applyRunInputSelectionState(readWorkspaceState(), resolved));
+      sendJson(res, 200, resolved);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      sendJson(res, message.startsWith("No pending input request") ? 404 : 400, { error: message });
+      sendJson(res, runControlErrorStatus(error), { error: errorMessage(error) });
     }
   });
 }
 
 function handleGitStatus(req: IncomingMessage, res: ServerResponse): void {
-  readJsonBody(req, (body) => {
+  readJsonBody(req, res, (body) => {
     try {
-      const parsed = JSON.parse(body || "{}") as { cwd?: string };
-      const cwd = parsed.cwd?.trim() ?? "";
+      const { cwd } = parseGitCwdPayload(body);
       const validation = validateGitCwd(cwd);
       if (validation) {
         sendJson(res, 400, { error: validation });
@@ -877,7 +1109,7 @@ function handleGitStatus(req: IncomingMessage, res: ServerResponse): void {
         sendJson(res, 200, parseGitStatusPorcelain(result.stdout));
       });
     } catch (error) {
-      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+      sendJson(res, gitErrorStatus(error), { error: errorMessage(error) });
     }
   });
 }
@@ -906,6 +1138,66 @@ function validateGitPath(path: string): string | null {
     return "Git file path contains an invalid null byte.";
   }
   return null;
+}
+
+function parseJsonObjectPayload(body: string, errorMessage: string): Record<string, unknown> {
+  const parsed = JSON.parse(body || "{}") as unknown;
+  if (!isRecord(parsed)) {
+    throw new Error(errorMessage);
+  }
+  return parsed;
+}
+
+const gitBadRequestMessages = new Set([
+  "Invalid git request payload.",
+  "Project directory is required.",
+  "Git file path is required.",
+  "Git file path contains an invalid null byte.",
+  "Commit message is required.",
+]);
+
+export function gitErrorStatus(error: unknown): 400 | 500 {
+  return error instanceof SyntaxError || gitBadRequestMessages.has(errorMessage(error)) ? 400 : 500;
+}
+
+export function gitPushRequestErrorStatus(error: unknown): 400 | 500 {
+  return gitErrorStatus(error);
+}
+
+export function parseGitCwdPayload(body: string): { readonly cwd: string } {
+  const parsed = parseJsonObjectPayload(body, "Invalid git request payload.");
+  const cwd = typeof parsed.cwd === "string" ? parsed.cwd.trim() : "";
+  if (!cwd) {
+    throw new Error("Project directory is required.");
+  }
+  return { cwd };
+}
+
+export function parseGitFilePayload(body: string): { readonly cwd: string; readonly path: string; readonly mode: "staged" | "worktree" } {
+  const parsed = parseJsonObjectPayload(body, "Invalid git request payload.");
+  const cwd = typeof parsed.cwd === "string" ? parsed.cwd.trim() : "";
+  const path = typeof parsed.path === "string" ? parsed.path.trim() : "";
+  if (!cwd) {
+    throw new Error("Project directory is required.");
+  }
+  const pathError = validateGitPath(path);
+  if (pathError) {
+    throw new Error(pathError);
+  }
+  return { cwd, path, mode: parsed.mode === "staged" ? "staged" : "worktree" };
+}
+
+export function parseGitCommitPayload(body: string): { readonly cwd: string; readonly message: string } {
+  const parsed = parseJsonObjectPayload(body, "Invalid git request payload.");
+  const cwd = typeof parsed.cwd === "string" ? parsed.cwd.trim() : "";
+  if (!cwd) {
+    throw new Error("Project directory is required.");
+  }
+  const message = typeof parsed.message === "string" ? parsed.message.trim() : "";
+  if (!message) {
+    throw new Error("Commit message is required.");
+  }
+  return { cwd, message };
 }
 
 export function buildGitCommitArgs(message: string): string[] {
@@ -973,16 +1265,12 @@ function sendGitStatusAfterMutation(cwd: string, res: ServerResponse): void {
 }
 
 function handleGitDiff(req: IncomingMessage, res: ServerResponse): void {
-  readJsonBody(req, (body) => {
+  readJsonBody(req, res, (body) => {
     try {
-      const parsed = JSON.parse(body || "{}") as { cwd?: string; path?: string; mode?: string };
-      const cwd = parsed.cwd?.trim() ?? "";
-      const path = parsed.path?.trim() ?? "";
-      const mode = parsed.mode === "staged" ? "staged" : "worktree";
+      const { cwd, path, mode } = parseGitFilePayload(body);
       const cwdError = validateGitCwd(cwd);
-      const pathError = validateGitPath(path);
-      if (cwdError || pathError) {
-        sendJson(res, 400, { error: cwdError ?? pathError });
+      if (cwdError) {
+        sendJson(res, 400, { error: cwdError });
         return;
       }
       const args = mode === "staged" ? ["diff", "--cached", "--", path] : ["diff", "--", path];
@@ -994,21 +1282,18 @@ function handleGitDiff(req: IncomingMessage, res: ServerResponse): void {
         sendJson(res, 200, { path, mode, diff: result.stdout });
       });
     } catch (error) {
-      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+      sendJson(res, gitErrorStatus(error), { error: errorMessage(error) });
     }
   });
 }
 
 function handleGitStage(req: IncomingMessage, res: ServerResponse): void {
-  readJsonBody(req, (body) => {
+  readJsonBody(req, res, (body) => {
     try {
-      const parsed = JSON.parse(body || "{}") as { cwd?: string; path?: string };
-      const cwd = parsed.cwd?.trim() ?? "";
-      const path = parsed.path?.trim() ?? "";
+      const { cwd, path } = parseGitFilePayload(body);
       const cwdError = validateGitCwd(cwd);
-      const pathError = validateGitPath(path);
-      if (cwdError || pathError) {
-        sendJson(res, 400, { error: cwdError ?? pathError });
+      if (cwdError) {
+        sendJson(res, 400, { error: cwdError });
         return;
       }
       runGit(cwd, ["add", "--", path], (result) => {
@@ -1019,21 +1304,18 @@ function handleGitStage(req: IncomingMessage, res: ServerResponse): void {
         sendGitStatusAfterMutation(cwd, res);
       });
     } catch (error) {
-      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+      sendJson(res, gitErrorStatus(error), { error: errorMessage(error) });
     }
   });
 }
 
 function handleGitUnstage(req: IncomingMessage, res: ServerResponse): void {
-  readJsonBody(req, (body) => {
+  readJsonBody(req, res, (body) => {
     try {
-      const parsed = JSON.parse(body || "{}") as { cwd?: string; path?: string };
-      const cwd = parsed.cwd?.trim() ?? "";
-      const path = parsed.path?.trim() ?? "";
+      const { cwd, path } = parseGitFilePayload(body);
       const cwdError = validateGitCwd(cwd);
-      const pathError = validateGitPath(path);
-      if (cwdError || pathError) {
-        sendJson(res, 400, { error: cwdError ?? pathError });
+      if (cwdError) {
+        sendJson(res, 400, { error: cwdError });
         return;
       }
       runGit(cwd, ["restore", "--staged", "--", path], (result) => {
@@ -1044,28 +1326,21 @@ function handleGitUnstage(req: IncomingMessage, res: ServerResponse): void {
         sendGitStatusAfterMutation(cwd, res);
       });
     } catch (error) {
-      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+      sendJson(res, gitErrorStatus(error), { error: errorMessage(error) });
     }
   });
 }
 
 function handleGitCommit(req: IncomingMessage, res: ServerResponse): void {
-  readJsonBody(req, (body) => {
+  readJsonBody(req, res, (body) => {
     try {
-      const parsed = JSON.parse(body || "{}") as { cwd?: string; message?: string };
-      const cwd = parsed.cwd?.trim() ?? "";
+      const { cwd, message } = parseGitCommitPayload(body);
       const cwdError = validateGitCwd(cwd);
       if (cwdError) {
         sendJson(res, 400, { error: cwdError });
         return;
       }
-      let args: string[];
-      try {
-        args = buildGitCommitArgs(parsed.message ?? "");
-      } catch (error) {
-        sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
-        return;
-      }
+      const args = buildGitCommitArgs(message);
       runGit(cwd, args, (result) => {
         if (!result.ok) {
           sendJson(res, 500, { error: result.error });
@@ -1074,16 +1349,15 @@ function handleGitCommit(req: IncomingMessage, res: ServerResponse): void {
         sendGitStatusAfterMutation(cwd, res);
       });
     } catch (error) {
-      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+      sendJson(res, gitErrorStatus(error), { error: errorMessage(error) });
     }
   });
 }
 
 function handleGitPush(req: IncomingMessage, res: ServerResponse): void {
-  readJsonBody(req, (body) => {
+  readJsonBody(req, res, (body) => {
     try {
-      const parsed = JSON.parse(body || "{}") as { cwd?: string };
-      const cwd = parsed.cwd?.trim() ?? "";
+      const { cwd } = parseGitCwdPayload(body);
       const cwdError = validateGitCwd(cwd);
       if (cwdError) {
         sendJson(res, 400, { error: cwdError });
@@ -1097,7 +1371,7 @@ function handleGitPush(req: IncomingMessage, res: ServerResponse): void {
         sendGitStatusAfterMutation(cwd, res);
       });
     } catch (error) {
-      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+      sendJson(res, gitPushRequestErrorStatus(error), { error: errorMessage(error) });
     }
   });
 }
@@ -1149,7 +1423,7 @@ interface RunArgsRequest {
   readonly accessMode?: AgentAccessMode;
 }
 
-interface BackgroundRunBinding {
+export interface BackgroundRunBinding {
   readonly conversationId: string;
   readonly runId: string;
   readonly userMessageId: string;
@@ -1245,6 +1519,96 @@ function parseAccessMode(value: unknown): AgentAccessMode | null {
     return "read-only";
   }
   return isAgentAccessMode(value) ? value : null;
+}
+
+interface ParsedRunRequestError {
+  readonly ok: false;
+  readonly error: string;
+}
+
+interface ParsedRunRequestSuccess {
+  readonly ok: true;
+  readonly agent: string;
+  readonly model: string;
+  readonly reasoning: string;
+  readonly mode: AgentProfile["mode"];
+  readonly prompt: string;
+  readonly requestedCwd: string;
+  readonly accessMode: AgentAccessMode;
+  readonly accessModeValid: boolean;
+  readonly profileValid: boolean;
+  readonly profileError: string;
+  readonly binding: BackgroundRunBinding | null;
+  readonly bindingInvalid: boolean;
+}
+
+export type ParsedRunRequestPayload = ParsedRunRequestError | ParsedRunRequestSuccess;
+
+export function parseRunRequestPayload(body: string): ParsedRunRequestPayload {
+  let agent = "";
+  let model = "default";
+  let reasoning = "default";
+  let mode: AgentProfile["mode"] = "default";
+  let prompt = "";
+  let requestedCwd = "";
+  let accessMode: AgentAccessMode = "read-only";
+  let accessModeValid = true;
+  let profileValid = true;
+  let profileError = "";
+  let binding: BackgroundRunBinding | null = null;
+  let bindingInvalid = false;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body || "{}") as unknown;
+  } catch {
+    return { ok: false, error: "Invalid run request payload." };
+  }
+  if (!isRecord(parsed)) {
+    return { ok: false, error: "Invalid run request payload." };
+  }
+  agent = typeof parsed.agent === "string" ? parsed.agent : "";
+  const hasNewProfileFields = typeof parsed.model === "string" || typeof parsed.reasoning === "string" || typeof parsed.mode === "string";
+  if (hasNewProfileFields) {
+    model = typeof parsed.model === "string" ? parsed.model : "default";
+    reasoning = typeof parsed.reasoning === "string" ? parsed.reasoning : "default";
+    mode = parsed.mode === "plan" ? "plan" : "default";
+    if (parsed.mode !== undefined && parsed.mode !== "default" && parsed.mode !== "plan") {
+      profileValid = false;
+      profileError = "Invalid mode. Expected default or plan.";
+    }
+  } else if (typeof parsed.variant === "string" && isAgentId(agent)) {
+    const legacyProfile = normalizeAgentProfile({ agent, variant: parsed.variant }, agent);
+    model = legacyProfile.model;
+    reasoning = legacyProfile.reasoning;
+    mode = legacyProfile.mode;
+  }
+  prompt = typeof parsed.prompt === "string" ? parsed.prompt.trim() : "";
+  requestedCwd = typeof parsed.cwd === "string" ? parsed.cwd : "";
+  const parsedAccessMode = parseAccessMode(parsed.accessMode);
+  if (parsedAccessMode) {
+    accessMode = parsedAccessMode;
+  } else {
+    accessModeValid = false;
+  }
+  binding = backgroundBindingFromParsed(parsed);
+  bindingInvalid =
+    !binding &&
+    ["conversationId", "runId", "userMessageId", "userMessageTime", "agentMessageId", "agentMessageTime"].some((key) => Object.hasOwn(parsed, key));
+  return {
+    ok: true,
+    agent,
+    model,
+    reasoning,
+    mode,
+    prompt,
+    requestedCwd,
+    accessMode,
+    accessModeValid,
+    profileValid,
+    profileError,
+    binding,
+    bindingInvalid,
+  };
 }
 
 function claudePermissionModeForRequest(request: RunRequest): ClaudeQueryOptions["permissionMode"] {
@@ -1497,6 +1861,7 @@ export function parseRunInputPayload(body: string): RunInputSelection {
 }
 
 interface PendingRunApproval {
+  readonly toolUseID: string;
   readonly input: Record<string, unknown>;
   readonly resolve: (result: PermissionResult) => void;
   readonly reject: (error: Error) => void;
@@ -1570,11 +1935,16 @@ function parseAskUserQuestionInput(input: Record<string, unknown>): readonly Ask
   return questions.length > 0 ? questions : null;
 }
 
-function decisionToPermissionResult(decision: RunApprovalDecision, input: Record<string, unknown>): PermissionResult {
+function pendingRequestId(scopeId: string | undefined, id: string): string {
+  const scope = scopeId?.trim();
+  return scope ? `${scope}:${id}` : id;
+}
+
+function decisionToPermissionResult(decision: RunApprovalDecision, input: Record<string, unknown>, toolUseID: string): PermissionResult {
   if (decision.decision === "approved") {
-    return { behavior: "allow", updatedInput: input, toolUseID: decision.id };
+    return { behavior: "allow", updatedInput: input, toolUseID };
   }
-  return { behavior: "deny", message: "User rejected this action.", toolUseID: decision.id };
+  return { behavior: "deny", message: "User rejected this action.", toolUseID };
 }
 
 export function resolvePendingRunApproval(decision: RunApprovalDecision): RunApprovalDecision {
@@ -1583,7 +1953,7 @@ export function resolvePendingRunApproval(decision: RunApprovalDecision): RunApp
     throw new Error(`No pending approval request for ${decision.id}.`);
   }
   pending.dispose();
-  pending.resolve(decisionToPermissionResult(decision, pending.input));
+  pending.resolve(decisionToPermissionResult(decision, pending.input, pending.toolUseID));
   return decision;
 }
 
@@ -1640,15 +2010,16 @@ export function parseRunCancelPayload(body: string): RunCancelRequest {
   return { runId: parsed.runId.trim() };
 }
 
-function createRunInputHandler(input: Record<string, unknown>, context: Parameters<CanUseTool>[2], send: (event: RunEvent) => void): Promise<PermissionResult> | null {
+function createRunInputHandler(input: Record<string, unknown>, context: Parameters<CanUseTool>[2], send: (event: RunEvent) => void, scopeId?: string): Promise<PermissionResult> | null {
   const questions = parseAskUserQuestionInput(input);
   if (!questions) {
     return null;
   }
 
   return new Promise<PermissionResult>((resolve, reject) => {
+    const toolRequestId = pendingRequestId(scopeId, context.toolUseID);
     const questionItems: PendingRunInputQuestion[] = questions.map((question, index) => ({
-      id: `${context.toolUseID}:q${index}`,
+      id: `${toolRequestId}:q${index}`,
       question,
     }));
     const onAbort = () => {
@@ -1695,17 +2066,17 @@ function createRunInputHandler(input: Record<string, unknown>, context: Paramete
   });
 }
 
-export function createRunApprovalHandler(send: (event: RunEvent) => void): CanUseTool {
+export function createRunApprovalHandler(send: (event: RunEvent) => void, scopeId?: string): CanUseTool {
   return (toolName, input, context) => {
     if (toolName === "AskUserQuestion") {
-      const inputHandler = createRunInputHandler(input, context, send);
+      const inputHandler = createRunInputHandler(input, context, send, scopeId);
       if (inputHandler) {
         return inputHandler;
       }
     }
 
     return new Promise<PermissionResult>((resolve, reject) => {
-      const id = context.toolUseID;
+      const id = pendingRequestId(scopeId, context.toolUseID);
       const replaced = pendingRunApprovals.get(id);
       if (replaced) {
         replaced.dispose();
@@ -1725,7 +2096,7 @@ export function createRunApprovalHandler(send: (event: RunEvent) => void): CanUs
         pendingRunApprovals.delete(id);
       };
 
-      pendingRunApprovals.set(id, { input, resolve, reject, dispose });
+      pendingRunApprovals.set(id, { toolUseID: context.toolUseID, input, resolve, reject, dispose });
       context.signal.addEventListener("abort", onAbort, { once: true });
       send(detail ? { type: "approval", id, title: context.title ?? `Approve ${toolName}?`, detail } : { type: "approval", id, title: context.title ?? `Approve ${toolName}?` });
     });
@@ -1825,6 +2196,153 @@ function patchWorkspaceConversation(state: WorkspaceState, id: string, patch: Pa
   };
 }
 
+function serverOwnsBackgroundRun(conversation: WorkspaceConversation): boolean {
+  return Boolean(conversation.activeRunId) && (conversation.status === "running" || conversation.status === "waiting");
+}
+
+function threadHasMessagesMissingFromCurrent(incoming: WorkspaceState, current: WorkspaceState, conversationId: string): boolean {
+  const currentMessageIds = new Set((current.threads[conversationId] ?? []).map((message) => message.id));
+  return (incoming.threads[conversationId] ?? []).some((message) => !currentMessageIds.has(message.id));
+}
+
+function staleClientStillHasSettledRun(incoming: WorkspaceState, current: WorkspaceState, conversation: WorkspaceConversation, currentConversation: WorkspaceConversation): boolean {
+  return (
+    Boolean(conversation.activeRunId) &&
+    !currentConversation.activeRunId &&
+    currentConversation.status !== "running" &&
+    currentConversation.status !== "waiting" &&
+    !threadHasMessagesMissingFromCurrent(incoming, current, conversation.id)
+  );
+}
+
+function workspaceConversationMap(state: WorkspaceState): Map<string, WorkspaceConversation> {
+  return new Map([...state.chats, ...state.projects.flatMap((project) => project.conversations)].map((conversation) => [conversation.id, conversation]));
+}
+
+function mergeServerOwnedRunFields(incoming: WorkspaceConversation, current: WorkspaceConversation): WorkspaceConversation {
+  return {
+    ...incoming,
+    activeRunId: current.activeRunId,
+    status: current.status,
+    snippet: current.snippet,
+    time: current.time,
+    costUsd: current.costUsd,
+    usage: current.usage,
+  };
+}
+
+export function mergeWorkspacePutState(incoming: WorkspaceState, current: WorkspaceState): WorkspaceState {
+  const currentById = workspaceConversationMap(current);
+  const incomingConversationIds = new Set([...incoming.chats, ...incoming.projects.flatMap((project) => project.conversations)].map((conversation) => conversation.id));
+  const serverOwnedConversationIds = new Set<string>();
+  const mergeConversation = (conversation: WorkspaceConversation): WorkspaceConversation => {
+    const currentConversation = currentById.get(conversation.id);
+    if (!currentConversation || (!serverOwnsBackgroundRun(currentConversation) && !staleClientStillHasSettledRun(incoming, current, conversation, currentConversation))) {
+      return conversation;
+    }
+    serverOwnedConversationIds.add(conversation.id);
+    return mergeServerOwnedRunFields(conversation, currentConversation);
+  };
+  let chats = incoming.chats.map(mergeConversation);
+  let projects = incoming.projects.map((project) => ({
+    ...project,
+    conversations: project.conversations.map(mergeConversation),
+  }));
+
+  for (const conversation of current.chats) {
+    if (serverOwnsBackgroundRun(conversation) && !incomingConversationIds.has(conversation.id)) {
+      serverOwnedConversationIds.add(conversation.id);
+      chats = [conversation, ...chats];
+      incomingConversationIds.add(conversation.id);
+    }
+  }
+  for (const currentProject of current.projects) {
+    const missingConversations = currentProject.conversations.filter((conversation) => serverOwnsBackgroundRun(conversation) && !incomingConversationIds.has(conversation.id));
+    if (missingConversations.length === 0) {
+      continue;
+    }
+    for (const conversation of missingConversations) {
+      serverOwnedConversationIds.add(conversation.id);
+      incomingConversationIds.add(conversation.id);
+    }
+    const existingProject = projects.find((project) => project.id === currentProject.id);
+    if (existingProject) {
+      projects = projects.map((project) => (project.id === currentProject.id ? { ...project, conversations: [...missingConversations, ...project.conversations] } : project));
+    } else {
+      projects = [{ ...currentProject, conversations: missingConversations }, ...projects];
+    }
+  }
+
+  const threads = { ...incoming.threads };
+  for (const conversationId of serverOwnedConversationIds) {
+    threads[conversationId] = current.threads[conversationId] ?? threads[conversationId] ?? [];
+  }
+  return {
+    ...incoming,
+    chats,
+    projects,
+    threads,
+  };
+}
+
+function patchWorkspaceBlocks(state: WorkspaceState, updateBlock: (block: AgentBlock) => AgentBlock): WorkspaceState {
+  const changedConversationIds = new Set<string>();
+  let threads: WorkspaceState["threads"] | null = null;
+
+  for (const [conversationId, messages] of Object.entries(state.threads)) {
+    let messagesChanged = false;
+    const nextMessages = messages.map((message) => {
+      if (!message.blocks) {
+        return message;
+      }
+      let blocksChanged = false;
+      const blocks = message.blocks.map((block) => {
+        const nextBlock = updateBlock(block);
+        blocksChanged ||= nextBlock !== block;
+        return nextBlock;
+      });
+      if (!blocksChanged) {
+        return message;
+      }
+      messagesChanged = true;
+      return { ...message, blocks };
+    });
+    if (messagesChanged) {
+      threads = threads ?? { ...state.threads };
+      threads[conversationId] = nextMessages;
+      changedConversationIds.add(conversationId);
+    }
+  }
+
+  if (!threads) {
+    return state;
+  }
+
+  let next: WorkspaceState = { ...state, threads };
+  for (const conversationId of changedConversationIds) {
+    next = patchWorkspaceConversation(next, conversationId, { status: "running" });
+  }
+  return next;
+}
+
+export function applyRunApprovalDecisionState(state: WorkspaceState, decision: RunApprovalDecision): WorkspaceState {
+  return patchWorkspaceBlocks(state, (block) => {
+    if (block.kind !== "approval" || block.id !== decision.id || block.decision === decision.decision) {
+      return block;
+    }
+    return { ...block, decision: decision.decision };
+  });
+}
+
+export function applyRunInputSelectionState(state: WorkspaceState, selection: RunInputSelection): WorkspaceState {
+  return patchWorkspaceBlocks(state, (block) => {
+    if (block.kind !== "options" || block.id !== selection.id || JSON.stringify(block.selected ?? []) === JSON.stringify(selection.selected)) {
+      return block;
+    }
+    return { ...block, selected: [...selection.selected] };
+  });
+}
+
 function ensureBackgroundUserMessage(state: WorkspaceState, binding: BackgroundRunBinding, prompt: string): WorkspaceState {
   const existing = state.threads[binding.conversationId] ?? [];
   if (existing.some((message) => message.id === binding.userMessageId)) {
@@ -1862,10 +2380,9 @@ function persistBackgroundBlocks(binding: BackgroundRunBinding, blocks: readonly
   writeWorkspaceState(patchWorkspaceConversation(withMessage, binding.conversationId, patch));
 }
 
-function startPersistedBackgroundRun(binding: BackgroundRunBinding, request: RunRequest): BackgroundRunAccumulator {
-  const accumulator = createBackgroundAccumulator();
-  const state = ensureBackgroundUserMessage(readWorkspaceState(), binding, request.prompt);
-  const started = patchWorkspaceConversation(state, binding.conversationId, {
+function startBackgroundRunState(state: WorkspaceState, binding: BackgroundRunBinding, request: RunRequest, accumulator: BackgroundRunAccumulator): WorkspaceState {
+  const withUserMessage = ensureBackgroundUserMessage(state, binding, request.prompt);
+  const started = patchWorkspaceConversation(withUserMessage, binding.conversationId, {
     activeRunId: binding.runId,
     status: "running",
     snippet: clip(request.prompt, 60),
@@ -1874,11 +2391,16 @@ function startPersistedBackgroundRun(binding: BackgroundRunBinding, request: Run
     costUsd: undefined,
     usage: undefined,
   });
-  writeWorkspaceState(putBackgroundAgentMessage(started, binding, backgroundBlocks(accumulator)));
+  return putBackgroundAgentMessage(started, binding, backgroundBlocks(accumulator));
+}
+
+function startPersistedBackgroundRun(binding: BackgroundRunBinding, request: RunRequest): BackgroundRunAccumulator {
+  const accumulator = createBackgroundAccumulator();
+  writeWorkspaceState(startBackgroundRunState(readWorkspaceState(), binding, request, accumulator));
   return accumulator;
 }
 
-function applyBackgroundRunEvent(binding: BackgroundRunBinding, accumulator: BackgroundRunAccumulator, event: RunEvent): void {
+function accumulateBackgroundRunEvent(accumulator: BackgroundRunAccumulator, event: RunEvent): void {
   switch (event.type) {
     case "start":
       accumulator.started = true;
@@ -1945,24 +2467,32 @@ function applyBackgroundRunEvent(binding: BackgroundRunBinding, accumulator: Bac
       accumulator.usage = event.usage;
       return;
   }
+}
+
+function applyBackgroundRunEvent(binding: BackgroundRunBinding, accumulator: BackgroundRunAccumulator, event: RunEvent): void {
+  accumulateBackgroundRunEvent(accumulator, event);
   const blocks = backgroundBlocks(accumulator);
   const locale = readWorkspaceState().settings.general.locale;
   persistBackgroundBlocks(binding, blocks, blocksNeedInput(blocks) ? { status: "waiting", snippet: translate(locale, "runNeedsInputSnippet"), time: binding.agentMessageTime } : {});
 }
 
-function finishPersistedBackgroundRun(binding: BackgroundRunBinding, accumulator: BackgroundRunAccumulator, canceled: boolean): void {
+export function finishBackgroundRunState(state: WorkspaceState, binding: BackgroundRunBinding, accumulator: BackgroundRunAccumulator, canceled: boolean): WorkspaceState {
   accumulator.done = true;
   let blocks = backgroundBlocks(accumulator);
-  const state = readWorkspaceState();
   const locale = state.settings.general.locale;
-  if (canceled && blocks.length === 0) {
-    blocks = [{ kind: "status", level: "warn", text: translate(locale, "runCanceledSnippet") }];
+  if (canceled) {
+    const canceledStatusBlock: AgentBlock = { kind: "status", level: "warn", text: translate(locale, "runCanceledSnippet") };
+    const hasCanceledStatus = blocks.some((block) => block.kind === "status" && block.level === canceledStatusBlock.level && block.text === canceledStatusBlock.text);
+    blocks = blocks.length === 0 ? [canceledStatusBlock] : hasCanceledStatus ? blocks : [...blocks, canceledStatusBlock];
   }
   const hadError = accumulator.statuses.some((status) => status.level === "error");
-  const waiting = !canceled && !hadError && blocksNeedInput(blocks);
+  const hadOutput = accumulator.hasText || accumulator.hasReasoning || accumulator.tools.length > 0 || accumulator.approvals.length > 0 || accumulator.options.length > 0;
+  const warningOnlyFailure = accumulator.statuses.some((status) => status.level === "warn") && !hadOutput;
+  const failed = hadError || warningOnlyFailure;
+  const waiting = !canceled && !failed && blocksNeedInput(blocks);
   const patch = canceled
     ? { activeRunId: undefined, status: "idle" as const, snippet: translate(locale, "runCanceledSnippet"), time: binding.agentMessageTime }
-    : hadError
+    : failed
       ? { activeRunId: undefined, status: "error" as const, snippet: translate(locale, "runFailedSnippet"), time: binding.agentMessageTime }
       : waiting
         ? { status: "waiting" as const, snippet: translate(locale, "runNeedsInputSnippet"), time: binding.agentMessageTime }
@@ -1974,7 +2504,26 @@ function finishPersistedBackgroundRun(binding: BackgroundRunBinding, accumulator
             ...(accumulator.costUsd === undefined ? {} : { costUsd: accumulator.costUsd }),
             ...(accumulator.usage === undefined ? {} : { usage: accumulator.usage }),
           };
-  writeWorkspaceState(patchWorkspaceConversation(putBackgroundAgentMessage(state, binding, blocks), binding.conversationId, patch));
+  return patchWorkspaceConversation(putBackgroundAgentMessage(state, binding, blocks), binding.conversationId, patch);
+}
+
+function finishPersistedBackgroundRun(binding: BackgroundRunBinding, accumulator: BackgroundRunAccumulator, canceled: boolean): void {
+  writeWorkspaceState(finishBackgroundRunState(readWorkspaceState(), binding, accumulator, canceled));
+}
+
+export function settleEarlyBackgroundRunState(
+  state: WorkspaceState,
+  binding: BackgroundRunBinding,
+  request: RunRequest,
+  events: readonly RunEvent[],
+  canceled = false,
+): WorkspaceState {
+  const accumulator = createBackgroundAccumulator();
+  const started = startBackgroundRunState(state, binding, request, accumulator);
+  for (const event of events) {
+    accumulateBackgroundRunEvent(accumulator, event);
+  }
+  return finishBackgroundRunState(started, binding, accumulator, canceled);
 }
 
 function backgroundBindingFromParsed(value: Record<string, unknown>): BackgroundRunBinding | null {
@@ -2597,7 +3146,7 @@ async function runClaudeSdk(
     });
   }
   const translate = createClaudeStreamTranslator();
-  const canUseTool = createRunApprovalHandler(send);
+  const canUseTool = createRunApprovalHandler(send, binding?.runId);
   const timeout = setTimeout(() => {
     timedOut = true;
     send({ type: "error", text: "Run timed out after 120s" });
@@ -2626,80 +3175,49 @@ async function runClaudeSdk(
 }
 
 function handleRunCancel(req: IncomingMessage, res: ServerResponse): void {
-  readJsonBody(req, (body) => {
+  readJsonBody(req, res, (body) => {
     try {
       const request = parseRunCancelPayload(body);
       const handle = backgroundRunHandles.get(request.runId);
+      const currentState = readWorkspaceState();
+      const canceled = cancelBackgroundRunRequestState(currentState, request.runId, Boolean(handle));
       if (!handle) {
+        if (canceled.canceled) {
+          writeWorkspaceState(canceled.state);
+          sendJson(res, 200, { runId: request.runId, canceled: true, detached: true });
+          return;
+        }
         sendJson(res, 404, { error: `No active run for ${request.runId}.` });
         return;
       }
       handle.cancel();
+      writeWorkspaceState(canceled.state);
       sendJson(res, 200, { runId: request.runId, canceled: true });
     } catch (error) {
-      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+      sendJson(res, runControlErrorStatus(error), { error: errorMessage(error) });
     }
   });
 }
 
 function handleRun(req: IncomingMessage, res: ServerResponse): void {
-  let body = "";
-  req.on("data", (chunk) => {
-    body += chunk;
+  let bodyAccumulator: JsonBodyAccumulator = { body: "", bytes: 0 };
+  let bodyReadError: Error | null = null;
+  req.on("data", (chunk: Buffer | string) => {
+    if (bodyReadError) {
+      return;
+    }
+    try {
+      bodyAccumulator = appendJsonBodyChunk(bodyAccumulator, chunk);
+    } catch (error) {
+      bodyReadError = error instanceof Error ? error : new Error(String(error));
+    }
   });
   req.on("end", () => {
-    let agent = "";
-    let model = "default";
-    let reasoning = "default";
-    let mode: AgentProfile["mode"] = "default";
-    let prompt = "";
-    let requestedCwd = "";
-    let accessMode: AgentAccessMode = "read-only";
-    let accessModeValid = true;
-    let profileValid = true;
-    let profileError = "";
-    let binding: BackgroundRunBinding | null = null;
-    let bindingInvalid = false;
-    try {
-      const parsed = JSON.parse(body || "{}") as unknown;
-      if (isRecord(parsed)) {
-        agent = typeof parsed.agent === "string" ? parsed.agent : "";
-        const hasNewProfileFields = typeof parsed.model === "string" || typeof parsed.reasoning === "string" || typeof parsed.mode === "string";
-        if (hasNewProfileFields) {
-          model = typeof parsed.model === "string" ? parsed.model : "default";
-          reasoning = typeof parsed.reasoning === "string" ? parsed.reasoning : "default";
-          mode = parsed.mode === "plan" ? "plan" : "default";
-          if (parsed.mode !== undefined && parsed.mode !== "default" && parsed.mode !== "plan") {
-            profileValid = false;
-            profileError = "Invalid mode. Expected default or plan.";
-          }
-        } else if (typeof parsed.variant === "string" && isAgentId(agent)) {
-          const legacyProfile = normalizeAgentProfile({ agent, variant: parsed.variant }, agent);
-          model = legacyProfile.model;
-          reasoning = legacyProfile.reasoning;
-          mode = legacyProfile.mode;
-        }
-        prompt = typeof parsed.prompt === "string" ? parsed.prompt.trim() : "";
-        requestedCwd = typeof parsed.cwd === "string" ? parsed.cwd : "";
-        const parsedAccessMode = parseAccessMode(parsed.accessMode);
-        if (parsedAccessMode) {
-          accessMode = parsedAccessMode;
-        } else {
-          accessModeValid = false;
-        }
-        binding = backgroundBindingFromParsed(parsed);
-        bindingInvalid =
-          !binding &&
-          ["conversationId", "runId", "userMessageId", "userMessageTime", "agentMessageId", "agentMessageTime"].some((key) => Object.hasOwn(parsed, key));
-      }
-    } catch {
-      // ignore
-    }
-
     res.setHeader("Content-Type", "application/x-ndjson");
     res.setHeader("Cache-Control", "no-store");
     const sender = createRunEventSender(res);
     let accumulator: BackgroundRunAccumulator | null = null;
+    let binding: BackgroundRunBinding | null = null;
     const send = (event: RunEvent) => {
       sender.send(event);
       if (binding && accumulator) {
@@ -2707,6 +3225,24 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
       }
     };
     const sendDone = sender.sendDone;
+
+    if (bodyReadError) {
+      res.statusCode = jsonBodyReadErrorStatus(bodyReadError);
+      send({ type: "error", text: errorMessage(bodyReadError) });
+      sendDone();
+      sender.end();
+      return;
+    }
+    const parsedPayload = parseRunRequestPayload(bodyAccumulator.body);
+
+    if (!parsedPayload.ok) {
+      send({ type: "error", text: parsedPayload.error });
+      sendDone();
+      sender.end();
+      return;
+    }
+    const { agent, model, reasoning, mode, prompt, requestedCwd, accessMode, accessModeValid, profileValid, profileError, bindingInvalid } = parsedPayload;
+    binding = parsedPayload.binding;
 
     if (!prompt) {
       send({ type: "error", text: "Empty prompt" });
@@ -2720,16 +3256,27 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
       sender.end();
       return;
     }
-    if (!accessModeValid) {
-      send({ type: "error", text: "Invalid accessMode. Expected read-only or read-write." });
+
+    const request: RunRequest = { agent, model, reasoning, mode, prompt, accessMode };
+    if (binding) {
+      accumulator = startPersistedBackgroundRun(binding, request);
+    }
+    const finishAndEnd = () => {
+      if (binding && accumulator) {
+        finishPersistedBackgroundRun(binding, accumulator, false);
+      }
       sendDone();
       sender.end();
+    };
+
+    if (!accessModeValid) {
+      send({ type: "error", text: "Invalid accessMode. Expected read-only or read-write." });
+      finishAndEnd();
       return;
     }
     if (!profileValid) {
       send({ type: "error", text: profileError });
-      sendDone();
-      sender.end();
+      finishAndEnd();
       return;
     }
 
@@ -2738,24 +3285,21 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
     if (!spec || !resolvedBin || !isAgentId(agent)) {
       send({ type: "start" });
       send({ type: "status", level: "warn", text: spec ? `${spec.bin} is not installed on this machine` : `Running ${agent || "this agent"} is not wired yet` });
-      sendDone();
-      sender.end();
+      finishAndEnd();
       return;
     }
     const requestedProfileErrorMessage = requestedProfileError(agent, model, reasoning, mode);
     if (requestedProfileErrorMessage) {
       send({ type: "start" });
       send({ type: "error", text: requestedProfileErrorMessage });
-      sendDone();
-      sender.end();
+      finishAndEnd();
       return;
     }
     const accessModeError = validateRunAccessModeForAgent(agent, accessMode);
     if (accessModeError) {
       send({ type: "start" });
       send({ type: "error", text: accessModeError });
-      sendDone();
-      sender.end();
+      finishAndEnd();
       return;
     }
     const config = readAgentSecretConfig();
@@ -2764,8 +3308,7 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
     if (spec.env && detect && !hasConfiguredAgentAuth(detect, config, runEnv)) {
       send({ type: "start" });
       send({ type: "status", level: "warn", text: `${agent} needs setup: set one of ${spec.env.join(", ")}` });
-      sendDone();
-      sender.end();
+      finishAndEnd();
       return;
     }
 
@@ -2779,16 +3322,14 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
         if (!existsSync(requestedCwd) || !statSync(requestedCwd).isDirectory()) {
           send({ type: "start" });
           send({ type: "error", text: `Project directory does not exist: ${requestedCwd}` });
-          sendDone();
-          sender.end();
+          finishAndEnd();
           return;
         }
         cwd = requestedCwd;
       } catch (error) {
         send({ type: "start" });
         send({ type: "error", text: error instanceof Error ? error.message : String(error) });
-        sendDone();
-        sender.end();
+        finishAndEnd();
         return;
       }
     }
@@ -2798,10 +3339,6 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
       // ignore
     }
 
-    const request: RunRequest = { agent, model, reasoning, mode, prompt, accessMode };
-    if (binding) {
-      accumulator = startPersistedBackgroundRun(binding, request);
-    }
     send({ type: "start" });
     if (cwd !== join(tmpdir(), "rlab-agent-scratch")) {
       send({ type: "status", level: "info", text: `cwd · ${cwd}` });
@@ -2820,8 +3357,7 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
       child = spawnResolvedBin(resolvedBin, spec.args(request), { cwd, env: runEnv, stdio: ["ignore", "pipe", "pipe"] });
     } catch (error) {
       send({ type: "error", text: error instanceof Error ? `Failed to launch ${spec.bin}: ${error.message}` : `Failed to launch ${spec.bin}` });
-      sendDone();
-      sender.end();
+      finishAndEnd();
       return;
     }
     let canceled = false;

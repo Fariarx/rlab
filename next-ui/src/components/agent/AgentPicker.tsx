@@ -66,6 +66,9 @@ export function AgentPicker({
   }, [open, value]);
 
   const choose = (id: AgentId) => {
+    if (id === agent) {
+      return;
+    }
     const nextProfile = defaultProfileForAgent(id);
     setAgent(id);
     setModel(nextProfile.model);
@@ -207,12 +210,6 @@ export function AgentPicker({
 
       <AgentOptionGroup label={t("agentModel", { agent: def.name })} options={def.models} value={model} onSelect={setModel} />
       <AgentOptionGroup label={t("agentReasoning", { agent: def.name })} options={def.reasoning} value={reasoning} onSelect={setReasoning} />
-      <AgentOptionGroup
-        label={t("agentWorkMode", { agent: def.name })}
-        options={def.modes}
-        value={mode}
-        onSelect={(nextMode) => setMode(nextMode === "plan" ? "plan" : "default")}
-      />
 
       <DialogActions sx={{ px: 2.5, py: 2 }}>
         <Box sx={{ flex: 1 }}>

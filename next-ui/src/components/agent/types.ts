@@ -179,6 +179,9 @@ export interface ConversationSummary {
   readonly profile?: AgentProfile;
   readonly activeRunId?: string;
   readonly unread?: boolean;
+  /** Pinned conversations surface in a dedicated top group and are hidden from
+   *  their original project/chats list. */
+  readonly pinned?: boolean;
   readonly costUsd?: number;
   readonly usage?: RunUsage;
 }

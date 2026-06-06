@@ -1,11 +1,17 @@
 import AttachFileIcon from "@mui/icons-material/AttachFile";
-import CloseIcon from "@mui/icons-material/Close";
+import AutoAwesomeRoundedIcon from "@mui/icons-material/AutoAwesomeRounded";
+import CheckRoundedIcon from "@mui/icons-material/CheckRounded";
+import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
+import DescriptionOutlinedIcon from "@mui/icons-material/DescriptionOutlined";
+import ImageOutlinedIcon from "@mui/icons-material/ImageOutlined";
 import SendIcon from "@mui/icons-material/Send";
 import StopCircleIcon from "@mui/icons-material/StopCircle";
-import { Box, Chip, InputBase, Stack, Typography } from "@mui/material";
-import { type ChangeEvent, type KeyboardEvent, useLayoutEffect, useMemo, useRef, useState } from "react";
+import TuneRoundedIcon from "@mui/icons-material/TuneRounded";
+import { Box, InputBase, Menu, MenuItem, Stack, type SxProps, type Theme, Typography } from "@mui/material";
+import { type ChangeEvent, type DragEvent, type KeyboardEvent, type MouseEvent, type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import { Button, IconButton, KeyHint } from "../ui";
+import { dropIn } from "./anim";
 import { type ComposerAttachmentDraft, type ComposerDraft } from "./types";
 
 interface SlashCommand {
@@ -103,6 +109,75 @@ async function fileToAttachmentDraft(file: File): Promise<ComposerAttachmentDraf
   return { ...base, content: "", path };
 }
 
+function attachmentIcon(type: string): ReactNode {
+  if (type.startsWith("image/")) {
+    return <ImageOutlinedIcon sx={{ fontSize: 14 }} />;
+  }
+  return <DescriptionOutlinedIcon sx={{ fontSize: 14 }} />;
+}
+
+/**
+ * FloatingTag — a single rounded pill that "floats" above the composer (its own
+ * shadow, not boxed into a shared container). Used for each attached file and
+ * for each enabled work mode (accent tone), all individually removable.
+ */
+function FloatingTag({
+  icon,
+  label,
+  onRemove,
+  removeLabel,
+  tone = "neutral",
+}: {
+  readonly icon: ReactNode;
+  readonly label: string;
+  readonly onRemove: () => void;
+  readonly removeLabel: string;
+  readonly tone?: "neutral" | "accent";
+}) {
+  return (
+    <Box
+      component="span"
+      sx={{
+        pointerEvents: "auto",
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 0.5,
+        maxWidth: 240,
+        pl: 0.875,
+        pr: 0.25,
+        py: 0.25,
+        borderRadius: (t) => `${t.custom.radii.pill}px`,
+        fontSize: "0.74rem",
+        fontWeight: 600,
+        boxShadow: "0 2px 10px rgba(0, 0, 0, 0.35)",
+        transition: "transform 120ms ease, box-shadow 120ms ease",
+        "&:hover": { boxShadow: "0 4px 14px rgba(0, 0, 0, 0.45)" },
+        ...(tone === "accent"
+          ? {
+              color: (t) => t.palette.status.info.main,
+              backgroundColor: (t) => t.palette.status.info.soft,
+              border: (t) => `1px solid ${t.palette.status.info.border}`,
+            }
+          : {
+              color: "text.primary",
+              backgroundColor: (t) => t.custom.surfaces.s3,
+              border: (t) => `1px solid ${t.custom.borders.strong}`,
+            }),
+      }}
+    >
+      <Box component="span" sx={{ display: "inline-flex", flex: "0 0 auto", color: tone === "accent" ? "inherit" : "text.secondary" }}>
+        {icon}
+      </Box>
+      <Box component="span" sx={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        {label}
+      </Box>
+      <IconButton aria-label={removeLabel} onClick={onRemove} sx={{ p: 0.125, flex: "0 0 auto", color: "inherit", "&:hover": { backgroundColor: "transparent", opacity: 0.7 } }}>
+        <CloseRoundedIcon sx={{ fontSize: 13 }} />
+      </IconButton>
+    </Box>
+  );
+}
+
 /** Composer — the chat input. Sends on Enter (Shift+Enter for newline). Sticky
  * at the bottom on mobile; the send button stays a comfortable tap target. */
 export function Composer({
@@ -110,6 +185,9 @@ export function Composer({
   mentionableFiles = [],
   value,
   attachments,
+  modes = [],
+  activeMode = "default",
+  onModeChange,
   onDraftChange,
   onSend,
   onStop,
@@ -120,6 +198,11 @@ export function Composer({
   readonly mentionableFiles?: readonly string[];
   readonly value?: string;
   readonly attachments?: readonly ComposerAttachmentDraft[];
+  /** Non-default work modes the current agent supports (toggleable per chat). */
+  readonly modes?: readonly { readonly id: string; readonly label: string }[];
+  /** The currently active work mode id ("default" when none). */
+  readonly activeMode?: string;
+  readonly onModeChange?: (modeId: string) => void;
   readonly onDraftChange?: (draft: ComposerDraft) => void;
   readonly onSend?: (value: string) => void;
   readonly onStop?: () => void;
@@ -130,6 +213,12 @@ export function Composer({
   const [internalAttachments, setInternalAttachments] = useState<readonly ComposerAttachmentDraft[]>([]);
   const [sending, setSending] = useState(false);
   const [expanded, setExpanded] = useState(false);
+  const [activeSuggestion, setActiveSuggestion] = useState(0);
+  const [suggestDismissed, setSuggestDismissed] = useState(false);
+  const [dragDepth, setDragDepth] = useState(0);
+  const dragging = dragDepth > 0;
+  const [modeMenuAnchor, setModeMenuAnchor] = useState<null | HTMLElement>(null);
+  const activeModeOption = modes.find((mode) => mode.id === activeMode) ?? null;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const singleRowRef = useRef(0);
@@ -184,6 +273,8 @@ export function Composer({
   };
 
   const setComposerValue = (nextValue: string) => {
+    // Typing re-opens suggestions that an earlier Escape dismissed.
+    setSuggestDismissed(false);
     updateDraft({ text: nextValue, attachments: latestDraftRef.current.attachments });
   };
 
@@ -203,15 +294,37 @@ export function Composer({
   };
 
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    // While the suggestion popover is open, the arrow keys / Enter / Tab drive
+    // the list instead of the textarea, so picking an option never needs the mouse.
+    if (suggestionsOpen) {
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        setActiveSuggestion((index) => (index + 1) % suggestions.length);
+        return;
+      }
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        setActiveSuggestion((index) => (index - 1 + suggestions.length) % suggestions.length);
+        return;
+      }
+      if ((event.key === "Enter" && !event.shiftKey) || event.key === "Tab") {
+        event.preventDefault();
+        suggestions[activeIndex]?.apply();
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setSuggestDismissed(true);
+        return;
+      }
+    }
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       send();
     }
   };
 
-  const chooseFiles = async (event: ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(event.target.files ?? []);
-    event.target.value = "";
+  const addFiles = async (files: readonly File[]) => {
     if (files.length === 0) {
       return;
     }
@@ -229,6 +342,44 @@ export function Composer({
     }
   };
 
+  const chooseFiles = async (event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files ?? []);
+    event.target.value = "";
+    await addFiles(files);
+  };
+
+  // File drag-and-drop onto the composer. `dragDepth` counts enter/leave so
+  // moving over child elements doesn't flicker the overlay off.
+  const dragHasFiles = (event: DragEvent) => Array.from(event.dataTransfer.types ?? []).includes("Files");
+  const onDragEnter = (event: DragEvent) => {
+    if (!dragHasFiles(event)) {
+      return;
+    }
+    event.preventDefault();
+    setDragDepth((depth) => depth + 1);
+  };
+  const onDragOver = (event: DragEvent) => {
+    if (!dragHasFiles(event)) {
+      return;
+    }
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+  };
+  const onDragLeave = (event: DragEvent) => {
+    if (!dragHasFiles(event)) {
+      return;
+    }
+    setDragDepth((depth) => Math.max(0, depth - 1));
+  };
+  const onDrop = (event: DragEvent) => {
+    if (!dragHasFiles(event)) {
+      return;
+    }
+    event.preventDefault();
+    setDragDepth(0);
+    void addFiles(Array.from(event.dataTransfer.files));
+  };
+
   const insertMention = (file: string) => {
     setComposerValue(composerValue.replace(/@([^\s@/]*)$/, `@${file} `));
   };
@@ -237,10 +388,80 @@ export function Composer({
     setComposerValue(`${command.prompt} `);
   };
 
+  // Slash commands and @-mentions never appear together (one needs a leading
+  // "/", the other a trailing "@…"), so a single suggestion list covers both.
+  const suggestions: ReadonlyArray<{ readonly id: string; readonly label: string; readonly mono?: boolean; readonly apply: () => void }> =
+    visibleSlashCommands.length > 0
+      ? visibleSlashCommands.map((command) => ({ id: command.id, label: command.label, apply: () => insertSlashCommand(command) }))
+      : mentionedFiles.map((file) => ({ id: file, label: file, mono: true, apply: () => insertMention(file) }));
+  const suggestionsOpen = suggestions.length > 0 && !suggestDismissed;
+  const activeIndex = Math.min(activeSuggestion, Math.max(suggestions.length - 1, 0));
+  const suggestionKey = suggestions.map((suggestion) => suggestion.id).join("|");
+  useEffect(() => {
+    setActiveSuggestion(0);
+  }, [suggestionKey]);
+
   const canSend = (composerValue.trim().length > 0 || composerAttachments.length > 0) && !sending;
 
+  const floatingPanelSx: SxProps<Theme> = {
+    pointerEvents: "auto",
+    p: 0.75,
+    borderRadius: (t) => `${t.custom.radii.md}px`,
+    border: (t) => `1px solid ${t.custom.borders.subtle}`,
+    backgroundColor: (t) => t.custom.surfaces.s2,
+    boxShadow: "0 -8px 24px rgba(0, 0, 0, 0.4)",
+  };
+
   return (
-    <Stack spacing={0.75}>
+    <Stack spacing={0.75} sx={{ position: "relative" }} onDragEnter={onDragEnter} onDragOver={onDragOver} onDragLeave={onDragLeave} onDrop={onDrop}>
+      {/* Animated drop target shown while files are dragged over the composer. */}
+      {dragging && (
+        <Box
+          sx={{
+            position: "absolute",
+            inset: 0,
+            zIndex: 20,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 1,
+            borderRadius: (t) => `${t.custom.radii.lg}px`,
+            border: (t) => `1.5px dashed ${t.custom.borders.strong}`,
+            backgroundColor: (t) => t.custom.surfaces.s3,
+            color: "text.secondary",
+            animation: `${dropIn} 160ms ease both`,
+            pointerEvents: "none",
+          }}
+        >
+          <AttachFileIcon sx={{ fontSize: 18 }} />
+          <Typography sx={{ fontSize: "0.82rem", fontWeight: 600 }}>{t("dropFilesHint")}</Typography>
+        </Box>
+      )}
+      {/* Each enabled mode and each attached file floats as its own pill above
+          the composer — never boxed into a shared container, never reflowing the
+          thread. */}
+      {(composerAttachments.length > 0 || activeModeOption) && (
+        <Box sx={{ position: "absolute", left: 0, right: 0, bottom: "100%", pb: 1, display: "flex", flexWrap: "wrap", gap: 0.75, pointerEvents: "none", zIndex: 6 }}>
+          {activeModeOption && (
+            <FloatingTag
+              tone="accent"
+              icon={<AutoAwesomeRoundedIcon sx={{ fontSize: 14 }} />}
+              label={activeModeOption.label}
+              removeLabel={t("disableMode", { mode: activeModeOption.label })}
+              onRemove={() => onModeChange?.("default")}
+            />
+          )}
+          {composerAttachments.map((attachment) => (
+            <FloatingTag
+              key={attachment.id}
+              icon={attachmentIcon(attachment.type)}
+              label={attachment.name}
+              removeLabel={t("removeAttachment", { name: attachment.name })}
+              onRemove={() => setComposerAttachments(composerAttachments.filter((item) => item.id !== attachment.id))}
+            />
+          ))}
+        </Box>
+      )}
       <Box
         sx={{
           display: "flex",
@@ -250,10 +471,11 @@ export function Composer({
           borderRadius: (t) => `${t.custom.radii.lg}px`,
           backgroundColor: (t) => t.custom.surfaces.s2,
           border: (t) => `1px solid ${t.custom.borders.subtle}`,
-          transition: "box-shadow 140ms ease, border-color 140ms ease",
+          transition: "border-color 140ms ease",
+          // Soft focus: just brighten the border. No outer glow ring (it clipped
+          // against the surrounding padding and read as harsh).
           "&:focus-within": {
-            borderColor: (t) => t.custom.borders.focus,
-            boxShadow: (t) => `0 0 0 3px ${t.palette.status.running.soft}`,
+            borderColor: (t) => t.custom.borders.strong,
           },
         }}
       >
@@ -268,6 +490,35 @@ export function Composer({
         <IconButton aria-label={t("attach")} sx={{ flex: "0 0 auto" }} onClick={() => fileInputRef.current?.click()}>
           <AttachFileIcon sx={{ fontSize: 18 }} />
         </IconButton>
+        {modes.length > 0 && (
+          <>
+            <IconButton
+              aria-label={t("workMode")}
+              sx={{ flex: "0 0 auto", color: activeModeOption ? (t) => t.palette.status.info.main : undefined }}
+              onClick={(event: MouseEvent<HTMLElement>) => setModeMenuAnchor(event.currentTarget)}
+            >
+              <TuneRoundedIcon sx={{ fontSize: 18 }} />
+            </IconButton>
+            <Menu anchorEl={modeMenuAnchor} open={Boolean(modeMenuAnchor)} onClose={() => setModeMenuAnchor(null)}>
+              {modes.map((mode) => (
+                <MenuItem
+                  key={mode.id}
+                  selected={mode.id === activeMode}
+                  onClick={() => {
+                    setModeMenuAnchor(null);
+                    onModeChange?.(mode.id === activeMode ? "default" : mode.id);
+                  }}
+                >
+                  <Box sx={{ display: "flex", alignItems: "center", gap: 1, minWidth: 150 }}>
+                    <AutoAwesomeRoundedIcon sx={{ fontSize: 16, color: "text.secondary" }} />
+                    <Box component="span" sx={{ flex: 1 }}>{mode.label}</Box>
+                    {mode.id === activeMode && <CheckRoundedIcon sx={{ fontSize: 16, color: (t) => t.palette.status.info.main }} />}
+                  </Box>
+                </MenuItem>
+              ))}
+            </Menu>
+          </>
+        )}
         {/* The input column keeps a fixed single-row height so the composer bar
             never grows. When multiline is needed the same input lifts into an
             overlay (position: absolute) that grows upward over the thread. */}
@@ -276,6 +527,39 @@ export function Composer({
           data-expanded={expanded ? "true" : "false"}
           sx={{ position: "relative", flex: 1, minWidth: 0, minHeight: 30, display: "flex", alignItems: "center" }}
         >
+          {/* The suggestion dropdown is anchored to the input column, so it is
+              never wider than the field it completes. */}
+          {suggestionsOpen && (
+            <Box role="listbox" aria-label={t("suggestions")} sx={{ position: "absolute", left: 0, right: 0, bottom: "100%", mb: 1, zIndex: 7, ...floatingPanelSx }}>
+              <Stack spacing={0.25}>
+                {suggestions.map((suggestion, index) => (
+                  <Button
+                    key={suggestion.id}
+                    role="option"
+                    aria-selected={index === activeIndex}
+                    variant="text"
+                    size="small"
+                    onMouseDown={(event) => event.preventDefault()}
+                    onMouseEnter={() => setActiveSuggestion(index)}
+                    onClick={suggestion.apply}
+                    sx={{
+                      justifyContent: "flex-start",
+                      backgroundColor: (t) => (index === activeIndex ? t.custom.surfaces.s3 : "transparent"),
+                      "&:hover": { backgroundColor: (t) => t.custom.surfaces.s3 },
+                    }}
+                  >
+                    {suggestion.mono ? (
+                      <Typography component="span" sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.76rem" }}>
+                        {suggestion.label}
+                      </Typography>
+                    ) : (
+                      suggestion.label
+                    )}
+                  </Button>
+                ))}
+              </Stack>
+            </Box>
+          )}
           <InputBase
             inputRef={textareaRef}
             value={composerValue}
@@ -300,7 +584,7 @@ export function Composer({
                 py: 0.75,
                 borderRadius: (t) => `${t.custom.radii.md}px`,
                 backgroundColor: (t) => t.custom.surfaces.s2,
-                border: (t) => `1px solid ${t.custom.borders.focus}`,
+                border: (t) => `1px solid ${t.custom.borders.strong}`,
                 boxShadow: "0 -10px 28px rgba(0, 0, 0, 0.45)",
               }),
             }}
@@ -327,43 +611,6 @@ export function Composer({
           </Button>
         </Stack>
       </Box>
-      {composerAttachments.length > 0 && (
-        <Stack direction="row" spacing={0.75} sx={{ flexWrap: "wrap", gap: 0.75 }}>
-          {composerAttachments.map((attachment) => (
-            <Chip
-              key={attachment.id}
-              label={attachment.name}
-              size="small"
-              deleteIcon={<CloseIcon sx={{ fontSize: 15 }} />}
-              onDelete={() => setComposerAttachments(composerAttachments.filter((item) => item.id !== attachment.id))}
-            />
-          ))}
-        </Stack>
-      )}
-      {(visibleSlashCommands.length > 0 || mentionedFiles.length > 0) && (
-        <Stack
-          spacing={0.5}
-          sx={{
-            p: 0.75,
-            borderRadius: (theme) => `${theme.custom.radii.md}px`,
-            border: (theme) => `1px solid ${theme.custom.borders.subtle}`,
-            backgroundColor: (theme) => theme.custom.surfaces.s2,
-          }}
-        >
-          {visibleSlashCommands.map((command) => (
-            <Button key={command.id} variant="text" size="small" onClick={() => insertSlashCommand(command)} sx={{ justifyContent: "flex-start" }}>
-              {command.label}
-            </Button>
-          ))}
-          {mentionedFiles.map((file) => (
-            <Button key={file} variant="text" size="small" onClick={() => insertMention(file)} sx={{ justifyContent: "flex-start" }}>
-              <Typography component="span" sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.76rem" }}>
-                {file}
-              </Typography>
-            </Button>
-          ))}
-        </Stack>
-      )}
     </Stack>
   );
 }

@@ -240,6 +240,30 @@ describe("runConversation", () => {
     });
   });
 
+  it("treats warning-only runs without agent output as errors", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        streamResponse([
+          { type: "start" },
+          { type: "status", level: "warn", text: "codex is not installed on this machine" },
+          { type: "done" },
+        ]),
+      ),
+    );
+
+    const result = await runConversation({
+      profile: { agent: "codex", model: "default", reasoning: "default", mode: "default" },
+      prompt: "answer",
+      accessMode: "read-only",
+      locale: "ru",
+      onBlocks: vi.fn(),
+    });
+
+    expect(result.status).toBe("error");
+    expect(result.snippet).toBe("Прогон упал");
+  });
+
   it("returns usage from completed run events", async () => {
     vi.stubGlobal(
       "fetch",

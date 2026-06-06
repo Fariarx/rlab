@@ -355,11 +355,13 @@ export async function runConversation(opts: {
   opts.onBlocks(finalBlocks);
 
   const hadError = statuses.some((s) => s.level === "error");
+  const hadOutput = hasText || hasReasoning || tools.length > 0 || approvals.length > 0 || options.length > 0;
+  const warningOnlyFailure = statuses.some((s) => s.level === "warn") && !hadOutput;
   const needsInput = approvals.length > 0 || options.length > 0;
-  const status = hadError ? "error" : needsInput ? "waiting" : "done";
+  const status = hadError || warningOnlyFailure ? "error" : needsInput ? "waiting" : "done";
   const snippet = canceled
     ? translate(opts.locale, "runCanceledSnippet")
-    : hadError
+    : hadError || warningOnlyFailure
       ? translate(opts.locale, "runFailedSnippet")
       : needsInput
         ? translate(opts.locale, "runNeedsInputSnippet")
