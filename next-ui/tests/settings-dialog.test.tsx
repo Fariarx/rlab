@@ -159,7 +159,7 @@ describe("SettingsDialog agent configuration", () => {
     expect(await screen.findByText("Ошибка установки OpenCode: npm failed")).toBeInTheDocument();
   });
 
-  it("updates the server-backed default agent model variant", async () => {
+  it("updates the server-backed default agent model", async () => {
     const fetch = vi.fn(async (url: string | URL | Request) => {
       const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
       if (path === "/api/agent-config") {
@@ -180,7 +180,9 @@ describe("SettingsDialog agent configuration", () => {
             ...defaultAppSettings.agents,
             defaultProfile: {
               agent: "codex",
-              variant: "DEFAULT",
+              model: "default",
+              reasoning: "default",
+              mode: "default",
             },
           },
         }}
@@ -194,7 +196,9 @@ describe("SettingsDialog agent configuration", () => {
       agents: {
         defaultProfile: {
           agent: "codex",
-          variant: "GPT-5.5",
+          model: "gpt-5.5",
+          reasoning: "default",
+          mode: "default",
         },
       },
     });

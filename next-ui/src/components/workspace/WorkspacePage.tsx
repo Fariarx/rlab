@@ -49,6 +49,7 @@ import {
   useAgentStatusError,
   useAgentStatusLive,
   useReloadAgentStatus,
+  agentProfileEquals,
 } from "../agent";
 import { SettingsDialog } from "../settings/SettingsDialog";
 import { Button, EmptyState, IconButton, StatusDot, useToast } from "../ui";
@@ -233,7 +234,7 @@ export function WorkspacePageView({
       if (conv) {
         setProfile((current) => {
           const nextProfile = conversationProfile(conv);
-          return current.agent === nextProfile.agent && current.variant === nextProfile.variant ? current : nextProfile;
+          return agentProfileEquals(current, nextProfile) ? current : nextProfile;
         });
       }
     } else if (routeKind === "project" && routeConversationId) {
@@ -245,7 +246,7 @@ export function WorkspacePageView({
       if (conv) {
         setProfile((current) => {
           const nextProfile = conversationProfile(conv);
-          return current.agent === nextProfile.agent && current.variant === nextProfile.variant ? current : nextProfile;
+          return agentProfileEquals(current, nextProfile) ? current : nextProfile;
         });
       }
     }
@@ -588,7 +589,7 @@ export function WorkspacePageView({
                 )}
               </Box>
             </Stack>
-            <Stack direction="row" spacing={1} sx={{ alignItems: "center", flex: "0 0 auto" }}>
+            <Stack direction="row" spacing={1} sx={{ alignItems: "center", flex: "0 0 auto", "& .MuiIconButton-root": { width: 30, height: 30 } }}>
               {(selected || composingNew) && <AgentBadge profile={profile} onClick={openPicker} compact />}
               {selected?.costUsd !== undefined && (
                 <Typography sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.72rem", color: (theme) => theme.palette.status.info.main }}>

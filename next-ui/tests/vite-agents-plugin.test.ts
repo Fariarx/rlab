@@ -36,6 +36,7 @@ import {
 } from "../vite-agents-plugin";
 import { buildInitialWorkspaceState } from "../src/components/workspace/workspace-state";
 import { type CanUseTool } from "@anthropic-ai/claude-agent-sdk";
+import { type AgentProfile } from "../src/components/agent";
 
 describe("vite agents plugin", () => {
   it("treats a ChatGPT-authenticated Codex CLI as available without API key env", () => {
@@ -198,7 +199,7 @@ describe("vite agents plugin", () => {
   });
 
   it("starts Claude with partial message streaming enabled", () => {
-    expect(buildClaudeRunArgs("hello")).toEqual([
+    expect(buildClaudeRunArgs({ prompt: "hello" })).toEqual([
       "-p",
       "hello",
       "--output-format",
@@ -309,8 +310,8 @@ describe("vite agents plugin", () => {
     ).toEqual([{ type: "approval", id: "approval-1", title: "Approve Bash?", detail: "npm test" }]);
   });
 
-  it("builds Codex args with the selected model variant", () => {
-    expect(buildCodexRunArgs("hello", "GPT-5.5")).toEqual([
+  it("builds Codex args with the selected model and reasoning effort", () => {
+    expect(buildCodexRunArgs({ prompt: "hello", model: "gpt-5.5", reasoning: "high", mode: "default", accessMode: "read-only" })).toEqual([
       "exec",
       "--json",
       "--sandbox",
@@ -318,13 +319,29 @@ describe("vite agents plugin", () => {
       "--skip-git-repo-check",
       "--model",
       "gpt-5.5",
+      "-c",
+      'model_reasoning_effort="high"',
       "hello",
     ]);
   });
 
   it("maps agent access mode into CLI safety flags", () => {
-    expect(buildClaudeRunArgs("hello", "DEFAULT", "read-write")).toContain("acceptEdits");
-    expect(buildCodexRunArgs("hello", "DEFAULT", "read-write")).toEqual([
+    expect(buildClaudeRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "read-write" })).toContain("acceptEdits");
+    expect(buildClaudeRunArgs({ prompt: "hello", model: "opus", reasoning: "max", mode: "plan", accessMode: "read-write" })).toEqual([
+      "-p",
+      "hello",
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      "--include-partial-messages",
+      "--model",
+      "opus",
+      "--effort",
+      "max",
+      "--permission-mode",
+      "plan",
+    ]);
+    expect(buildCodexRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "read-write" })).toEqual([
       "exec",
       "--json",
       "--sandbox",
@@ -332,7 +349,7 @@ describe("vite agents plugin", () => {
       "--skip-git-repo-check",
       "hello",
     ]);
-    expect(buildGeminiRunArgs("hello", "DEFAULT", "read-write")).toContain("plan");
+    expect(buildGeminiRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "read-write" })).toContain("plan");
   });
 
   it("rejects writable runs for adapters without a live permission bridge", () => {
@@ -343,8 +360,8 @@ describe("vite agents plugin", () => {
     expect(validateRunAccessModeForAgent("opencode", "read-write")).toContain("does not support interactive approve/deny yet");
   });
 
-  it("builds Gemini args with the selected model variant", () => {
-    expect(buildGeminiRunArgs("hello", "Flash")).toEqual([
+  it("builds Gemini args with the selected model", () => {
+    expect(buildGeminiRunArgs({ prompt: "hello", model: "flash", reasoning: "default", mode: "default", accessMode: "read-only" })).toEqual([
       "--prompt",
       "hello",
       "--output-format",
@@ -357,17 +374,19 @@ describe("vite agents plugin", () => {
     ]);
   });
 
-  it("builds OpenCode args with a concrete default model and no permission bypass", () => {
-    expect(buildOpenCodeRunArgs("hello")).toEqual([
+  it("builds OpenCode args with a concrete default model, reasoning variant, and no permission bypass", () => {
+    expect(buildOpenCodeRunArgs({ prompt: "hello", model: "default", reasoning: "high", mode: "default", accessMode: "read-only" })).toEqual([
       "run",
       "--format",
       "json",
       "--thinking",
       "--model",
       "opencode/deepseek-v4-flash-free",
+      "--variant",
+      "high",
       "hello",
     ]);
-    expect(buildOpenCodeRunArgs("hello", "DEFAULT", "read-write")).not.toContain("--dangerously-skip-permissions");
+    expect(buildOpenCodeRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "read-write" })).not.toContain("--dangerously-skip-permissions");
   });
 
   it("translates Codex JSONL events into normalized run events", () => {
@@ -710,7 +729,7 @@ describe("vite agents plugin", () => {
 
     expect(
       buildClaudeSdkOptions(
-        { agent: "claude-code", variant: "DEFAULT", prompt: "hello", accessMode: "read-write" },
+        { agent: "claude-code", model: "default", reasoning: "default", mode: "default", prompt: "hello", accessMode: "read-write" },
         "C:/repo",
         controller,
         canUseTool,
@@ -725,12 +744,14 @@ describe("vite agents plugin", () => {
 
     expect(
       buildClaudeSdkOptions(
-        { agent: "claude-code", variant: "Plan", prompt: "hello", accessMode: "read-write" },
+        { agent: "claude-code", model: "opus", reasoning: "max", mode: "plan", prompt: "hello", accessMode: "read-write" },
         "C:/repo",
         controller,
         canUseTool,
       ),
     ).toMatchObject({
+      effort: "max",
+      model: "opus",
       permissionMode: "plan",
     });
   });
@@ -785,21 +806,21 @@ describe("vite agents plugin", () => {
     const migrated = migrateSeedWorkspaceState({
       ...state,
       chats: state.chats.map((conversation) =>
-        conversation.id === "chat-2" ? { ...conversation, profile: { agent: "codex", variant: "GPT-5" } } : conversation,
+        conversation.id === "chat-2" ? { ...conversation, profile: { agent: "codex", variant: "GPT-5" } as unknown as AgentProfile } : conversation,
       ),
       projects: state.projects.map((project) =>
         project.id === "auth-service"
           ? {
               ...project,
               conversations: project.conversations.map((conversation) =>
-                conversation.id === "c-jwt" ? { ...conversation, profile: { agent: "codex", variant: "DEFAULT" } } : conversation,
+                conversation.id === "c-jwt" ? { ...conversation, profile: { agent: "codex", variant: "DEFAULT" } as unknown as AgentProfile } : conversation,
               ),
             }
           : project,
       ),
     });
 
-    expect(migrated.chats.find((conversation) => conversation.id === "chat-2")?.profile).toEqual({ agent: "codex", variant: "GPT-5.5" });
-    expect(migrated.projects[0]?.conversations.find((conversation) => conversation.id === "c-jwt")?.profile).toEqual({ agent: "codex", variant: "GPT-5.5" });
+    expect(migrated.chats.find((conversation) => conversation.id === "chat-2")?.profile).toEqual({ agent: "codex", model: "gpt-5.5", reasoning: "default", mode: "default" });
+    expect(migrated.projects[0]?.conversations.find((conversation) => conversation.id === "c-jwt")?.profile).toEqual({ agent: "codex", model: "gpt-5.5", reasoning: "default", mode: "default" });
   });
 });

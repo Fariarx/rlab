@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useWorkspace } from "../src/components/workspace/use-workspace";
 import { buildInitialWorkspaceState, type WorkspaceState } from "../src/components/workspace/workspace-state";
@@ -13,6 +13,7 @@ function Probe() {
       <div data-testid="theme">{workspace.settings.appearance.theme}</div>
       <div data-testid="locale">{workspace.settings.general.locale}</div>
       <div data-testid="density">{workspace.settings.appearance.density}</div>
+      <div data-testid="loading">{String(workspace.loading)}</div>
       <div data-testid="cost">{selected?.costUsd ?? "none"}</div>
       <div data-testid="usage">{selected?.usage?.totalTokens ?? "none"}</div>
       <button type="button" onClick={() => workspace.sendMessage(workspace.selectedId, "Persist this message")}>
@@ -30,10 +31,10 @@ function Probe() {
       <button type="button" onClick={() => workspace.decideApproval(workspace.selectedId, "approval-1", "approved")}>
         approve
       </button>
-      <button type="button" onClick={() => workspace.newProjectChat("auth-service", { agent: "claude-code", variant: "DEFAULT" })}>
+      <button type="button" onClick={() => workspace.newProjectChat("auth-service", { agent: "claude-code", model: "default", reasoning: "default", mode: "default" })}>
         new-project-chat
       </button>
-      <button type="button" onClick={() => workspace.createProject({ name: "billing", path: "C:\\work\\billing", profile: { agent: "codex", variant: "GPT-5.5" } })}>
+      <button type="button" onClick={() => workspace.createProject({ name: "billing", path: "C:\\work\\billing", profile: { agent: "codex", model: "gpt-5.5", reasoning: "high", mode: "default" } })}>
         create-project
       </button>
       <button
@@ -63,9 +64,11 @@ describe("useWorkspace", () => {
     readonly agentMessageId?: string;
     readonly conversationId?: string;
     readonly prompt?: string;
+    readonly model?: string;
+    readonly reasoning?: string;
     readonly runId?: string;
     readonly userMessageId?: string;
-    readonly variant?: string;
+    readonly mode?: string;
   }> = [];
   let runCancelRequests: Array<{ readonly runId?: string }> = [];
 
@@ -101,9 +104,11 @@ describe("useWorkspace", () => {
             agentMessageId?: string;
             conversationId?: string;
             prompt?: string;
+            model?: string;
+            reasoning?: string;
             runId?: string;
             userMessageId?: string;
-            variant?: string;
+            mode?: string;
           });
           activeRunSignal = init?.signal as AbortSignal | undefined;
           const stream = new ReadableStream<Uint8Array>({
@@ -127,6 +132,7 @@ describe("useWorkspace", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
     if (originalLocalStorage) {
       Object.defineProperty(window, "localStorage", originalLocalStorage);
@@ -247,7 +253,7 @@ describe("useWorkspace", () => {
     state = {
       ...state,
       chats: state.chats.map((chat) =>
-        chat.id === "chat-2" ? { ...chat, agent: "codex", profile: { agent: "codex", variant: "GPT-5.5" } } : chat,
+        chat.id === "chat-2" ? { ...chat, agent: "codex", profile: { agent: "codex", model: "gpt-5.5", reasoning: "high", mode: "default" } } : chat,
       ),
     };
     render(<Probe />);
@@ -263,7 +269,9 @@ describe("useWorkspace", () => {
         prompt: "Persist this message",
         runId: expect.stringMatching(/^run-/),
         userMessageId: expect.stringMatching(/^u-/),
-        variant: "GPT-5.5",
+        model: "gpt-5.5",
+        reasoning: "high",
+        mode: "default",
       });
     });
   });
@@ -287,6 +295,60 @@ describe("useWorkspace", () => {
     await waitFor(() => {
       expect(runRequests[0]).toMatchObject({ accessMode: "read-write" });
     });
+  });
+
+  it("does not poll seeded running conversations that are not real background runs", async () => {
+    vi.useFakeTimers();
+    render(<Probe />);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByText("chat-2")).toBeInTheDocument();
+
+    const initialWorkspaceReads = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace" && (!init || init.method === "GET")).length;
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4500);
+    });
+
+    const workspaceReads = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace" && (!init || init.method === "GET")).length;
+    expect(workspaceReads).toBe(initialWorkspaceReads);
+  });
+
+  it("syncs persisted background runs without marking the workspace as loading", async () => {
+    vi.useFakeTimers();
+    state = {
+      ...state,
+      chats: state.chats.map((chat) => (chat.id === "chat-2" ? { ...chat, activeRunId: "run-existing", status: "running" } : chat)),
+    };
+    render(<Probe />);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByText("chat-2")).toBeInTheDocument();
+    expect(screen.getByTestId("loading")).toHaveTextContent("false");
+
+    state = {
+      ...state,
+      chats: state.chats.map((chat) =>
+        chat.id === "chat-2"
+          ? { ...chat, activeRunId: undefined, status: "done", snippet: "finished" }
+          : chat,
+      ),
+      threads: {
+        ...state.threads,
+        "chat-2": [...state.threads["chat-2"], { id: "a-bg", role: "agent", blocks: [{ kind: "text", text: "finished" }] }],
+      },
+    };
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2100);
+    });
+
+    expect(screen.getByTestId("status")).toHaveTextContent("done");
+    expect(screen.getByTestId("loading")).toHaveTextContent("false");
   });
 
   it("retries a user message by resending its original text", async () => {
@@ -342,7 +404,7 @@ describe("useWorkspace", () => {
       expect(project?.name).toBe("billing");
       expect(project?.path).toBe("C:\\work\\billing");
       expect(project?.conversations).toHaveLength(1);
-      expect(project?.conversations[0]?.profile).toEqual({ agent: "codex", variant: "GPT-5.5" });
+      expect(project?.conversations[0]?.profile).toEqual({ agent: "codex", model: "gpt-5.5", reasoning: "high", mode: "default" });
       expect(state.selectedId).toBe(project?.conversations[0]?.id);
     });
   });

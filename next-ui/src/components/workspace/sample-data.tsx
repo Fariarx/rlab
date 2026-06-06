@@ -122,11 +122,11 @@ export function starterThread(): ChatMessage[] {
 }
 
 export const initialChats: readonly ConversationSummary[] = [
-  { id: "chat-2", title: "Release notes для 0.1.69", snippet: "Пишет changelog…", time: "15:12", status: "running", agent: "codex", profile: { agent: "codex", variant: "DEFAULT" }, unread: true },
-  { id: "chat-3", title: "Postgres или SQLite для нас", snippet: "Ждёт ввод: ожидаемый QPS?", time: "14:05", status: "waiting", agent: "gemini", profile: { agent: "gemini", variant: "Flash" }, unread: true },
-  { id: "chat-1", title: "Объясни auth flow", snippet: "Разобрал жизненный цикл токена", time: "13:40", status: "done", agent: "claude-code", profile: { agent: "claude-code", variant: "DEFAULT" } },
-  { id: "chat-5", title: "Сводка incident #4127", snippet: "Не удалось получить bundle логов", time: "Mon", status: "error", agent: "claude-code", profile: { agent: "claude-code", variant: "DEFAULT" } },
-  { id: "chat-4", title: "Идеи текста onboarding", snippet: "Черновик сохранён", time: "Mon", status: "idle", agent: "amp", profile: { agent: "amp", variant: "DEFAULT" } },
+  { id: "chat-2", title: "Release notes для 0.1.69", snippet: "Пишет changelog…", time: "15:12", status: "running", agent: "codex", profile: { agent: "codex", model: "default", reasoning: "default", mode: "default" }, unread: true },
+  { id: "chat-3", title: "Postgres или SQLite для нас", snippet: "Ждёт ввод: ожидаемый QPS?", time: "14:05", status: "waiting", agent: "gemini", profile: { agent: "gemini", model: "flash", reasoning: "default", mode: "default" }, unread: true },
+  { id: "chat-1", title: "Объясни auth flow", snippet: "Разобрал жизненный цикл токена", time: "13:40", status: "done", agent: "claude-code", profile: { agent: "claude-code", model: "default", reasoning: "default", mode: "default" } },
+  { id: "chat-5", title: "Сводка incident #4127", snippet: "Не удалось получить bundle логов", time: "Mon", status: "error", agent: "claude-code", profile: { agent: "claude-code", model: "default", reasoning: "default", mode: "default" } },
+  { id: "chat-4", title: "Идеи текста onboarding", snippet: "Черновик сохранён", time: "Mon", status: "idle", agent: "amp", profile: { agent: "amp", model: "default", reasoning: "default", mode: "default" } },
 ];
 
 export const initialProjects: readonly Project[] = [
@@ -135,9 +135,9 @@ export const initialProjects: readonly Project[] = [
     name: "auth-service",
     path: "/root/workspace/rlab",
     conversations: [
-      { id: "c-flaky", title: "Flaky-тест auth.login", snippet: "Сьют переведён на fake timers", time: "14:02", status: "running", agent: "claude-code", profile: { agent: "claude-code", variant: "DEFAULT" }, unread: true },
-      { id: "c-jwt", title: "Ротация JWT-секретов", snippet: "Ждёт подтверждение deploy", time: "11:20", status: "waiting", agent: "codex", profile: { agent: "codex", variant: "GPT-5.5" } },
-      { id: "c-rl", title: "Rate-limit middleware", snippet: "Отгружено · 6 файлов изменено", time: "Mon", status: "done", agent: "claude-code", profile: { agent: "claude-code", variant: "DEFAULT" } },
+      { id: "c-flaky", title: "Flaky-тест auth.login", snippet: "Сьют переведён на fake timers", time: "14:02", status: "running", agent: "claude-code", profile: { agent: "claude-code", model: "default", reasoning: "default", mode: "default" }, unread: true },
+      { id: "c-jwt", title: "Ротация JWT-секретов", snippet: "Ждёт подтверждение deploy", time: "11:20", status: "waiting", agent: "codex", profile: { agent: "codex", model: "gpt-5.5", reasoning: "default", mode: "default" } },
+      { id: "c-rl", title: "Rate-limit middleware", snippet: "Отгружено · 6 файлов изменено", time: "Mon", status: "done", agent: "claude-code", profile: { agent: "claude-code", model: "default", reasoning: "default", mode: "default" } },
     ],
   },
   {
@@ -145,9 +145,9 @@ export const initialProjects: readonly Project[] = [
     name: "web-ui",
     path: "/root/workspace/rlab/next-ui",
     conversations: [
-      { id: "c-theme", title: "Токены dark/light темы", snippet: "Все токены перенесены", time: "Tue", status: "done", agent: "amp", profile: { agent: "amp", variant: "DEFAULT" } },
-      { id: "c-virt", title: "Виртуализация списка board", snippet: "Черновик — не начато", time: "Tue", status: "idle", agent: "gemini", profile: { agent: "gemini", variant: "Pro" } },
-      { id: "c-toast", title: "Починить stacking тостов", snippet: "Build упал на CI step 3", time: "Mon", status: "error", agent: "copilot", profile: { agent: "copilot", variant: "DEFAULT" } },
+      { id: "c-theme", title: "Токены dark/light темы", snippet: "Все токены перенесены", time: "Tue", status: "done", agent: "amp", profile: { agent: "amp", model: "default", reasoning: "default", mode: "default" } },
+      { id: "c-virt", title: "Виртуализация списка board", snippet: "Черновик — не начато", time: "Tue", status: "idle", agent: "gemini", profile: { agent: "gemini", model: "pro", reasoning: "default", mode: "default" } },
+      { id: "c-toast", title: "Починить stacking тостов", snippet: "Build упал на CI step 3", time: "Mon", status: "error", agent: "copilot", profile: { agent: "copilot", model: "default", reasoning: "default", mode: "default" } },
     ],
   },
   {
@@ -155,8 +155,8 @@ export const initialProjects: readonly Project[] = [
     name: "infra",
     path: "/root/workspace/rlab",
     conversations: [
-      { id: "c-tf", title: "Terraform drift", snippet: "Ждёт ввод: 2 ресурса на destroy", time: "Wed", status: "waiting", agent: "codex", profile: { agent: "codex", variant: "DEFAULT" }, unread: true },
-      { id: "c-node", title: "Обновить Node до 22", snippet: "В очереди после release", time: "Wed", status: "idle", agent: "claude-code", profile: { agent: "claude-code", variant: "Plan" } },
+      { id: "c-tf", title: "Terraform drift", snippet: "Ждёт ввод: 2 ресурса на destroy", time: "Wed", status: "waiting", agent: "codex", profile: { agent: "codex", model: "default", reasoning: "default", mode: "default" }, unread: true },
+      { id: "c-node", title: "Обновить Node до 22", snippet: "В очереди после release", time: "Wed", status: "idle", agent: "claude-code", profile: { agent: "claude-code", model: "default", reasoning: "default", mode: "plan" } },
     ],
   },
 ];

@@ -77,6 +77,32 @@ describe("AgentPicker a11y", () => {
     fireEvent.click(screen.getByRole("button", { name: "Выбрать Codex из CLI" }));
     fireEvent.click(screen.getByRole("button", { name: "Использовать Codex" }));
 
-    expect(onSelect).toHaveBeenCalledWith({ agent: "codex", variant: "DEFAULT" });
+    expect(onSelect).toHaveBeenCalledWith({ agent: "codex", model: "default", reasoning: "default", mode: "default" });
+  });
+
+  it("keeps model, reasoning, and work mode as separate profile fields", async () => {
+    const onSelect = vi.fn();
+
+    renderWithTheme(
+      <AgentPicker
+        open
+        value={DEFAULT_PROFILE}
+        onClose={vi.fn()}
+        onSelect={onSelect}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Выбрать Claude Code из CLI" }));
+    fireEvent.click(screen.getByRole("button", { name: "Opus" }));
+    fireEvent.click(screen.getByRole("button", { name: "Max" }));
+    fireEvent.click(screen.getByRole("button", { name: "Plan" }));
+    fireEvent.click(screen.getByRole("button", { name: "Использовать Claude Code" }));
+
+    expect(onSelect).toHaveBeenCalledWith({
+      agent: "claude-code",
+      model: "opus",
+      reasoning: "max",
+      mode: "plan",
+    });
   });
 });

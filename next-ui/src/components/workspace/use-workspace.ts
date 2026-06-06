@@ -1,6 +1,6 @@
 import { type IReactionDisposer, makeAutoObservable, reaction, runInAction } from "mobx";
 import { useEffect, useState } from "react";
-import { type AgentBlock, type AgentProfile, type ApprovalDecision, type ChatMessage, type ComposerDraft, type ConversationStatus, type ConversationSummary, type Project } from "../agent";
+import { agentProfileEquals, normalizeAgentProfile, type AgentBlock, type AgentProfile, type ApprovalDecision, type ChatMessage, type ComposerDraft, type ConversationStatus, type ConversationSummary, type Project } from "../agent";
 import { translate } from "../../i18n/I18nProvider";
 import { cancelRun, runConversation, type RunConversationResult } from "./run-agent";
 import { nowLabel, starterThread, truncate } from "./sample-data";
@@ -50,8 +50,12 @@ function findConversation(state: WorkspaceState, id: string): ConversationSummar
   return [...state.chats, ...state.projects.flatMap((p) => p.conversations)].find((c) => c.id === id) ?? null;
 }
 
+function workspaceConversations(state: WorkspaceState): ConversationSummary[] {
+  return [...state.chats, ...state.projects.flatMap((project) => project.conversations)];
+}
+
 export function conversationProfile(conversation: ConversationSummary | null | undefined): AgentProfile {
-  return conversation?.profile ?? { agent: conversation?.agent ?? "claude-code", variant: "DEFAULT" };
+  return normalizeAgentProfile(conversation?.profile, conversation?.agent ?? "claude-code");
 }
 
 function conversationCwd(state: WorkspaceState, id: string): string | undefined {
@@ -139,6 +143,7 @@ function finalRunPatch(
   const resolvedStatus = result.status === "waiting" && inputResolved ? "done" : result.status;
   const resolvedSnippet = result.status === "waiting" && resolvedStatus === "done" ? snippetFromBlocks(agentBlocks, locale) : result.snippet;
   return {
+    activeRunId: undefined,
     status: resolvedStatus,
     snippet: resolvedSnippet,
     ...(result.costUsd === undefined ? {} : { costUsd: result.costUsd }),
@@ -273,7 +278,7 @@ class WorkspaceStore implements Workspace {
     if (!this.pollTimer) {
       this.pollTimer = setInterval(() => {
         if (this.hydrated && !this.loading && this.hasPersistedActiveRuns()) {
-          this.reloadWorkspace();
+          void this.syncBackgroundRuns();
         }
       }, 2000);
     }
@@ -325,8 +330,51 @@ class WorkspaceStore implements Workspace {
 
   private hasPersistedActiveRuns(): boolean {
     return [...this.state.chats, ...this.state.projects.flatMap((project) => project.conversations)].some(
-      (conversation) => conversation.status === "running" || conversation.status === "waiting",
+      (conversation) => Boolean(conversation.activeRunId) && !this.runs.has(conversation.id) && (conversation.status === "running" || conversation.status === "waiting"),
     );
+  }
+
+  private async syncBackgroundRuns(): Promise<void> {
+    const seq = this.loadSeq;
+    try {
+      const loadedState = await loadWorkspaceState();
+      if (seq !== this.loadSeq) {
+        return;
+      }
+      runInAction(() => {
+        this.state = this.mergeBackgroundRunState(this.state, loadedState);
+        this.loadError = null;
+      });
+    } catch (error) {
+      if (seq !== this.loadSeq) {
+        return;
+      }
+      runInAction(() => {
+        this.loadError = error instanceof Error ? error.message : String(error);
+      });
+    }
+  }
+
+  private mergeBackgroundRunState(current: WorkspaceState, loaded: WorkspaceState): WorkspaceState {
+    const ids = new Set(
+      workspaceConversations(current)
+        .filter((conversation) => Boolean(conversation.activeRunId) && !this.runs.has(conversation.id))
+        .map((conversation) => conversation.id),
+    );
+    if (ids.size === 0) {
+      return current;
+    }
+    let next = current;
+    const threads = { ...current.threads };
+    for (const id of ids) {
+      const loadedConversation = findConversation(loaded, id);
+      if (!loadedConversation) {
+        continue;
+      }
+      next = patchConversation(next, id, loadedConversation);
+      threads[id] = loaded.threads[id] ?? current.threads[id] ?? [];
+    }
+    return { ...next, threads };
   }
 
   find(id: string): ConversationSummary | null {
@@ -469,6 +517,7 @@ class WorkspaceStore implements Workspace {
     const runId = nextId("run");
 
     const runningPatch: Partial<ConversationSummary> = {
+      activeRunId: runId,
       status: "running" as ConversationStatus,
       snippet: truncate(text, 60),
       time: nowLabel(),
@@ -549,7 +598,7 @@ class WorkspaceStore implements Workspace {
       })
       .catch(() => {
         if (!runHandle.canceled) {
-          this.setState((current) => patchConversation(current, id, { status: "error", snippet: translate(current.settings.general.locale, "runFailedSnippet") }));
+          this.setState((current) => patchConversation(current, id, { activeRunId: undefined, status: "error", snippet: translate(current.settings.general.locale, "runFailedSnippet") }));
         }
       })
       .finally(() => {
@@ -566,6 +615,11 @@ class WorkspaceStore implements Workspace {
       void cancelRun(active.runId).catch(() => undefined);
       active.controller.abort();
       this.runs.delete(id);
+    } else {
+      const activeRunId = this.find(id)?.activeRunId;
+      if (activeRunId) {
+        void cancelRun(activeRunId).catch(() => undefined);
+      }
     }
     // Reset the conversation even when there is no live run handle (e.g. a
     // seeded "running" conversation, or one left "running" after a decision):
@@ -576,6 +630,7 @@ class WorkspaceStore implements Workspace {
         return current;
       }
       return patchConversation(current, id, {
+        activeRunId: undefined,
         status: "idle",
         snippet: translate(current.settings.general.locale, "runCanceledSnippet"),
         time: nowLabel(),

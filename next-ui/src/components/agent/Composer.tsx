@@ -223,7 +223,7 @@ export function Composer({
       <Box
         sx={{
           display: "flex",
-          alignItems: "flex-end",
+          alignItems: "center",
           gap: 1,
           p: 1,
           borderRadius: (t) => `${t.custom.radii.lg}px`,
@@ -244,7 +244,7 @@ export function Composer({
           onChange={chooseFiles}
           style={{ position: "absolute", width: 1, height: 1, opacity: 0, pointerEvents: "none" }}
         />
-        <IconButton aria-label={t("attach")} sx={{ mb: "1px" }} onClick={() => fileInputRef.current?.click()}>
+        <IconButton aria-label={t("attach")} sx={{ flex: "0 0 auto" }} onClick={() => fileInputRef.current?.click()}>
           <AttachFileIcon sx={{ fontSize: 18 }} />
         </IconButton>
         <InputBase

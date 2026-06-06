@@ -5,11 +5,12 @@ import { homedir, tmpdir } from "node:os";
 import { basename, delimiter, dirname, join } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
-import { query, type CanUseTool, type Options as ClaudeQueryOptions, type PermissionResult } from "@anthropic-ai/claude-agent-sdk";
+import { query, type CanUseTool, type EffortLevel, type Options as ClaudeQueryOptions, type PermissionResult } from "@anthropic-ai/claude-agent-sdk";
 import type { Plugin, ViteDevServer, PreviewServer } from "vite";
 import { parseGitStatusPorcelain } from "./src/lib/git-status";
 import { cloneAppSettings, defaultAppSettings, isAgentAccessMode, isAppSettings, type AgentAccessMode, type Locale } from "./src/components/workspace/app-settings";
 import { buildInitialWorkspaceState, cloneWorkspaceState, type WorkspaceState } from "./src/components/workspace/workspace-state";
+import { agentProfileEquals, getAgent, isAgentId, normalizeAgentProfile, type AgentProfile } from "./src/components/agent/agents";
 import { type AgentBlock, type ChatMessage, type RunUsage } from "./src/components/agent/types";
 import { translate } from "./src/i18n/I18nProvider";
 import { pickDirectoryPathFromSystemDialog } from "../src/server/directory-picker";
@@ -389,12 +390,17 @@ function seedConversationById(state: WorkspaceState): Map<string, WorkspaceConve
 }
 
 function migrateConversationProfile(conversation: WorkspaceConversation, fresh: WorkspaceConversation | undefined): Pick<WorkspaceConversation, "agent" | "profile"> {
-  const profile = conversation.profile ?? { agent: conversation.agent, variant: "DEFAULT" };
-  if (profile.agent === "codex" && profile.variant === "GPT-5") {
-    return { agent: "codex", profile: { agent: "codex", variant: "GPT-5.5" } };
-  }
-  if (legacySeedCopy[conversation.id] && fresh?.profile && profile.agent === fresh.profile.agent && profile.variant === "DEFAULT" && fresh.profile.variant !== "DEFAULT") {
-    return { agent: fresh.profile.agent, profile: fresh.profile };
+  const profile = normalizeAgentProfile(conversation.profile, conversation.agent);
+  if (
+    legacySeedCopy[conversation.id] &&
+    fresh?.profile &&
+    profile.agent === fresh.profile.agent &&
+    profile.model === "default" &&
+    profile.reasoning === "default" &&
+    profile.mode === "default" &&
+    !agentProfileEquals(profile, fresh.profile)
+  ) {
+    return { agent: fresh.profile.agent, profile: normalizeAgentProfile(fresh.profile, fresh.profile.agent) };
   }
   return { agent: profile.agent, profile };
 }
@@ -1089,9 +1095,19 @@ interface RunCancelRequest {
 
 interface RunRequest {
   readonly agent: string;
-  readonly variant: string;
+  readonly model: string;
+  readonly reasoning: string;
+  readonly mode: AgentProfile["mode"];
   readonly prompt: string;
   readonly accessMode: AgentAccessMode;
+}
+
+interface RunArgsRequest {
+  readonly prompt: string;
+  readonly model?: string;
+  readonly reasoning?: string;
+  readonly mode?: AgentProfile["mode"];
+  readonly accessMode?: AgentAccessMode;
 }
 
 interface BackgroundRunBinding {
@@ -1136,27 +1152,53 @@ interface RunSpec {
   readonly createTranslator: () => (line: string) => RunEvent[];
 }
 
-const MODEL_BY_AGENT_VARIANT: Record<string, Record<string, string>> = {
-  codex: {
-    "GPT-5.5": "gpt-5.5",
-  },
-  gemini: {
-    Flash: "gemini-2.5-flash",
-    Pro: "gemini-2.5-pro",
-  },
-  opencode: {
-    DEFAULT: "opencode/deepseek-v4-flash-free",
-  },
-};
-
 const CLAUDE_SAFE_READ_TOOLS = ["Read", "Glob", "Grep", "LS"] as const;
+const CLAUDE_EFFORT_LEVELS = new Set<EffortLevel>(["low", "medium", "high", "xhigh", "max"]);
 
-function modelForVariant(agent: string, variant: string): string | undefined {
-  const variants = MODEL_BY_AGENT_VARIANT[agent];
-  if (!variants) {
+function profileForArgs(agent: AgentProfile["agent"], request: RunArgsRequest): AgentProfile {
+  return normalizeAgentProfile(
+    {
+      agent,
+      model: request.model ?? "default",
+      reasoning: request.reasoning ?? "default",
+      mode: request.mode ?? "default",
+    },
+    agent,
+  );
+}
+
+function optionValue(agent: AgentProfile["agent"], kind: "models" | "reasoning", id: string): string | undefined {
+  const option = getAgent(agent)[kind].find((item) => item.id === id);
+  if (!option) {
     return undefined;
   }
-  return variants[variant];
+  return option.value;
+}
+
+function modelForProfile(profile: AgentProfile): string | undefined {
+  return optionValue(profile.agent, "models", profile.model);
+}
+
+function reasoningForProfile(profile: AgentProfile): string | undefined {
+  return optionValue(profile.agent, "reasoning", profile.reasoning);
+}
+
+function asClaudeEffort(value: string | undefined): EffortLevel | undefined {
+  return value && CLAUDE_EFFORT_LEVELS.has(value as EffortLevel) ? (value as EffortLevel) : undefined;
+}
+
+function requestedProfileError(agent: AgentProfile["agent"], model: string, reasoning: string, mode: AgentProfile["mode"]): string | null {
+  const def = getAgent(agent);
+  if (!def.models.some((option) => option.id === model)) {
+    return `Unknown model '${model}' for ${agent}.`;
+  }
+  if (!def.reasoning.some((option) => option.id === reasoning)) {
+    return `Unknown reasoning '${reasoning}' for ${agent}.`;
+  }
+  if (!def.modes.some((option) => option.id === mode)) {
+    return `Unknown work mode '${mode}' for ${agent}.`;
+  }
+  return null;
 }
 
 function parseAccessMode(value: unknown): AgentAccessMode | null {
@@ -1167,7 +1209,7 @@ function parseAccessMode(value: unknown): AgentAccessMode | null {
 }
 
 function claudePermissionModeForRequest(request: RunRequest): ClaudeQueryOptions["permissionMode"] {
-  if (request.accessMode === "read-only" || request.variant === "Plan") {
+  if (request.accessMode === "read-only" || request.mode === "plan") {
     return "plan";
   }
   return "default";
@@ -1181,52 +1223,71 @@ export function buildClaudeSdkOptions(request: RunRequest, cwd: string, abortCon
     cwd,
     permissionMode: claudePermissionModeForRequest(request),
   };
-  const model = modelForVariant("claude-code", request.variant);
+  const profile = normalizeAgentProfile(request, "claude-code");
+  const model = modelForProfile(profile);
   if (model) {
     options.model = model;
+  }
+  const effort = asClaudeEffort(reasoningForProfile(profile));
+  if (effort) {
+    options.effort = effort;
   }
   return options;
 }
 
-export function buildClaudeRunArgs(prompt: string, variant = "DEFAULT", accessMode: AgentAccessMode = "read-only"): string[] {
-  const args = ["-p", prompt, "--output-format", "stream-json", "--verbose", "--include-partial-messages"];
-  const model = modelForVariant("claude-code", variant);
+export function buildClaudeRunArgs(request: RunArgsRequest): string[] {
+  const profile = profileForArgs("claude-code", request);
+  const accessMode = request.accessMode ?? "read-only";
+  const args = ["-p", request.prompt, "--output-format", "stream-json", "--verbose", "--include-partial-messages"];
+  const model = modelForProfile(profile);
   if (model) {
     args.push("--model", model);
   }
-  args.push("--permission-mode", accessMode === "read-write" && variant !== "Plan" ? "acceptEdits" : "plan");
+  const effort = reasoningForProfile(profile);
+  if (effort) {
+    args.push("--effort", effort);
+  }
+  args.push("--permission-mode", accessMode === "read-write" && profile.mode !== "plan" ? "acceptEdits" : "plan");
   return args;
 }
 
-export function buildCodexRunArgs(prompt: string, variant = "DEFAULT", accessMode: AgentAccessMode = "read-only"): string[] {
-  void accessMode;
+export function buildCodexRunArgs(request: RunArgsRequest): string[] {
+  const profile = profileForArgs("codex", request);
   const args = ["exec", "--json", "--sandbox", "read-only", "--skip-git-repo-check"];
-  const model = modelForVariant("codex", variant);
+  const model = modelForProfile(profile);
   if (model) {
     args.push("--model", model);
   }
-  args.push(prompt);
+  const reasoning = reasoningForProfile(profile);
+  if (reasoning) {
+    args.push("-c", `model_reasoning_effort="${reasoning}"`);
+  }
+  args.push(request.prompt);
   return args;
 }
 
-export function buildGeminiRunArgs(prompt: string, variant = "DEFAULT", accessMode: AgentAccessMode = "read-only"): string[] {
-  void accessMode;
-  const args = ["--prompt", prompt, "--output-format", "stream-json", "--approval-mode", "plan", "--skip-trust"];
-  const model = modelForVariant("gemini", variant);
+export function buildGeminiRunArgs(request: RunArgsRequest): string[] {
+  const profile = profileForArgs("gemini", request);
+  const args = ["--prompt", request.prompt, "--output-format", "stream-json", "--approval-mode", "plan", "--skip-trust"];
+  const model = modelForProfile(profile);
   if (model) {
     args.push("--model", model);
   }
   return args;
 }
 
-export function buildOpenCodeRunArgs(prompt: string, variant = "DEFAULT", accessMode: AgentAccessMode = "read-only"): string[] {
-  void accessMode;
+export function buildOpenCodeRunArgs(request: RunArgsRequest): string[] {
+  const profile = profileForArgs("opencode", request);
   const args = ["run", "--format", "json", "--thinking"];
-  const model = modelForVariant("opencode", variant);
+  const model = modelForProfile(profile);
   if (model) {
     args.push("--model", model);
   }
-  args.push(prompt);
+  const reasoning = reasoningForProfile(profile);
+  if (reasoning) {
+    args.push("--variant", reasoning);
+  }
+  args.push(request.prompt);
   return args;
 }
 
@@ -1236,27 +1297,27 @@ const RUN: Record<string, RunSpec> = {
   "claude-code": {
     bin: "claude",
     supportsWritableApprovals: true,
-    args: (request) => buildClaudeRunArgs(request.prompt, request.variant, request.accessMode),
+    args: (request) => buildClaudeRunArgs(request),
     createTranslator: createClaudeStreamTranslator,
   },
   codex: {
     bin: "codex",
     env: DETECT.codex.env,
     supportsWritableApprovals: false,
-    args: (request) => buildCodexRunArgs(request.prompt, request.variant, request.accessMode),
+    args: (request) => buildCodexRunArgs(request),
     createTranslator: createCodexStreamTranslator,
   },
   gemini: {
     bin: "gemini",
     env: DETECT.gemini.env,
     supportsWritableApprovals: false,
-    args: (request) => buildGeminiRunArgs(request.prompt, request.variant, request.accessMode),
+    args: (request) => buildGeminiRunArgs(request),
     createTranslator: createGeminiStreamTranslator,
   },
   opencode: {
     bin: "opencode",
     supportsWritableApprovals: false,
-    args: (request) => buildOpenCodeRunArgs(request.prompt, request.variant, request.accessMode),
+    args: (request) => buildOpenCodeRunArgs(request),
     createTranslator: createOpenCodeStreamTranslator,
   },
 };
@@ -1766,6 +1827,7 @@ function startPersistedBackgroundRun(binding: BackgroundRunBinding, request: Run
   const accumulator = createBackgroundAccumulator();
   const state = ensureBackgroundUserMessage(readWorkspaceState(), binding, request.prompt);
   const started = patchWorkspaceConversation(state, binding.conversationId, {
+    activeRunId: binding.runId,
     status: "running",
     snippet: clip(request.prompt, 60),
     time: binding.userMessageTime,
@@ -1860,12 +1922,13 @@ function finishPersistedBackgroundRun(binding: BackgroundRunBinding, accumulator
   const hadError = accumulator.statuses.some((status) => status.level === "error");
   const waiting = !canceled && !hadError && blocksNeedInput(blocks);
   const patch = canceled
-    ? { status: "idle" as const, snippet: translate(locale, "runCanceledSnippet"), time: binding.agentMessageTime }
+    ? { activeRunId: undefined, status: "idle" as const, snippet: translate(locale, "runCanceledSnippet"), time: binding.agentMessageTime }
     : hadError
-      ? { status: "error" as const, snippet: translate(locale, "runFailedSnippet"), time: binding.agentMessageTime }
+      ? { activeRunId: undefined, status: "error" as const, snippet: translate(locale, "runFailedSnippet"), time: binding.agentMessageTime }
       : waiting
         ? { status: "waiting" as const, snippet: translate(locale, "runNeedsInputSnippet"), time: binding.agentMessageTime }
         : {
+            activeRunId: undefined,
             status: "done" as const,
             snippet: snippetFromBlocks(blocks, locale),
             time: binding.agentMessageTime,
@@ -2547,18 +2610,36 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
   });
   req.on("end", () => {
     let agent = "";
-    let variant = "DEFAULT";
+    let model = "default";
+    let reasoning = "default";
+    let mode: AgentProfile["mode"] = "default";
     let prompt = "";
     let requestedCwd = "";
     let accessMode: AgentAccessMode = "read-only";
     let accessModeValid = true;
+    let profileValid = true;
+    let profileError = "";
     let binding: BackgroundRunBinding | null = null;
     let bindingInvalid = false;
     try {
       const parsed = JSON.parse(body || "{}") as unknown;
       if (isRecord(parsed)) {
         agent = typeof parsed.agent === "string" ? parsed.agent : "";
-        variant = typeof parsed.variant === "string" ? parsed.variant : "DEFAULT";
+        const hasNewProfileFields = typeof parsed.model === "string" || typeof parsed.reasoning === "string" || typeof parsed.mode === "string";
+        if (hasNewProfileFields) {
+          model = typeof parsed.model === "string" ? parsed.model : "default";
+          reasoning = typeof parsed.reasoning === "string" ? parsed.reasoning : "default";
+          mode = parsed.mode === "plan" ? "plan" : "default";
+          if (parsed.mode !== undefined && parsed.mode !== "default" && parsed.mode !== "plan") {
+            profileValid = false;
+            profileError = "Invalid mode. Expected default or plan.";
+          }
+        } else if (typeof parsed.variant === "string" && isAgentId(agent)) {
+          const legacyProfile = normalizeAgentProfile({ agent, variant: parsed.variant }, agent);
+          model = legacyProfile.model;
+          reasoning = legacyProfile.reasoning;
+          mode = legacyProfile.mode;
+        }
         prompt = typeof parsed.prompt === "string" ? parsed.prompt.trim() : "";
         requestedCwd = typeof parsed.cwd === "string" ? parsed.cwd : "";
         const parsedAccessMode = parseAccessMode(parsed.accessMode);
@@ -2606,12 +2687,26 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
       sender.end();
       return;
     }
+    if (!profileValid) {
+      send({ type: "error", text: profileError });
+      sendDone();
+      sender.end();
+      return;
+    }
 
     const spec = RUN[agent];
     const resolvedBin = spec ? resolveBinOnPath(spec.bin) : null;
-    if (!spec || !resolvedBin) {
+    if (!spec || !resolvedBin || !isAgentId(agent)) {
       send({ type: "start" });
       send({ type: "status", level: "warn", text: spec ? `${spec.bin} is not installed on this machine` : `Running ${agent || "this agent"} is not wired yet` });
+      sendDone();
+      sender.end();
+      return;
+    }
+    const requestedProfileErrorMessage = requestedProfileError(agent, model, reasoning, mode);
+    if (requestedProfileErrorMessage) {
+      send({ type: "start" });
+      send({ type: "error", text: requestedProfileErrorMessage });
       sendDone();
       sender.end();
       return;
@@ -2664,7 +2759,7 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
       // ignore
     }
 
-    const request: RunRequest = { agent, variant, prompt, accessMode };
+    const request: RunRequest = { agent, model, reasoning, mode, prompt, accessMode };
     if (binding) {
       accumulator = startPersistedBackgroundRun(binding, request);
     }

@@ -9,9 +9,13 @@ import { pop } from "./anim";
 import {
   AGENTS,
   type AgentId,
+  type AgentOption,
   type AgentProfile,
+  type AgentWorkMode,
   agentStatusKey,
+  defaultProfileForAgent,
   getAgent,
+  normalizeAgentProfile,
   withAlpha,
 } from "./agents";
 import { useAgentCliInfo, useAgentStatus, useAgentStatusError, useAgentStatusLive, useReloadAgentStatus } from "./use-agent-status";
@@ -20,7 +24,7 @@ function cliBinsLabel(bins: readonly string[]): string {
   return bins.length > 0 ? bins.join(", ") : "unknown";
 }
 
-/** AgentPicker — a polished dialog for choosing the agent + variant, showing
+/** AgentPicker — a polished dialog for choosing the agent profile, showing
  * each agent's status in the system. */
 export function AgentPicker({
   open,
@@ -33,8 +37,11 @@ export function AgentPicker({
   readonly onClose: () => void;
   readonly onSelect: (profile: AgentProfile) => void;
 }) {
-  const [agent, setAgent] = useState<AgentId>(value.agent);
-  const [variant, setVariant] = useState<string>(value.variant);
+  const initialProfile = normalizeAgentProfile(value);
+  const [agent, setAgent] = useState<AgentId>(initialProfile.agent);
+  const [model, setModel] = useState<string>(initialProfile.model);
+  const [reasoning, setReasoning] = useState<string>(initialProfile.reasoning);
+  const [mode, setMode] = useState<AgentWorkMode>(initialProfile.mode);
   const statusOf = useAgentStatus();
   const cliInfoOf = useAgentCliInfo();
   const liveCliDetection = useAgentStatusLive();
@@ -50,18 +57,24 @@ export function AgentPicker({
 
   useEffect(() => {
     if (open) {
-      setAgent(value.agent);
-      setVariant(value.variant);
+      const nextProfile = normalizeAgentProfile(value);
+      setAgent(nextProfile.agent);
+      setModel(nextProfile.model);
+      setReasoning(nextProfile.reasoning);
+      setMode(nextProfile.mode);
     }
-  }, [open, value.agent, value.variant]);
+  }, [open, value]);
 
   const choose = (id: AgentId) => {
+    const nextProfile = defaultProfileForAgent(id);
     setAgent(id);
-    setVariant("DEFAULT");
+    setModel(nextProfile.model);
+    setReasoning(nextProfile.reasoning);
+    setMode(nextProfile.mode);
   };
 
   const confirm = () => {
-    onSelect({ agent, variant });
+    onSelect(normalizeAgentProfile({ agent, model, reasoning, mode }));
     onClose();
   };
 
@@ -103,7 +116,7 @@ export function AgentPicker({
         </IconButton>
       </Stack>
 
-      <Box sx={{ px: 2.5, pb: 1, maxHeight: 360, overflow: "auto" }}>
+      <Box sx={{ px: 2.5, pt: 0.75, pb: 1, maxHeight: 360, overflow: "auto" }}>
         {detectionError && (
           <Alert
             severity="error"
@@ -192,39 +205,14 @@ export function AgentPicker({
         </Box>
       </Box>
 
-      {def.variants.length > 1 && (
-        <Box sx={{ px: 2.5, pt: 1, pb: 0.5 }}>
-          <Typography variant="microLabel" sx={{ color: "text.secondary", display: "block", mb: 0.75 }}>
-            {t("agentVariant", { agent: def.name })}
-          </Typography>
-          <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap", gap: 1 }}>
-            {def.variants.map((v) => {
-              const on = v === variant;
-              return (
-                <Box
-                  key={v}
-                  onClick={() => setVariant(v)}
-                  sx={{
-                    px: 1.25,
-                    py: 0.5,
-                    borderRadius: (t) => `${t.custom.radii.pill}px`,
-                    cursor: "pointer",
-                    fontFamily: (t) => t.custom.fonts.mono,
-                    fontSize: "0.72rem",
-                    fontWeight: 600,
-                    color: (t) => (on ? t.palette.status.running.main : t.palette.text.secondary),
-                    border: (t) => `1px solid ${on ? t.palette.status.running.border : t.custom.borders.subtle}`,
-                    backgroundColor: (t) => (on ? t.palette.status.running.soft : t.custom.surfaces.s2),
-                    transition: "all 140ms ease",
-                  }}
-                >
-                  {v}
-                </Box>
-              );
-            })}
-          </Stack>
-        </Box>
-      )}
+      <AgentOptionGroup label={t("agentModel", { agent: def.name })} options={def.models} value={model} onSelect={setModel} />
+      <AgentOptionGroup label={t("agentReasoning", { agent: def.name })} options={def.reasoning} value={reasoning} onSelect={setReasoning} />
+      <AgentOptionGroup
+        label={t("agentWorkMode", { agent: def.name })}
+        options={def.modes}
+        value={mode}
+        onSelect={(nextMode) => setMode(nextMode === "plan" ? "plan" : "default")}
+      />
 
       <DialogActions sx={{ px: 2.5, py: 2 }}>
         <Box sx={{ flex: 1 }}>
@@ -242,5 +230,62 @@ export function AgentPicker({
         </Button>
       </DialogActions>
     </Dialog>
+  );
+}
+
+function AgentOptionGroup({
+  label,
+  options,
+  value,
+  onSelect,
+}: {
+  readonly label: string;
+  readonly options: readonly AgentOption[];
+  readonly value: string;
+  readonly onSelect: (value: string) => void;
+}) {
+  if (options.length <= 1) {
+    return null;
+  }
+  return (
+    <Box sx={{ px: 2.5, pt: 1, pb: 0.5 }}>
+      <Typography variant="microLabel" sx={{ color: "text.secondary", display: "block", mb: 0.75 }}>
+        {label}
+      </Typography>
+      <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap", gap: 1 }}>
+        {options.map((option) => {
+          const on = option.id === value;
+          return (
+            <Box
+              key={option.id}
+              component="button"
+              type="button"
+              aria-pressed={on}
+              onClick={() => onSelect(option.id)}
+              sx={{
+                px: 1.25,
+                py: 0.5,
+                borderRadius: (t) => `${t.custom.radii.pill}px`,
+                cursor: "pointer",
+                font: "inherit",
+                fontFamily: (t) => t.custom.fonts.mono,
+                fontSize: "0.72rem",
+                fontWeight: 600,
+                color: (t) => (on ? t.palette.status.running.main : t.palette.text.secondary),
+                border: (t) => `1px solid ${on ? t.palette.status.running.border : t.custom.borders.subtle}`,
+                backgroundColor: (t) => (on ? t.palette.status.running.soft : t.custom.surfaces.s2),
+                transition: "all 140ms ease",
+                "&:focus-visible": {
+                  outline: (t) => `2px solid ${t.custom.borders.focus}`,
+                  outlineOffset: 2,
+                },
+              }}
+            >
+              {option.label}
+            </Box>
+          );
+        })}
+      </Stack>
+    </Box>
   );
 }

@@ -31,7 +31,9 @@ describe("workspace state", () => {
         accessMode: "read-only",
         defaultProfile: {
           agent: "claude-code",
-          variant: "DEFAULT",
+          model: "default",
+          reasoning: "default",
+          mode: "default",
         },
       },
     });

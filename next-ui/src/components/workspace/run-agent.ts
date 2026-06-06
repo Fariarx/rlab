@@ -146,7 +146,7 @@ async function streamRun(
   const res = await fetch("/api/run", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ agent: profile.agent, variant: profile.variant, prompt, cwd, accessMode, ...binding }),
+    body: JSON.stringify({ agent: profile.agent, model: profile.model, reasoning: profile.reasoning, mode: profile.mode, prompt, cwd, accessMode, ...binding }),
     signal,
   });
   if (!res.ok || !res.body) {

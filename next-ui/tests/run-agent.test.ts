@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { type AgentBlock } from "../src/components/agent";
+import { DEFAULT_PROFILE, type AgentBlock } from "../src/components/agent";
 import { runConversation } from "../src/components/workspace/run-agent";
 
 function streamResponse(events: readonly unknown[]): Response {
@@ -58,7 +58,7 @@ describe("runConversation", () => {
     const blocks: AgentBlock[][] = [];
 
     await runConversation({
-      profile: { agent: "claude-code", variant: "DEFAULT" },
+      profile: DEFAULT_PROFILE,
       prompt: "edit ttl",
       accessMode: "read-only",
       locale: "ru",
@@ -99,7 +99,7 @@ describe("runConversation", () => {
     const blocks: AgentBlock[][] = [];
 
     await runConversation({
-      profile: { agent: "claude-code", variant: "DEFAULT" },
+      profile: DEFAULT_PROFILE,
       prompt: "write file",
       accessMode: "read-only",
       locale: "ru",
@@ -136,7 +136,7 @@ describe("runConversation", () => {
     const blocks: AgentBlock[][] = [];
 
     const result = await runConversation({
-      profile: { agent: "claude-code", variant: "DEFAULT" },
+      profile: DEFAULT_PROFILE,
       prompt: "run tests",
       accessMode: "read-write",
       locale: "ru",
@@ -173,7 +173,7 @@ describe("runConversation", () => {
     const blocks: AgentBlock[][] = [];
 
     const result = await runConversation({
-      profile: { agent: "claude-code", variant: "DEFAULT" },
+      profile: DEFAULT_PROFILE,
       prompt: "choose format",
       accessMode: "read-write",
       locale: "ru",
@@ -206,7 +206,7 @@ describe("runConversation", () => {
     const blocks: AgentBlock[][] = [];
 
     await runConversation({
-      profile: { agent: "claude-code", variant: "DEFAULT" },
+      profile: DEFAULT_PROFILE,
       prompt: "answer",
       accessMode: "read-only",
       locale: "ru",
@@ -225,7 +225,7 @@ describe("runConversation", () => {
     const blocks: AgentBlock[][] = [];
 
     const result = await runConversation({
-      profile: { agent: "claude-code", variant: "DEFAULT" },
+      profile: DEFAULT_PROFILE,
       prompt: "answer",
       accessMode: "read-only",
       locale: "ru",
@@ -252,7 +252,7 @@ describe("runConversation", () => {
     );
 
     const result = await runConversation({
-      profile: { agent: "opencode", variant: "DEFAULT" },
+      profile: { agent: "opencode", model: "default", reasoning: "default", mode: "default" },
       prompt: "answer",
       accessMode: "read-only",
       locale: "ru",

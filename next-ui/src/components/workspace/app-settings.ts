@@ -1,4 +1,4 @@
-import { type AgentProfile } from "../agent/agents";
+import { DEFAULT_PROFILE, isAgentId, normalizeAgentProfile, type AgentProfile } from "../agent/agents";
 
 export type ThemeMode = "dark" | "light" | "high-contrast";
 export type Locale = "en" | "ru";
@@ -49,10 +49,7 @@ export const defaultAppSettings: AppSettings = {
   },
   agents: {
     accessMode: "read-only",
-    defaultProfile: {
-      agent: "claude-code",
-      variant: "DEFAULT",
-    },
+    defaultProfile: DEFAULT_PROFILE,
   },
 };
 
@@ -62,7 +59,7 @@ export function cloneAppSettings(settings: AppSettings): AppSettings {
     general: { ...settings.general },
     agents: {
       accessMode: settings.agents.accessMode ?? defaultAppSettings.agents.accessMode,
-      defaultProfile: { ...settings.agents.defaultProfile },
+      defaultProfile: normalizeAgentProfile(settings.agents.defaultProfile),
     },
   };
 }
@@ -81,7 +78,7 @@ export function mergeAppSettings(current: AppSettings, patch: AppSettingsPatch):
       ...current.agents,
       ...patch.agents,
       accessMode: patch.agents?.accessMode ?? current.agents.accessMode ?? defaultAppSettings.agents.accessMode,
-      defaultProfile: patch.agents?.defaultProfile ? { ...patch.agents.defaultProfile } : { ...current.agents.defaultProfile },
+      defaultProfile: normalizeAgentProfile(patch.agents?.defaultProfile ?? current.agents.defaultProfile),
     },
   };
 }
@@ -111,16 +108,11 @@ function isAgentProfile(value: unknown): value is AgentProfile {
     return false;
   }
   return (
-    (value.agent === "claude-code" ||
-      value.agent === "codex" ||
-      value.agent === "gemini" ||
-      value.agent === "amp" ||
-      value.agent === "opencode" ||
-      value.agent === "cursor" ||
-      value.agent === "qwen" ||
-      value.agent === "copilot" ||
-      value.agent === "droid") &&
-    typeof value.variant === "string"
+    isAgentId(value.agent) &&
+    ((typeof value.model === "string" &&
+      typeof value.reasoning === "string" &&
+      (value.mode === "default" || value.mode === "plan")) ||
+      typeof value.variant === "string")
   );
 }
 

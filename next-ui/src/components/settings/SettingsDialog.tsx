@@ -11,9 +11,12 @@ import {
   AGENTS,
   type AgentDef,
   type AgentId,
+  type AgentOption,
   type AgentProfile,
   AgentGlyph,
   agentStatusKey,
+  defaultProfileForAgent,
+  normalizeAgentProfile,
   useAgentStatus,
   useReloadAgentStatus,
 } from "../agent";
@@ -34,6 +37,51 @@ function SettingRow({ title, description, control }: { readonly title: string; r
         <Typography sx={{ fontSize: "0.78rem", color: "text.secondary" }}>{description}</Typography>
       </Box>
       <Box sx={{ flex: "0 0 auto" }}>{control}</Box>
+    </Stack>
+  );
+}
+
+function ProfileToggleRow({
+  label,
+  ariaLabel,
+  options,
+  value,
+  optionAriaLabel,
+  onSelect,
+}: {
+  readonly label: string;
+  readonly ariaLabel: string;
+  readonly options: readonly AgentOption[];
+  readonly value: string;
+  readonly optionAriaLabel: (option: AgentOption) => string;
+  readonly onSelect: (value: string) => void;
+}) {
+  if (options.length <= 1) {
+    return null;
+  }
+  return (
+    <Stack direction={{ xs: "column", sm: "row" }} spacing={1} sx={{ alignItems: { xs: "stretch", sm: "center" } }}>
+      <Typography variant="microLabel" sx={{ color: "text.secondary", minWidth: 128 }}>
+        {label}
+      </Typography>
+      <ToggleButtonGroup
+        exclusive
+        size="small"
+        value={value}
+        aria-label={ariaLabel}
+        onChange={(_, nextValue: string | null) => {
+          if (nextValue) {
+            onSelect(nextValue);
+          }
+        }}
+        sx={{ flexWrap: "wrap", gap: 0.75 }}
+      >
+        {options.map((option) => (
+          <ToggleButton key={option.id} value={option.id} aria-label={optionAriaLabel(option)}>
+            {option.label}
+          </ToggleButton>
+        ))}
+      </ToggleButtonGroup>
     </Stack>
   );
 }
@@ -219,12 +267,11 @@ function AgentsSection({
   };
 
   const selectDefaultAgent = (agent: AgentId) => {
-    const nextVariant = defaultProfile.agent === agent ? defaultProfile.variant : "DEFAULT";
-    onDefaultProfileChange({ agent, variant: nextVariant });
+    onDefaultProfileChange(defaultProfile.agent === agent ? normalizeAgentProfile(defaultProfile) : defaultProfileForAgent(agent));
   };
 
-  const selectDefaultVariant = (agent: AgentId, variant: string) => {
-    onDefaultProfileChange({ agent, variant });
+  const selectDefaultProfileOption = (agent: AgentId, patch: Partial<Omit<AgentProfile, "agent">>) => {
+    onDefaultProfileChange(normalizeAgentProfile({ ...defaultProfile, agent, ...patch }, agent));
   };
 
   const operationMessage =
@@ -347,29 +394,32 @@ function AgentsSection({
               </Stack>
             </Stack>
 
-            {selectedDefault && a.variants.length > 1 && !installable && !blocked && (
-              <Stack direction={{ xs: "column", sm: "row" }} spacing={1} sx={{ alignItems: { xs: "stretch", sm: "center" }, pl: { sm: 5.75 } }}>
-                <Typography variant="microLabel" sx={{ color: "text.secondary", minWidth: 128 }}>
-                  {t("defaultModel")}
-                </Typography>
-                <ToggleButtonGroup
-                  exclusive
-                  size="small"
-                  value={defaultProfile.variant}
-                  aria-label={t("defaultModelFor", { agent: a.name })}
-                  onChange={(_, nextVariant: string | null) => {
-                    if (nextVariant) {
-                      selectDefaultVariant(a.id, nextVariant);
-                    }
-                  }}
-                  sx={{ flexWrap: "wrap", gap: 0.75 }}
-                >
-                  {a.variants.map((variant) => (
-                    <ToggleButton key={variant} value={variant} aria-label={t("makeDefaultAgentVariant", { agent: a.name, variant })}>
-                      {variant}
-                    </ToggleButton>
-                  ))}
-                </ToggleButtonGroup>
+            {selectedDefault && !installable && !blocked && (
+              <Stack spacing={1} sx={{ pl: { sm: 5.75 } }}>
+                <ProfileToggleRow
+                  label={t("defaultModel")}
+                  ariaLabel={t("defaultModelFor", { agent: a.name })}
+                  options={a.models}
+                  value={defaultProfile.model}
+                  optionAriaLabel={(option) => t("makeDefaultAgentModel", { agent: a.name, option: option.label })}
+                  onSelect={(model) => selectDefaultProfileOption(a.id, { model })}
+                />
+                <ProfileToggleRow
+                  label={t("defaultReasoning")}
+                  ariaLabel={t("defaultReasoningFor", { agent: a.name })}
+                  options={a.reasoning}
+                  value={defaultProfile.reasoning}
+                  optionAriaLabel={(option) => t("makeDefaultAgentReasoning", { agent: a.name, option: option.label })}
+                  onSelect={(reasoning) => selectDefaultProfileOption(a.id, { reasoning })}
+                />
+                <ProfileToggleRow
+                  label={t("defaultWorkMode")}
+                  ariaLabel={t("defaultWorkModeFor", { agent: a.name })}
+                  options={a.modes}
+                  value={defaultProfile.mode}
+                  optionAriaLabel={(option) => t("makeDefaultAgentWorkMode", { agent: a.name, option: option.label })}
+                  onSelect={(mode) => selectDefaultProfileOption(a.id, { mode: mode === "plan" ? "plan" : "default" })}
+                />
               </Stack>
             )}
           </Stack>

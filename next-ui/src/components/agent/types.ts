@@ -177,6 +177,7 @@ export interface ConversationSummary {
   readonly status: ConversationStatus;
   readonly agent: AgentId;
   readonly profile?: AgentProfile;
+  readonly activeRunId?: string;
   readonly unread?: boolean;
   readonly costUsd?: number;
   readonly usage?: RunUsage;

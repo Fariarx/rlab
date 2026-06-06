@@ -1,4 +1,5 @@
 import { type AgentBlock, type ChatMessage, type ComposerDraft, type ConversationSummary, type Project } from "../agent/types";
+import { normalizeAgentProfile } from "../agent/agents";
 import { cloneAppSettings, defaultAppSettings, type AppSettings } from "./app-settings";
 import { buildInitialThreads, initialChats, initialProjects } from "./sample-data";
 
@@ -56,7 +57,7 @@ export function cloneWorkspaceState(state: WorkspaceState): WorkspaceState {
 }
 
 function cloneConversation(conversation: ConversationSummary): ConversationSummary {
-  const profile = conversation.profile ?? { agent: conversation.agent, variant: "DEFAULT" };
+  const profile = normalizeAgentProfile(conversation.profile, conversation.agent);
   return { ...conversation, agent: profile.agent, profile };
 }
 

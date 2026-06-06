@@ -298,3 +298,49 @@
 [2m13:40:09[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/workspace/WorkspacePage.tsx, /src/components/kit/sections/AgentBlocksSection.tsx, /src/components/settings/SettingsDialog.tsx, /src/components/agent/AgentBadge.tsx[22m
 [2m13:42:15[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32m✨ new dependencies optimized: [33msimple-icons[32m[39m
 [2m13:42:15[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32m✨ optimized dependencies changed. reloading[39m
+[2m13:45:54[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/workspace/WorkspacePage.tsx, /src/components/kit/sections/AgentBlocksSection.tsx, /src/components/settings/SettingsDialog.tsx, /src/components/agent/ConversationList.tsx[22m
+[2m13:46:07[22m [36m[1m[vite][22m[39m [32mvite-agents-plugin.ts changed, restarting server...[39m
+[2m13:46:07[22m [36m[1m[vite][22m[39m server restarted.
+[2m13:46:18[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/workspace/WorkspacePage.tsx[22m
+[2m13:46:36[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/workspace/WorkspacePage.tsx[22m
+[2m13:46:46[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/workspace/WorkspacePage.tsx[22m
+[2m14:01:42[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/agent/AgentBadge.tsx[22m
+[2m14:02:12[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/WorkspacePage.tsx[22m
+[2m14:02:32[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/agent/Composer.tsx[22m
+[2m14:02:38[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/agent/Composer.tsx[22m
+[2m14:03:12[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/agent/Composer.tsx[22m
+[2m14:04:22[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/agent/AgentPicker.tsx[22m
+[2m14:04:32[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/workspace/WorkspacePage.tsx, /src/components/kit/sections/AgentBlocksSection.tsx, /src/components/settings/SettingsDialog.tsx, /src/components/agent/AgentGlyph.tsx, /src/components/agent/AgentMonogram.tsx, /src/components/agent/AgentPicker.tsx, /src/components/agent/AgentBadge.tsx, /src/components/agent/use-agent-status.tsx[22m
+[2m14:04:32[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/components/agent/use-agent-status.tsx[22m Could not Fast Refresh ("useAgentCliInfo" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m14:04:32[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/workspace/WorkspacePage.tsx, /src/components/kit/sections/AgentBlocksSection.tsx, /src/components/settings/SettingsDialog.tsx, /src/components/agent/AgentPicker.tsx, /src/components/agent/AgentBadge.tsx[22m
+[2m14:04:43[22m [36m[1m[vite][22m[39m [32msrc/components/workspace/app-settings.ts changed, restarting server...[39m
+[2m14:04:43[22m [36m[1m[vite][22m[39m server restarted.
+[2m14:05:04[22m [36m[1m[vite][22m[39m [32msrc/components/workspace/app-settings.ts changed, restarting server...[39m
+[2m14:05:04[22m [36m[1m[vite][22m[39m server restarted.
+[2m14:05:12[22m [36m[1m[vite][22m[39m [32msrc/components/workspace/workspace-state.ts changed, restarting server...[39m
+[2m14:05:12[22m [36m[1m[vite][22m[39m server restarted.
+[2m14:05:19[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/workspace/WorkspacePage.tsx[22m
+[2m14:05:27[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/WorkspacePage.tsx[22m
+[2m14:06:01[22m [36m[1m[vite][22m[39m [32msrc/components/workspace/sample-data.tsx changed, restarting server...[39m
+[2m14:06:01[22m [36m[1m[vite][22m[39m server restarted.
+[2m14:06:29[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/agent/AgentPicker.tsx[22m
+[2m14:06:40[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/agent/AgentBadge.tsx[22m
+[2m14:07:00[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/settings/SettingsDialog.tsx[22m
+[2m14:07:11[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/settings/SettingsDialog.tsx[22m
+[2m14:07:38[22m [36m[1m[vite][22m[39m [32msrc/i18n/I18nProvider.tsx changed, restarting server...[39m
+[2m14:07:38[22m [36m[1m[vite][22m[39m server restarted.
+[2m14:07:46[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/workspace/WorkspacePage.tsx[22m
+[2m14:08:19[22m [36m[1m[vite][22m[39m [32msrc/components/agent/agents.ts changed, restarting server...[39m
+[2m14:08:19[22m [36m[1m[vite][22m[39m server restarted.
+[2m14:08:26[22m [36m[1m[vite][22m[39m [32mvite-agents-plugin.ts changed, restarting server...[39m
+[2m14:08:26[22m [36m[1m[vite][22m[39m server restarted.
+[2m14:08:55[22m [36m[1m[vite][22m[39m [32mvite-agents-plugin.ts changed, restarting server...[39m
+[2m14:08:55[22m [36m[1m[vite][22m[39m server restarted.
+[2m14:09:11[22m [36m[1m[vite][22m[39m [32mvite-agents-plugin.ts changed, restarting server...[39m
+[2m14:09:11[22m [36m[1m[vite][22m[39m server restarted.
+[2m14:09:37[22m [36m[1m[vite][22m[39m [32mvite-agents-plugin.ts changed, restarting server...[39m
+[2m14:09:37[22m [36m[1m[vite][22m[39m server restarted.
+[2m14:09:50[22m [36m[1m[vite][22m[39m [32mvite-agents-plugin.ts changed, restarting server...[39m
+[2m14:09:50[22m [36m[1m[vite][22m[39m server restarted.
+[2m14:10:08[22m [36m[1m[vite][22m[39m [32mvite-agents-plugin.ts changed, restarting server...[39m
+[2m14:10:08[22m [36m[1m[vite][22m[39m server restarted.
