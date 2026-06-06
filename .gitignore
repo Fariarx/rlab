@@ -12,6 +12,7 @@ playwright-report
 web-ui/.env
 web-ui/.env.*
 !web-ui/.env.example
+next-ui/.dev-server.*.log
 packages/desktop/out
 packages/desktop/cli
 packages/desktop/*.tgz

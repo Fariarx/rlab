@@ -1,0 +1,145 @@
+import { type ReactNode } from "react";
+import { type StatusKey } from "../../theme/tokens";
+import { type AgentId } from "./agents";
+
+/** Run state shared by tool/command/plan-step style blocks. */
+export type RunState = "pending" | "running" | "ok" | "error";
+
+export interface ToolBlock {
+  readonly kind: "tool";
+  readonly name: string;
+  readonly summary?: string;
+  readonly args?: Readonly<Record<string, string>>;
+  readonly output?: string;
+  readonly state: RunState;
+  readonly duration?: string;
+}
+
+export interface CommandBlock {
+  readonly kind: "command";
+  readonly command: string;
+  readonly output?: string;
+  readonly state: RunState;
+  readonly exitCode?: number;
+}
+
+export interface DiffBlock {
+  readonly kind: "diff";
+  readonly file: string;
+  readonly additions: number;
+  readonly deletions: number;
+  readonly lines: ReadonlyArray<{ readonly type: "add" | "del" | "ctx"; readonly text: string }>;
+}
+
+export interface SearchBlock {
+  readonly kind: "search";
+  readonly query: string;
+  readonly state: RunState;
+  readonly results: ReadonlyArray<{ readonly title: string; readonly url: string }>;
+}
+
+export interface PlanBlock {
+  readonly kind: "plan";
+  readonly steps: ReadonlyArray<{ readonly label: string; readonly state: RunState }>;
+}
+
+export interface ReasoningBlock {
+  readonly kind: "reasoning";
+  readonly text: string;
+  /** When true, renders the live "thinking" animation instead of a summary. */
+  readonly active?: boolean;
+  readonly duration?: string;
+}
+
+export interface TextBlock {
+  readonly kind: "text";
+  readonly text: string;
+  /** Appends a blinking caret to convey live streaming. */
+  readonly streaming?: boolean;
+}
+
+export interface CodeBlockData {
+  readonly kind: "code";
+  readonly language: string;
+  readonly code: string;
+}
+
+export interface OptionsBlock {
+  readonly kind: "options";
+  readonly prompt: string;
+  readonly multi?: boolean;
+  readonly options: ReadonlyArray<{ readonly id: string; readonly label: string; readonly description?: string }>;
+}
+
+export interface ApprovalBlock {
+  readonly kind: "approval";
+  readonly title: string;
+  readonly detail?: string;
+}
+
+export interface StatusBlock {
+  readonly kind: "status";
+  readonly level: StatusKey;
+  readonly text: string;
+}
+
+export interface CitationBlock {
+  readonly kind: "citation";
+  readonly sources: ReadonlyArray<{ readonly label: string; readonly url: string }>;
+}
+
+export interface SuggestedActionsBlock {
+  readonly kind: "suggested";
+  readonly actions: ReadonlyArray<{
+    readonly id: string;
+    readonly label: string;
+    readonly icon?: ReactNode;
+    readonly tone?: "default" | "primary" | "danger";
+  }>;
+}
+
+export type AgentBlock =
+  | ReasoningBlock
+  | TextBlock
+  | ToolBlock
+  | CommandBlock
+  | DiffBlock
+  | SearchBlock
+  | PlanBlock
+  | CodeBlockData
+  | OptionsBlock
+  | ApprovalBlock
+  | StatusBlock
+  | CitationBlock
+  | SuggestedActionsBlock;
+
+export interface ChatMessage {
+  readonly id: string;
+  readonly role: "user" | "agent";
+  readonly time?: string;
+  /** User messages carry plain text; agent messages carry rich blocks. */
+  readonly text?: string;
+  readonly blocks?: readonly AgentBlock[];
+}
+
+/* ----------------------------- Sidebar / projects --------------------------- */
+
+export type ConversationStatus = "running" | "waiting" | "done" | "error" | "idle";
+
+export interface ConversationSummary {
+  readonly id: string;
+  readonly title: string;
+  readonly snippet: string;
+  readonly time: string;
+  readonly status: ConversationStatus;
+  readonly agent: AgentId;
+  readonly unread?: boolean;
+}
+
+export interface Project {
+  readonly id: string;
+  readonly name: string;
+  /** Real working directory the agent runs in for this project's conversations. */
+  readonly path?: string;
+  readonly conversations: readonly ConversationSummary[];
+}
