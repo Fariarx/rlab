@@ -6,9 +6,8 @@ import CreateNewFolderIcon from "@mui/icons-material/CreateNewFolder";
 import FolderOutlinedIcon from "@mui/icons-material/FolderOutlined";
 import MenuIcon from "@mui/icons-material/Menu";
 import MenuOpenIcon from "@mui/icons-material/MenuOpen";
-import RateReviewOutlinedIcon from "@mui/icons-material/RateReviewOutlined";
 import RestartAltIcon from "@mui/icons-material/RestartAlt";
-import SendIcon from "@mui/icons-material/Send";
+import TerminalIcon from "@mui/icons-material/Terminal";
 import SearchIcon from "@mui/icons-material/Search";
 import SettingsIcon from "@mui/icons-material/Settings";
 import {
@@ -63,11 +62,14 @@ import { Button, EmptyState, IconButton, StatusDot, useToast } from "../ui";
 import { CommandPalette, type CommandPaletteItem } from "./CommandPalette";
 import { CreateProjectDialog } from "./CreateProjectDialog";
 import { type DiffCommentApi, GitView } from "./GitPanel";
+import { TerminalView } from "./TerminalView";
 import { DEFAULT_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, normalizeSidebarWidth } from "./app-settings";
 import { conversationProfile, type Workspace, useWorkspace } from "./use-workspace";
 
 const COMPOSER_DRAFT_SAVE_DELAY_MS = 350;
 const EMPTY_COMPOSER_DRAFT: ComposerDraft = { text: "", attachments: [] };
+
+type WorkspaceView = "chat" | "git" | "terminal";
 
 // The sidebar title bar and the chat pane header share one fixed height so the
 // two columns line up across the top.
@@ -179,16 +181,10 @@ export function WorkspacePageView({
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
-  const [view, setView] = useState<"chat" | "git">("chat");
-  // Git mounts on first open and stays mounted thereafter, so it keeps its
-  // scroll/expanded state when switching chats (and never fetches if unused).
-  const [gitMounted, setGitMounted] = useState(false);
-  const showView = (next: "chat" | "git") => {
-    setView(next);
-    if (next === "git") {
-      setGitMounted(true);
-    }
-  };
+  const [view, setView] = useState<WorkspaceView>("chat");
+  // Unstaged line totals for the header Git-tab badge, reported by the Git view.
+  const [gitUnstaged, setGitUnstaged] = useState<{ readonly additions: number; readonly deletions: number }>({ additions: 0, deletions: 0 });
+  const showView = (next: WorkspaceView) => setView(next);
   // Pending code-review comments, attached to diff lines in the Git view and sent
   // to the thread as one block (without starting an agent run).
   const [reviewComments, setReviewComments] = useState<readonly ReviewCommentEntry[]>([]);
@@ -237,7 +233,8 @@ export function WorkspacePageView({
   const accessMode = ws.settings.agents.accessMode;
   const mode = ws.settings.appearance.theme;
   const routeKind = route?.kind;
-  const routeConversationId = route && (route.kind === "chat" || route.kind === "project") ? route.conversationId : undefined;
+  const routeProjectId = route?.kind === "project" ? route.projectId : undefined;
+  const routeConversationId = route?.kind === "chat" || route?.kind === "project" ? route.conversationId : undefined;
   const noAgentsAvailable = agentStatusLive && AGENTS.every((agent) => statusOf(agent.id) !== "available" && statusOf(agent.id) !== "running");
   const workspaceHydrating = !ws.loaded;
 
@@ -335,11 +332,16 @@ export function WorkspacePageView({
   }, []);
 
   useLayoutEffect(() => {
-    if ((routeKind === "chat" || routeKind === "project") && routeConversationId) {
-      if (ws.selectedId !== routeConversationId) {
-        ws.select(routeConversationId);
+    const projectConversationId = routeProjectId
+      ? ws.projects.find((project) => project.id === routeProjectId)?.conversations[0]?.id
+      : undefined;
+    const targetConversationId = routeConversationId ?? (routeKind === "project" ? projectConversationId : undefined);
+
+    if ((routeKind === "chat" || routeKind === "project") && targetConversationId) {
+      if (ws.selectedId !== targetConversationId) {
+        ws.select(targetConversationId);
       }
-      const conv = ws.find(routeConversationId);
+      const conv = ws.find(targetConversationId);
       if (conv) {
         setProfile((current) => {
           const nextProfile = conversationProfile(conv);
@@ -347,7 +349,7 @@ export function WorkspacePageView({
         });
       }
     }
-  }, [routeKind, routeConversationId, ws.selectedId, ws.select, ws.find]);
+  }, [routeKind, routeProjectId, routeConversationId, ws.projects, ws.selectedId, ws.select, ws.find]);
 
   useEffect(() => {
     const conversations = workspaceConversations(ws);
@@ -401,7 +403,8 @@ export function WorkspacePageView({
   // conversation isn't created until the user sends the first message.
   const startNewChat = () => {
     setProfile(ws.settings.agents.defaultProfile ?? DEFAULT_PROFILE);
-    setComposingNew({});
+    const selectedProjectId = projectForConversation(ws, ws.selectedId)?.id;
+    setComposingNew({ projectId: routeProjectId ?? selectedProjectId });
     setDrawerOpen(false);
   };
 
@@ -863,11 +866,22 @@ export function WorkspacePageView({
                 size="small"
                 exclusive
                 value={view}
-                onChange={(_, next: "chat" | "git" | null) => next && showView(next)}
+                onChange={(_, next: WorkspaceView | null) => next && showView(next)}
                 aria-label={t("viewSwitcher")}
                 sx={{
+                  // Single bordered container with borderless segments inside, so
+                  // the selected highlight fills its segment edge-to-edge (no
+                  // uneven gap between the highlight and the group border).
+                  height: 30,
+                  alignItems: "stretch",
+                  borderRadius: (t) => `${t.custom.radii.sm}px`,
+                  border: (t) => `1px solid ${t.custom.borders.subtle}`,
+                  backgroundColor: (t) => t.custom.surfaces.s2,
+                  overflow: "hidden",
                   "& .MuiToggleButton-root": {
-                    height: 30,
+                    border: 0,
+                    borderRadius: 0,
+                    height: "100%",
                     px: 1.25,
                     py: 0,
                     gap: 0.5,
@@ -875,8 +889,9 @@ export function WorkspacePageView({
                     fontFamily: (t) => t.custom.fonts.mono,
                     fontSize: "0.74rem",
                     color: "text.secondary",
-                    borderColor: (t) => t.custom.borders.subtle,
+                    "&:not(:first-of-type)": { borderLeft: (t) => `1px solid ${t.custom.borders.subtle}` },
                     "&.Mui-selected": { color: "text.primary", backgroundColor: (t) => t.custom.surfaces.s3 },
+                    "&.Mui-selected:hover": { backgroundColor: (t) => t.custom.surfaces.s3 },
                   },
                 }}
               >
@@ -887,6 +902,16 @@ export function WorkspacePageView({
                 <ToggleButton value="git" aria-label={t("git")}>
                   <AccountTreeIcon sx={{ fontSize: 15 }} />
                   <Box component="span" sx={{ display: { xs: "none", sm: "inline" } }}>{t("git")}</Box>
+                  {(gitUnstaged.additions > 0 || gitUnstaged.deletions > 0) && (
+                    <Box component="span" sx={{ ml: 0.5, display: "inline-flex", gap: 0.5, fontSize: "0.64rem", fontWeight: 700 }}>
+                      <Box component="span" sx={{ color: (t) => t.palette.status.ok.main }}>+{gitUnstaged.additions}</Box>
+                      <Box component="span" sx={{ color: (t) => t.palette.status.error.main }}>−{gitUnstaged.deletions}</Box>
+                    </Box>
+                  )}
+                </ToggleButton>
+                <ToggleButton value="terminal" aria-label={t("terminalTab")}>
+                  <TerminalIcon sx={{ fontSize: 15 }} />
+                  <Box component="span" sx={{ display: { xs: "none", sm: "inline" } }}>{t("terminalTab")}</Box>
                 </ToggleButton>
               </ToggleButtonGroup>
             </Stack>
@@ -968,43 +993,25 @@ export function WorkspacePageView({
                   />
                 )}
               </Box>
-              {gitMounted && (
-                <Box sx={{ position: "absolute", inset: 0, display: view === "git" ? "block" : "none" }}>
-                  <GitView cwd={selectedCwd} lastTurnDiffs={lastTurnDiffs} review={selected ? review : undefined} />
-                </Box>
-              )}
+              <Box sx={{ position: "absolute", inset: 0, display: view === "git" ? "block" : "none" }}>
+                <GitView
+                  cwd={selectedCwd}
+                  lastTurnDiffs={lastTurnDiffs}
+                  review={selected ? review : undefined}
+                  active={view === "git"}
+                  onUnstagedStatsChange={setGitUnstaged}
+                />
+              </Box>
+              {/* Keyed by folder so each project's terminal keeps its own scrollback. */}
+              <Box sx={{ position: "absolute", inset: 0, display: view === "terminal" ? "block" : "none" }}>
+                <TerminalView key={selectedCwd ?? "none"} cwd={selectedCwd} />
+              </Box>
             </Box>
           </Box>
         </Box>
 
         <Box sx={{ flex: "0 0 auto", borderTop: (t) => `1px solid ${t.custom.borders.subtle}`, backgroundColor: (t) => t.custom.surfaces.s1 }}>
           <Box sx={{ width: "100%", maxWidth: THREAD_MAX_WIDTH, mx: "auto", px: THREAD_PADDING_X, py: 1.5 }}>
-            {reviewComments.length > 0 && (
-              <Stack
-                direction="row"
-                spacing={1}
-                sx={{
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  mb: 1,
-                  px: 1.25,
-                  py: 0.75,
-                  borderRadius: (t) => `${t.custom.radii.md}px`,
-                  border: (t) => `1px solid ${t.palette.status.info.border}`,
-                  backgroundColor: (t) => t.palette.status.info.soft,
-                }}
-              >
-                <Stack direction="row" spacing={0.75} sx={{ alignItems: "center", minWidth: 0 }}>
-                  <RateReviewOutlinedIcon sx={{ fontSize: 16, color: (t) => t.palette.status.info.main }} />
-                  <Typography sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.78rem", color: "text.primary" }}>
-                    {t("reviewPending", { count: reviewComments.length })}
-                  </Typography>
-                </Stack>
-                <Button variant="contained" size="small" aria-label={t("reviewSendComments")} startIcon={<SendIcon sx={{ fontSize: 15 }} />} onClick={sendReviewComments}>
-                  {t("reviewSend")}
-                </Button>
-              </Stack>
-            )}
             {workspaceHydrating ? (
               <Box aria-busy="true" sx={{ minHeight: 52 }} />
             ) : composingNew ? (
@@ -1054,6 +1061,8 @@ export function WorkspacePageView({
                 onStop={() => ws.stopRun(ws.selectedId)}
                 onAttachmentError={(message) => toast({ message, severity: "error", duration: 3000 })}
                 running={selected?.status === "running"}
+                reviewCount={reviewComments.length}
+                onSendReview={sendReviewComments}
               />
             )}
           </Box>

@@ -402,10 +402,10 @@ function DiffCommentComposer({
         }}
       />
       <Stack direction="row" spacing={0.75} sx={{ justifyContent: "flex-end" }}>
-        <Button variant="subtle" size="small" onClick={onCancel}>
+        <Button variant="subtle" size="small" onClick={onCancel} sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.74rem" }}>
           {t("cancel")}
         </Button>
-        <Button variant="contained" size="small" disabled={draft.trim().length === 0} onClick={submit}>
+        <Button variant="contained" size="small" disabled={draft.trim().length === 0} onClick={submit} sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.74rem" }}>
           {t("reviewSaveComment")}
         </Button>
       </Stack>

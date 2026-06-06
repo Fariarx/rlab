@@ -1,7 +1,7 @@
 import { fireEvent, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { ConversationList, type ConversationSummary } from "../src/components/agent";
-import { renderWithTheme } from "./util/render-with-theme";
+import { renderWithThemeAndVirtuoso } from "./util/render-with-virtuoso";
 
 const base: ConversationSummary = {
   id: "c1",
@@ -17,7 +17,7 @@ function noopActions() {
 }
 
 function render(chats: readonly ConversationSummary[], actions = noopActions()) {
-  renderWithTheme(<ConversationList projects={[]} chats={chats} selectedId={chats[0]?.id ?? null} onSelect={vi.fn()} actions={actions} />);
+  renderWithThemeAndVirtuoso(<ConversationList projects={[]} chats={chats} selectedId={chats[0]?.id ?? null} onSelect={vi.fn()} actions={actions} />);
   return actions;
 }
 

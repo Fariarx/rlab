@@ -5,8 +5,9 @@ import ForumRoundedIcon from "@mui/icons-material/ForumRounded";
 import MoreHorizIcon from "@mui/icons-material/MoreHoriz";
 import PushPinOutlinedIcon from "@mui/icons-material/PushPinOutlined";
 import PushPinRoundedIcon from "@mui/icons-material/PushPinRounded";
-import { Box, Collapse, InputBase, Menu, MenuItem, Stack, Tooltip, Typography } from "@mui/material";
+import { Box, InputBase, Menu, MenuItem, Stack, Tooltip, Typography } from "@mui/material";
 import { type KeyboardEvent, type MouseEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import { useI18n } from "../../i18n/I18nProvider";
 import { IconButton, StatusDot } from "../ui";
 import { type AgentId, getAgent, withAlpha } from "./agents";
@@ -32,6 +33,35 @@ export function conversationMatches(conversation: ConversationSummary, query: st
 // actionable states (running / waiting / error) get one. Idle (gray) and done
 // (green) render the bare avatar.
 const STATUSES_WITH_DOT: ReadonlySet<ConversationStatus> = new Set<ConversationStatus>(["running", "waiting", "error"]);
+
+type ConversationListItem =
+  | {
+      readonly kind: "group";
+      readonly idBase: string;
+      readonly label: string;
+      readonly conversations: readonly ConversationSummary[];
+      readonly delay: number;
+      readonly collapsedIcon: ReactNode;
+      readonly expandedIcon: ReactNode;
+    }
+  | {
+      readonly kind: "conversation";
+      readonly conversation: ConversationSummary;
+      readonly delay: number;
+    }
+  | {
+      readonly kind: "empty";
+    };
+
+function conversationListItemKey(index: number, item: ConversationListItem): string {
+  if (item.kind === "group") {
+    return `group:${item.idBase}`;
+  }
+  if (item.kind === "conversation") {
+    return `conversation:${item.conversation.id}`;
+  }
+  return `empty:${index}`;
+}
 
 /** 1–2 capitalised letters derived from the conversation title. */
 function titleInitials(title: string): string {
@@ -313,41 +343,33 @@ function ConversationRow({
   );
 }
 
-/** A collapsible sidebar group (pinned / project / chats). Headers carry the
- *  count always; the unread + running indicators surface only while the group
- *  is collapsed (when expanded the rows themselves convey that). */
-function ConversationGroup({
+/** A collapsible sidebar group header. Rows are rendered by the virtual list,
+ *  so the header owns only collapse state and collapsed summary indicators. */
+function ConversationGroupHeader({
   idBase,
   label,
   conversations,
-  selectedId,
-  baseDelay,
+  open,
+  delay,
   collapsedIcon,
   expandedIcon,
-  onSelect,
-  onMove,
-  registerRowRef,
-  actions,
+  onToggle,
 }: {
   readonly idBase: string;
   readonly label: string;
   readonly conversations: readonly ConversationSummary[];
-  readonly selectedId: string | null;
-  readonly baseDelay: number;
+  readonly open: boolean;
+  readonly delay: number;
   readonly collapsedIcon: ReactNode;
   readonly expandedIcon: ReactNode;
-  readonly onSelect: (id: string) => void;
-  readonly onMove: (id: string, offset: -1 | 1) => void;
-  readonly registerRowRef: (id: string, element: HTMLDivElement | null) => void;
-  readonly actions: ConversationActions;
+  readonly onToggle: (idBase: string) => void;
 }) {
-  const [open, setOpen] = useState(true);
   const { t } = useI18n();
   const runningCount = conversations.filter((c) => c.status === "running").length;
   const hasUnread = conversations.some((c) => c.unread);
   const panelId = `${idBase}-conversations`;
 
-  const toggleOpen = () => setOpen((value) => !value);
+  const toggleOpen = () => onToggle(idBase);
   const onHeaderKey = (e: KeyboardEvent<HTMLDivElement>) => {
     if (e.key !== "Enter" && e.key !== " ") {
       return;
@@ -375,6 +397,7 @@ function ConversationGroup({
           borderRadius: (t) => `${t.custom.radii.sm}px`,
           "&:hover": { backgroundColor: (t) => t.custom.surfaces.s3 },
           "&:focus-visible": { outline: (t) => `2px solid ${t.custom.borders.focus}`, outlineOffset: "-2px" },
+          ...rise(delay),
         }}
       >
         <Box sx={{ display: "flex", color: "text.secondary" }}>{open ? expandedIcon : collapsedIcon}</Box>
@@ -390,22 +413,6 @@ function ConversationGroup({
             <Box role="img" aria-label={t("unread")} sx={{ width: 6, height: 6, borderRadius: "50%", backgroundColor: (t) => t.palette.status.running.main }} />
           ) : null)}
       </Stack>
-      <Collapse in={open} unmountOnExit>
-        <Stack id={panelId} spacing={0.25} sx={{ mt: 0.25, mb: 0.75 }}>
-          {conversations.map((conversation, index) => (
-            <ConversationRow
-              key={conversation.id}
-              conversation={conversation}
-              active={conversation.id === selectedId}
-              delay={baseDelay + index * 50}
-              onSelect={onSelect}
-              onMove={onMove}
-              registerRowRef={registerRowRef}
-              actions={actions}
-            />
-          ))}
-        </Stack>
-      </Collapse>
     </Box>
   );
 }
@@ -423,7 +430,9 @@ export function ConversationList({
   readonly onSelect: (id: string) => void;
   readonly actions: ConversationActions;
 }) {
+  const virtuosoRef = useRef<VirtuosoHandle | null>(null);
   const rowRefs = useRef(new Map<string, HTMLDivElement>());
+  const [collapsedGroups, setCollapsedGroups] = useState<ReadonlySet<string>>(() => new Set());
   const { t } = useI18n();
 
   // Pinned conversations are lifted into a top group and removed from their
@@ -439,11 +448,95 @@ export function ConversationList({
   const visibleChats = useMemo(() => chats.filter((c) => !c.pinned), [chats]);
 
   const empty = projects.length === 0 && chats.length === 0;
+  const toggleGroup = (idBase: string) => {
+    setCollapsedGroups((current) => {
+      const next = new Set(current);
+      if (next.has(idBase)) {
+        next.delete(idBase);
+      } else {
+        next.add(idBase);
+      }
+      return next;
+    });
+  };
+  const listItems = useMemo<readonly ConversationListItem[]>(() => {
+    if (empty) {
+      return [{ kind: "empty" }];
+    }
+
+    const items: ConversationListItem[] = [];
+    const addGroup = ({
+      idBase,
+      label,
+      conversations,
+      baseDelay,
+      collapsedIcon,
+      expandedIcon,
+    }: {
+      readonly idBase: string;
+      readonly label: string;
+      readonly conversations: readonly ConversationSummary[];
+      readonly baseDelay: number;
+      readonly collapsedIcon: ReactNode;
+      readonly expandedIcon: ReactNode;
+    }) => {
+      items.push({ kind: "group", idBase, label, conversations, delay: baseDelay, collapsedIcon, expandedIcon });
+      if (!collapsedGroups.has(idBase)) {
+        conversations.forEach((conversation, index) => {
+          items.push({ kind: "conversation", conversation, delay: baseDelay + index * 50 });
+        });
+      }
+    };
+
+    if (pinned.length > 0) {
+      addGroup({
+        idBase: "pinned-group",
+        label: t("pinned"),
+        conversations: pinned,
+        baseDelay: 0,
+        collapsedIcon: <PushPinRoundedIcon sx={{ fontSize: 16 }} />,
+        expandedIcon: <PushPinOutlinedIcon sx={{ fontSize: 16 }} />,
+      });
+    }
+
+    visibleProjects.forEach((project, index) => {
+      addGroup({
+        idBase: `project-group-${project.id}`,
+        label: project.name,
+        conversations: project.conversations,
+        baseDelay: (index + 1) * 120,
+        collapsedIcon: <FolderRoundedIcon sx={{ fontSize: 17 }} />,
+        expandedIcon: <FolderOpenRoundedIcon sx={{ fontSize: 17 }} />,
+      });
+    });
+
+    if (visibleChats.length > 0) {
+      addGroup({
+        idBase: "chats-group",
+        label: t("chats"),
+        conversations: visibleChats,
+        baseDelay: (visibleProjects.length + 1) * 120,
+        collapsedIcon: <ForumRoundedIcon sx={{ fontSize: 16 }} />,
+        expandedIcon: <ForumOutlinedIcon sx={{ fontSize: 16 }} />,
+      });
+    }
+
+    return items;
+  }, [collapsedGroups, empty, pinned, t, visibleChats, visibleProjects]);
   // Pinned first, then projects, then chats — flattened for arrow-key navigation.
   const visibleConversationIds = useMemo(
-    () => [...pinned.map((c) => c.id), ...visibleProjects.flatMap((project) => project.conversations.map((c) => c.id)), ...visibleChats.map((c) => c.id)],
-    [pinned, visibleProjects, visibleChats],
+    () => listItems.flatMap((item) => (item.kind === "conversation" ? [item.conversation.id] : [])),
+    [listItems],
   );
+  const conversationItemIndexes = useMemo(() => {
+    const indexes = new Map<string, number>();
+    listItems.forEach((item, index) => {
+      if (item.kind === "conversation") {
+        indexes.set(item.conversation.id, index);
+      }
+    });
+    return indexes;
+  }, [listItems]);
   const registerRowRef = (id: string, element: HTMLDivElement | null) => {
     if (element) {
       rowRefs.current.set(id, element);
@@ -452,9 +545,14 @@ export function ConversationList({
     }
   };
   const focusConversation = (id: string) => {
+    const index = conversationItemIndexes.get(id);
+    if (index !== undefined) {
+      virtuosoRef.current?.scrollToIndex({ align: "center", behavior: "auto", index });
+    }
     const focus = () => rowRefs.current.get(id)?.focus();
     if (typeof window.requestAnimationFrame === "function") {
       window.requestAnimationFrame(focus);
+      window.requestAnimationFrame(() => window.requestAnimationFrame(focus));
     } else {
       window.setTimeout(focus, 0);
     }
@@ -481,64 +579,58 @@ export function ConversationList({
       role="listbox"
       aria-label={t("conversationList")}
       data-testid="conversation-list-virtual-list"
-      data-virtualized="false"
-      // `scrollbar-gutter: stable both-edges` reserves equal gutters on both
-      // sides so the left/right inset stays even whether or not the scrollbar
-      // is showing.
-      sx={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "hidden", scrollbarGutter: "stable both-edges", px: 0.75, pt: 1.5, pb: 1 }}
+      data-virtualized="true"
+      sx={{ flex: 1, minHeight: 0, overflow: "hidden" }}
     >
-      {pinned.length > 0 && (
-        <Box sx={{ pb: 0.5 }}>
-          <ConversationGroup
-            idBase="pinned-group"
-            label={t("pinned")}
-            conversations={pinned}
-            selectedId={selectedId}
-            baseDelay={0}
-            collapsedIcon={<PushPinRoundedIcon sx={{ fontSize: 16 }} />}
-            expandedIcon={<PushPinOutlinedIcon sx={{ fontSize: 16 }} />}
-            onSelect={onSelect}
-            onMove={moveConversation}
-            registerRowRef={registerRowRef}
-            actions={actions}
-          />
-        </Box>
-      )}
-      {visibleProjects.map((project, index) => (
-        <Box key={project.id} sx={{ pb: 0.5 }}>
-          <ConversationGroup
-            idBase={`project-group-${project.id}`}
-            label={project.name}
-            conversations={project.conversations}
-            selectedId={selectedId}
-            baseDelay={(index + 1) * 120}
-            collapsedIcon={<FolderRoundedIcon sx={{ fontSize: 17 }} />}
-            expandedIcon={<FolderOpenRoundedIcon sx={{ fontSize: 17 }} />}
-            onSelect={onSelect}
-            onMove={moveConversation}
-            registerRowRef={registerRowRef}
-            actions={actions}
-          />
-        </Box>
-      ))}
-      {visibleChats.length > 0 && (
-        <Box sx={{ pb: 0.5 }}>
-          <ConversationGroup
-            idBase="chats-group"
-            label={t("chats")}
-            conversations={visibleChats}
-            selectedId={selectedId}
-            baseDelay={(visibleProjects.length + 1) * 120}
-            collapsedIcon={<ForumRoundedIcon sx={{ fontSize: 16 }} />}
-            expandedIcon={<ForumOutlinedIcon sx={{ fontSize: 16 }} />}
-            onSelect={onSelect}
-            onMove={moveConversation}
-            registerRowRef={registerRowRef}
-            actions={actions}
-          />
-        </Box>
-      )}
-      {empty && <Typography sx={{ fontSize: "0.78rem", color: "text.secondary", textAlign: "center", py: 3 }}>{t("noConversationsYet")}</Typography>}
+      <Virtuoso
+        ref={virtuosoRef}
+        data={listItems}
+        computeItemKey={conversationListItemKey}
+        defaultItemHeight={72}
+        increaseViewportBy={{ bottom: 480, top: 240 }}
+        initialItemCount={Math.min(listItems.length, 40)}
+        minOverscanItemCount={{ bottom: 8, top: 4 }}
+        style={{ height: "100%", scrollbarGutter: "stable both-edges" }}
+        itemContent={(index, item) => {
+          const isFirst = index === 0;
+          if (item.kind === "empty") {
+            return (
+              <Box sx={{ px: 0.75, pt: 1.5, pb: 1 }}>
+                <Typography sx={{ fontSize: "0.78rem", color: "text.secondary", textAlign: "center", py: 3 }}>{t("noConversationsYet")}</Typography>
+              </Box>
+            );
+          }
+          if (item.kind === "group") {
+            return (
+              <Box sx={{ px: 0.75, pt: isFirst ? 1.5 : 0.5, pb: 0.25 }}>
+                <ConversationGroupHeader
+                  idBase={item.idBase}
+                  label={item.label}
+                  conversations={item.conversations}
+                  open={!collapsedGroups.has(item.idBase)}
+                  delay={item.delay}
+                  collapsedIcon={item.collapsedIcon}
+                  expandedIcon={item.expandedIcon}
+                  onToggle={toggleGroup}
+                />
+              </Box>
+            );
+          }
+          return (
+            <Box sx={{ px: 0.75, pb: 0.25 }}>
+              <ConversationRow
+                conversation={item.conversation}
+                active={item.conversation.id === selectedId}
+                delay={item.delay}
+                onSelect={onSelect}
+                onMove={moveConversation}
+                registerRowRef={registerRowRef}
+                actions={actions}
+              />
+            </Box>
+          );
+        }}
+      />
     </Box>
   );
 }

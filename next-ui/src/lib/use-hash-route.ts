@@ -4,7 +4,7 @@ export type HashRoute =
   | { readonly kind: "home" }
   | { readonly kind: "kit" }
   | { readonly kind: "chat"; readonly conversationId: string }
-  | { readonly kind: "project"; readonly projectId: string; readonly conversationId: string };
+  | { readonly kind: "project"; readonly projectId: string; readonly conversationId?: string };
 
 /**
  * Minimal hash-router subscription. Returns the current `window.location.hash`
@@ -44,8 +44,12 @@ export function parseHashRoute(hash: string): HashRoute {
     return { kind: "chat", conversationId: decodeSegment(parts[1]) };
   }
 
-  if (parts[0] === "project" && parts[1] && parts[2]) {
-    return { kind: "project", projectId: decodeSegment(parts[1]), conversationId: decodeSegment(parts[2]) };
+  if (parts[0] === "project" && parts[1]) {
+    return {
+      kind: "project",
+      projectId: decodeSegment(parts[1]),
+      ...(parts[2] ? { conversationId: decodeSegment(parts[2]) } : {}),
+    };
   }
 
   return { kind: "home" };
@@ -58,7 +62,9 @@ export function buildHashRoute(route: HashRoute): string {
     case "chat":
       return `#/chat/${encodeSegment(route.conversationId)}`;
     case "project":
-      return `#/project/${encodeSegment(route.projectId)}/${encodeSegment(route.conversationId)}`;
+      return route.conversationId
+        ? `#/project/${encodeSegment(route.projectId)}/${encodeSegment(route.conversationId)}`
+        : `#/project/${encodeSegment(route.projectId)}`;
     case "home":
       return "#/";
   }

@@ -2,7 +2,7 @@ import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WorkspacePage } from "../src/components/workspace/WorkspacePage";
 import { buildInitialWorkspaceState } from "../src/components/workspace/workspace-state";
-import { renderWithTheme } from "./util/render-with-theme";
+import { renderWithThemeAndVirtuoso } from "./util/render-with-virtuoso";
 
 type PersistedComposerAttachmentDraft = {
   readonly id: string;
@@ -52,7 +52,7 @@ describe("WorkspacePage", () => {
   });
 
   it("renders the sidebar, chats list, and conversation thread", () => {
-    renderWithTheme(<WorkspacePage />);
+    renderWithThemeAndVirtuoso(<WorkspacePage />);
 
     expect(screen.getByText("rlab / агенты")).toBeInTheDocument();
     // Appears in both the sidebar row and the pane header.
@@ -62,20 +62,20 @@ describe("WorkspacePage", () => {
   });
 
   it("shows projects in the unified sidebar list", () => {
-    renderWithTheme(<WorkspacePage />);
+    renderWithThemeAndVirtuoso(<WorkspacePage />);
 
     expect(screen.getByText("auth-service")).toBeInTheDocument();
   });
 
   it("opens the agent picker from the agent badge", () => {
-    renderWithTheme(<WorkspacePage />);
+    renderWithThemeAndVirtuoso(<WorkspacePage />);
 
     fireEvent.click(screen.getByRole("button", { name: /Изменить агента/i }));
     expect(screen.getByText("Выбор агента")).toBeInTheDocument();
   });
 
   it("opens the command palette from the keyboard", () => {
-    renderWithTheme(<WorkspacePage />);
+    renderWithThemeAndVirtuoso(<WorkspacePage />);
 
     fireEvent.keyDown(window, { key: "k", ctrlKey: true });
 
@@ -84,11 +84,11 @@ describe("WorkspacePage", () => {
   });
 
   it("opens conversation search from the command palette", async () => {
-    renderWithTheme(<WorkspacePage />);
+    renderWithThemeAndVirtuoso(<WorkspacePage />);
 
     fireEvent.keyDown(window, { key: "k", metaKey: true });
     const palette = screen.getByRole("dialog", { name: "Палитра команд" });
-    fireEvent.click(within(palette).getByRole("button", { name: "Поиск диалогов..." }));
+    fireEvent.click(within(palette).getByRole("option", { name: "Поиск диалогов..." }));
 
     await waitFor(() => {
       expect(screen.getByPlaceholderText("Поиск по названию или сообщению...")).toBeInTheDocument();
@@ -96,7 +96,7 @@ describe("WorkspacePage", () => {
   });
 
   it("runs the active command palette item selected with arrow keys", async () => {
-    renderWithTheme(<WorkspacePage />);
+    renderWithThemeAndVirtuoso(<WorkspacePage />);
 
     fireEvent.keyDown(window, { key: "k", ctrlKey: true });
     const input = screen.getByPlaceholderText("Найти команду...");
@@ -104,7 +104,7 @@ describe("WorkspacePage", () => {
     fireEvent.keyDown(input, { key: "ArrowDown" });
 
     const palette = screen.getByRole("dialog", { name: "Палитра команд" });
-    expect(within(palette).getByRole("button", { name: "Поиск диалогов..." })).toHaveAttribute("aria-current", "true");
+    expect(within(palette).getByRole("option", { name: "Поиск диалогов..." })).toHaveAttribute("aria-current", "true");
 
     fireEvent.keyDown(input, { key: "Enter" });
 
@@ -113,23 +113,43 @@ describe("WorkspacePage", () => {
     });
   });
 
+  it("exposes the active command palette option to assistive technology", () => {
+    renderWithThemeAndVirtuoso(<WorkspacePage />);
+
+    fireEvent.keyDown(window, { key: "k", ctrlKey: true });
+
+    const input = screen.getByRole("combobox", { name: "Палитра команд" });
+    const listbox = screen.getByRole("listbox", { name: "Палитра команд" });
+    const initialOptions = within(listbox).getAllByRole("option");
+
+    expect(input).toHaveAttribute("aria-controls", "command-palette-list");
+    expect(input).toHaveAttribute("aria-activedescendant", initialOptions[0].id);
+    expect(initialOptions[0]).toHaveAttribute("aria-selected", "true");
+
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+
+    const movedOptions = within(listbox).getAllByRole("option");
+    expect(input).toHaveAttribute("aria-activedescendant", movedOptions[1].id);
+    expect(movedOptions[1]).toHaveAttribute("aria-selected", "true");
+  });
+
   it("filters command palette items and opens settings", () => {
-    renderWithTheme(<WorkspacePage />);
+    renderWithThemeAndVirtuoso(<WorkspacePage />);
 
     fireEvent.keyDown(window, { key: "k", ctrlKey: true });
     fireEvent.change(screen.getByPlaceholderText("Найти команду..."), { target: { value: "настрой" } });
 
     const palette = screen.getByRole("dialog", { name: "Палитра команд" });
-    expect(within(palette).getByRole("button", { name: "Открыть настройки" })).toBeInTheDocument();
-    expect(within(palette).queryByRole("button", { name: "Поиск диалогов..." })).not.toBeInTheDocument();
+    expect(within(palette).getByRole("option", { name: "Открыть настройки" })).toBeInTheDocument();
+    expect(within(palette).queryByRole("option", { name: "Поиск диалогов..." })).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Открыть настройки" }));
+    fireEvent.click(within(palette).getByRole("option", { name: "Открыть настройки" }));
 
     expect(screen.getByRole("tab", { name: "Внешний вид" })).toBeInTheDocument();
   });
 
   it("starts a new chat draft and creates it on first send", async () => {
-    renderWithTheme(<WorkspacePage />);
+    renderWithThemeAndVirtuoso(<WorkspacePage />);
 
     fireEvent.click(screen.getByRole("button", { name: "Новый диалог" }));
 
@@ -144,7 +164,7 @@ describe("WorkspacePage", () => {
   });
 
   it("opens the create project dialog", () => {
-    renderWithTheme(<WorkspacePage />);
+    renderWithThemeAndVirtuoso(<WorkspacePage />);
 
     fireEvent.click(screen.getByRole("button", { name: "Новый проект" }));
 
@@ -154,7 +174,7 @@ describe("WorkspacePage", () => {
   });
 
   it("shows a retry run action for failed conversations", () => {
-    renderWithTheme(<WorkspacePage />);
+    renderWithThemeAndVirtuoso(<WorkspacePage />);
 
     fireEvent.click(screen.getByText("Сводка incident #4127"));
 
@@ -188,7 +208,7 @@ describe("WorkspacePage", () => {
     });
     vi.stubGlobal("fetch", fetch);
 
-    renderWithTheme(<WorkspacePage />);
+    renderWithThemeAndVirtuoso(<WorkspacePage />);
 
     // Projects and chats share one list, so target chat-2's row explicitly
     // rather than relying on which conversation happens to be first.
@@ -203,7 +223,7 @@ describe("WorkspacePage", () => {
   });
 
   it("sends a message into the active conversation", async () => {
-    renderWithTheme(<WorkspacePage />);
+    renderWithThemeAndVirtuoso(<WorkspacePage />);
 
     const input = await screen.findByPlaceholderText(/^Написать:/);
     fireEvent.change(input, { target: { value: "Ship it" } });
@@ -228,7 +248,7 @@ describe("WorkspacePage", () => {
     });
     vi.stubGlobal("fetch", fetch);
 
-    const firstRender = renderWithTheme(<WorkspacePage />);
+    const firstRender = renderWithThemeAndVirtuoso(<WorkspacePage />);
     const input = await screen.findByPlaceholderText(/^Написать:/);
 
     fireEvent.change(input, { target: { value: "Черновик не из браузера" } });
@@ -238,7 +258,7 @@ describe("WorkspacePage", () => {
     });
 
     firstRender.unmount();
-    renderWithTheme(<WorkspacePage />);
+    renderWithThemeAndVirtuoso(<WorkspacePage />);
 
     await waitFor(() => {
       expect(screen.getByPlaceholderText(/^Написать:/)).toHaveValue("Черновик не из браузера");
@@ -268,7 +288,7 @@ describe("WorkspacePage", () => {
     });
     vi.stubGlobal("fetch", fetch);
 
-    const firstRender = renderWithTheme(<WorkspacePage />);
+    const firstRender = renderWithThemeAndVirtuoso(<WorkspacePage />);
     await screen.findByPlaceholderText(/^Написать:/);
     const file = new File(["hello from persisted file"], "notes.txt", { type: "text/plain" });
 
@@ -283,7 +303,7 @@ describe("WorkspacePage", () => {
     });
 
     firstRender.unmount();
-    renderWithTheme(<WorkspacePage />);
+    renderWithThemeAndVirtuoso(<WorkspacePage />);
 
     expect(await screen.findByText("notes.txt")).toBeInTheDocument();
     fireEvent.change(screen.getByPlaceholderText(/^Написать:/), { target: { value: "Read attachment" } });
@@ -335,7 +355,7 @@ describe("WorkspacePage", () => {
     });
     vi.stubGlobal("fetch", fetch);
 
-    renderWithTheme(<WorkspacePage />);
+    renderWithThemeAndVirtuoso(<WorkspacePage />);
 
     await waitFor(() => {
       expect(screen.queryByRole("button", { name: "Остановить запуск" })).not.toBeInTheDocument();
@@ -403,7 +423,7 @@ describe("WorkspacePage", () => {
     });
     vi.stubGlobal("fetch", fetch);
 
-    renderWithTheme(<WorkspacePage />);
+    renderWithThemeAndVirtuoso(<WorkspacePage />);
 
     await waitFor(() => {
       expect(screen.queryByRole("button", { name: "Остановить запуск" })).not.toBeInTheDocument();
@@ -452,7 +472,7 @@ describe("WorkspacePage", () => {
   });
 
   it("shows a stop button for a running conversation", async () => {
-    renderWithTheme(<WorkspacePage />);
+    renderWithThemeAndVirtuoso(<WorkspacePage />);
 
     expect(await screen.findByRole("button", { name: "Остановить запуск" })).toBeInTheDocument();
   });
@@ -476,7 +496,7 @@ describe("WorkspacePage", () => {
     });
     vi.stubGlobal("fetch", fetch);
 
-    renderWithTheme(<WorkspacePage />);
+    renderWithThemeAndVirtuoso(<WorkspacePage />);
 
     expect(await screen.findByText("Ошибка Workspace API: Workspace load failed (503)")).toBeInTheDocument();
     expect(screen.getByRole("alert")).toHaveStyle({ alignItems: "center" });
@@ -496,7 +516,7 @@ describe("WorkspacePage", () => {
       configurable: true,
       value: { writeText },
     });
-    renderWithTheme(<WorkspacePage />);
+    renderWithThemeAndVirtuoso(<WorkspacePage />);
 
     fireEvent.click(screen.getAllByRole("button", { name: "Скопировать сообщение" })[0]);
 
@@ -535,7 +555,7 @@ describe("WorkspacePage", () => {
     });
     vi.stubGlobal("fetch", fetch);
 
-    renderWithTheme(<WorkspacePage />);
+    renderWithThemeAndVirtuoso(<WorkspacePage />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Одобрить" }));
 
@@ -592,7 +612,7 @@ describe("WorkspacePage", () => {
     });
     vi.stubGlobal("fetch", fetch);
 
-    renderWithTheme(<WorkspacePage />);
+    renderWithThemeAndVirtuoso(<WorkspacePage />);
 
     fireEvent.click(await screen.findByText("Summary"));
     fireEvent.click(screen.getByRole("button", { name: "Подтвердить" }));
@@ -639,7 +659,7 @@ describe("WorkspacePage", () => {
     });
     vi.stubGlobal("fetch", fetch);
 
-    renderWithTheme(<WorkspacePage />);
+    renderWithThemeAndVirtuoso(<WorkspacePage />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Одобрить" }));
 
@@ -675,7 +695,7 @@ describe("WorkspacePage", () => {
     });
     vi.stubGlobal("fetch", fetch);
 
-    renderWithTheme(<WorkspacePage />);
+    renderWithThemeAndVirtuoso(<WorkspacePage />);
 
     await screen.findByPlaceholderText("Написать: Flaky-тест auth.login...");
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
@@ -713,7 +733,7 @@ describe("WorkspacePage", () => {
     });
     vi.stubGlobal("fetch", fetch);
 
-    renderWithTheme(<WorkspacePage />);
+    renderWithThemeAndVirtuoso(<WorkspacePage />);
 
     await screen.findByPlaceholderText("Написать: Flaky-тест auth.login...");
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
@@ -759,7 +779,7 @@ describe("WorkspacePage", () => {
     });
     vi.stubGlobal("fetch", fetch);
 
-    renderWithTheme(<WorkspacePage />);
+    renderWithThemeAndVirtuoso(<WorkspacePage />);
 
     await screen.findByPlaceholderText("Написать: Flaky-тест auth.login...");
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
@@ -804,7 +824,7 @@ describe("WorkspacePage", () => {
     });
     vi.stubGlobal("fetch", fetch);
 
-    renderWithTheme(<WorkspacePage />);
+    renderWithThemeAndVirtuoso(<WorkspacePage />);
 
     await screen.findByPlaceholderText("Написать: Flaky-тест auth.login...");
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
@@ -842,7 +862,7 @@ describe("WorkspacePage", () => {
     });
     vi.stubGlobal("fetch", fetch);
 
-    renderWithTheme(<WorkspacePage />);
+    renderWithThemeAndVirtuoso(<WorkspacePage />);
 
     await screen.findByPlaceholderText("Написать: Flaky-тест auth.login...");
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
@@ -891,7 +911,7 @@ describe("WorkspacePage", () => {
     });
     vi.stubGlobal("fetch", fetch);
 
-    renderWithTheme(<WorkspacePage />);
+    renderWithThemeAndVirtuoso(<WorkspacePage />);
 
     await screen.findByPlaceholderText("Написать: Flaky-тест auth.login...");
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
@@ -928,7 +948,7 @@ describe("WorkspacePage", () => {
     });
     vi.stubGlobal("fetch", fetch);
 
-    renderWithTheme(<WorkspacePage />);
+    renderWithThemeAndVirtuoso(<WorkspacePage />);
 
     await screen.findByPlaceholderText("Написать: Flaky-тест auth.login...");
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
@@ -976,7 +996,7 @@ describe("WorkspacePage", () => {
     });
     vi.stubGlobal("fetch", fetch);
 
-    renderWithTheme(<WorkspacePage />);
+    renderWithThemeAndVirtuoso(<WorkspacePage />);
 
     await screen.findByPlaceholderText("Написать: Flaky-тест auth.login...");
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
@@ -1018,7 +1038,7 @@ describe("WorkspacePage", () => {
     });
     vi.stubGlobal("fetch", fetch);
 
-    renderWithTheme(<WorkspacePage />);
+    renderWithThemeAndVirtuoso(<WorkspacePage />);
 
     await screen.findByPlaceholderText("Написать: Flaky-тест auth.login...");
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
@@ -1034,6 +1054,47 @@ describe("WorkspacePage", () => {
 
     // The review renders as a collapsible block (not plain text) in the chat.
     expect(await screen.findByText("Ревью · 1 комментариев")).toBeInTheDocument();
+  });
+
+  it("runs a command in the Terminal tab and streams its output", async () => {
+    const workspace = { ...buildInitialWorkspaceState(), selectedId: "c-flaky" };
+    let terminalRequest: { readonly cwd?: string; readonly command?: string } | null = null;
+    const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+      if (path === "/api/workspace" && (!init || init.method === "GET")) {
+        return Response.json(workspace);
+      }
+      if (path === "/api/workspace" && init?.method === "PUT") {
+        return Response.json(workspace);
+      }
+      if (path === "/api/project-files") {
+        return Response.json({ files: [] });
+      }
+      if (path === "/api/git-status") {
+        return Response.json({ branch: "main", ahead: 0, behind: 0, clean: true, files: [] });
+      }
+      if (path === "/api/terminal") {
+        terminalRequest = JSON.parse(String(init?.body ?? "{}")) as { cwd?: string; command?: string };
+        return new Response(
+          `${JSON.stringify({ type: "out", chunk: "hello-from-shell\n" })}\n${JSON.stringify({ type: "exit", code: 0 })}\n`,
+          { headers: { "Content-Type": "application/x-ndjson" } },
+        );
+      }
+      return new Response("not found", { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetch);
+
+    renderWithThemeAndVirtuoso(<WorkspacePage />);
+
+    await screen.findByPlaceholderText("Написать: Flaky-тест auth.login...");
+    fireEvent.click(screen.getByRole("button", { name: "Терминал" }));
+
+    const input = await screen.findByPlaceholderText("Выполнить команду...");
+    fireEvent.change(input, { target: { value: "echo hi" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(await screen.findByText("hello-from-shell")).toBeInTheDocument();
+    expect(terminalRequest).toEqual({ cwd: "/root/workspace/rlab", command: "echo hi" });
   });
 
 });

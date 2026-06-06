@@ -1,5 +1,7 @@
 import { Box, Stack } from "@mui/material";
-import { useLayoutEffect, useRef } from "react";
+import { useLayoutEffect, useMemo, useRef } from "react";
+import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
+import { useI18n } from "../../i18n/I18nProvider";
 import { Message } from "./Message";
 import { rise } from "./anim";
 import { type MessageActionHandlers } from "./message-actions";
@@ -28,6 +30,32 @@ function hasLiveAgentBlock(message: ChatMessage): boolean {
 
 const BOTTOM_PIN_THRESHOLD = 96;
 
+type ConversationItem = { readonly kind: "message"; readonly message: ChatMessage } | { readonly kind: "typing" };
+
+function itemKey(index: number, item: ConversationItem): string {
+  return item.kind === "message" ? item.message.id : `typing-${index}`;
+}
+
+function TypingRow({ delay }: { readonly delay: number }) {
+  return (
+    <Stack direction="row" spacing={1.25} sx={{ alignItems: "center", ...rise(delay) }}>
+      <AgentAvatar />
+      <Box
+        sx={{
+          px: 1.5,
+          py: 1,
+          borderRadius: (t) => `${t.custom.radii.lg}px`,
+          borderTopLeftRadius: (t) => `${t.custom.radii.sm}px`,
+          backgroundColor: (t) => t.custom.surfaces.s2,
+          border: (t) => `1px solid ${t.custom.borders.subtle}`,
+        }}
+      >
+        <TypingDots />
+      </Box>
+    </Stack>
+  );
+}
+
 /** Conversation — the message thread, with an optional trailing typing row. */
 export function Conversation({
   messages,
@@ -44,67 +72,55 @@ export function Conversation({
   readonly contentMaxWidth?: number;
   readonly contentPaddingX?: { readonly xs: number; readonly sm: number };
 }) {
-  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const { t } = useI18n();
+  const virtuosoRef = useRef<VirtuosoHandle | null>(null);
   // Whether the viewport is pinned to the latest message. Starts pinned so a
   // freshly opened conversation lands at the bottom; flips off when the user
   // scrolls up to read history so streaming updates don't yank them back down.
   const pinnedToBottom = useRef(true);
   const hasLiveContent = typing === true || messages.some(hasLiveAgentBlock);
-
-  const handleScroll = () => {
-    const el = scrollRef.current;
-    if (el) {
-      pinnedToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < BOTTOM_PIN_THRESHOLD;
-    }
-  };
+  const items = useMemo<readonly ConversationItem[]>(
+    () => (typing ? [...messages.map((message) => ({ kind: "message" as const, message })), { kind: "typing" as const }] : messages.map((message) => ({ kind: "message" as const, message }))),
+    [messages, typing],
+  );
 
   useLayoutEffect(() => {
-    const el = scrollRef.current;
-    if (el && pinnedToBottom.current) {
-      el.scrollTop = el.scrollHeight;
+    if (pinnedToBottom.current) {
+      virtuosoRef.current?.autoscrollToBottom();
     }
   }, [messages, typing]);
 
   return (
     <Box
-      ref={scrollRef}
-      onScroll={handleScroll}
       data-testid="conversation-virtual-list"
-      data-virtualized="false"
+      data-virtualized="true"
+      role="log"
+      aria-label={t("conversationThread")}
       aria-live={hasLiveContent ? "polite" : "off"}
       aria-relevant="additions text"
-      sx={{ height: "100%", minHeight: 0, overflowY: "auto", overflowX: "hidden" }}
+      sx={{ height: "100%", minHeight: 0, overflow: "hidden" }}
     >
-      {/* minHeight:100% + justify-end keeps short threads pinned to the bottom.
-          Overflow lives on the parent (not this flex box) so tall threads stay
-          fully scrollable — sidestepping the flex-end + overflow clipping bug.
-          maxWidth centers the column while the scrollbar stays at the screen edge. */}
-      <Stack sx={{ minHeight: "100%", justifyContent: "flex-end", width: "100%", maxWidth: contentMaxWidth, mx: "auto", px: contentPaddingX, py: { xs: 2.5, sm: 4 } }}>
-        {messages.map((message, index) => (
-          <Box key={message.id} sx={{ pb: 3 }}>
-            <Message actions={actions} message={message} index={index} />
-          </Box>
-        ))}
-        {typing && (
-          <Box sx={{ pb: 3 }}>
-            <Stack direction="row" spacing={1.25} sx={{ alignItems: "center", ...rise(messages.length * 120) }}>
-              <AgentAvatar />
-              <Box
-                sx={{
-                  px: 1.5,
-                  py: 1,
-                  borderRadius: (t) => `${t.custom.radii.lg}px`,
-                  borderTopLeftRadius: (t) => `${t.custom.radii.sm}px`,
-                  backgroundColor: (t) => t.custom.surfaces.s2,
-                  border: (t) => `1px solid ${t.custom.borders.subtle}`,
-                }}
-              >
-                <TypingDots />
-              </Box>
-            </Stack>
+      <Virtuoso
+        ref={virtuosoRef}
+        data={items}
+        alignToBottom
+        atBottomThreshold={BOTTOM_PIN_THRESHOLD}
+        atBottomStateChange={(atBottom) => {
+          pinnedToBottom.current = atBottom;
+        }}
+        computeItemKey={itemKey}
+        defaultItemHeight={96}
+        followOutput={(atBottom) => (atBottom ? "auto" : false)}
+        increaseViewportBy={{ bottom: 640, top: 320 }}
+        initialItemCount={Math.min(items.length, 20)}
+        minOverscanItemCount={{ bottom: 8, top: 4 }}
+        style={{ height: "100%" }}
+        itemContent={(index, item) => (
+          <Box sx={{ width: "100%", maxWidth: contentMaxWidth, mx: "auto", px: contentPaddingX, pt: index === 0 ? { xs: 2.5, sm: 4 } : 0, pb: 3 }}>
+            {item.kind === "message" ? <Message actions={actions} message={item.message} index={index} /> : <TypingRow delay={messages.length * 120} />}
           </Box>
         )}
-      </Stack>
+      />
     </Box>
   );
 }

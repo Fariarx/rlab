@@ -1,11 +1,11 @@
 import { screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { Conversation, ConversationList } from "../src/components/agent";
-import { renderWithTheme } from "./util/render-with-theme";
+import { renderWithThemeAndVirtuoso } from "./util/render-with-virtuoso";
 
 describe("usage cost", () => {
   it("shows conversation cost and token usage in the sidebar row", () => {
-    renderWithTheme(
+    renderWithThemeAndVirtuoso(
       <ConversationList
         projects={[]}
         selectedId="cost-chat"
@@ -31,7 +31,7 @@ describe("usage cost", () => {
   });
 
   it("shows agent message cost and token usage in the conversation", () => {
-    renderWithTheme(
+    renderWithThemeAndVirtuoso(
       <Conversation
         messages={[
           {

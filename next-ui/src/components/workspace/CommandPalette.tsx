@@ -95,8 +95,15 @@ export function CommandPalette({ open, items, onClose }: CommandPaletteProps) {
             }}
             placeholder={t("commandSearchPlaceholder")}
             slotProps={{
-              input: {
+              htmlInput: {
+                "aria-activedescendant": activeItem ? `command-palette-item-${activeItem.id}` : undefined,
+                "aria-autocomplete": "list",
                 "aria-controls": listId,
+                "aria-expanded": open ? "true" : "false",
+                "aria-label": t("commandPalette"),
+                role: "combobox",
+              },
+              input: {
                 startAdornment: (
                   <InputAdornment position="start">
                     <SearchIcon sx={{ fontSize: 18, color: "text.secondary" }} />
@@ -107,14 +114,16 @@ export function CommandPalette({ open, items, onClose }: CommandPaletteProps) {
           />
 
           {visibleItems.length > 0 ? (
-            <Stack id={listId} aria-label={t("commandPalette")} spacing={0.75}>
+            <Stack id={listId} role="listbox" aria-label={t("commandPalette")} spacing={0.75}>
               {visibleItems.map((item, index) => (
                 <Button
                   key={item.id}
                   id={`command-palette-item-${item.id}`}
+                  role="option"
                   type="button"
                   aria-label={item.label}
                   aria-current={index === activeIndex ? "true" : undefined}
+                  aria-selected={index === activeIndex ? "true" : "false"}
                   onClick={() => runCommand(item)}
                   onMouseEnter={() => setActiveIndex(index)}
                   sx={{

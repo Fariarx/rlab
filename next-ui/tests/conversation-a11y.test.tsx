@@ -2,17 +2,25 @@ import { fireEvent, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { Conversation, ConversationList } from "../src/components/agent";
 import { initialProjects } from "../src/components/workspace/sample-data";
-import { renderWithTheme } from "./util/render-with-theme";
+import { renderWithThemeAndVirtuoso } from "./util/render-with-virtuoso";
 
 describe("Conversation a11y", () => {
   it("announces streaming updates politely", () => {
-    renderWithTheme(<Conversation messages={[{ id: "u1", role: "user", text: "hello" }]} typing />);
+    renderWithThemeAndVirtuoso(<Conversation messages={[{ id: "u1", role: "user", text: "hello" }]} typing />);
 
     expect(screen.getByText("hello").closest("[aria-live]")).toHaveAttribute("aria-live", "polite");
   });
 
+  it("exposes the message stream as a named log region", () => {
+    renderWithThemeAndVirtuoso(<Conversation messages={[{ id: "u1", role: "user", text: "hello" }]} />);
+
+    const thread = screen.getByRole("log", { name: "Лента сообщений" });
+    expect(thread).toHaveAttribute("aria-live", "off");
+    expect(thread).toHaveAttribute("aria-relevant", "additions text");
+  });
+
   it("keeps announcing a streaming agent message after the typing row is replaced", () => {
-    renderWithTheme(
+    renderWithThemeAndVirtuoso(
       <Conversation
         messages={[
           { id: "u1", role: "user", text: "hello" },
@@ -25,13 +33,13 @@ describe("Conversation a11y", () => {
   });
 
   it("does not announce static completed threads", () => {
-    renderWithTheme(<Conversation messages={[{ id: "u1", role: "user", text: "hello" }]} />);
+    renderWithThemeAndVirtuoso(<Conversation messages={[{ id: "u1", role: "user", text: "hello" }]} />);
 
     expect(screen.getByText("hello").closest("[aria-live]")).toHaveAttribute("aria-live", "off");
   });
 
   it("supports keyboard collapse and expand for project groups", () => {
-    renderWithTheme(
+    renderWithThemeAndVirtuoso(
       <ConversationList
         projects={initialProjects}
         chats={[]}

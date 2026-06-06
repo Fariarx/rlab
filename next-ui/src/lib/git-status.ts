@@ -14,6 +14,29 @@ export interface GitStatusPayload {
   readonly behind: number;
   readonly clean: boolean;
   readonly files: readonly GitFileStatus[];
+  /** Total added/removed lines across unstaged (working-tree) changes. */
+  readonly unstagedAdditions?: number;
+  readonly unstagedDeletions?: number;
+}
+
+/** Sums the additions/deletions columns of `git diff --numstat` output. Binary
+ *  files (shown as `-`) are ignored. */
+export function parseNumstatTotals(output: string): { readonly additions: number; readonly deletions: number } {
+  let additions = 0;
+  let deletions = 0;
+  for (const line of output.split(/\r?\n/)) {
+    if (!line.trim()) {
+      continue;
+    }
+    const [added, removed] = line.split("\t");
+    if (added && added !== "-") {
+      additions += Number(added) || 0;
+    }
+    if (removed && removed !== "-") {
+      deletions += Number(removed) || 0;
+    }
+  }
+  return { additions, deletions };
 }
 
 function statusLabel(code: string): string {

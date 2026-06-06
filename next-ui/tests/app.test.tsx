@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/App";
 import { buildInitialWorkspaceState, type WorkspaceState } from "../src/components/workspace/workspace-state";
+import { withVirtuosoMock } from "./util/render-with-virtuoso";
 
 describe("App", () => {
   afterEach(() => {
@@ -10,7 +11,7 @@ describe("App", () => {
   });
 
   it("renders the localized agent workspace by default", () => {
-    render(<App />);
+    render(withVirtuosoMock(<App />));
 
     expect(screen.getByText("rlab / агенты")).toBeInTheDocument();
     // Projects and chats share one unified sidebar list (no mode toggle).
@@ -48,7 +49,7 @@ describe("App", () => {
       }),
     );
 
-    render(<App />);
+    render(withVirtuosoMock(<App />));
 
     expect(await screen.findByText("На этой машине нет установленных или доступных coding-агентов.")).toBeInTheDocument();
   });
@@ -88,7 +89,7 @@ describe("App", () => {
       }),
     );
 
-    render(<App />);
+    render(withVirtuosoMock(<App />));
 
     expect(await screen.findByText("Ошибка детекта агентов: Agent detection failed (503)")).toBeInTheDocument();
 
@@ -131,11 +132,41 @@ describe("App", () => {
       }),
     );
 
-    render(<App />);
+    render(withVirtuosoMock(<App />));
 
     // The selected chat's agent (codex → available) is shown as the header
     // agent badge's status dot, whose accessible label reflects the live status.
     expect((await screen.findAllByLabelText("Доступен")).length).toBeGreaterThan(0);
     expect(warn).not.toHaveBeenCalledWith(expect.stringContaining("[MobX]"));
+  });
+
+  it("disables app animations when reduce motion is enabled", async () => {
+    const state: WorkspaceState = {
+      ...buildInitialWorkspaceState(),
+      settings: {
+        ...buildInitialWorkspaceState().settings,
+        appearance: {
+          ...buildInitialWorkspaceState().settings.appearance,
+          reduceMotion: true,
+        },
+      },
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        if (String(input) === "/api/workspace") {
+          return Response.json(state);
+        }
+        return Response.json({});
+      }),
+    );
+
+    render(withVirtuosoMock(<App />));
+
+    expect(await screen.findByText("rlab / агенты")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(document.head.textContent).toContain("animation:none!important");
+      expect(document.head.textContent).toContain("transition:none!important");
+    });
   });
 });

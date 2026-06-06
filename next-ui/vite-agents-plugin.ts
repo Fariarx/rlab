@@ -7,7 +7,7 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { query, type CanUseTool, type EffortLevel, type Options as ClaudeQueryOptions, type PermissionResult } from "@anthropic-ai/claude-agent-sdk";
 import type { Plugin, ViteDevServer, PreviewServer } from "vite";
-import { parseGitStatusPorcelain } from "./src/lib/git-status";
+import { parseGitStatusPorcelain, parseNumstatTotals } from "./src/lib/git-status";
 import {
   cloneAppSettings,
   defaultAppSettings,
@@ -1285,13 +1285,7 @@ function handleGitStatus(req: IncomingMessage, res: ServerResponse): void {
         return;
       }
 
-      runGit(cwd, ["status", "--porcelain=v1", "-b"], (result) => {
-        if (!result.ok) {
-          sendJson(res, 500, { error: result.error });
-          return;
-        }
-        sendJson(res, 200, parseGitStatusPorcelain(result.stdout));
-      });
+      respondWithGitStatus(cwd, res);
     } catch (error) {
       sendJson(res, gitErrorStatus(error), { error: errorMessage(error) });
     }
@@ -1438,14 +1432,23 @@ function runGit(cwd: string, args: readonly string[], onDone: (result: GitComman
   });
 }
 
-function sendGitStatusAfterMutation(cwd: string, res: ServerResponse): void {
+function respondWithGitStatus(cwd: string, res: ServerResponse): void {
   runGit(cwd, ["status", "--porcelain=v1", "-b"], (statusResult) => {
     if (!statusResult.ok) {
       sendJson(res, 500, { error: statusResult.error });
       return;
     }
-    sendJson(res, 200, parseGitStatusPorcelain(statusResult.stdout));
+    const payload = parseGitStatusPorcelain(statusResult.stdout);
+    // A second cheap pass for unstaged line totals (the header badge shows +/-).
+    runGit(cwd, ["diff", "--numstat"], (numstatResult) => {
+      const totals = numstatResult.ok ? parseNumstatTotals(numstatResult.stdout) : { additions: 0, deletions: 0 };
+      sendJson(res, 200, { ...payload, unstagedAdditions: totals.additions, unstagedDeletions: totals.deletions });
+    });
   });
+}
+
+function sendGitStatusAfterMutation(cwd: string, res: ServerResponse): void {
+  respondWithGitStatus(cwd, res);
 }
 
 function handleGitDiff(req: IncomingMessage, res: ServerResponse): void {
@@ -1538,6 +1541,29 @@ function handleGitCommit(req: IncomingMessage, res: ServerResponse): void {
   });
 }
 
+function handleGitInit(req: IncomingMessage, res: ServerResponse): void {
+  readJsonBody(req, res, (body) => {
+    try {
+      const { cwd } = parseGitCwdPayload(body);
+      const cwdError = validateGitCwd(cwd);
+      if (cwdError) {
+        sendJson(res, 400, { error: cwdError });
+        return;
+      }
+      // `git init` is idempotent — initialises a repo with Git's defaults.
+      runGit(cwd, ["init"], (result) => {
+        if (!result.ok) {
+          sendJson(res, 500, { error: result.error });
+          return;
+        }
+        sendGitStatusAfterMutation(cwd, res);
+      });
+    } catch (error) {
+      sendJson(res, gitErrorStatus(error), { error: errorMessage(error) });
+    }
+  });
+}
+
 function handleGitPush(req: IncomingMessage, res: ServerResponse): void {
   readJsonBody(req, res, (body) => {
     try {
@@ -1557,6 +1583,73 @@ function handleGitPush(req: IncomingMessage, res: ServerResponse): void {
     } catch (error) {
       sendJson(res, gitPushRequestErrorStatus(error), { error: errorMessage(error) });
     }
+  });
+}
+
+function parseTerminalPayload(body: string): { readonly cwd: string; readonly command: string } {
+  const parsed = parseJsonObjectPayload(body, "Invalid terminal request payload.");
+  const cwd = typeof parsed.cwd === "string" ? parsed.cwd.trim() : "";
+  const command = typeof parsed.command === "string" ? parsed.command : "";
+  if (!cwd) {
+    throw new Error("Project directory is required.");
+  }
+  if (!command.trim()) {
+    throw new Error("Command is required.");
+  }
+  return { cwd, command };
+}
+
+/** Runs one shell command in the chat folder and streams its output as NDJSON
+ *  ({type:"out"|"err",chunk} … {type:"exit",code}). Stateless per command — an
+ *  explicit user-driven shell, so a real (login) shell is fine here. */
+function handleTerminal(req: IncomingMessage, res: ServerResponse): void {
+  readJsonBody(req, res, (body) => {
+    let cwd: string;
+    let command: string;
+    try {
+      ({ cwd, command } = parseTerminalPayload(body));
+      const cwdError = validateGitCwd(cwd);
+      if (cwdError) {
+        sendJson(res, 400, { error: cwdError });
+        return;
+      }
+    } catch (error) {
+      sendJson(res, gitErrorStatus(error), { error: errorMessage(error) });
+      return;
+    }
+
+    res.setHeader("Content-Type", "application/x-ndjson");
+    res.setHeader("Cache-Control", "no-store");
+    const write = (event: Record<string, unknown>) => {
+      res.write(`${JSON.stringify(event)}\n`);
+    };
+
+    const shell = process.env.SHELL || "/bin/bash";
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(shell, ["-lc", command], { cwd, env: process.env, stdio: ["ignore", "pipe", "pipe"] });
+    } catch (error) {
+      write({ type: "err", chunk: error instanceof Error ? error.message : String(error) });
+      write({ type: "exit", code: 1 });
+      res.end();
+      return;
+    }
+    let done = false;
+    child.stdout?.on("data", (chunk: Buffer) => write({ type: "out", chunk: chunk.toString() }));
+    child.stderr?.on("data", (chunk: Buffer) => write({ type: "err", chunk: chunk.toString() }));
+    child.on("error", (error) => write({ type: "err", chunk: error.message }));
+    child.on("close", (code) => {
+      done = true;
+      write({ type: "exit", code: code ?? 0 });
+      res.end();
+    });
+    // Abort the command only if the client disconnects before it finishes (the
+    // request stream closing on its own must not kill a still-running command).
+    res.on("close", () => {
+      if (!done && !child.killed) {
+        child.kill();
+      }
+    });
   });
 }
 
@@ -4799,6 +4892,22 @@ function attach(server: ViteDevServer | PreviewServer): void {
       return;
     }
     handleGitPush(req, res);
+  });
+  server.middlewares.use("/api/git-init", (req, res) => {
+    if (req.method !== "POST") {
+      res.statusCode = 405;
+      res.end();
+      return;
+    }
+    handleGitInit(req, res);
+  });
+  server.middlewares.use("/api/terminal", (req, res) => {
+    if (req.method !== "POST") {
+      res.statusCode = 405;
+      res.end();
+      return;
+    }
+    handleTerminal(req, res);
   });
   server.middlewares.use("/api/runs", (req, res) => {
     if (req.method !== "GET") {

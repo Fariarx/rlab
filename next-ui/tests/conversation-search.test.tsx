@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { useState } from "react";
 import { ConversationList, ConversationSearch, type ChatMessage, type ConversationSummary } from "../src/components/agent";
 import { renderWithTheme } from "./util/render-with-theme";
+import { renderWithThemeAndVirtuoso } from "./util/render-with-virtuoso";
 
 const baseConversation: ConversationSummary = {
   id: "search-chat",
@@ -34,8 +35,8 @@ function KeyboardProbe() {
 }
 
 describe("conversation list", () => {
-  it("renders chat rows without virtualization", () => {
-    renderWithTheme(
+  it("renders chat rows in a virtualized sidebar list", () => {
+    renderWithThemeAndVirtuoso(
       <ConversationList
         projects={[]}
         selectedId="chat-0"
@@ -45,11 +46,12 @@ describe("conversation list", () => {
       />,
     );
 
-    expect(screen.getByTestId("conversation-list-virtual-list")).toHaveAttribute("data-virtualized", "false");
+    expect(screen.getByTestId("conversation-list-virtual-list")).toHaveAttribute("data-virtualized", "true");
+    expect(screen.getByTestId("virtuoso-scroller")).toBeInTheDocument();
   });
 
   it("moves conversation selection with arrow keys and keeps focus on the active row", async () => {
-    renderWithTheme(<KeyboardProbe />);
+    renderWithThemeAndVirtuoso(<KeyboardProbe />);
 
     const first = screen.getByRole("option", { name: "First chat" });
     expect(first).toHaveAttribute("tabindex", "0");
@@ -66,7 +68,7 @@ describe("conversation list", () => {
   });
 
   it("selects a conversation row with Enter", () => {
-    renderWithTheme(<KeyboardProbe />);
+    renderWithThemeAndVirtuoso(<KeyboardProbe />);
 
     fireEvent.keyDown(screen.getByRole("option", { name: "Second chat" }), { key: "Enter" });
 

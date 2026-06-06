@@ -3,6 +3,7 @@ import { render } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/App";
 import { buildInitialWorkspaceState, type WorkspaceState } from "../src/components/workspace/workspace-state";
+import { withVirtuosoMock } from "./util/render-with-virtuoso";
 
 let workspace: WorkspaceState;
 
@@ -35,6 +36,16 @@ describe("hash routing", () => {
     expect(await screen.findByText("Ждёт подтверждение deploy")).toBeInTheDocument();
   });
 
+  it("opens a project deep link at the first project conversation", async () => {
+    window.location.hash = "#/project/auth-service";
+
+    renderApp();
+
+    expect((await screen.findAllByText("Flaky-тест auth.login")).length).toBeGreaterThan(0);
+    expect(await screen.findByPlaceholderText("Написать: Flaky-тест auth.login...")).toBeInTheDocument();
+    expect(window.location.hash).toBe("#/project/auth-service");
+  });
+
   it("updates the hash when a project conversation is selected", async () => {
     window.location.hash = "#/project/auth-service/c-flaky";
 
@@ -45,10 +56,28 @@ describe("hash routing", () => {
 
     expect(window.location.hash).toBe("#/project/auth-service/c-jwt");
   });
+
+  it("creates a new conversation inside the active project route", async () => {
+    window.location.hash = "#/project/auth-service/c-flaky";
+
+    renderApp();
+    await screen.findByPlaceholderText("Написать: Flaky-тест auth.login...");
+
+    fireEvent.click(screen.getByRole("button", { name: "Новый диалог" }));
+    const input = await screen.findByPlaceholderText("Начать новый диалог...");
+    fireEvent.change(input, { target: { value: "Project-local follow-up" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    const project = workspace.projects.find((item) => item.id === "auth-service");
+    const created = project?.conversations.find((conversation) => conversation.snippet === "Project-local follow-up");
+    expect(created).toBeDefined();
+    expect(workspace.chats.some((conversation) => conversation.snippet === "Project-local follow-up")).toBe(false);
+    expect(window.location.hash).toBe(`#/project/auth-service/${created?.id}`);
+  });
 });
 
 function renderApp() {
-  return render(<App />);
+  return render(withVirtuosoMock(<App />));
 }
 
 async function fetchWorkspaceResource(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {

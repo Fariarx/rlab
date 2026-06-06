@@ -39,9 +39,9 @@ export function App() {
         <GlobalStyles
           styles={{
             "*, *::before, *::after": {
-              animationDuration: "1ms !important",
+              animation: "none !important",
               scrollBehavior: "auto !important",
-              transitionDuration: "1ms !important",
+              transition: "none !important",
             },
           }}
         />

@@ -1,7 +1,7 @@
 import { screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { Conversation, type ChatMessage } from "../src/components/agent";
-import { renderWithTheme } from "./util/render-with-theme";
+import { renderWithThemeAndVirtuoso, withVirtuosoMock } from "./util/render-with-virtuoso";
 
 describe("Conversation auto-scroll", () => {
   it("keeps streaming agent content visible as it updates", () => {
@@ -10,16 +10,18 @@ describe("Conversation auto-scroll", () => {
       { id: "a1", role: "agent", time: "10:01", blocks: [{ kind: "text", text: "Hel", streaming: true }] },
     ];
 
-    const { rerender } = renderWithTheme(<Conversation messages={initialMessages} />);
+    const { rerender } = renderWithThemeAndVirtuoso(<Conversation messages={initialMessages} />);
     expect(screen.getByText("Hel")).toBeInTheDocument();
 
     rerender(
-      <Conversation
-        messages={[
-          initialMessages[0],
-          { id: "a1", role: "agent", time: "10:01", blocks: [{ kind: "text", text: "Hello", streaming: true }] },
-        ]}
-      />,
+      withVirtuosoMock(
+        <Conversation
+          messages={[
+            initialMessages[0],
+            { id: "a1", role: "agent", time: "10:01", blocks: [{ kind: "text", text: "Hello", streaming: true }] },
+          ]}
+        />,
+      ),
     );
 
     // The streaming text stays rendered (and the thread sticks to the bottom)
@@ -28,7 +30,7 @@ describe("Conversation auto-scroll", () => {
   });
 
   it("marks the thread as a live region while content streams", () => {
-    renderWithTheme(
+    renderWithThemeAndVirtuoso(
       <Conversation
         messages={[
           { id: "u1", role: "user", text: "Run this", time: "10:00" },
@@ -40,8 +42,8 @@ describe("Conversation auto-scroll", () => {
     expect(screen.getByTestId("conversation-virtual-list")).toHaveAttribute("aria-live", "polite");
   });
 
-  it("renders long threads in a native scroll container so streaming content stays visible", () => {
-    renderWithTheme(
+  it("renders long threads in a virtualized scroll container", () => {
+    renderWithThemeAndVirtuoso(
       <Conversation
         messages={Array.from({ length: 50 }, (_, index) => ({
           id: `m-${index}`,
@@ -53,9 +55,7 @@ describe("Conversation auto-scroll", () => {
 
     const thread = screen.getByTestId("conversation-virtual-list");
     expect(thread).toBeInTheDocument();
-    // The thread uses native overflow scrolling (not windowed virtualization) so
-    // streaming agent output is never unmounted out of the viewport mid-update.
-    expect(thread).toHaveAttribute("data-virtualized", "false");
-    expect(screen.queryByTestId("virtuoso-scroller")).not.toBeInTheDocument();
+    expect(thread).toHaveAttribute("data-virtualized", "true");
+    expect(screen.getByTestId("virtuoso-scroller")).toBeInTheDocument();
   });
 });

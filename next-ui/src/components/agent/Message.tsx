@@ -343,6 +343,9 @@ function AgentMessage({ message, delay, actions }: { readonly message: ChatMessa
           <AgentUsageMeta message={message} />
         </Stack>
         <Stack spacing={1.25}>
+          {/* The turn starts as an empty agent message; show the thinking dots in
+              place until the first block streams in (no separate typing bubble). */}
+          {blocks.length === 0 && <TypingDots />}
           {detailBlocks.length > 0 && (
             <Box sx={rise(delay + 120)}>
               <AgentDetails blocks={detailBlocks} actions={actions} />

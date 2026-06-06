@@ -2,6 +2,7 @@ import { fireEvent, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { ApprovalRequest, Conversation, type ChatMessage } from "../src/components/agent";
 import { renderWithTheme } from "./util/render-with-theme";
+import { renderWithThemeAndVirtuoso } from "./util/render-with-virtuoso";
 
 const messages: ChatMessage[] = [
   { id: "u1", role: "user", text: "Original prompt", time: "10:00" },
@@ -14,7 +15,7 @@ describe("message actions", () => {
     const onRetry = vi.fn();
     const onEditAndResend = vi.fn();
 
-    renderWithTheme(
+    renderWithThemeAndVirtuoso(
       <Conversation
         messages={messages}
         actions={{
@@ -37,7 +38,7 @@ describe("message actions", () => {
   });
 
   it("only exposes copy for agent messages", () => {
-    renderWithTheme(
+    renderWithThemeAndVirtuoso(
       <Conversation
         messages={[messages[1]]}
         actions={{
@@ -55,7 +56,7 @@ describe("message actions", () => {
 
   it("sends approval decisions from approval blocks", () => {
     const onApprovalDecision = vi.fn();
-    renderWithTheme(
+    renderWithThemeAndVirtuoso(
       <Conversation
         messages={[
           {
@@ -75,7 +76,7 @@ describe("message actions", () => {
 
   it("sends option selections from AskUserQuestion option blocks", () => {
     const onOptionSelection = vi.fn();
-    renderWithTheme(
+    renderWithThemeAndVirtuoso(
       <Conversation
         messages={[
           {

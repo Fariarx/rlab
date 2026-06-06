@@ -831,6 +831,16 @@ class WorkspaceStore implements Workspace {
 
     const aId = nextId("a");
     const agentTime = nowLabel();
+    // Create the agent message up-front (empty) so the thread shows a single
+    // continuous "thinking" bubble that streams content in place — no separate
+    // typing placeholder that pops out and gets replaced (which read as a flicker).
+    this.setState((current) => {
+      const arr = current.threads[id] ?? [];
+      if (arr.some((m) => m.id === aId)) {
+        return current;
+      }
+      return { ...current, threads: { ...current.threads, [id]: [...arr, { id: aId, role: "agent", time: agentTime, blocks: [] }] } };
+    });
     const applyBlocks = (blocks: AgentBlock[]) => {
       let shouldFlush = false;
       this.setState((current) => {

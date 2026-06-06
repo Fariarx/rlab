@@ -9,7 +9,7 @@ import { type ReactNode, type RefObject, useCallback, useEffect, useMemo, useRef
 import { type I18nApi, useI18n } from "../../i18n/I18nProvider";
 import { type GitFileStatus, type GitStatusPayload } from "../../lib/git-status";
 import { type DiffBlock, type ReviewCommentEntry } from "../agent";
-import { Button, IconButton } from "../ui";
+import { Button, EmptyState, IconButton } from "../ui";
 import { countDiffChanges, type DiffViewerLine, GitDiffLines, gitDiffViewerLinesFromBlock, gitDiffViewerLinesFromUnified } from "./GitDiffViewer";
 
 /** Code-review comment plumbing shared by the diff cards. The file path is bound
@@ -25,6 +25,11 @@ interface GitViewProps {
   readonly cwd?: string;
   readonly lastTurnDiffs?: readonly DiffBlock[];
   readonly review?: DiffCommentApi;
+  /** Whether the Git view is the visible tab. Diffs only auto-load when active so
+   *  a hidden (but mounted) Git view fetches status for the badge but no diffs. */
+  readonly active?: boolean;
+  /** Reports the unstaged line totals up for the header Git-tab badge. */
+  readonly onUnstagedStatsChange?: (stats: { readonly additions: number; readonly deletions: number }) => void;
 }
 
 type GitApiErrorPayload = {
@@ -96,6 +101,16 @@ async function mutateGitFile(endpoint: "/api/git-stage" | "/api/git-unstage", cw
   });
   const payload = await readGitApiPayload<GitStatusPayload>(response);
   return assertGitApiOk(endpoint === "/api/git-stage" ? "Git stage" : "Git unstage", response, payload);
+}
+
+async function initGitRepo(cwd: string): Promise<GitStatusPayload> {
+  const response = await fetch("/api/git-init", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cwd }),
+  });
+  const payload = await readGitApiPayload<GitStatusPayload>(response);
+  return assertGitApiOk("Git init", response, payload);
 }
 
 async function commitGit(cwd: string, message: string): Promise<GitStatusPayload> {
@@ -187,6 +202,10 @@ function DiffFileCard({
         borderRadius: radius,
         border: (theme) => `1px solid ${theme.custom.borders.subtle}`,
         backgroundColor: (theme) => theme.custom.surfaces.s2,
+        // `clip` keeps the rounded corners from being overrun by the sticky
+        // header when it reaches the card bottom, without creating a scroll
+        // container (which `hidden` would, breaking the sticky header).
+        overflow: "clip",
       }}
     >
       <Box ref={sentinelRef} aria-hidden="true" sx={{ height: 0 }} />
@@ -328,7 +347,7 @@ function GitFileDiffCard({
   );
 }
 
-export function GitView({ cwd, lastTurnDiffs = [], review }: GitViewProps) {
+export function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnstagedStatsChange }: GitViewProps) {
   const { t } = useI18n();
   const [status, setStatus] = useState<GitStatusPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -377,6 +396,13 @@ export function GitView({ cwd, lastTurnDiffs = [], review }: GitViewProps) {
   const stagedFiles = useMemo(() => changedFilesForTab(status, "staged"), [status]);
   const hasStagedFiles = stagedFiles.length > 0;
 
+  // Report the unstaged line totals up for the header Git-tab badge.
+  const unstagedAdditions = status?.unstagedAdditions ?? 0;
+  const unstagedDeletions = status?.unstagedDeletions ?? 0;
+  useEffect(() => {
+    onUnstagedStatsChange?.({ additions: unstagedAdditions, deletions: unstagedDeletions });
+  }, [unstagedAdditions, unstagedDeletions, onUnstagedStatsChange]);
+
   const runGitAction = (action: () => Promise<GitStatusPayload>, onDone?: () => void) => {
     if (!cwd) {
       return;
@@ -402,6 +428,7 @@ export function GitView({ cwd, lastTurnDiffs = [], review }: GitViewProps) {
       runGitAction(() => commitGit(cwd, message), () => setCommitMessage(""));
     }
   };
+  const initRepo = () => cwd && runGitAction(() => initGitRepo(cwd));
 
   return (
     <Stack sx={{ height: "100%", minHeight: 0, backgroundColor: (theme) => theme.custom.surfaces.s1 }}>
@@ -455,14 +482,22 @@ export function GitView({ cwd, lastTurnDiffs = [], review }: GitViewProps) {
         )}
 
         <Stack ref={scrollRef} spacing={1.5} sx={{ flex: 1, minHeight: 0, overflow: "auto", px: 1.5, pt: 0, pb: 2 }}>
-          {!cwd && <Alert severity="info" sx={{ mt: 1.5 }}>{t("gitNoProject")}</Alert>}
           {loading && (
             <Stack direction="row" spacing={1} sx={{ alignItems: "center", color: "text.secondary", pt: 1.5 }}>
               <CircularProgress size={16} />
               <Typography>{t("gitLoading")}</Typography>
             </Stack>
           )}
-          {error && <Alert severity="error" sx={{ mt: 1.5 }}>{error}</Alert>}
+          {!loading && !status && (
+            <Stack sx={{ height: "100%", justifyContent: "center", alignItems: "center", px: 3, py: 4 }}>
+              <EmptyState
+                icon={<AccountTreeIcon />}
+                title={t("gitEmptyTitle")}
+                description={cwd ? error ?? t("gitNoRepoDescription") : t("gitNoProject")}
+                action={cwd ? <Button variant="contained" disabled={actionLoading} onClick={initRepo}>{t("gitInitRepo")}</Button> : undefined}
+              />
+            </Stack>
+          )}
           {status && (
             <Stack spacing={1.5} sx={{ minHeight: 0, pt: 1.5 }}>
               {activeTab === "unstaged" &&
@@ -477,7 +512,7 @@ export function GitView({ cwd, lastTurnDiffs = [], review }: GitViewProps) {
                         cwd={cwd}
                         file={file}
                         mode="worktree"
-                        autoLoad={unstagedFiles.length <= EAGER_DIFF_LIMIT}
+                        autoLoad={active && unstagedFiles.length <= EAGER_DIFF_LIMIT}
                         scrollRef={scrollRef}
                         review={review}
                         t={t}
@@ -507,7 +542,7 @@ export function GitView({ cwd, lastTurnDiffs = [], review }: GitViewProps) {
                         cwd={cwd}
                         file={file}
                         mode="staged"
-                        autoLoad={stagedFiles.length <= EAGER_DIFF_LIMIT}
+                        autoLoad={active && stagedFiles.length <= EAGER_DIFF_LIMIT}
                         scrollRef={scrollRef}
                         review={review}
                         t={t}

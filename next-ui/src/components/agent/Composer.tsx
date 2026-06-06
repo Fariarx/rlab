@@ -3,6 +3,7 @@ import AutoAwesomeRoundedIcon from "@mui/icons-material/AutoAwesomeRounded";
 import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
 import DescriptionOutlinedIcon from "@mui/icons-material/DescriptionOutlined";
 import ImageOutlinedIcon from "@mui/icons-material/ImageOutlined";
+import RateReviewOutlinedIcon from "@mui/icons-material/RateReviewOutlined";
 import SendIcon from "@mui/icons-material/Send";
 import StopCircleIcon from "@mui/icons-material/StopCircle";
 import TuneRoundedIcon from "@mui/icons-material/TuneRounded";
@@ -151,8 +152,9 @@ function FloatingTag({
 }: {
   readonly icon: ReactNode;
   readonly label: string;
-  readonly onRemove: () => void;
-  readonly removeLabel: string;
+  /** When omitted the tag has no close button (e.g. the read-only review tag). */
+  readonly onRemove?: () => void;
+  readonly removeLabel?: string;
   readonly tone?: "neutral" | "accent";
 }) {
   return (
@@ -165,7 +167,7 @@ function FloatingTag({
         gap: 0.5,
         maxWidth: 240,
         pl: 0.875,
-        pr: 0.25,
+        pr: onRemove ? 0.25 : 0.875,
         py: 0.25,
         borderRadius: (t) => `${t.custom.radii.pill}px`,
         fontSize: "0.74rem",
@@ -185,9 +187,11 @@ function FloatingTag({
       <Box component="span" sx={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
         {label}
       </Box>
-      <IconButton aria-label={removeLabel} onClick={onRemove} sx={{ p: 0.125, flex: "0 0 auto", color: "inherit", "&:hover": { backgroundColor: "transparent", opacity: 0.7 } }}>
-        <CloseRoundedIcon sx={{ fontSize: 13 }} />
-      </IconButton>
+      {onRemove && (
+        <IconButton aria-label={removeLabel ?? ""} onClick={onRemove} sx={{ p: 0.125, flex: "0 0 auto", color: "inherit", "&:hover": { backgroundColor: "transparent", opacity: 0.7 } }}>
+          <CloseRoundedIcon sx={{ fontSize: 13 }} />
+        </IconButton>
+      )}
     </Box>
   );
 }
@@ -215,6 +219,10 @@ interface ComposerProps {
   readonly onStop?: () => void;
   readonly onAttachmentError?: (message: string) => void;
   readonly running?: boolean;
+  /** Count of pending review comments shown as a no-close tag; when > 0 the send
+   *  button is enabled and sending also flushes the comments via onSendReview. */
+  readonly reviewCount?: number;
+  readonly onSendReview?: () => void;
 }
 
 /** Composer — the chat input. Sends on Enter (Shift+Enter for newline). Sticky
@@ -235,6 +243,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     onStop,
     onAttachmentError,
     running = false,
+    reviewCount = 0,
+    onSendReview,
   },
   ref,
 ) {
@@ -328,13 +338,21 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 
   const send = async () => {
     const trimmed = composerValue.trim();
-    if (trimmed.length > 0 || composerAttachments.length > 0) {
-      setSending(true);
+    const hasInput = trimmed.length > 0 || composerAttachments.length > 0;
+    if (!hasInput && reviewCount === 0) {
+      return;
+    }
+    setSending(true);
+    if (hasInput) {
       const attachmentBlocks = composerAttachments.map(attachmentBlock);
       onSend?.([trimmed, ...attachmentBlocks].filter(Boolean).join("\n\n"));
       updateDraft({ text: "", attachments: [] });
-      setSending(false);
     }
+    // Pending review comments flush as their own block (no agent run).
+    if (reviewCount > 0) {
+      onSendReview?.();
+    }
+    setSending(false);
   };
 
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -425,7 +443,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     setActiveSuggestion(0);
   }, [suggestionKey]);
 
-  const canSend = (composerValue.trim().length > 0 || composerAttachments.length > 0) && !sending;
+  const canSend = (composerValue.trim().length > 0 || composerAttachments.length > 0 || reviewCount > 0) && !sending;
+  const sendLabel = reviewCount > 0 ? t("reviewSendComments") : t("send");
 
   const floatingPanelSx: SxProps<Theme> = {
     pointerEvents: "auto",
@@ -444,8 +463,15 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       {/* Each enabled mode and each attached file floats as its own pill above
           the divider that tops the input container (overlaying the thread),
           never boxed together and never reflowing the thread. */}
-      {(composerAttachments.length > 0 || activeModeOption) && (
+      {(composerAttachments.length > 0 || activeModeOption || reviewCount > 0) && (
         <Box sx={{ position: "absolute", left: 0, right: 0, bottom: "calc(100% + 22px)", display: "flex", flexWrap: "wrap", gap: 0.75, pointerEvents: "none", zIndex: 6 }}>
+          {reviewCount > 0 && (
+            <FloatingTag
+              tone="accent"
+              icon={<RateReviewOutlinedIcon sx={{ fontSize: 14 }} />}
+              label={t("reviewPending", { count: reviewCount })}
+            />
+          )}
           {activeModeOption && (
             <FloatingTag
               tone="accent"
@@ -609,7 +635,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             onClick={() => void send()}
             disabled={!canSend}
             sx={{ minWidth: 0, px: 1.25, py: 1, borderRadius: (t) => `${t.custom.radii.md}px` }}
-            aria-label={t("send")}
+            aria-label={sendLabel}
           >
             <SendIcon sx={{ fontSize: 18 }} />
           </Button>
