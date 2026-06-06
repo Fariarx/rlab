@@ -1,308 +1,36 @@
 import { type StatusKey } from "../../theme/tokens";
+import { type AgentSystemStatus } from "../../lib/agent-catalog";
 
-/**
- * Agent (coding-executor) model. Runtime availability is loaded through
- * `/api/agents`; `AGENT_STATUS` is only the initial static baseline while that
- * endpoint is pending.
- */
-export type AgentId =
-  | "claude-code"
-  | "codex"
-  | "gemini"
-  | "amp"
-  | "opencode"
-  | "cursor"
-  | "qwen"
-  | "copilot"
-  | "droid";
+export {
+  AGENTS,
+  AGENTS_BY_ID,
+  AGENT_STATUS,
+  DEFAULT_AGENT_OPTION_ID,
+  DEFAULT_PROFILE,
+  STATIC_AGENT_CLI_INFO,
+  agentProfileEquals,
+  agentProfileLabels,
+  defaultProfileForAgent,
+  getAgent,
+  getAgentStatus,
+  isAgentId,
+  legacyProfileFromVariant,
+  normalizeAgentProfile,
+  resolveAgentModelValue,
+  resolveAgentOptionValue,
+  resolveAgentReasoningValue,
+} from "../../lib/agent-catalog";
 
-export type AgentSystemStatus = "available" | "running" | "needs-setup" | "unavailable" | "unsupported";
-export type AgentWorkMode = "default" | "plan";
-
-export interface AgentOption {
-  readonly id: string;
-  readonly label: string;
-  readonly value?: string;
-}
-
-export interface AgentDef {
-  readonly id: AgentId;
-  readonly name: string;
-  readonly vendor: string;
-  /** CLI executables checked on PATH, in priority order. */
-  readonly cliBins: readonly string[];
-  /** Whether this UI can run the agent through /api/run. */
-  readonly runAdapter: boolean;
-  /** Two-letter monogram for the avatar. */
-  readonly short: string;
-  /** Brand-ish accent used for the agent's identity. */
-  readonly accent: string;
-  /** Selectable model aliases/IDs (default first). */
-  readonly models: readonly AgentOption[];
-  /** Selectable reasoning effort levels supported by the adapter (default first). */
-  readonly reasoning: readonly AgentOption[];
-  /** Chat work modes (default first); this is not a model or reasoning setting. */
-  readonly modes: readonly AgentOption[];
-}
-
-export const DEFAULT_AGENT_OPTION_ID = "default";
-
-const DEFAULT_OPTION: AgentOption = { id: DEFAULT_AGENT_OPTION_ID, label: "Default" };
-const DEFAULT_ONLY = [DEFAULT_OPTION] as const;
-const DEFAULT_MODE_OPTIONS = [DEFAULT_OPTION] as const;
-const CLAUDE_MODE_OPTIONS = [DEFAULT_OPTION, { id: "plan", label: "Plan", value: "plan" }] as const;
-const CLAUDE_REASONING_OPTIONS = [
-  DEFAULT_OPTION,
-  { id: "low", label: "Low", value: "low" },
-  { id: "medium", label: "Medium", value: "medium" },
-  { id: "high", label: "High", value: "high" },
-  { id: "xhigh", label: "Extra High", value: "xhigh" },
-  { id: "max", label: "Max", value: "max" },
-] as const;
-const CLAUDE_MODEL_OPTIONS = [
-  DEFAULT_OPTION,
-  { id: "claude-opus-4-8", label: "Opus 4.8", value: "claude-opus-4-8" },
-  { id: "claude-opus-4-7", label: "Opus 4.7", value: "claude-opus-4-7" },
-  { id: "claude-sonnet-4-6", label: "Sonnet 4.6", value: "claude-sonnet-4-6" },
-  { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5", value: "claude-haiku-4-5-20251001" },
-  { id: "opus", label: "Opus alias", value: "opus" },
-  { id: "sonnet", label: "Sonnet alias", value: "sonnet" },
-] as const;
-const CODEX_REASONING_OPTIONS = [
-  DEFAULT_OPTION,
-  { id: "low", label: "Low", value: "low" },
-  { id: "medium", label: "Medium", value: "medium" },
-  { id: "high", label: "High", value: "high" },
-  { id: "xhigh", label: "Extra High", value: "xhigh" },
-] as const;
-const GEMINI_MODEL_OPTIONS = [
-  DEFAULT_OPTION,
-  { id: "gemini-3-pro", label: "Gemini 3 Pro", value: "gemini-3-pro-preview" },
-  { id: "gemini-3-flash", label: "Gemini 3 Flash", value: "gemini-3-flash-preview" },
-  { id: "pro", label: "2.5 Pro", value: "gemini-2.5-pro" },
-  { id: "flash", label: "2.5 Flash", value: "gemini-2.5-flash" },
-  { id: "flash-lite", label: "Flash-Lite", value: "gemini-2.5-flash-lite" },
-] as const;
-const OPENCODE_MODEL_OPTIONS = [
-  { id: DEFAULT_AGENT_OPTION_ID, label: "Default", value: "opencode/deepseek-v4-flash-free" },
-  { id: "gpt-5.2", label: "GPT-5.2", value: "opencode/gpt-5.2" },
-  { id: "gpt-5.1-codex", label: "GPT-5.1 Codex", value: "opencode/gpt-5.1-codex" },
-  { id: "claude-sonnet-4.5", label: "Claude Sonnet 4.5", value: "opencode/claude-sonnet-4-5" },
-  { id: "claude-opus-4.5", label: "Claude Opus 4.5", value: "opencode/claude-opus-4-5" },
-  { id: "gemini-3-pro", label: "Gemini 3 Pro", value: "google/gemini-3-pro-preview" },
-] as const;
-
-export const AGENTS: readonly AgentDef[] = [
-  {
-    id: "claude-code",
-    name: "Claude Code",
-    vendor: "Anthropic",
-    cliBins: ["claude"],
-    runAdapter: true,
-    short: "CC",
-    accent: "#D2A24C",
-    models: CLAUDE_MODEL_OPTIONS,
-    reasoning: CLAUDE_REASONING_OPTIONS,
-    modes: CLAUDE_MODE_OPTIONS,
-  },
-  {
-    id: "codex",
-    name: "Codex",
-    vendor: "OpenAI",
-    cliBins: ["codex"],
-    runAdapter: true,
-    short: "CX",
-    accent: "#10A37F",
-    models: [
-      DEFAULT_OPTION,
-      { id: "gpt-5.5", label: "GPT-5.5", value: "gpt-5.5" },
-      { id: "gpt-5.4", label: "GPT-5.4", value: "gpt-5.4" },
-      { id: "gpt-5.4-mini", label: "GPT-5.4 Mini", value: "gpt-5.4-mini" },
-      { id: "gpt-5.3-codex-spark", label: "GPT-5.3 Codex Spark", value: "gpt-5.3-codex-spark" },
-    ],
-    reasoning: CODEX_REASONING_OPTIONS,
-    modes: DEFAULT_MODE_OPTIONS,
-  },
-  {
-    id: "gemini",
-    name: "Gemini",
-    vendor: "Google",
-    cliBins: ["gemini"],
-    runAdapter: true,
-    short: "GM",
-    accent: "#4C8DF6",
-    models: GEMINI_MODEL_OPTIONS,
-    reasoning: DEFAULT_ONLY,
-    modes: DEFAULT_MODE_OPTIONS,
-  },
-  { id: "amp", name: "AMP", vendor: "Sourcegraph", cliBins: ["amp"], runAdapter: false, short: "AM", accent: "#E5484D", models: DEFAULT_ONLY, reasoning: DEFAULT_ONLY, modes: DEFAULT_MODE_OPTIONS },
-  {
-    id: "opencode",
-    name: "OpenCode",
-    vendor: "OpenCode",
-    cliBins: ["opencode"],
-    runAdapter: true,
-    short: "OC",
-    accent: "#8B5CF6",
-    models: OPENCODE_MODEL_OPTIONS,
-    reasoning: CLAUDE_REASONING_OPTIONS,
-    modes: DEFAULT_MODE_OPTIONS,
-  },
-  { id: "cursor", name: "Cursor", vendor: "Anysphere", cliBins: ["cursor-agent", "cursor"], runAdapter: false, short: "CU", accent: "#9aa4ad", models: DEFAULT_ONLY, reasoning: DEFAULT_ONLY, modes: DEFAULT_MODE_OPTIONS },
-  { id: "qwen", name: "Qwen", vendor: "Alibaba", cliBins: ["qwen", "qwen-code"], runAdapter: false, short: "QW", accent: "#7C3AED", models: DEFAULT_ONLY, reasoning: DEFAULT_ONLY, modes: DEFAULT_MODE_OPTIONS },
-  { id: "copilot", name: "Copilot", vendor: "GitHub", cliBins: ["copilot"], runAdapter: false, short: "CP", accent: "#3FB950", models: DEFAULT_ONLY, reasoning: DEFAULT_ONLY, modes: DEFAULT_MODE_OPTIONS },
-  { id: "droid", name: "Droid", vendor: "Factory", cliBins: ["droid"], runAdapter: false, short: "DR", accent: "#22A6B3", models: DEFAULT_ONLY, reasoning: DEFAULT_ONLY, modes: DEFAULT_MODE_OPTIONS },
-];
-
-export const AGENTS_BY_ID: Record<AgentId, AgentDef> = Object.fromEntries(AGENTS.map((a) => [a.id, a])) as Record<
+export type {
+  AgentCliInfo,
+  AgentCliMap,
+  AgentDef,
   AgentId,
-  AgentDef
->;
-
-export function getAgent(id: AgentId): AgentDef {
-  return AGENTS_BY_ID[id];
-}
-
-export function isAgentId(value: unknown): value is AgentId {
-  return typeof value === "string" && value in AGENTS_BY_ID;
-}
-
-/** Initial status baseline before runtime executor discovery returns. */
-export const AGENT_STATUS: Record<AgentId, AgentSystemStatus> = {
-  "claude-code": "available",
-  codex: "available",
-  gemini: "available",
-  opencode: "unavailable",
-  amp: "unsupported",
-  copilot: "unsupported",
-  cursor: "unsupported",
-  qwen: "unsupported",
-  droid: "unsupported",
-};
-
-export function getAgentStatus(id: AgentId): AgentSystemStatus {
-  return AGENT_STATUS[id];
-}
-
-export interface AgentCliInfo {
-  readonly status: AgentSystemStatus;
-  readonly bins: readonly string[];
-  readonly resolvedBin: string | null;
-  readonly runAdapter: boolean;
-  readonly selectable: boolean;
-  readonly env: readonly string[];
-  readonly installCommand: string | null;
-}
-
-export type AgentCliMap = Partial<Record<AgentId, AgentCliInfo>>;
-
-export const STATIC_AGENT_CLI_INFO: Record<AgentId, AgentCliInfo> = Object.fromEntries(
-  AGENTS.map((agent) => {
-    const status = AGENT_STATUS[agent.id];
-    return [
-      agent.id,
-      {
-        status,
-        bins: agent.cliBins,
-        resolvedBin: null,
-        runAdapter: agent.runAdapter,
-        selectable: status !== "unavailable" && status !== "unsupported",
-        env: [],
-        installCommand: null,
-      },
-    ];
-  }),
-) as unknown as Record<AgentId, AgentCliInfo>;
-
-export interface AgentProfile {
-  readonly agent: AgentId;
-  readonly model: string;
-  readonly reasoning: string;
-  readonly mode: AgentWorkMode;
-}
-
-export const DEFAULT_PROFILE: AgentProfile = { agent: "claude-code", model: DEFAULT_AGENT_OPTION_ID, reasoning: DEFAULT_AGENT_OPTION_ID, mode: "default" };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function isAgentWorkMode(value: unknown): value is AgentWorkMode {
-  return value === "default" || value === "plan";
-}
-
-function hasOption(options: readonly AgentOption[], id: string): boolean {
-  return options.some((option) => option.id === id);
-}
-
-function normalizeOptionId(options: readonly AgentOption[], id: string): string {
-  return hasOption(options, id) ? id : DEFAULT_AGENT_OPTION_ID;
-}
-
-export function defaultProfileForAgent(agent: AgentId): AgentProfile {
-  return { agent, model: DEFAULT_AGENT_OPTION_ID, reasoning: DEFAULT_AGENT_OPTION_ID, mode: "default" };
-}
-
-export function normalizeAgentProfile(value: unknown, fallbackAgent: AgentId = DEFAULT_PROFILE.agent): AgentProfile {
-  if (!isRecord(value)) {
-    return defaultProfileForAgent(fallbackAgent);
-  }
-  const agent = isAgentId(value.agent) ? value.agent : fallbackAgent;
-  if (typeof value.variant === "string") {
-    return legacyProfileFromVariant(agent, value.variant);
-  }
-  const def = getAgent(agent);
-  return {
-    agent,
-    model: typeof value.model === "string" ? normalizeOptionId(def.models, value.model) : DEFAULT_AGENT_OPTION_ID,
-    reasoning: typeof value.reasoning === "string" ? normalizeOptionId(def.reasoning, value.reasoning) : DEFAULT_AGENT_OPTION_ID,
-    mode: isAgentWorkMode(value.mode) && hasOption(def.modes, value.mode) ? value.mode : "default",
-  };
-}
-
-export function legacyProfileFromVariant(agent: AgentId, variant: string): AgentProfile {
-  const base = defaultProfileForAgent(agent);
-  if (agent === "claude-code" && variant === "Plan") {
-    return { ...base, mode: "plan" };
-  }
-  if (agent === "codex" && (variant === "GPT-5" || variant === "GPT-5.5")) {
-    return { ...base, model: "gpt-5.5" };
-  }
-  if (agent === "gemini" && variant === "Flash") {
-    return { ...base, model: "flash" };
-  }
-  if (agent === "gemini" && variant === "Pro") {
-    return { ...base, model: "pro" };
-  }
-  return base;
-}
-
-export function agentProfileEquals(a: AgentProfile, b: AgentProfile): boolean {
-  return a.agent === b.agent && a.model === b.model && a.reasoning === b.reasoning && a.mode === b.mode;
-}
-
-function optionLabel(options: readonly AgentOption[], id: string): string | null {
-  return options.find((option) => option.id === id)?.label ?? null;
-}
-
-export function agentProfileLabels(profile: AgentProfile): readonly string[] {
-  const def = getAgent(profile.agent);
-  const labels: string[] = [];
-  if (profile.model !== DEFAULT_AGENT_OPTION_ID) {
-    const label = optionLabel(def.models, profile.model);
-    if (label) {
-      labels.push(label);
-    }
-  }
-  if (profile.reasoning !== DEFAULT_AGENT_OPTION_ID) {
-    const label = optionLabel(def.reasoning, profile.reasoning);
-    if (label) {
-      labels.push(label);
-    }
-  }
-  // Work mode is surfaced as a removable chat tag (not in the agent badge).
-  return labels;
-}
+  AgentOption,
+  AgentProfile,
+  AgentSystemStatus,
+  AgentWorkMode,
+} from "../../lib/agent-catalog";
 
 export const agentStatusKey: Record<AgentSystemStatus, StatusKey> = {
   available: "ok",

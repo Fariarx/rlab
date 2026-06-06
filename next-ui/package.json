@@ -21,6 +21,7 @@
     "@mui/material": "^9.0.1",
     "mobx": "^6.16.0",
     "mobx-react-lite": "^4.1.1",
+    "prism-react-renderer": "^2.4.1",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "react-markdown": "^10.1.0",

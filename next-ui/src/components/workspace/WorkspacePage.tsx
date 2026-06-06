@@ -26,7 +26,7 @@ import {
   Tooltip,
   Typography,
 } from "@mui/material";
-import { type DragEvent, type MouseEvent as ReactMouseEvent, useEffect, useMemo, useRef, useState } from "react";
+import { type DragEvent, type MouseEvent as ReactMouseEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { I18nProvider, useI18n } from "../../i18n/I18nProvider";
 import { type HashRoute } from "../../lib/use-hash-route";
 import {
@@ -61,26 +61,13 @@ import { SettingsDialog } from "../settings/SettingsDialog";
 import { Button, EmptyState, IconButton, StatusDot, useToast } from "../ui";
 import { CommandPalette, type CommandPaletteItem } from "./CommandPalette";
 import { CreateProjectDialog } from "./CreateProjectDialog";
-import { GitPanel } from "./GitPanel";
+import { GitView } from "./GitPanel";
+import { DEFAULT_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, normalizeSidebarWidth } from "./app-settings";
 import { conversationProfile, type Workspace, useWorkspace } from "./use-workspace";
 
-const SIDEBAR_WIDTH = 300;
-const SIDEBAR_MIN_WIDTH = 240;
-const SIDEBAR_MAX_WIDTH = 520;
-const SIDEBAR_WIDTH_KEY = "next-ui:sidebar-width";
 const COMPOSER_DRAFT_SAVE_DELAY_MS = 350;
 const EMPTY_COMPOSER_DRAFT: ComposerDraft = { text: "", attachments: [] };
 
-function loadSidebarWidth(): number {
-  if (typeof window === "undefined") {
-    return SIDEBAR_WIDTH;
-  }
-  if (typeof window.localStorage?.getItem !== "function") {
-    return SIDEBAR_WIDTH;
-  }
-  const saved = Number(window.localStorage.getItem(SIDEBAR_WIDTH_KEY));
-  return Number.isFinite(saved) && saved >= SIDEBAR_MIN_WIDTH && saved <= SIDEBAR_MAX_WIDTH ? saved : SIDEBAR_WIDTH;
-}
 // The sidebar title bar and the chat pane header share one fixed height so the
 // two columns line up across the top.
 const HEADER_MIN_HEIGHT = 53;
@@ -191,11 +178,11 @@ export function WorkspacePageView({
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
-  const [gitOpen, setGitOpen] = useState(false);
+  const [view, setView] = useState<"chat" | "git">("chat");
   const [mentionableFiles, setMentionableFiles] = useState<readonly string[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth);
+  const [sidebarWidth, setSidebarWidth] = useState(() => normalizeSidebarWidth(ws.settings.appearance.sidebarWidth));
   const [isResizingSidebar, setIsResizingSidebar] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [runKey, setRunKey] = useState(0);
@@ -319,7 +306,7 @@ export function WorkspacePageView({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if ((routeKind === "chat" || routeKind === "project") && routeConversationId) {
       if (ws.selectedId !== routeConversationId) {
         ws.select(routeConversationId);
@@ -422,15 +409,14 @@ export function WorkspacePageView({
     }
   };
 
+  const persistedSidebarWidth = normalizeSidebarWidth(ws.settings.appearance.sidebarWidth);
   useEffect(() => {
-    try {
-      if (typeof window.localStorage?.setItem === "function") {
-        window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(sidebarWidth));
-      }
-    } catch {
-      // Ignore storage failures (private mode, quota) — width just won't persist.
+    if (isResizingSidebar || sidebarWidthRef.current === persistedSidebarWidth) {
+      return;
     }
-  }, [sidebarWidth]);
+    sidebarWidthRef.current = persistedSidebarWidth;
+    setSidebarWidth(persistedSidebarWidth);
+  }, [isResizingSidebar, persistedSidebarWidth]);
 
   useEffect(() => {
     sidebarWidthRef.current = sidebarWidth;
@@ -465,7 +451,7 @@ export function WorkspacePageView({
       });
     };
     const onMove = (moveEvent: MouseEvent) => {
-      const next = Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, startWidth + (moveEvent.clientX - startX)));
+      const next = Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, startWidth + (moveEvent.clientX - startX)));
       applyWidth(next);
     };
     const onUp = () => {
@@ -481,7 +467,9 @@ export function WorkspacePageView({
       if (sidebarInnerRef.current) {
         sidebarInnerRef.current.style.width = `${latestWidth}px`;
       }
-      setSidebarWidth(latestWidth);
+      const normalizedWidth = normalizeSidebarWidth(latestWidth);
+      setSidebarWidth(normalizedWidth);
+      ws.updateSettings({ appearance: { sidebarWidth: normalizedWidth } });
       setIsResizingSidebar(false);
     };
     window.addEventListener("mousemove", onMove);
@@ -643,7 +631,7 @@ export function WorkspacePageView({
       id: "open-git",
       label: t("commandOpenGit"),
       keywords: [t("git"), t("gitStatus")],
-      action: () => setGitOpen(true),
+      action: () => setView("git"),
     },
     {
       id: "toggle-theme",
@@ -751,7 +739,7 @@ export function WorkspacePageView({
         />
       )}
 
-      <Drawer open={drawerOpen} onClose={() => setDrawerOpen(false)} sx={{ display: { md: "none" } }} slotProps={{ paper: { sx: { width: SIDEBAR_WIDTH, backgroundImage: "none" } } }}>
+      <Drawer open={drawerOpen} onClose={() => setDrawerOpen(false)} sx={{ display: { md: "none" } }} slotProps={{ paper: { sx: { width: DEFAULT_SIDEBAR_WIDTH, backgroundImage: "none" } } }}>
         {sidebar}
       </Drawer>
 
@@ -836,16 +824,6 @@ export function WorkspacePageView({
             </Stack>
             <Stack direction="row" spacing={1} sx={{ alignItems: "center", flex: "0 0 auto", "& .MuiIconButton-root": { width: 30, height: 30 } }}>
               {(selected || composingNew) && <AgentBadge profile={profile} onClick={openPicker} compact />}
-              <Tooltip title={t("git")}>
-                <IconButton aria-label={t("git")} onClick={() => setGitOpen(true)}>
-                  <AccountTreeIcon sx={{ fontSize: 17 }} />
-                </IconButton>
-              </Tooltip>
-              <Tooltip title={t("replay")}>
-                <IconButton aria-label={t("replay")} onClick={() => setRunKey((k) => k + 1)}>
-                  <ReplayIcon sx={{ fontSize: 17 }} />
-                </IconButton>
-              </Tooltip>
               {selected?.status === "error" && (
                 <Tooltip title={t("retryRun")}>
                   <IconButton aria-label={t("retryRun")} onClick={retryLastUserMessage}>
@@ -853,17 +831,35 @@ export function WorkspacePageView({
                   </IconButton>
                 </Tooltip>
               )}
-              <Tooltip title={mode === "dark" ? t("toggleThemeDark") : t("toggleThemeLight")}>
-                <IconButton
-                  aria-label={mode === "dark" ? t("toggleThemeDark") : t("toggleThemeLight")}
-                  onClick={() => ws.updateSettings({ appearance: { theme: mode === "dark" ? "light" : "dark" } })}
-                >
-                  {mode === "dark" ? <LightModeIcon fontSize="small" /> : <DarkModeIcon fontSize="small" />}
-                </IconButton>
-              </Tooltip>
-              <Link href="#/kit" underline="hover" sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.78rem", display: { xs: "none", sm: "block" } }}>
-                {t("kit")}
-              </Link>
+              <ToggleButtonGroup
+                size="small"
+                exclusive
+                value={view}
+                onChange={(_, next: "chat" | "git" | null) => next && setView(next)}
+                aria-label={t("viewSwitcher")}
+                sx={{
+                  "& .MuiToggleButton-root": {
+                    px: 1.25,
+                    py: 0.5,
+                    gap: 0.5,
+                    textTransform: "none",
+                    fontFamily: (t) => t.custom.fonts.mono,
+                    fontSize: "0.74rem",
+                    color: "text.secondary",
+                    borderColor: (t) => t.custom.borders.subtle,
+                    "&.Mui-selected": { color: "text.primary", backgroundColor: (t) => t.custom.surfaces.s3 },
+                  },
+                }}
+              >
+                <ToggleButton value="chat" aria-label={t("chatTab")}>
+                  <ChatBubbleOutlineIcon sx={{ fontSize: 15 }} />
+                  <Box component="span" sx={{ display: { xs: "none", sm: "inline" } }}>{t("chatTab")}</Box>
+                </ToggleButton>
+                <ToggleButton value="git" aria-label={t("git")}>
+                  <AccountTreeIcon sx={{ fontSize: 15 }} />
+                  <Box component="span" sx={{ display: { xs: "none", sm: "inline" } }}>{t("git")}</Box>
+                </ToggleButton>
+              </ToggleButtonGroup>
             </Stack>
           </Stack>
         </Box>

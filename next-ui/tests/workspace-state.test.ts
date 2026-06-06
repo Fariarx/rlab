@@ -19,6 +19,7 @@ describe("workspace state", () => {
       appearance: {
         density: "comfortable",
         reduceMotion: false,
+        sidebarWidth: 300,
         theme: "dark",
       },
       general: {

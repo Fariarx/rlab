@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { homedir, tmpdir } from "node:os";
@@ -17,11 +17,23 @@ import {
   type Locale,
 } from "./src/components/workspace/app-settings";
 import { buildInitialWorkspaceState, cloneWorkspaceState, type WorkspaceState } from "./src/components/workspace/workspace-state";
-import { agentProfileEquals, getAgent, isAgentId, normalizeAgentProfile, type AgentProfile } from "./src/components/agent/agents";
+import {
+  agentProfileEquals,
+  DEFAULT_AGENT_OPTION_ID,
+  getAgent,
+  isDirectAgentModelValue,
+  isAgentId,
+  normalizeAgentProfile,
+  resolveAgentModelValue,
+  resolveAgentReasoningValue,
+  type AgentOption,
+  type AgentProfile,
+} from "./src/lib/agent-catalog";
 import {
   type AgentBlock,
   type ChatMessage,
   type CodeBlockData,
+  type ConversationStatus,
   type DiffBlock,
   type PlanBlock,
   type RunState,
@@ -67,6 +79,8 @@ interface AgentCliInfo {
   readonly selectable: boolean;
   readonly env: readonly string[];
   readonly installCommand: string | null;
+  readonly models?: readonly AgentOption[];
+  readonly reasoning?: readonly AgentOption[];
 }
 
 // Keys must match AgentId in src/components/agent/agents.ts.
@@ -281,6 +295,155 @@ function spawnResolvedBin(resolvedBin: string, args: readonly string[], options:
   return spawn(launch.command, launch.args, options);
 }
 
+const MODEL_DISCOVERY_TIMEOUT_MS = 5_000;
+const REASONING_LABELS: Record<string, string> = {
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  xhigh: "Extra High",
+  max: "Max",
+};
+
+function modelLabelFromValue(value: string): string {
+  const leaf = value.split("/").filter(Boolean).at(-1) ?? value;
+  const readableLeaf = leaf.replace(/-(\d+)-(\d+)(?=-|$)/g, "-$1.$2");
+  return readableLeaf
+    .split(/[-_]+/)
+    .filter(Boolean)
+    .map((token) => {
+      const lower = token.toLowerCase();
+      const known: Record<string, string> = {
+        claude: "Claude",
+        codex: "Codex",
+        deepseek: "Deepseek",
+        flash: "Flash",
+        free: "Free",
+        fast: "Fast",
+        gpt: "GPT",
+        haiku: "Haiku",
+        mini: "Mini",
+        minimax: "MiniMax",
+        opus: "Opus",
+        sonnet: "Sonnet",
+      };
+      if (known[lower]) {
+        return known[lower];
+      }
+      if (/^\d+b$/i.test(token)) {
+        return token.toUpperCase();
+      }
+      if (/^\d+(?:\.\d+)+$/.test(token)) {
+        return token;
+      }
+      if (/^v\d/i.test(token)) {
+        return `V${token.slice(1)}`;
+      }
+      if (/^qwen\d*/i.test(token)) {
+        return `Qwen${token.slice(4)}`;
+      }
+      return `${token.slice(0, 1).toUpperCase()}${token.slice(1)}`;
+    })
+    .join(" ");
+}
+
+function reasoningOptionFromEffort(effort: string): AgentOption | null {
+  const label = REASONING_LABELS[effort];
+  return label ? { id: effort, label, value: effort } : null;
+}
+
+function uniqueAgentOptions(options: readonly AgentOption[]): AgentOption[] {
+  const seen = new Set<string>();
+  const result: AgentOption[] = [];
+  for (const option of options) {
+    if (seen.has(option.id)) {
+      continue;
+    }
+    seen.add(option.id);
+    result.push(option);
+  }
+  return result;
+}
+
+export function parseOpenCodeModelsOutput(output: string): AgentOption[] {
+  return uniqueAgentOptions(
+    output
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.includes("/") && isDirectAgentModelValue("opencode", line))
+      .map((value) => ({ id: value, label: modelLabelFromValue(value), value })),
+  );
+}
+
+export function parseCodexModelsOutput(output: string): { readonly models: readonly AgentOption[]; readonly reasoning: readonly AgentOption[] } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(output) as unknown;
+  } catch {
+    return { models: [], reasoning: [] };
+  }
+  if (!isRecord(parsed) || !Array.isArray(parsed.models)) {
+    return { models: [], reasoning: [] };
+  }
+
+  const models: AgentOption[] = [];
+  const reasoning: AgentOption[] = [];
+  const reasoningSeen = new Set<string>();
+  for (const item of parsed.models) {
+    if (!isRecord(item) || typeof item.slug !== "string" || !isDirectAgentModelValue("codex", item.slug)) {
+      continue;
+    }
+    models.push({ id: item.slug, label: typeof item.display_name === "string" ? item.display_name : modelLabelFromValue(item.slug), value: item.slug });
+    if (Array.isArray(item.supported_reasoning_levels)) {
+      for (const level of item.supported_reasoning_levels) {
+        if (!isRecord(level) || typeof level.effort !== "string" || reasoningSeen.has(level.effort)) {
+          continue;
+        }
+        const option = reasoningOptionFromEffort(level.effort);
+        if (option) {
+          reasoningSeen.add(level.effort);
+          reasoning.push(option);
+        }
+      }
+    }
+  }
+  return { models: uniqueAgentOptions(models), reasoning };
+}
+
+function runResolvedBinText(resolvedBin: string, args: readonly string[]): string | null {
+  const launch = resolveLaunchCommand(resolvedBin, args);
+  const result = spawnSync(launch.command, launch.args, {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: MODEL_DISCOVERY_TIMEOUT_MS,
+    windowsHide: true,
+  });
+  if (result.error || result.status !== 0 || typeof result.stdout !== "string") {
+    return null;
+  }
+  const output = result.stdout.trim();
+  return output.length > 0 ? output : null;
+}
+
+function discoveredAgentOptions(id: string, resolvedBin: string | null): Pick<AgentCliInfo, "models" | "reasoning"> {
+  if (!resolvedBin) {
+    return {};
+  }
+  if (id === "opencode") {
+    const output = runResolvedBinText(resolvedBin, ["models"]);
+    const models = output ? parseOpenCodeModelsOutput(output) : [];
+    return models.length > 0 ? { models } : {};
+  }
+  if (id === "codex") {
+    const output = runResolvedBinText(resolvedBin, ["debug", "models"]);
+    const parsed = output ? parseCodexModelsOutput(output) : { models: [], reasoning: [] };
+    return {
+      ...(parsed.models.length > 0 ? { models: parsed.models } : {}),
+      ...(parsed.reasoning.length > 0 ? { reasoning: parsed.reasoning } : {}),
+    };
+  }
+  return {};
+}
+
 function resolvedDetectBin(detect: Detect, pathValue = process.env.PATH ?? "", platform: NodeJS.Platform = process.platform): string | null {
   for (const bin of detect.bins) {
     const resolved = resolveBinOnPath(bin, pathValue, platform);
@@ -311,6 +474,7 @@ export function agentCliInfoForDetection(
     selectable: status !== "unavailable" && status !== "unsupported",
     env: detect.env ?? [],
     installCommand: installCommandForAgent(id)?.join(" ") ?? null,
+    ...discoveredAgentOptions(id, resolvedBin),
   };
 }
 
@@ -1454,6 +1618,36 @@ export interface BackgroundRunBinding {
   readonly agentMessageTime: string;
 }
 
+export interface ActiveBackgroundRunSnapshot {
+  readonly runId: string;
+  readonly conversationId: string;
+  readonly userMessageId: string;
+  readonly agentMessageId: string;
+  readonly startedAt: string;
+}
+
+export interface ActiveBackgroundRunUpdate {
+  readonly runId: string;
+  readonly conversationId: string;
+  readonly agentMessageId: string;
+  readonly status: ConversationStatus;
+  readonly snippet: string;
+  readonly time: string;
+  readonly done: boolean;
+  readonly blocks: readonly AgentBlock[];
+  readonly costUsd?: number;
+  readonly usage?: RunUsage;
+}
+
+type BackgroundRunSubscriber = (update: ActiveBackgroundRunUpdate) => void;
+
+export interface BackgroundRunHandle {
+  readonly binding: BackgroundRunBinding;
+  readonly startedAt: string;
+  readonly cancel: () => void;
+  subscribers?: Set<BackgroundRunSubscriber>;
+}
+
 interface StreamingTool {
   id: string;
   name: string;
@@ -1524,20 +1718,12 @@ function profileForArgs(agent: AgentProfile["agent"], request: RunArgsRequest): 
   );
 }
 
-function optionValue(agent: AgentProfile["agent"], kind: "models" | "reasoning", id: string): string | undefined {
-  const option = getAgent(agent)[kind].find((item) => item.id === id);
-  if (!option) {
-    return undefined;
-  }
-  return option.value;
-}
-
 function modelForProfile(profile: AgentProfile): string | undefined {
-  return optionValue(profile.agent, "models", profile.model);
+  return resolveAgentModelValue(profile.agent, profile.model) ?? (profile.model !== DEFAULT_AGENT_OPTION_ID && isDirectAgentModelValue(profile.agent, profile.model) ? profile.model : undefined);
 }
 
 function reasoningForProfile(profile: AgentProfile): string | undefined {
-  return optionValue(profile.agent, "reasoning", profile.reasoning);
+  return resolveAgentReasoningValue(profile.agent, profile.reasoning);
 }
 
 function asClaudeEffort(value: string | undefined): EffortLevel | undefined {
@@ -1546,7 +1732,7 @@ function asClaudeEffort(value: string | undefined): EffortLevel | undefined {
 
 function requestedProfileError(agent: AgentProfile["agent"], model: string, reasoning: string, mode: AgentProfile["mode"]): string | null {
   const def = getAgent(agent);
-  if (!def.models.some((option) => option.id === model)) {
+  if (!def.models.some((option) => option.id === model) && !isDirectAgentModelValue(agent, model)) {
     return `Unknown model '${model}' for ${agent}.`;
   }
   if (!def.reasoning.some((option) => option.id === reasoning)) {
@@ -2175,33 +2361,61 @@ function parseAskUserQuestionOptions(value: unknown): readonly AskUserQuestionOp
   }
   const options: AskUserQuestionOption[] = [];
   for (const option of value) {
-    if (!isRecord(option) || typeof option.label !== "string" || option.label.trim().length === 0) {
+    if (typeof option === "string") {
+      const label = option.trim();
+      if (label.length === 0) {
+        return null;
+      }
+      options.push({ label });
+      continue;
+    }
+    if (!isRecord(option)) {
       return null;
     }
-    const description = typeof option.description === "string" && option.description.trim().length > 0 ? option.description : undefined;
-    options.push(description ? { label: option.label, description } : { label: option.label });
+    const label = firstString(option, ["label", "text", "title", "value", "id", "name"]);
+    if (!label) {
+      return null;
+    }
+    const description = firstString(option, ["description", "detail", "subtitle", "help"]);
+    options.push(description ? { label, description } : { label });
   }
   return options.length > 0 ? options : null;
 }
 
-function parseAskUserQuestionInput(input: Record<string, unknown>): readonly AskUserQuestionItem[] | null {
-  if (!Array.isArray(input.questions)) {
+function parseAskUserQuestionItem(question: unknown): AskUserQuestionItem | null {
+  if (!isRecord(question)) {
     return null;
   }
+  const prompt = firstString(question, ["question", "prompt", "text", "title", "message"]);
+  if (!prompt) {
+    return null;
+  }
+  const options = parseAskUserQuestionOptions(question.options ?? question.choices ?? question.values);
+  if (!options) {
+    return null;
+  }
+  return {
+    question: prompt,
+    multiSelect: question.multiSelect === true || question.multi_select === true || question.multi === true || question.multiple === true,
+    options,
+  };
+}
+
+function parseAskUserQuestionInput(input: Record<string, unknown>): readonly AskUserQuestionItem[] | null {
+  const source = Array.isArray(input.questions)
+    ? input.questions
+    : Array.isArray(input.items)
+      ? input.items
+      : Array.isArray(input.prompts)
+        ? input.prompts
+        : [input];
   const questions: AskUserQuestionItem[] = [];
-  for (const question of input.questions) {
-    if (!isRecord(question) || typeof question.question !== "string" || question.question.trim().length === 0) {
+  for (const question of source) {
+    const parsed = parseAskUserQuestionItem(question);
+    if (!parsed) {
       return null;
     }
-    const options = parseAskUserQuestionOptions(question.options);
-    if (!options) {
-      return null;
-    }
-    questions.push({
-      question: question.question,
-      multiSelect: question.multiSelect === true,
-      options,
-    });
+    questions.push(parsed);
   }
   return questions.length > 0 ? questions : null;
 }
@@ -2374,7 +2588,47 @@ export function createRunApprovalHandler(send: (event: RunEvent) => void, scopeI
   };
 }
 
-const backgroundRunHandles = new Map<string, { readonly cancel: () => void }>();
+const backgroundRunHandles = new Map<string, BackgroundRunHandle>();
+
+export function activeBackgroundRunSnapshotsFromHandles(handles: ReadonlyMap<string, BackgroundRunHandle>): ActiveBackgroundRunSnapshot[] {
+  return Array.from(handles.values(), ({ binding, startedAt }) => ({
+    runId: binding.runId,
+    conversationId: binding.conversationId,
+    userMessageId: binding.userMessageId,
+    agentMessageId: binding.agentMessageId,
+    startedAt,
+  }));
+}
+
+function activeBackgroundRunSnapshots(): ActiveBackgroundRunSnapshot[] {
+  return activeBackgroundRunSnapshotsFromHandles(backgroundRunHandles);
+}
+
+function subscribeBackgroundRun(runId: string, subscriber: BackgroundRunSubscriber): (() => void) | null {
+  const handle = backgroundRunHandles.get(runId);
+  if (!handle) {
+    return null;
+  }
+  handle.subscribers = handle.subscribers ?? new Set<BackgroundRunSubscriber>();
+  handle.subscribers.add(subscriber);
+  return () => {
+    handle.subscribers?.delete(subscriber);
+  };
+}
+
+function notifyBackgroundRunUpdate(binding: BackgroundRunBinding, done: boolean): void {
+  const handle = backgroundRunHandles.get(binding.runId);
+  if (!handle?.subscribers || handle.subscribers.size === 0) {
+    return;
+  }
+  const update = activeBackgroundRunUpdateFromState(readWorkspaceState(), binding, done);
+  if (!update) {
+    return;
+  }
+  for (const subscriber of handle.subscribers) {
+    subscriber(update);
+  }
+}
 
 function createBackgroundAccumulator(): BackgroundRunAccumulator {
   return {
@@ -2507,6 +2761,27 @@ function staleClientStillHasSettledRun(incoming: WorkspaceState, current: Worksp
 
 function workspaceConversationMap(state: WorkspaceState): Map<string, WorkspaceConversation> {
   return new Map([...state.chats, ...state.projects.flatMap((project) => project.conversations)].map((conversation) => [conversation.id, conversation]));
+}
+
+export function activeBackgroundRunUpdateFromState(state: WorkspaceState, binding: BackgroundRunBinding, done: boolean): ActiveBackgroundRunUpdate | null {
+  const conversation = workspaceConversationMap(state).get(binding.conversationId);
+  if (!conversation) {
+    return null;
+  }
+  const agentMessage = (state.threads[binding.conversationId] ?? []).find((message) => message.id === binding.agentMessageId);
+  const blocks = agentMessage?.blocks ?? [];
+  return {
+    runId: binding.runId,
+    conversationId: binding.conversationId,
+    agentMessageId: binding.agentMessageId,
+    status: conversation.status,
+    snippet: conversation.snippet,
+    time: conversation.time,
+    done,
+    blocks,
+    ...(conversation.costUsd === undefined ? {} : { costUsd: conversation.costUsd }),
+    ...(conversation.usage === undefined ? {} : { usage: conversation.usage }),
+  };
 }
 
 function mergeServerOwnedRunFields(incoming: WorkspaceConversation, current: WorkspaceConversation): WorkspaceConversation {
@@ -2805,6 +3080,7 @@ function applyBackgroundRunEvent(binding: BackgroundRunBinding, accumulator: Bac
   const blocks = backgroundBlocks(accumulator);
   const locale = readWorkspaceState().settings.general.locale;
   persistBackgroundBlocks(binding, blocks, blocksNeedInput(blocks) ? { status: "waiting", snippet: translate(locale, "runNeedsInputSnippet"), time: binding.agentMessageTime } : {});
+  notifyBackgroundRunUpdate(binding, false);
 }
 
 export function finishBackgroundRunState(state: WorkspaceState, binding: BackgroundRunBinding, accumulator: BackgroundRunAccumulator, canceled: boolean): WorkspaceState {
@@ -3184,6 +3460,7 @@ function commandExecutionEvents(eventType: unknown, item: Record<string, unknown
 
 interface CodexStreamState {
   readonly planTextById: Map<string, string>;
+  sawAgentMessageDelta: boolean;
 }
 
 function planEventFromUnknown(id: string | undefined, value: unknown): Extract<RunEvent, { type: "plan" }> | null {
@@ -3255,6 +3532,9 @@ function codexItemEvents(msg: Record<string, unknown>, state: CodexStreamState):
   }
   const item = msg.item;
   if (item.type === "agent_message") {
+    if (state.sawAgentMessageDelta && msg.type === "item.completed") {
+      return [];
+    }
     const text = textFromUnknown(item);
     return text ? [{ type: "text", text }] : [];
   }
@@ -3276,7 +3556,7 @@ function codexItemEvents(msg: Record<string, unknown>, state: CodexStreamState):
 }
 
 export function createCodexStreamTranslator(): (line: string) => RunEvent[] {
-  const state: CodexStreamState = { planTextById: new Map() };
+  const state: CodexStreamState = { planTextById: new Map(), sawAgentMessageDelta: false };
   return (line: string): RunEvent[] => {
     let msg: unknown;
     try {
@@ -3303,8 +3583,24 @@ export function createCodexStreamTranslator(): (line: string) => RunEvent[] {
     switch (msg.type) {
       case "turn.started":
         return [{ type: "status", level: "info", text: "codex turn started" }];
+      case "agent_message_delta":
+      case "agent.message.delta":
+      case "message.delta": {
+        const text = textFromUnknown(msg.delta ?? msg.text ?? msg.message ?? msg.content);
+        if (!text) {
+          return [];
+        }
+        state.sawAgentMessageDelta = true;
+        return [{ type: "text", text }];
+      }
       case "agent_message": {
+        if (state.sawAgentMessageDelta && msg.final !== false) {
+          return [];
+        }
         const text = textFromUnknown(msg.message ?? msg.delta ?? msg);
+        if (typeof msg.delta === "string") {
+          state.sawAgentMessageDelta = true;
+        }
         return text ? [{ type: "text", text }] : [];
       }
       case "error":
@@ -3384,6 +3680,7 @@ function geminiToolEvents(value: unknown): RunEvent[] {
 }
 
 export function createGeminiStreamTranslator(): (line: string) => RunEvent[] {
+  let assistantDeltaText = "";
   return (line: string): RunEvent[] => {
     let msg: unknown;
     try {
@@ -3404,6 +3701,21 @@ export function createGeminiStreamTranslator(): (line: string) => RunEvent[] {
         return [];
       }
       const text = textFromUnknown(msg.content ?? msg.text ?? msg);
+      if (msg.delta === true) {
+        assistantDeltaText += text;
+        return text ? [{ type: "text", text }] : [];
+      }
+      if (assistantDeltaText) {
+        const previousDeltaText = assistantDeltaText;
+        assistantDeltaText = "";
+        if (!text || text === previousDeltaText) {
+          return [];
+        }
+        if (text.startsWith(previousDeltaText)) {
+          const tail = text.slice(previousDeltaText.length);
+          return tail ? [{ type: "text", text: tail }] : [];
+        }
+      }
       return text ? [{ type: "text", text }] : [];
     }
     if (msg.type === "result") {
@@ -3536,6 +3848,60 @@ function opencodeToolEvents(msg: Record<string, unknown>, part: Record<string, u
   return events;
 }
 
+function opencodeLifecycleToolInput(properties: Record<string, unknown>): Record<string, unknown> | undefined {
+  if (isRecord(properties.input)) {
+    return properties.input;
+  }
+  if (isRecord(properties.args)) {
+    return properties.args;
+  }
+  if (isRecord(properties.output) && isRecord(properties.output.args)) {
+    return properties.output.args;
+  }
+  return undefined;
+}
+
+function opencodeLifecycleToolOutput(properties: Record<string, unknown>): unknown {
+  if (properties.result !== undefined || properties.error !== undefined) {
+    return properties.result ?? properties.error;
+  }
+  if (properties.output === undefined) {
+    return undefined;
+  }
+  if (isRecord(properties.output)) {
+    return properties.output.result ?? properties.output.output ?? properties.output.error;
+  }
+  return properties.output;
+}
+
+function opencodeToolLifecycleEvents(msg: Record<string, unknown>): RunEvent[] {
+  const event = opencodeSdkEnvelope(msg) ?? msg;
+  const type = typeof event.type === "string" ? event.type : "";
+  if (type !== "tool.execute.before" && type !== "tool_execute_before" && type !== "tool.execute.after" && type !== "tool_execute_after") {
+    return [];
+  }
+
+  const properties = opencodeEventProperties(event);
+  const id = firstString(properties, ["callID", "callId", "toolCallID", "toolCallId", "id"]) ?? "opencode-tool";
+  const name = firstString(properties, ["tool", "toolName", "name"]) ?? "tool";
+  const input = opencodeLifecycleToolInput(properties);
+  const output = type === "tool.execute.after" || type === "tool_execute_after" ? opencodeLifecycleToolOutput(properties) : undefined;
+  const status = firstString(properties, ["status", "state"])?.toLowerCase() ?? "";
+  const failed = status === "error" || status === "failed" || properties.error !== undefined;
+  const state: RunState = output !== undefined || status === "completed" || status === "success" || failed ? (failed ? "error" : "ok") : "running";
+  const rich = richToolEvents(id, name, input, state, output);
+  if (rich.length > 0) {
+    return rich;
+  }
+
+  const summary = firstString(properties, ["description", "title", "command"]) ?? firstString(input, ["command", "query", "path", "file_path", "filePath"]) ?? name;
+  const events: RunEvent[] = [{ type: "tool", id, name, summary: clip(summary, 80), args: toArgs(input) }];
+  if (state === "ok" || state === "error") {
+    events.push({ type: "tool_result", id, ok: state === "ok", output: resultText(output ?? "") });
+  }
+  return events;
+}
+
 function opencodeSdkEnvelope(msg: Record<string, unknown>): Record<string, unknown> | null {
   if (msg.type === "sdk_event" && isRecord(msg.event)) {
     return msg.event;
@@ -3544,6 +3910,74 @@ function opencodeSdkEnvelope(msg: Record<string, unknown>): Record<string, unkno
     return msg.event;
   }
   return null;
+}
+
+interface OpenCodeStreamState {
+  readonly messageRoleByKey: Map<string, string>;
+  readonly assistantTextByMessageKey: Map<string, string>;
+  readonly assistantReasoningByMessageKey: Map<string, string>;
+}
+
+function opencodeEventProperties(event: Record<string, unknown>): Record<string, unknown> {
+  return isRecord(event.properties) ? event.properties : event;
+}
+
+function opencodeMessageKey(sessionId: string | undefined, messageId: string): string {
+  return `${sessionId ?? ""}:${messageId}`;
+}
+
+function opencodeSdkMessageEvents(msg: Record<string, unknown>, state: OpenCodeStreamState): RunEvent[] | null {
+  const event = opencodeSdkEnvelope(msg) ?? msg;
+  const type = typeof event.type === "string" ? event.type : "";
+  const properties = opencodeEventProperties(event);
+
+  if (type === "message.updated" || type === "message_updated") {
+    const info = isRecord(properties.info) ? properties.info : properties;
+    const messageId = firstString(info, ["id", "messageID", "messageId"]);
+    const role = firstString(info, ["role"]);
+    if (messageId && role) {
+      state.messageRoleByKey.set(opencodeMessageKey(firstString(info, ["sessionID", "sessionId"]), messageId), role);
+    }
+    return [];
+  }
+
+  if (type !== "message.part.updated" && type !== "message_part_updated") {
+    return null;
+  }
+
+  const part = isRecord(properties.part) ? properties.part : null;
+  const partType = typeof part?.type === "string" ? part.type : "";
+  if (!part || (partType !== "text" && partType !== "reasoning")) {
+    return null;
+  }
+  const messageId = firstString(part, ["messageID", "messageId"]);
+  if (!messageId) {
+    return [];
+  }
+  const messageKey = opencodeMessageKey(firstString(part, ["sessionID", "sessionId"]) ?? firstString(properties, ["sessionID", "sessionId"]), messageId);
+  if (state.messageRoleByKey.get(messageKey) !== "assistant") {
+    return [];
+  }
+
+  const delta = typeof properties.delta === "string" ? properties.delta : "";
+  const fullText = typeof part.text === "string" ? part.text : "";
+  const textByMessageKey = partType === "reasoning" ? state.assistantReasoningByMessageKey : state.assistantTextByMessageKey;
+  const previousText = textByMessageKey.get(messageKey) ?? "";
+  const eventFromText = (text: string): RunEvent => (partType === "reasoning" ? { type: "reasoning", text } : { type: "text", text });
+
+  if (delta) {
+    textByMessageKey.set(messageKey, `${previousText}${delta}`);
+    return [eventFromText(delta)];
+  }
+  if (!fullText || fullText === previousText) {
+    return [];
+  }
+  textByMessageKey.set(messageKey, fullText);
+  if (previousText && fullText.startsWith(previousText)) {
+    const tail = fullText.slice(previousText.length);
+    return tail ? [eventFromText(tail)] : [];
+  }
+  return [eventFromText(fullText)];
 }
 
 function opencodeTodoEvents(msg: Record<string, unknown>): RunEvent[] {
@@ -3569,6 +4003,11 @@ function opencodeQuestionEvents(msg: Record<string, unknown>): RunEvent[] {
 }
 
 export function createOpenCodeStreamTranslator(): (line: string) => RunEvent[] {
+  const state: OpenCodeStreamState = {
+    messageRoleByKey: new Map(),
+    assistantTextByMessageKey: new Map(),
+    assistantReasoningByMessageKey: new Map(),
+  };
   return (line: string): RunEvent[] => {
     let msg: unknown;
     try {
@@ -3587,6 +4026,14 @@ export function createOpenCodeStreamTranslator(): (line: string) => RunEvent[] {
     const questionEvents = opencodeQuestionEvents(msg);
     if (questionEvents.length > 0) {
       return questionEvents;
+    }
+    const toolLifecycleEvents = opencodeToolLifecycleEvents(msg);
+    if (toolLifecycleEvents.length > 0) {
+      return toolLifecycleEvents;
+    }
+    const sdkMessageEvents = opencodeSdkMessageEvents(msg, state);
+    if (sdkMessageEvents) {
+      return sdkMessageEvents;
     }
     const part = opencodePart(msg);
     if (part) {
@@ -3682,6 +4129,8 @@ async function runClaudeSdk(
   });
   if (binding) {
     backgroundRunHandles.set(binding.runId, {
+      binding,
+      startedAt: new Date().toISOString(),
       cancel: () => {
         if (!abortController.signal.aborted) {
           abortController.abort();
@@ -3711,6 +4160,7 @@ async function runClaudeSdk(
     clearTimeout(timeout);
     if (binding && accumulator) {
       finishPersistedBackgroundRun(binding, accumulator, abortController.signal.aborted && !timedOut);
+      notifyBackgroundRunUpdate(binding, true);
       backgroundRunHandles.delete(binding.runId);
     }
     sendDone();
@@ -3741,6 +4191,57 @@ function handleRunCancel(req: IncomingMessage, res: ServerResponse): void {
       sendJson(res, runControlErrorStatus(error), { error: errorMessage(error) });
     }
   });
+}
+
+function handleActiveRuns(_req: IncomingMessage, res: ServerResponse): void {
+  sendJson(res, 200, { runs: activeBackgroundRunSnapshots() });
+}
+
+function handleRunAttach(req: IncomingMessage, res: ServerResponse): void {
+  const url = new URL(req.url ?? "", "http://localhost");
+  const runId = url.searchParams.get("runId")?.trim() ?? "";
+  if (!runId) {
+    sendJson(res, 400, { error: "runId is required." });
+    return;
+  }
+  const handle = backgroundRunHandles.get(runId);
+  if (!handle) {
+    sendJson(res, 404, { error: `No active run for ${runId}.` });
+    return;
+  }
+  const initial = activeBackgroundRunUpdateFromState(readWorkspaceState(), handle.binding, false);
+  if (!initial) {
+    sendJson(res, 409, { error: `Active run ${runId} has no persisted workspace state.` });
+    return;
+  }
+
+  res.setHeader("Content-Type", "application/x-ndjson");
+  res.setHeader("Cache-Control", "no-store");
+  const sendUpdate = (update: ActiveBackgroundRunUpdate) => {
+    if (res.writableEnded) {
+      return;
+    }
+    res.write(`${JSON.stringify({ type: "update", update })}\n`);
+  };
+  let unsubscribe: (() => void) | null = null;
+  const cleanup = () => {
+    unsubscribe?.();
+    unsubscribe = null;
+  };
+  const subscriber: BackgroundRunSubscriber = (update) => {
+    sendUpdate(update);
+    if (update.done && !res.writableEnded) {
+      cleanup();
+      res.end();
+    }
+  };
+  unsubscribe = subscribeBackgroundRun(runId, subscriber);
+  if (!unsubscribe) {
+    sendJson(res, 404, { error: `No active run for ${runId}.` });
+    return;
+  }
+  res.on("close", cleanup);
+  sendUpdate(initial);
 }
 
 function handleRun(req: IncomingMessage, res: ServerResponse): void {
@@ -3907,6 +4408,8 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
     let canceled = false;
     if (binding) {
       backgroundRunHandles.set(binding.runId, {
+        binding,
+        startedAt: new Date().toISOString(),
         cancel: () => {
           canceled = true;
           if (child.exitCode === null) {
@@ -3945,6 +4448,7 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
       send({ type: "error", text: `Failed to launch ${spec.bin}: ${err.message}` });
       if (binding && accumulator) {
         finishPersistedBackgroundRun(binding, accumulator, canceled);
+        notifyBackgroundRunUpdate(binding, true);
         backgroundRunHandles.delete(binding.runId);
       }
       sendDone();
@@ -3957,6 +4461,7 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
       }
       if (binding && accumulator) {
         finishPersistedBackgroundRun(binding, accumulator, canceled);
+        notifyBackgroundRunUpdate(binding, true);
         backgroundRunHandles.delete(binding.runId);
       }
       sendDone();
@@ -4069,6 +4574,22 @@ function attach(server: ViteDevServer | PreviewServer): void {
       return;
     }
     handleGitPush(req, res);
+  });
+  server.middlewares.use("/api/runs", (req, res) => {
+    if (req.method !== "GET") {
+      res.statusCode = 405;
+      res.end();
+      return;
+    }
+    handleActiveRuns(req, res);
+  });
+  server.middlewares.use("/api/run-attach", (req, res) => {
+    if (req.method !== "GET") {
+      res.statusCode = 405;
+      res.end();
+      return;
+    }
+    handleRunAttach(req, res);
   });
   server.middlewares.use("/api/run", (req, res) => {
     if (req.method !== "POST") {

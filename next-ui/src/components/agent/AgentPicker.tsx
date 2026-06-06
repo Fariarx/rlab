@@ -1,6 +1,6 @@
 import CheckIcon from "@mui/icons-material/Check";
 import CloseIcon from "@mui/icons-material/Close";
-import { Alert, Box, Dialog, DialogActions, Stack, Typography } from "@mui/material";
+import { Alert, Box, Dialog, DialogActions, Divider, Stack, Typography } from "@mui/material";
 import { useEffect, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import { Button, IconButton, StatusDot, TagSelect } from "../ui";
@@ -22,6 +22,17 @@ import { useAgentCliInfo, useAgentStatus, useAgentStatusError, useAgentStatusLiv
 
 function cliBinsLabel(bins: readonly string[]): string {
   return bins.length > 0 ? bins.join(", ") : "unknown";
+}
+
+function liveOptionsOrCatalog(catalogOptions: readonly AgentOption[], liveOptions: readonly AgentOption[] | undefined): readonly AgentOption[] {
+  if (!liveOptions?.length) {
+    return catalogOptions;
+  }
+  const defaultOption = catalogOptions[0];
+  if (!defaultOption || liveOptions.some((option) => option.id === defaultOption.id)) {
+    return liveOptions;
+  }
+  return [defaultOption, ...liveOptions];
 }
 
 /** AgentPicker — a polished dialog for choosing the agent profile, showing
@@ -52,6 +63,8 @@ export function AgentPicker({
   const def = getAgent(agent);
   const selectedCli = cliInfoOf(agent);
   const selectedStatus = statusOf(agent);
+  const modelOptions = liveOptionsOrCatalog(def.models, selectedCli?.models);
+  const reasoningOptions = liveOptionsOrCatalog(def.reasoning, selectedCli?.reasoning);
   const canUse = selectedCli?.selectable ?? (selectedStatus !== "unavailable" && selectedStatus !== "unsupported");
   const titleId = "agent-picker-title";
 
@@ -119,7 +132,9 @@ export function AgentPicker({
         </IconButton>
       </Stack>
 
-      <Box sx={{ px: 2.5, pt: 0.75, pb: 1, maxHeight: 360, overflow: "auto" }}>
+      <Divider />
+
+      <Box sx={{ px: 2.5, pt: 1.25, pb: 1, maxHeight: 360, overflow: "auto" }}>
         {detectionError && (
           <Alert
             severity="error"
@@ -208,8 +223,10 @@ export function AgentPicker({
         </Box>
       </Box>
 
-      <AgentOptionGroup label={t("agentModel", { agent: def.name })} options={def.models} value={model} onSelect={setModel} />
-      <AgentOptionGroup label={t("agentReasoning", { agent: def.name })} options={def.reasoning} value={reasoning} onSelect={setReasoning} />
+      <Divider />
+
+      <AgentOptionGroup label={t("agentModel", { agent: def.name })} options={modelOptions} value={model} onSelect={setModel} />
+      <AgentOptionGroup label={t("agentReasoning", { agent: def.name })} options={reasoningOptions} value={reasoning} onSelect={setReasoning} />
 
       <DialogActions sx={{ px: 2.5, py: 2 }}>
         <Box sx={{ flex: 1 }}>

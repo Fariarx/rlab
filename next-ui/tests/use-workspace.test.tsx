@@ -42,7 +42,7 @@ function Probe() {
         type="button"
         onClick={() =>
           workspace.updateSettings({
-            appearance: { density: "compact", reduceMotion: true, theme: "light" },
+            appearance: { density: "compact", reduceMotion: true, sidebarWidth: 360, theme: "light" },
             general: { locale: "en" },
           })
         }
@@ -53,12 +53,33 @@ function Probe() {
   );
 }
 
+function activeRunsPayloadFromState(state: WorkspaceState) {
+  return {
+    runs: [...state.chats, ...state.projects.flatMap((project) => project.conversations)].flatMap((conversation) =>
+      conversation.activeRunId
+        ? [
+            {
+              runId: conversation.activeRunId,
+              conversationId: conversation.id,
+              userMessageId: "test-user-message",
+              agentMessageId: "test-agent-message",
+              startedAt: "2026-06-06T14:00:00.000Z",
+            },
+          ]
+        : [],
+    ),
+  };
+}
+
 describe("useWorkspace", () => {
   let state: WorkspaceState;
   let localStorageSetItem: ReturnType<typeof vi.fn>;
   let originalLocalStorage: PropertyDescriptor | undefined;
   let activeRunSignal: AbortSignal | undefined;
   let activeRunController: ReadableStreamDefaultController<Uint8Array> | undefined;
+  let attachRunSignal: AbortSignal | undefined;
+  let attachRunController: ReadableStreamDefaultController<Uint8Array> | undefined;
+  let attachRunRequests: string[] = [];
   let runRequests: Array<{
     readonly accessMode?: string;
     readonly agent?: string;
@@ -75,6 +96,7 @@ describe("useWorkspace", () => {
 
   beforeEach(() => {
     state = buildInitialWorkspaceState();
+    attachRunRequests = [];
     runRequests = [];
     runCancelRequests = [];
     originalLocalStorage = Object.getOwnPropertyDescriptor(window, "localStorage");
@@ -97,6 +119,21 @@ describe("useWorkspace", () => {
         if (url === "/api/workspace" && init?.method === "PUT") {
           state = JSON.parse(String(init.body)) as WorkspaceState;
           return Response.json(state);
+        }
+        if (url === "/api/runs") {
+          return Response.json(activeRunsPayloadFromState(state));
+        }
+        if (url.startsWith("/api/run-attach")) {
+          attachRunRequests.push(url);
+          attachRunSignal = init?.signal as AbortSignal | undefined;
+          const stream = new ReadableStream<Uint8Array>({
+            start(controller) {
+              attachRunController = controller;
+            },
+          });
+          return new Response(stream, {
+            headers: { "Content-Type": "application/x-ndjson" },
+          });
         }
         if (url === "/api/run") {
           runRequests.push(JSON.parse(String(init?.body ?? "{}")) as {
@@ -146,6 +183,17 @@ describe("useWorkspace", () => {
     await screen.findByText("chat-2");
 
     expect(fetch).toHaveBeenCalledWith("/api/workspace", expect.objectContaining({ method: "GET" }));
+  });
+
+  it("does not save freshly loaded server workspace state back to the workspace API", async () => {
+    render(<Probe />);
+
+    await screen.findByText("chat-2");
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace" && init?.method === "PUT")).toHaveLength(0);
   });
 
   it("retries failed initial workspace loads every 15 seconds", async () => {
@@ -215,6 +263,7 @@ describe("useWorkspace", () => {
       expect(state.settings.appearance.theme).toBe("light");
       expect(state.settings.appearance.density).toBe("compact");
       expect(state.settings.appearance.reduceMotion).toBe(true);
+      expect(state.settings.appearance.sidebarWidth).toBe(360);
       expect(state.settings.general.locale).toBe("en");
     });
     expect(localStorageSetItem).not.toHaveBeenCalledWith(expect.stringContaining("rlab-settings"), expect.any(String));
@@ -260,6 +309,7 @@ describe("useWorkspace", () => {
 
   it("keeps a bound background run running after the client stream disconnects and settles from workspace sync", async () => {
     vi.useFakeTimers();
+    let activeRunReads = 0;
     vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url === "/api/workspace" && (!init || init.method === "GET")) {
@@ -268,6 +318,10 @@ describe("useWorkspace", () => {
       if (url === "/api/workspace" && init?.method === "PUT") {
         state = JSON.parse(String(init.body)) as WorkspaceState;
         return Response.json(state);
+      }
+      if (url === "/api/runs") {
+        activeRunReads += 1;
+        return Response.json(activeRunsPayloadFromState(state));
       }
       if (url === "/api/run") {
         runRequests.push(JSON.parse(String(init?.body ?? "{}")) as {
@@ -329,6 +383,7 @@ describe("useWorkspace", () => {
     });
 
     expect(screen.getByTestId("status")).toHaveTextContent("done");
+    expect(activeRunReads).toBeGreaterThan(0);
   });
 
   it("marks a conversation waiting while a streamed approval is pending", async () => {
@@ -431,39 +486,87 @@ describe("useWorkspace", () => {
     expect(workspaceReads).toBe(initialWorkspaceReads);
   });
 
-  it("syncs persisted background runs without marking the workspace as loading", async () => {
-    vi.useFakeTimers();
+  it("applies persisted background run attach updates without marking the workspace as loading", async () => {
     state = {
       ...state,
       chats: state.chats.map((chat) => (chat.id === "chat-2" ? { ...chat, activeRunId: "run-existing", status: "running" } : chat)),
     };
     render(<Probe />);
 
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(0);
+    await screen.findByText("chat-2");
+    await waitFor(() => {
+      expect(attachRunRequests).toEqual(["/api/run-attach?runId=run-existing"]);
     });
-    expect(screen.getByText("chat-2")).toBeInTheDocument();
     expect(screen.getByTestId("loading")).toHaveTextContent("false");
 
+    attachRunController?.enqueue(
+      new TextEncoder().encode(
+        `${JSON.stringify({
+          type: "update",
+          update: {
+            runId: "run-existing",
+            conversationId: "chat-2",
+            agentMessageId: "test-agent-message",
+            status: "done",
+            snippet: "finished",
+            time: "14:01",
+            done: true,
+            blocks: [{ kind: "text", text: "finished" }],
+          },
+        })}\n`,
+      ),
+    );
+    attachRunController?.close();
+
+    await waitFor(() => {
+      expect(screen.getByTestId("status")).toHaveTextContent("done");
+    });
+    expect(screen.getByTestId("loading")).toHaveTextContent("false");
+  });
+
+  it("does not save server-owned attach stream updates back through the workspace API", async () => {
     state = {
       ...state,
-      chats: state.chats.map((chat) =>
-        chat.id === "chat-2"
-          ? { ...chat, activeRunId: undefined, status: "done", snippet: "finished" }
-          : chat,
-      ),
+      chats: state.chats.map((chat) => (chat.id === "chat-2" ? { ...chat, activeRunId: "run-existing", status: "running" } : chat)),
       threads: {
         ...state.threads,
-        "chat-2": [...state.threads["chat-2"], { id: "a-bg", role: "agent", blocks: [{ kind: "text", text: "finished" }] }],
+        "chat-2": [
+          ...state.threads["chat-2"],
+          { id: "test-agent-message", role: "agent", time: "14:00", blocks: [{ kind: "reasoning", text: "", active: true }] },
+        ],
       },
     };
+    render(<Probe />);
 
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(2100);
+    await screen.findByText("chat-2");
+    await waitFor(() => {
+      expect(attachRunRequests).toEqual(["/api/run-attach?runId=run-existing"]);
     });
+    const workspaceSavesBeforeAttachUpdate = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace" && init?.method === "PUT").length;
 
-    expect(screen.getByTestId("status")).toHaveTextContent("done");
-    expect(screen.getByTestId("loading")).toHaveTextContent("false");
+    attachRunController?.enqueue(
+      new TextEncoder().encode(
+        `${JSON.stringify({
+          type: "update",
+          update: {
+            runId: "run-existing",
+            conversationId: "chat-2",
+            agentMessageId: "test-agent-message",
+            status: "running",
+            snippet: "streamed token",
+            time: "14:01",
+            done: false,
+            blocks: [{ kind: "text", text: "streamed token", streaming: true }],
+          },
+        })}\n`,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("status")).toHaveTextContent("running");
+    });
+    const workspaceSavesAfterAttachUpdate = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace" && init?.method === "PUT").length;
+    expect(workspaceSavesAfterAttachUpdate).toBe(workspaceSavesBeforeAttachUpdate);
   });
 
   it("immediately syncs a persisted background run after loading workspace state", async () => {
@@ -481,6 +584,7 @@ describe("useWorkspace", () => {
       },
     };
     let workspaceReads = 0;
+    let activeRunReads = 0;
     vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url === "/api/workspace" && (!init || init.method === "GET")) {
@@ -490,6 +594,10 @@ describe("useWorkspace", () => {
       if (url === "/api/workspace" && init?.method === "PUT") {
         state = JSON.parse(String(init.body)) as WorkspaceState;
         return Response.json(state);
+      }
+      if (url === "/api/runs") {
+        activeRunReads += 1;
+        return Response.json({ runs: [] });
       }
       return new Response("not found", { status: 404 });
     });
@@ -507,6 +615,73 @@ describe("useWorkspace", () => {
     expect(screen.getByTestId("status")).toHaveTextContent("done");
     expect(screen.getByTestId("loading")).toHaveTextContent("false");
     expect(workspaceReads).toBe(2);
+    expect(activeRunReads).toBe(1);
+  });
+
+  it("attaches to an already active background run instead of starting the agent again", async () => {
+    state = {
+      ...state,
+      chats: state.chats.map((chat) => (chat.id === "chat-2" ? { ...chat, activeRunId: "run-existing", status: "running" } : chat)),
+      threads: {
+        ...state.threads,
+        "chat-2": [
+          ...state.threads["chat-2"],
+          { id: "test-agent-message", role: "agent", time: "14:00", blocks: [{ kind: "reasoning", text: "", active: true }] },
+        ],
+      },
+    };
+
+    render(<Probe />);
+
+    await screen.findByText("chat-2");
+    await waitFor(() => {
+      expect(attachRunRequests).toEqual(["/api/run-attach?runId=run-existing"]);
+    });
+    expect(runRequests).toEqual([]);
+
+    attachRunController?.enqueue(
+      new TextEncoder().encode(
+        `${JSON.stringify({
+          type: "update",
+          update: {
+            runId: "run-existing",
+            conversationId: "chat-2",
+            agentMessageId: "test-agent-message",
+            status: "done",
+            snippet: "attached finished",
+            time: "14:01",
+            done: true,
+            blocks: [{ kind: "text", text: "attached finished" }],
+          },
+        })}\n`,
+      ),
+    );
+    attachRunController?.close();
+
+    await waitFor(() => {
+      expect(screen.getByTestId("status")).toHaveTextContent("done");
+    });
+    expect(runRequests).toEqual([]);
+  });
+
+  it("closes background run attach streams on unmount without canceling the server run", async () => {
+    state = {
+      ...state,
+      chats: state.chats.map((chat) => (chat.id === "chat-2" ? { ...chat, activeRunId: "run-existing", status: "running" } : chat)),
+    };
+
+    const view = render(<Probe />);
+
+    await screen.findByText("chat-2");
+    await waitFor(() => {
+      expect(attachRunRequests).toEqual(["/api/run-attach?runId=run-existing"]);
+    });
+
+    view.unmount();
+
+    expect(attachRunSignal?.aborted).toBe(true);
+    expect(runCancelRequests).toEqual([]);
+    expect(runRequests).toEqual([]);
   });
 
   it("does not save or rerender when a persisted background run snapshot is unchanged", async () => {

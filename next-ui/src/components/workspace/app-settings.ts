@@ -5,9 +5,14 @@ export type Locale = "en" | "ru";
 export type DensityMode = "comfortable" | "compact";
 export type AgentAccessMode = "read-only" | "unrestricted";
 
+export const DEFAULT_SIDEBAR_WIDTH = 300;
+export const MIN_SIDEBAR_WIDTH = 240;
+export const MAX_SIDEBAR_WIDTH = 520;
+
 export interface AppearanceSettings {
   readonly density: DensityMode;
   readonly reduceMotion: boolean;
+  readonly sidebarWidth: number;
   readonly theme: ThemeMode;
 }
 
@@ -39,6 +44,7 @@ export const defaultAppSettings: AppSettings = {
   appearance: {
     density: "comfortable",
     reduceMotion: false,
+    sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
     theme: "dark",
   },
   general: {
@@ -55,7 +61,7 @@ export const defaultAppSettings: AppSettings = {
 
 export function cloneAppSettings(settings: AppSettings): AppSettings {
   return {
-    appearance: { ...settings.appearance },
+    appearance: { ...settings.appearance, sidebarWidth: normalizeSidebarWidth(settings.appearance.sidebarWidth) },
     general: { ...settings.general },
     agents: {
       accessMode: settings.agents.accessMode,
@@ -69,6 +75,7 @@ export function mergeAppSettings(current: AppSettings, patch: AppSettingsPatch):
     appearance: {
       ...current.appearance,
       ...patch.appearance,
+      sidebarWidth: normalizeSidebarWidth(patch.appearance?.sidebarWidth ?? current.appearance.sidebarWidth),
     },
     general: {
       ...current.general,
@@ -99,6 +106,13 @@ function isDensityMode(value: unknown): value is DensityMode {
   return value === "comfortable" || value === "compact";
 }
 
+export function normalizeSidebarWidth(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return DEFAULT_SIDEBAR_WIDTH;
+  }
+  return Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, Math.round(value)));
+}
+
 export function isAgentAccessMode(value: unknown): value is AgentAccessMode {
   return value === "read-only" || value === "unrestricted";
 }
@@ -125,6 +139,7 @@ export function isAppSettings(value: unknown): value is AppSettings {
     isThemeMode(appearance.theme) &&
     isDensityMode(appearance.density) &&
     typeof appearance.reduceMotion === "boolean" &&
+    (appearance.sidebarWidth === undefined || normalizeSidebarWidth(appearance.sidebarWidth) === appearance.sidebarWidth) &&
     isLocale(general.locale) &&
     typeof general.desktopNotifications === "boolean" &&
     typeof general.confirmDestructiveActions === "boolean" &&

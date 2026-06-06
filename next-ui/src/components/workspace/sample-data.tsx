@@ -123,7 +123,7 @@ export function starterThread(): ChatMessage[] {
 
 export const initialChats: readonly ConversationSummary[] = [
   { id: "chat-2", title: "Release notes для 0.1.69", snippet: "Пишет changelog…", time: "15:12", status: "running", agent: "codex", profile: { agent: "codex", model: "default", reasoning: "default", mode: "default" }, unread: true },
-  { id: "chat-3", title: "Postgres или SQLite для нас", snippet: "Ждёт ввод: ожидаемый QPS?", time: "14:05", status: "waiting", agent: "gemini", profile: { agent: "gemini", model: "flash", reasoning: "default", mode: "default" }, unread: true },
+  { id: "chat-3", title: "Postgres или SQLite для нас", snippet: "Ждёт ввод: ожидаемый QPS?", time: "14:05", status: "waiting", agent: "gemini", profile: { agent: "gemini", model: "gemini-2.5-flash", reasoning: "default", mode: "default" }, unread: true },
   { id: "chat-1", title: "Объясни auth flow", snippet: "Разобрал жизненный цикл токена", time: "13:40", status: "done", agent: "claude-code", profile: { agent: "claude-code", model: "default", reasoning: "default", mode: "default" } },
   { id: "chat-5", title: "Сводка incident #4127", snippet: "Не удалось получить bundle логов", time: "Mon", status: "error", agent: "claude-code", profile: { agent: "claude-code", model: "default", reasoning: "default", mode: "default" } },
   { id: "chat-4", title: "Идеи текста onboarding", snippet: "Черновик сохранён", time: "Mon", status: "idle", agent: "amp", profile: { agent: "amp", model: "default", reasoning: "default", mode: "default" } },
@@ -146,7 +146,7 @@ export const initialProjects: readonly Project[] = [
     path: "/root/workspace/rlab/next-ui",
     conversations: [
       { id: "c-theme", title: "Токены dark/light темы", snippet: "Все токены перенесены", time: "Tue", status: "done", agent: "amp", profile: { agent: "amp", model: "default", reasoning: "default", mode: "default" } },
-      { id: "c-virt", title: "Виртуализация списка board", snippet: "Черновик — не начато", time: "Tue", status: "idle", agent: "gemini", profile: { agent: "gemini", model: "pro", reasoning: "default", mode: "default" } },
+      { id: "c-virt", title: "Виртуализация списка board", snippet: "Черновик — не начато", time: "Tue", status: "idle", agent: "gemini", profile: { agent: "gemini", model: "gemini-2.5-pro", reasoning: "default", mode: "default" } },
       { id: "c-toast", title: "Починить stacking тостов", snippet: "Ошибка сборки на шаге CI 3", time: "Mon", status: "error", agent: "copilot", profile: { agent: "copilot", model: "default", reasoning: "default", mode: "default" } },
     ],
   },

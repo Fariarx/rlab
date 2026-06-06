@@ -1,18 +1,20 @@
-import CloseIcon from "@mui/icons-material/Close";
+import AccountTreeIcon from "@mui/icons-material/AccountTree";
+import AddIcon from "@mui/icons-material/Add";
+import DescriptionIcon from "@mui/icons-material/Description";
+import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
 import RefreshIcon from "@mui/icons-material/Refresh";
-import { Alert, Box, Chip, CircularProgress, Drawer, Stack, Tab, Tabs, Typography } from "@mui/material";
-import { useEffect, useMemo, useState } from "react";
+import RemoveIcon from "@mui/icons-material/Remove";
+import { Alert, Box, Chip, CircularProgress, Collapse, Stack, Tab, Tabs, type Theme, Tooltip, Typography } from "@mui/material";
+import { type ReactNode, type RefObject, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type I18nApi, useI18n } from "../../i18n/I18nProvider";
 import { type GitFileStatus, type GitStatusPayload } from "../../lib/git-status";
 import { type DiffBlock } from "../agent";
 import { Button, IconButton } from "../ui";
-import { GitDiffViewer, gitDiffViewerLinesFromBlock, gitDiffViewerLinesFromUnified } from "./GitDiffViewer";
+import { countDiffChanges, type DiffViewerLine, GitDiffLines, gitDiffViewerLinesFromBlock, gitDiffViewerLinesFromUnified } from "./GitDiffViewer";
 
-interface GitPanelProps {
+interface GitViewProps {
   readonly cwd?: string;
   readonly lastTurnDiffs?: readonly DiffBlock[];
-  readonly open: boolean;
-  readonly onClose: () => void;
 }
 
 type GitApiErrorPayload = {
@@ -27,6 +29,14 @@ interface GitDiffPayload {
 
 type GitPanelTab = "unstaged" | "staged" | "commit" | "last-turn";
 type GitDiffMode = GitDiffPayload["mode"];
+
+// A diff longer than this stays collapsed until the user opens it; one longer
+// than the hard cap is never rendered (an error is shown instead).
+const LARGE_DIFF_LINES = 240;
+const GIGANTIC_DIFF_LINES = 2000;
+// With few changed files we load every diff up-front (so small ones open
+// automatically); with many, diffs load lazily on expand to avoid a request flood.
+const EAGER_DIFF_LIMIT = 25;
 
 async function readGitApiPayload<T>(response: Response): Promise<T | GitApiErrorPayload> {
   try {
@@ -88,90 +98,230 @@ async function commitGit(cwd: string, message: string): Promise<GitStatusPayload
   return assertGitApiOk("Git commit", response, payload);
 }
 
-async function pushGit(cwd: string): Promise<GitStatusPayload> {
-  const response = await fetch("/api/git-push", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ cwd }),
-  });
-  const payload = await readGitApiPayload<GitStatusPayload>(response);
-  return assertGitApiOk("Git push", response, payload);
-}
-
-function gitFileStatusLabel(file: GitFileStatus, t: I18nApi["t"]): string {
-  if (file.code === "??") {
-    return t("gitFileUntracked");
-  }
-  if (file.code.includes("U")) {
-    return t("gitFileConflict");
-  }
-  if (file.code.includes("R")) {
-    return t("gitFileRenamed");
-  }
-  if (file.code.includes("C")) {
-    return t("gitFileCopied");
-  }
-  if (file.code.includes("A")) {
-    return t("gitFileAdded");
-  }
-  if (file.code.includes("D")) {
-    return t("gitFileDeleted");
-  }
-  if (file.code.includes("M")) {
-    return t("gitFileModified");
-  }
-  return t("gitFileChanged");
-}
-
-function fileTabMode(tab: GitPanelTab): GitDiffMode | null {
-  if (tab === "unstaged") {
-    return "worktree";
-  }
-  if (tab === "staged") {
-    return "staged";
-  }
-  return null;
-}
-
-function changedFilesForTab(status: GitStatusPayload | null, tab: GitPanelTab): readonly GitFileStatus[] {
+function changedFilesForTab(status: GitStatusPayload | null, tab: "unstaged" | "staged"): readonly GitFileStatus[] {
   if (!status) {
     return [];
   }
-  if (tab === "unstaged") {
-    return status.files.filter((file) => file.unstaged);
-  }
-  if (tab === "staged") {
-    return status.files.filter((file) => file.staged);
-  }
-  return [];
+  return tab === "unstaged" ? status.files.filter((file) => file.unstaged) : status.files.filter((file) => file.staged);
 }
 
 function tabLabel(label: string, count?: number): string {
   return typeof count === "number" ? `${label} ${count}` : label;
 }
 
-export function GitPanel({ cwd, lastTurnDiffs = [], open, onClose }: GitPanelProps) {
+/** A single file's diff rendered as a collapsible card (kit DiffCard style):
+ *  small diffs open by default, large ones stay collapsed, gigantic ones show
+ *  an error instead of being rendered. */
+function DiffFileCard({
+  path,
+  action,
+  lines,
+  loading = false,
+  error = null,
+  onFirstOpen,
+  scrollRef,
+  t,
+}: {
+  readonly path: string;
+  readonly action?: ReactNode;
+  readonly lines: readonly DiffViewerLine[] | null;
+  readonly loading?: boolean;
+  readonly error?: string | null;
+  readonly onFirstOpen?: () => void;
+  readonly scrollRef?: RefObject<HTMLDivElement | null>;
+  readonly t: I18nApi["t"];
+}) {
+  const lineCount = lines?.length ?? 0;
+  const gigantic = lineCount > GIGANTIC_DIFF_LINES;
+  const counts = lines ? countDiffChanges(lines) : null;
+  const [open, setOpen] = useState(false);
+  const [touched, setTouched] = useState(false);
+  const [stuck, setStuck] = useState(false);
+  const sentinelRef = useRef<HTMLDivElement>(null);
+
+  // Auto-open small diffs once their content has loaded; leave large/gigantic
+  // collapsed unless the user opens them.
+  useEffect(() => {
+    if (touched || !lines || lineCount === 0 || lineCount > LARGE_DIFF_LINES) {
+      return;
+    }
+    setOpen(true);
+  }, [lines, lineCount, touched]);
+
+  // While the header is pinned (its sentinel scrolled out of the panel top) it
+  // drops its rounded corners so it sits flush against the panel.
+  useEffect(() => {
+    const sentinel = sentinelRef.current;
+    const root = scrollRef?.current;
+    if (!open || !sentinel || !root || typeof IntersectionObserver === "undefined") {
+      setStuck(false);
+      return;
+    }
+    const observer = new IntersectionObserver(([entry]) => setStuck(!entry.isIntersecting), { root });
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [open, scrollRef]);
+
+  const radius = (theme: Theme) => `${theme.custom.radii.md}px`;
+  const topRadius = stuck ? 0 : radius;
+
+  return (
+    <Box
+      sx={{
+        borderRadius: radius,
+        border: (theme) => `1px solid ${theme.custom.borders.subtle}`,
+        backgroundColor: (theme) => theme.custom.surfaces.s2,
+      }}
+    >
+      <Box ref={sentinelRef} aria-hidden="true" sx={{ height: 0 }} />
+      <Stack
+        direction="row"
+        spacing={0.75}
+        onClick={() => {
+          setTouched(true);
+          setOpen((value) => {
+            const next = !value;
+            if (next) {
+              onFirstOpen?.();
+            }
+            return next;
+          });
+        }}
+        sx={{
+          alignItems: "center",
+          px: 1,
+          minHeight: 32,
+          cursor: "pointer",
+          position: "sticky",
+          top: 0,
+          zIndex: 1,
+          borderTopLeftRadius: topRadius,
+          borderTopRightRadius: topRadius,
+          // When collapsed the header is the whole card, so it keeps the rounded
+          // bottom corners; when open they belong to the diff body below.
+          borderBottomLeftRadius: open ? 0 : radius,
+          borderBottomRightRadius: open ? 0 : radius,
+          backgroundColor: (theme) => theme.custom.surfaces.s2,
+          "&:hover": { backgroundColor: (theme) => theme.custom.surfaces.s3 },
+        }}
+      >
+        <DescriptionIcon sx={{ fontSize: 14, color: "text.secondary", flex: "0 0 auto" }} />
+        <Typography component="span" sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.74rem", fontWeight: 600, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {path}
+        </Typography>
+        {counts && (counts.additions > 0 || counts.deletions > 0) && (
+          <Box component="span" sx={{ display: "inline-flex", gap: 0.5, flex: "0 0 auto", fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.7rem" }}>
+            {counts.additions > 0 && <Box component="span" sx={{ color: (theme) => theme.palette.status.ok.main }}>+{counts.additions}</Box>}
+            {counts.deletions > 0 && <Box component="span" sx={{ color: (theme) => theme.palette.status.error.main }}>−{counts.deletions}</Box>}
+          </Box>
+        )}
+        {action && (
+          <Box sx={{ flex: "0 0 auto", display: "flex" }} onClick={(event) => event.stopPropagation()}>
+            {action}
+          </Box>
+        )}
+        <KeyboardArrowDownIcon sx={{ fontSize: 16, color: "text.secondary", flex: "0 0 auto", transition: "transform 180ms ease", transform: open ? "rotate(180deg)" : "none" }} />
+      </Stack>
+      <Collapse in={open} unmountOnExit>
+        <Box sx={{ borderTop: (theme) => `1px solid ${theme.custom.borders.subtle}`, borderBottomLeftRadius: radius, borderBottomRightRadius: radius, overflow: "hidden", backgroundColor: (theme) => theme.custom.surfaces.s1 }}>
+          {loading ? (
+            <Stack direction="row" spacing={1} sx={{ alignItems: "center", color: "text.secondary", px: 1.5, py: 1.25 }}>
+              <CircularProgress size={14} />
+              <Typography sx={{ fontSize: "0.8rem" }}>{t("gitLoading")}</Typography>
+            </Stack>
+          ) : error ? (
+            <Alert severity="error" sx={{ m: 1.25 }}>
+              {error}
+            </Alert>
+          ) : gigantic ? (
+            <Alert severity="warning" sx={{ m: 1.25 }}>
+              {t("gitDiffTooLarge", { count: lineCount })}
+            </Alert>
+          ) : lines && lines.length > 0 ? (
+            <GitDiffLines lines={lines} path={path} />
+          ) : (
+            <Typography sx={{ color: "text.secondary", fontSize: "0.8rem", px: 1.5, py: 1.25 }}>{t("gitDiffEmpty")}</Typography>
+          )}
+        </Box>
+      </Collapse>
+    </Box>
+  );
+}
+
+/** A working-tree / staged file diff card that fetches its own diff. */
+function GitFileDiffCard({
+  cwd,
+  file,
+  mode,
+  action,
+  autoLoad,
+  scrollRef,
+  t,
+}: {
+  readonly cwd: string;
+  readonly file: GitFileStatus;
+  readonly mode: GitDiffMode;
+  readonly action?: ReactNode;
+  readonly autoLoad: boolean;
+  readonly scrollRef?: RefObject<HTMLDivElement | null>;
+  readonly t: I18nApi["t"];
+}) {
+  const [lines, setLines] = useState<readonly DiffViewerLine[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const requestedRef = useRef(false);
+
+  // Fetches once (eagerly for small changesets, otherwise on first expand). The
+  // card is keyed by file path, so a fresh instance resets the guard naturally.
+  const loadDiff = useCallback(() => {
+    if (requestedRef.current) {
+      return;
+    }
+    requestedRef.current = true;
+    setLoading(true);
+    setError(null);
+    void fetchGitDiff(cwd, file, mode)
+      .then((next) => setLines(next.diff.trim() ? gitDiffViewerLinesFromUnified(next.diff) : []))
+      .catch((loadError) => setError(loadError instanceof Error && loadError.message ? loadError.message : t("gitStatusUnavailable")))
+      .finally(() => setLoading(false));
+  }, [cwd, file.gitPath, mode, t]);
+
+  useEffect(() => {
+    if (autoLoad) {
+      loadDiff();
+    }
+  }, [autoLoad, loadDiff]);
+
+  return (
+    <DiffFileCard
+      path={file.gitPath}
+      action={action}
+      lines={lines}
+      loading={loading}
+      error={error}
+      onFirstOpen={loadDiff}
+      scrollRef={scrollRef}
+      t={t}
+    />
+  );
+}
+
+export function GitView({ cwd, lastTurnDiffs = [] }: GitViewProps) {
   const { t } = useI18n();
   const [status, setStatus] = useState<GitStatusPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   const [activeTab, setActiveTab] = useState<GitPanelTab>("unstaged");
-  const [selectedPath, setSelectedPath] = useState<string | null>(null);
-  const [selectedLastTurnFile, setSelectedLastTurnFile] = useState<string | null>(null);
-  const [diff, setDiff] = useState<GitDiffPayload | null>(null);
-  const [diffLoading, setDiffLoading] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
   const [commitMessage, setCommitMessage] = useState("");
+  const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (!open || !cwd) {
+    if (!cwd) {
       setStatus(null);
       setError(null);
       setLoading(false);
-      setSelectedPath(null);
-      setSelectedLastTurnFile(null);
-      setDiff(null);
       return;
     }
 
@@ -180,17 +330,9 @@ export function GitPanel({ cwd, lastTurnDiffs = [], open, onClose }: GitPanelPro
     setError(null);
     void fetchGitStatus(cwd)
       .then((next) => {
-        if (!alive) {
-          return;
+        if (alive) {
+          setStatus(next);
         }
-        setStatus(next);
-        setSelectedPath((current) => {
-          if (current && next.files.some((file) => file.gitPath === current)) {
-            return current;
-          }
-          return null;
-        });
-        setDiff(null);
       })
       .catch((loadError) => {
         if (alive) {
@@ -207,83 +349,22 @@ export function GitPanel({ cwd, lastTurnDiffs = [], open, onClose }: GitPanelPro
     return () => {
       alive = false;
     };
-  }, [cwd, open, reloadKey, t]);
+  }, [cwd, reloadKey, t]);
 
   const unstagedFiles = useMemo(() => changedFilesForTab(status, "unstaged"), [status]);
   const stagedFiles = useMemo(() => changedFilesForTab(status, "staged"), [status]);
-  const activeGitFiles = activeTab === "staged" ? stagedFiles : activeTab === "unstaged" ? unstagedFiles : [];
-  const selectedFile = activeGitFiles.find((file) => file.gitPath === selectedPath) ?? null;
-  const selectedLastTurnDiff = lastTurnDiffs.find((block) => block.file === selectedLastTurnFile) ?? null;
   const hasStagedFiles = stagedFiles.length > 0;
-  const canPush = Boolean(status?.upstream && status.ahead > 0);
 
-  useEffect(() => {
-    if (activeTab !== "unstaged" && activeTab !== "staged") {
-      return;
-    }
-    setSelectedPath((current) => {
-      if (current && activeGitFiles.some((file) => file.gitPath === current)) {
-        return current;
-      }
-      return activeGitFiles[0]?.gitPath ?? null;
-    });
-  }, [activeGitFiles, activeTab]);
-
-  useEffect(() => {
-    setSelectedLastTurnFile((current) => {
-      if (current && lastTurnDiffs.some((block) => block.file === current)) {
-        return current;
-      }
-      return lastTurnDiffs[0]?.file ?? null;
-    });
-  }, [lastTurnDiffs]);
-
-  useEffect(() => {
-    const mode = fileTabMode(activeTab);
-    if (!open || !cwd || !selectedFile || !mode) {
-      setDiff(null);
-      setDiffLoading(false);
-      return;
-    }
-
-    let alive = true;
-    setDiff(null);
-    setDiffLoading(true);
-    setError(null);
-    void fetchGitDiff(cwd, selectedFile, mode)
-      .then((next) => {
-        if (alive) {
-          setDiff(next);
-        }
-      })
-      .catch((loadError) => {
-        if (alive) {
-          setDiff(null);
-          setError(loadError instanceof Error && loadError.message ? loadError.message : t("gitStatusUnavailable"));
-        }
-      })
-      .finally(() => {
-        if (alive) {
-          setDiffLoading(false);
-        }
-      });
-
-    return () => {
-      alive = false;
-    };
-  }, [activeTab, cwd, open, selectedFile, t]);
-
-  const stageFile = (file: GitFileStatus) => {
+  const runGitAction = (action: () => Promise<GitStatusPayload>, onDone?: () => void) => {
     if (!cwd) {
       return;
     }
     setActionLoading(true);
     setError(null);
-    void mutateGitFile("/api/git-stage", cwd, file)
+    void action()
       .then((nextStatus) => {
         setStatus(nextStatus);
-        setSelectedPath(null);
-        setDiff(null);
+        onDone?.();
       })
       .catch((loadError) => {
         setError(loadError instanceof Error && loadError.message ? loadError.message : t("gitStatusUnavailable"));
@@ -291,166 +372,119 @@ export function GitPanel({ cwd, lastTurnDiffs = [], open, onClose }: GitPanelPro
       .finally(() => setActionLoading(false));
   };
 
-  const unstageFile = (file: GitFileStatus) => {
-    if (!cwd) {
-      return;
-    }
-    setActionLoading(true);
-    setError(null);
-    void mutateGitFile("/api/git-unstage", cwd, file)
-      .then((nextStatus) => {
-        setStatus(nextStatus);
-        setSelectedPath(null);
-        setDiff(null);
-      })
-      .catch((loadError) => {
-        setError(loadError instanceof Error && loadError.message ? loadError.message : t("gitStatusUnavailable"));
-      })
-      .finally(() => setActionLoading(false));
-  };
-
+  const stageFile = (file: GitFileStatus) => cwd && runGitAction(() => mutateGitFile("/api/git-stage", cwd, file));
+  const unstageFile = (file: GitFileStatus) => cwd && runGitAction(() => mutateGitFile("/api/git-unstage", cwd, file));
   const commitStagedFiles = () => {
-    if (!cwd) {
-      return;
-    }
     const message = commitMessage.trim();
-    if (!message) {
-      return;
+    if (cwd && message) {
+      runGitAction(() => commitGit(cwd, message), () => setCommitMessage(""));
     }
-    setActionLoading(true);
-    setError(null);
-    void commitGit(cwd, message)
-      .then((nextStatus) => {
-        setStatus(nextStatus);
-        setSelectedPath(null);
-        setDiff(null);
-        setCommitMessage("");
-      })
-      .catch((loadError) => {
-        setError(loadError instanceof Error && loadError.message ? loadError.message : t("gitStatusUnavailable"));
-      })
-      .finally(() => setActionLoading(false));
   };
-
-  const pushAheadCommits = () => {
-    if (!cwd || !canPush) {
-      return;
-    }
-    setActionLoading(true);
-    setError(null);
-    void pushGit(cwd)
-      .then((nextStatus) => {
-        setStatus(nextStatus);
-        setSelectedPath(null);
-        setDiff(null);
-      })
-      .catch((loadError) => {
-        setError(loadError instanceof Error && loadError.message ? loadError.message : t("gitStatusUnavailable"));
-      })
-      .finally(() => setActionLoading(false));
-  };
-
-  const titleId = "git-panel-title";
 
   return (
-    <Drawer
-      anchor="right"
-      open={open}
-      onClose={onClose}
-      aria-labelledby={titleId}
-      slotProps={{
-        paper: {
-          sx: {
-            width: { xs: "100%", sm: 720, lg: 900 },
-            backgroundImage: "none",
-            backgroundColor: (theme) => theme.custom.surfaces.s1,
-          },
-        },
-      }}
-    >
-      <Stack sx={{ height: "100%", minHeight: 0 }}>
+    <Stack sx={{ height: "100%", minHeight: 0, backgroundColor: (theme) => theme.custom.surfaces.s1 }}>
         <Stack
           direction="row"
           spacing={1}
           sx={{
             alignItems: "center",
             justifyContent: "space-between",
-            px: 2,
-            py: 1.5,
+            px: 1.5,
+            py: 0.75,
+            flex: "0 0 auto",
             borderBottom: (theme) => `1px solid ${theme.custom.borders.subtle}`,
           }}
         >
-          <Box sx={{ minWidth: 0 }}>
-            <Typography id={titleId} component="h2" variant="h6" sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.95rem" }}>
-              {t("git")}
+          <Box sx={{ minWidth: 0, display: "flex", alignItems: "center", gap: 1 }}>
+            <AccountTreeIcon sx={{ fontSize: 16, color: "text.secondary", flex: "0 0 auto" }} />
+            <Typography component="span" noWrap sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontWeight: 700, fontSize: "0.82rem" }}>
+              {status?.branch ?? t("git")}
             </Typography>
-            {cwd && (
-              <Typography noWrap sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.68rem", color: "text.secondary" }}>
-                {cwd}
-              </Typography>
-            )}
           </Box>
-          <Stack direction="row" spacing={0.75} sx={{ alignItems: "center" }}>
-            <Button variant="subtle" size="small" startIcon={<RefreshIcon sx={{ fontSize: 15 }} />} disabled={!cwd || loading} onClick={() => setReloadKey((key) => key + 1)}>
-              {t("refresh")}
-            </Button>
-            <IconButton aria-label={t("cancel")} onClick={onClose}>
-              <CloseIcon sx={{ fontSize: 18 }} />
-            </IconButton>
-          </Stack>
+          <Tooltip title={t("refresh")}>
+            <span>
+              <IconButton aria-label={t("refresh")} disabled={!cwd || loading} onClick={() => setReloadKey((key) => key + 1)}>
+                <RefreshIcon sx={{ fontSize: 17 }} />
+              </IconButton>
+            </span>
+          </Tooltip>
         </Stack>
 
-        <Stack spacing={1.5} sx={{ flex: 1, minHeight: 0, overflow: "auto", p: 2 }}>
-          {!cwd && <Alert severity="info">{t("gitNoProject")}</Alert>}
+        <Stack ref={scrollRef} spacing={1.5} sx={{ flex: 1, minHeight: 0, overflow: "auto", px: 1.5, pt: 0, pb: 2 }}>
+          {!cwd && <Alert severity="info" sx={{ mt: 1.5 }}>{t("gitNoProject")}</Alert>}
           {loading && (
-            <Stack direction="row" spacing={1} sx={{ alignItems: "center", color: "text.secondary" }}>
+            <Stack direction="row" spacing={1} sx={{ alignItems: "center", color: "text.secondary", pt: 1.5 }}>
               <CircularProgress size={16} />
               <Typography>{t("gitLoading")}</Typography>
             </Stack>
           )}
-          {error && <Alert severity="error">{error}</Alert>}
+          {error && <Alert severity="error" sx={{ mt: 1.5 }}>{error}</Alert>}
           {status && (
-            <Stack spacing={1.5} sx={{ minHeight: 0 }}>
-              <GitStatusSummary status={status} canPush={canPush} actionLoading={actionLoading} onPush={pushAheadCommits} t={t} />
-
-              <Tabs value={activeTab} onChange={(_, value: GitPanelTab) => setActiveTab(value)} aria-label={t("gitStatus")}>
+            <Stack spacing={1.5} sx={{ minHeight: 0, pt: 1.5 }}>
+              <Tabs value={activeTab} onChange={(_, value: GitPanelTab) => setActiveTab(value)} aria-label={t("gitStatus")} sx={{ minHeight: 0 }}>
                 <Tab value="unstaged" label={tabLabel(t("gitUnstagedTab"), unstagedFiles.length)} />
                 <Tab value="staged" label={tabLabel(t("gitStagedTab"), stagedFiles.length)} />
                 <Tab value="commit" label={t("gitCommitTab")} />
                 <Tab value="last-turn" label={tabLabel(t("gitLastTurnTab"), lastTurnDiffs.length)} />
               </Tabs>
 
-              {activeTab === "unstaged" && (
-                <GitFileChangesTab
-                  actionLoading={actionLoading}
-                  diff={diff}
-                  diffLoading={diffLoading}
-                  emptyText={t("gitNoUnstagedChanges")}
-                  files={unstagedFiles}
-                  mode="worktree"
-                  onSelect={(file) => setSelectedPath(file.gitPath)}
-                  onStage={stageFile}
-                  selectedFile={selectedFile}
-                  selectedPath={selectedPath}
-                  t={t}
-                />
-              )}
+              {activeTab === "unstaged" &&
+                cwd &&
+                (unstagedFiles.length === 0 ? (
+                  <Alert severity="info">{t("gitNoUnstagedChanges")}</Alert>
+                ) : (
+                  <Stack spacing={1.25}>
+                    {unstagedFiles.map((file) => (
+                      <GitFileDiffCard
+                        key={`${file.code}-${file.gitPath}`}
+                        cwd={cwd}
+                        file={file}
+                        mode="worktree"
+                        autoLoad={unstagedFiles.length <= EAGER_DIFF_LIMIT}
+                        scrollRef={scrollRef}
+                        t={t}
+                        action={
+                          <Tooltip title={t("gitStage")}>
+                            <Box component="span" sx={{ display: "inline-flex" }}>
+                              <IconButton size="small" disabled={actionLoading} aria-label={t("gitStageFile", { path: file.gitPath })} onClick={() => stageFile(file)} sx={{ width: 28, height: 28 }}>
+                                <AddIcon sx={{ fontSize: 16 }} />
+                              </IconButton>
+                            </Box>
+                          </Tooltip>
+                        }
+                      />
+                    ))}
+                  </Stack>
+                ))}
 
-              {activeTab === "staged" && (
-                <GitFileChangesTab
-                  actionLoading={actionLoading}
-                  diff={diff}
-                  diffLoading={diffLoading}
-                  emptyText={t("gitNoStagedChanges")}
-                  files={stagedFiles}
-                  mode="staged"
-                  onSelect={(file) => setSelectedPath(file.gitPath)}
-                  onUnstage={unstageFile}
-                  selectedFile={selectedFile}
-                  selectedPath={selectedPath}
-                  t={t}
-                />
-              )}
+              {activeTab === "staged" &&
+                cwd &&
+                (stagedFiles.length === 0 ? (
+                  <Alert severity="info">{t("gitNoStagedChanges")}</Alert>
+                ) : (
+                  <Stack spacing={1.25}>
+                    {stagedFiles.map((file) => (
+                      <GitFileDiffCard
+                        key={`${file.code}-${file.gitPath}`}
+                        cwd={cwd}
+                        file={file}
+                        mode="staged"
+                        autoLoad={stagedFiles.length <= EAGER_DIFF_LIMIT}
+                        scrollRef={scrollRef}
+                        t={t}
+                        action={
+                          <Tooltip title={t("gitUnstage")}>
+                            <Box component="span" sx={{ display: "inline-flex" }}>
+                              <IconButton size="small" disabled={actionLoading} aria-label={t("gitUnstageFile", { path: file.gitPath })} onClick={() => unstageFile(file)} sx={{ width: 28, height: 28 }}>
+                                <RemoveIcon sx={{ fontSize: 16 }} />
+                              </IconButton>
+                            </Box>
+                          </Tooltip>
+                        }
+                      />
+                    ))}
+                  </Stack>
+                ))}
 
               {activeTab === "commit" && (
                 <GitCommitTab
@@ -464,188 +498,19 @@ export function GitPanel({ cwd, lastTurnDiffs = [], open, onClose }: GitPanelPro
                 />
               )}
 
-              {activeTab === "last-turn" && (
-                <LastTurnChangesTab
-                  diffs={lastTurnDiffs}
-                  emptyText={t("gitNoLastTurnChanges")}
-                  onSelect={(block) => setSelectedLastTurnFile(block.file)}
-                  selectedDiff={selectedLastTurnDiff}
-                  selectedFile={selectedLastTurnFile}
-                />
-              )}
+              {activeTab === "last-turn" &&
+                (lastTurnDiffs.length === 0 ? (
+                  <Alert severity="info">{t("gitNoLastTurnChanges")}</Alert>
+                ) : (
+                  <Stack spacing={1.25}>
+                    {lastTurnDiffs.map((block) => (
+                      <DiffFileCard key={block.file} path={block.file} lines={gitDiffViewerLinesFromBlock(block)} scrollRef={scrollRef} t={t} />
+                    ))}
+                  </Stack>
+                ))}
             </Stack>
           )}
         </Stack>
-      </Stack>
-    </Drawer>
-  );
-}
-
-function GitStatusSummary({
-  actionLoading,
-  canPush,
-  onPush,
-  status,
-  t,
-}: {
-  readonly actionLoading: boolean;
-  readonly canPush: boolean;
-  readonly onPush: () => void;
-  readonly status: GitStatusPayload;
-  readonly t: I18nApi["t"];
-}) {
-  return (
-    <Stack
-      direction={{ xs: "column", sm: "row" }}
-      spacing={1}
-      sx={{
-        alignItems: { xs: "stretch", sm: "center" },
-        justifyContent: "space-between",
-        p: 1.25,
-        border: (theme) => `1px solid ${theme.custom.borders.subtle}`,
-        borderRadius: (theme) => `${theme.custom.radii.md}px`,
-        backgroundColor: (theme) => theme.custom.surfaces.s2,
-      }}
-    >
-      <Stack spacing={0.5} sx={{ minWidth: 0 }}>
-        <Stack direction="row" spacing={1} sx={{ alignItems: "center", minWidth: 0 }}>
-          <Typography variant="microLabel" sx={{ color: "text.secondary" }}>
-            {t("gitBranch")}
-          </Typography>
-          <Typography noWrap sx={{ fontFamily: (theme) => theme.custom.fonts.mono }}>
-            {status.branch}
-          </Typography>
-        </Stack>
-        {status.upstream && (
-          <Typography noWrap sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.72rem", color: "text.secondary" }}>
-            {t("gitUpstream")}: {status.upstream}
-          </Typography>
-        )}
-      </Stack>
-      <Stack direction="row" spacing={0.75} sx={{ alignItems: "center", flexWrap: "wrap", justifyContent: { xs: "flex-start", sm: "flex-end" } }}>
-        {status.ahead > 0 && <Chip size="small" label={t("gitAhead", { count: status.ahead })} />}
-        {status.behind > 0 && <Chip size="small" label={t("gitBehind", { count: status.behind })} />}
-        {status.clean && <Chip size="small" color="success" label={t("gitClean")} />}
-        <Button variant="subtle" size="small" disabled={!canPush || actionLoading} onClick={onPush}>
-          {t("gitPushCommits")}
-        </Button>
-      </Stack>
-    </Stack>
-  );
-}
-
-function GitFileChangesTab({
-  actionLoading,
-  diff,
-  diffLoading,
-  emptyText,
-  files,
-  mode,
-  onSelect,
-  onStage,
-  onUnstage,
-  selectedFile,
-  selectedPath,
-  t,
-}: {
-  readonly actionLoading: boolean;
-  readonly diff: GitDiffPayload | null;
-  readonly diffLoading: boolean;
-  readonly emptyText: string;
-  readonly files: readonly GitFileStatus[];
-  readonly mode: GitDiffMode;
-  readonly onSelect: (file: GitFileStatus) => void;
-  readonly onStage?: (file: GitFileStatus) => void;
-  readonly onUnstage?: (file: GitFileStatus) => void;
-  readonly selectedFile: GitFileStatus | null;
-  readonly selectedPath: string | null;
-  readonly t: I18nApi["t"];
-}) {
-  if (files.length === 0) {
-    return <Alert severity="info">{emptyText}</Alert>;
-  }
-
-  const diffLines = diff?.diff.trim() ? gitDiffViewerLinesFromUnified(diff.diff) : [];
-
-  return (
-    <Stack direction={{ xs: "column", md: "row" }} spacing={1.5} sx={{ minHeight: 0 }}>
-      <FileList files={files} onSelect={onSelect} selectedPath={selectedPath} t={t} />
-      <Stack spacing={1} sx={{ flex: 1, minWidth: 0 }}>
-        {selectedFile ? (
-          <>
-            <Stack direction="row" spacing={1} sx={{ alignItems: "center", justifyContent: "space-between", minWidth: 0 }}>
-              <Typography noWrap sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.8rem" }}>
-                {selectedFile.gitPath}
-              </Typography>
-              <Stack direction="row" spacing={0.75}>
-                {mode === "worktree" && onStage && (
-                  <Button variant="subtle" size="small" disabled={actionLoading} aria-label={t("gitStageFile", { path: selectedFile.gitPath })} onClick={() => onStage(selectedFile)}>
-                    {t("gitStage")}
-                  </Button>
-                )}
-                {mode === "staged" && onUnstage && (
-                  <Button variant="subtle" size="small" disabled={actionLoading} aria-label={t("gitUnstageFile", { path: selectedFile.gitPath })} onClick={() => onUnstage(selectedFile)}>
-                    {t("gitUnstage")}
-                  </Button>
-                )}
-              </Stack>
-            </Stack>
-            {diffLoading ? (
-              <Stack direction="row" spacing={1} sx={{ alignItems: "center", color: "text.secondary" }}>
-                <CircularProgress size={16} />
-                <Typography>{t("gitLoading")}</Typography>
-              </Stack>
-            ) : (
-              <GitDiffViewer emptyText={t("gitDiffEmpty")} lines={diffLines} />
-            )}
-          </>
-        ) : (
-          <Alert severity="info">{t("gitSelectChangedFile")}</Alert>
-        )}
-      </Stack>
-    </Stack>
-  );
-}
-
-function FileList({
-  files,
-  onSelect,
-  selectedPath,
-  t,
-}: {
-  readonly files: readonly GitFileStatus[];
-  readonly onSelect: (file: GitFileStatus) => void;
-  readonly selectedPath: string | null;
-  readonly t: I18nApi["t"];
-}) {
-  return (
-    <Stack spacing={0.75} sx={{ width: { xs: "100%", md: 280 }, flex: "0 0 auto" }}>
-      {files.map((file) => {
-        const selected = file.gitPath === selectedPath;
-        const label = gitFileStatusLabel(file, t);
-        return (
-          <Button
-            key={`${file.code}-${file.gitPath}`}
-            variant="subtle"
-            aria-label={`${file.path} ${label}`}
-            onClick={() => onSelect(file)}
-            sx={{
-              width: "100%",
-              alignItems: "center",
-              justifyContent: "space-between",
-              p: 1,
-              borderRadius: (theme) => `${theme.custom.radii.md}px`,
-              borderColor: (theme) => (selected ? theme.palette.status.running.border : theme.custom.borders.subtle),
-              gap: 1,
-            }}
-          >
-            <Typography noWrap sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.78rem" }}>
-              {file.path}
-            </Typography>
-            <Chip size="small" label={label} />
-          </Button>
-        );
-      })}
     </Stack>
   );
 }
@@ -697,72 +562,15 @@ function GitCommitTab({
         }}
       />
       {stagedFiles.length > 0 && (
-        <Stack direction="row" spacing={0.75} sx={{ flexWrap: "wrap" }}>
+        <Stack direction="row" spacing={0.75} sx={{ flexWrap: "wrap", gap: 0.75 }}>
           {stagedFiles.map((file) => (
             <Chip key={file.gitPath} size="small" label={file.path} />
           ))}
         </Stack>
       )}
-      {!hasStagedFiles && <Alert severity="info">{t("gitCommitNoStaged")}</Alert>}
       <Button variant="contained" size="small" disabled={!hasStagedFiles || actionLoading || commitMessage.trim().length === 0} onClick={onCommit}>
         {t("gitCommit")}
       </Button>
-    </Stack>
-  );
-}
-
-function LastTurnChangesTab({
-  diffs,
-  emptyText,
-  onSelect,
-  selectedDiff,
-  selectedFile,
-}: {
-  readonly diffs: readonly DiffBlock[];
-  readonly emptyText: string;
-  readonly onSelect: (block: DiffBlock) => void;
-  readonly selectedDiff: DiffBlock | null;
-  readonly selectedFile: string | null;
-}) {
-  if (diffs.length === 0) {
-    return <Alert severity="info">{emptyText}</Alert>;
-  }
-
-  return (
-    <Stack direction={{ xs: "column", md: "row" }} spacing={1.5} sx={{ minHeight: 0 }}>
-      <Stack spacing={0.75} sx={{ width: { xs: "100%", md: 280 }, flex: "0 0 auto" }}>
-        {diffs.map((block) => {
-          const selected = block.file === selectedFile;
-          return (
-            <Button
-              key={block.file}
-              variant="subtle"
-              aria-label={block.file}
-              onClick={() => onSelect(block)}
-              sx={{
-                width: "100%",
-                alignItems: "center",
-                justifyContent: "space-between",
-                p: 1,
-                borderRadius: (theme) => `${theme.custom.radii.md}px`,
-                borderColor: (theme) => (selected ? theme.palette.status.running.border : theme.custom.borders.subtle),
-                gap: 1,
-              }}
-            >
-              <Typography noWrap sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.78rem" }}>
-                {block.file}
-              </Typography>
-              <Stack direction="row" spacing={0.5}>
-                <Chip size="small" color="success" label={`+${block.additions}`} />
-                <Chip size="small" color="error" label={`-${block.deletions}`} />
-              </Stack>
-            </Button>
-          );
-        })}
-      </Stack>
-      <Box sx={{ flex: 1, minWidth: 0 }}>
-        <GitDiffViewer emptyText={emptyText} lines={selectedDiff ? gitDiffViewerLinesFromBlock(selectedDiff) : []} />
-      </Box>
     </Stack>
   );
 }

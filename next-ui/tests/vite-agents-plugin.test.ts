@@ -20,6 +20,8 @@ import {
   createCodexStreamTranslator,
   createGeminiStreamTranslator,
   createOpenCodeStreamTranslator,
+  activeBackgroundRunUpdateFromState,
+  activeBackgroundRunSnapshotsFromHandles,
   parseRunApprovalPayload,
   parseRunCancelPayload,
   parseRunInputPayload,
@@ -47,6 +49,8 @@ import {
   reconcileStaleBackgroundRuns,
   hasGeminiStoredAuthAt,
   installCommandForAgent,
+  parseCodexModelsOutput,
+  parseOpenCodeModelsOutput,
   resolveAgentInstallLaunch,
   resolveBinOnPath,
   resolveLaunchCommand,
@@ -58,6 +62,8 @@ import {
   validateRunAccessModeForAgent,
   windowsCommandLine,
   workspacePutErrorStatus,
+  type BackgroundRunBinding,
+  type BackgroundRunHandle,
 } from "../vite-agents-plugin";
 import { buildInitialWorkspaceState } from "../src/components/workspace/workspace-state";
 import { type CanUseTool } from "@anthropic-ai/claude-agent-sdk";
@@ -139,6 +145,46 @@ describe("vite agents plugin", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("parses live model catalogs from Codex and OpenCode CLIs", () => {
+    expect(
+      parseOpenCodeModelsOutput(
+        [
+          "opencode/deepseek-v4-flash-free",
+          "anthropic/claude-opus-4-7",
+          "anthropic/claude-opus-4-7-fast",
+          "lmstudio/qwen/qwen3-coder-30b",
+          "",
+        ].join("\n"),
+      ),
+    ).toEqual([
+      { id: "opencode/deepseek-v4-flash-free", label: "Deepseek V4 Flash Free", value: "opencode/deepseek-v4-flash-free" },
+      { id: "anthropic/claude-opus-4-7", label: "Claude Opus 4.7", value: "anthropic/claude-opus-4-7" },
+      { id: "anthropic/claude-opus-4-7-fast", label: "Claude Opus 4.7 Fast", value: "anthropic/claude-opus-4-7-fast" },
+      { id: "lmstudio/qwen/qwen3-coder-30b", label: "Qwen3 Coder 30B", value: "lmstudio/qwen/qwen3-coder-30b" },
+    ]);
+
+    expect(
+      parseCodexModelsOutput(
+        JSON.stringify({
+          models: [
+            {
+              slug: "gpt-5.5",
+              display_name: "GPT-5.5",
+              supported_reasoning_levels: [{ effort: "low" }, { effort: "medium" }, { effort: "xhigh" }],
+            },
+          ],
+        }),
+      ),
+    ).toEqual({
+      models: [{ id: "gpt-5.5", label: "GPT-5.5", value: "gpt-5.5" }],
+      reasoning: [
+        { id: "low", label: "Low", value: "low" },
+        { id: "medium", label: "Medium", value: "medium" },
+        { id: "xhigh", label: "Extra High", value: "xhigh" },
+      ],
+    });
   });
 
   it("resolves Windows command shims before PowerShell scripts for agent spawns", () => {
@@ -481,7 +527,7 @@ describe("vite agents plugin", () => {
   });
 
   it("builds Gemini args with the selected model", () => {
-    expect(buildGeminiRunArgs({ prompt: "hello", model: "flash", reasoning: "default", mode: "default", accessMode: "read-only" })).toEqual([
+    expect(buildGeminiRunArgs({ prompt: "hello", model: "gemini-2.5-flash", reasoning: "default", mode: "default", accessMode: "read-only" })).toEqual([
       "--prompt",
       "hello",
       "--output-format",
@@ -495,8 +541,8 @@ describe("vite agents plugin", () => {
   });
 
   it("builds Gemini args with newer explicit model choices", () => {
-    expect(buildGeminiRunArgs({ prompt: "hello", model: "gemini-3-pro", reasoning: "default", mode: "default", accessMode: "read-only" })).toContain("gemini-3-pro-preview");
-    expect(buildGeminiRunArgs({ prompt: "hello", model: "flash-lite", reasoning: "default", mode: "default", accessMode: "read-only" })).toContain("gemini-2.5-flash-lite");
+    expect(buildGeminiRunArgs({ prompt: "hello", model: "gemini-3-pro-preview", reasoning: "default", mode: "default", accessMode: "read-only" })).toContain("gemini-3-pro-preview");
+    expect(buildGeminiRunArgs({ prompt: "hello", model: "gemini-2.5-flash-lite", reasoning: "default", mode: "default", accessMode: "read-only" })).toContain("gemini-2.5-flash-lite");
   });
 
   it("builds OpenCode args with a concrete default model, reasoning variant, and no permission bypass", () => {
@@ -515,16 +561,20 @@ describe("vite agents plugin", () => {
   });
 
   it("builds OpenCode args with selected provider/model IDs", () => {
-    expect(buildOpenCodeRunArgs({ prompt: "hello", model: "gpt-5.1-codex", reasoning: "default", mode: "default", accessMode: "read-only" })).toEqual([
+    expect(buildOpenCodeRunArgs({ prompt: "hello", model: "anthropic-claude-opus-4-7", reasoning: "default", mode: "default", accessMode: "read-only" })).toEqual([
       "run",
       "--format",
       "json",
       "--thinking",
       "--model",
-      "opencode/gpt-5.1-codex",
+      "anthropic/claude-opus-4-7",
       "hello",
     ]);
-    expect(buildOpenCodeRunArgs({ prompt: "hello", model: "gemini-3-pro", reasoning: "default", mode: "default", accessMode: "read-only" })).toContain("google/gemini-3-pro-preview");
+    expect(buildOpenCodeRunArgs({ prompt: "hello", model: "opencode-big-pickle", reasoning: "default", mode: "default", accessMode: "read-only" })).toContain("opencode/big-pickle");
+  });
+
+  it("passes direct runtime provider/model IDs through to OpenCode", () => {
+    expect(buildOpenCodeRunArgs({ prompt: "hello", model: "anthropic/claude-custom-lab", reasoning: "default", mode: "default", accessMode: "read-only" })).toContain("anthropic/claude-custom-lab");
   });
 
   it("translates Codex JSONL events into normalized run events", () => {
@@ -534,6 +584,14 @@ describe("vite agents plugin", () => {
     expect(translate(JSON.stringify({ type: "item.completed", item: { id: "item_0", type: "agent_message", text: "hello" } }))).toEqual([{ type: "text", text: "hello" }]);
     expect(translate(JSON.stringify({ type: "agent_message", message: "hello" }))).toEqual([{ type: "text", text: "hello" }]);
     expect(translate(JSON.stringify({ type: "turn.failed", error: { message: "model unsupported" } }))).toEqual([{ type: "error", text: "model unsupported" }]);
+  });
+
+  it("translates Codex text deltas without duplicating the completed assistant message", () => {
+    const translate = createCodexStreamTranslator();
+
+    expect(translate(JSON.stringify({ type: "agent_message_delta", delta: "hel" }))).toEqual([{ type: "text", text: "hel" }]);
+    expect(translate(JSON.stringify({ type: "agent_message_delta", delta: "lo" }))).toEqual([{ type: "text", text: "lo" }]);
+    expect(translate(JSON.stringify({ type: "item.completed", item: { id: "item_0", type: "agent_message", text: "hello" } }))).toEqual([]);
   });
 
   it("translates Codex command execution items into tool events", () => {
@@ -740,6 +798,150 @@ describe("vite agents plugin", () => {
     ]);
   });
 
+  it("translates OpenCode SDK tool lifecycle events into rich tool events", () => {
+    const translate = createOpenCodeStreamTranslator();
+
+    expect(
+      translate(
+        JSON.stringify({
+          type: "sdk_event",
+          event: {
+            type: "tool.execute.before",
+            properties: {
+              tool: "bash",
+              callID: "tool-5",
+              input: { command: "npm test" },
+            },
+          },
+        }),
+      ),
+    ).toEqual([
+      {
+        type: "tool",
+        id: "tool-5",
+        name: "bash",
+        summary: "npm test",
+        args: { command: "npm test" },
+      },
+    ]);
+
+    expect(
+      translate(
+        JSON.stringify({
+          type: "sdk_event",
+          event: {
+            type: "tool.execute.after",
+            properties: {
+              tool: "write",
+              callID: "tool-6",
+              input: { file_path: "src/new.ts", content: "export const ok = true;" },
+              output: "created",
+            },
+          },
+        }),
+      ),
+    ).toEqual([
+      {
+        type: "diff",
+        id: "tool-6",
+        file: "src/new.ts",
+        additions: 1,
+        deletions: 0,
+        lines: [{ type: "add", text: "export const ok = true;" }],
+      },
+    ]);
+  });
+
+  it("translates single-question events from OpenCode into option blocks", () => {
+    const translate = createOpenCodeStreamTranslator();
+
+    expect(
+      translate(
+        JSON.stringify({
+          type: "sdk_event",
+          event: {
+            type: "question.asked",
+            properties: {
+              id: "question-1",
+              question: "Which fix should I apply?",
+              options: ["Minimal patch", { label: "Refactor module", description: "Larger cleanup" }],
+            },
+          },
+        }),
+      ),
+    ).toEqual([
+      {
+        type: "options",
+        id: "question-1:q0",
+        prompt: "Which fix should I apply?",
+        multi: false,
+        options: [
+          { id: "Minimal patch", label: "Minimal patch" },
+          { id: "Refactor module", label: "Refactor module", description: "Larger cleanup" },
+        ],
+      },
+    ]);
+  });
+
+  it("translates Codex question items into option blocks", () => {
+    const translate = createCodexStreamTranslator();
+
+    expect(
+      translate(
+        JSON.stringify({
+          type: "item.started",
+          item: {
+            id: "codex-question",
+            type: "question",
+            prompt: "Which test scope?",
+            choices: [{ label: "Unit" }, { label: "Integration", description: "Slower but broader" }],
+            multi_select: true,
+          },
+        }),
+      ),
+    ).toEqual([
+      {
+        type: "options",
+        id: "codex-question:q0",
+        prompt: "Which test scope?",
+        multi: true,
+        options: [
+          { id: "Unit", label: "Unit" },
+          { id: "Integration", label: "Integration", description: "Slower but broader" },
+        ],
+      },
+    ]);
+  });
+
+  it("translates Gemini question tools into option blocks", () => {
+    const translate = createGeminiStreamTranslator();
+
+    expect(
+      translate(
+        JSON.stringify({
+          type: "tool",
+          callId: "gemini-question",
+          name: "question",
+          args: {
+            text: "Pick deployment target",
+            choices: ["staging", "production"],
+          },
+        }),
+      ),
+    ).toEqual([
+      {
+        type: "options",
+        id: "gemini-question:q0",
+        prompt: "Pick deployment target",
+        multi: false,
+        options: [
+          { id: "staging", label: "staging" },
+          { id: "production", label: "production" },
+        ],
+      },
+    ]);
+  });
+
   it("translates real Gemini headless stream-json without echoing user messages", () => {
     const translate = createGeminiStreamTranslator();
 
@@ -747,6 +949,14 @@ describe("vite agents plugin", () => {
     expect(translate(JSON.stringify({ type: "message", role: "user", content: "Say exactly: hi" }))).toEqual([]);
     expect(translate(JSON.stringify({ type: "message", role: "assistant", content: "hi", delta: true }))).toEqual([{ type: "text", text: "hi" }]);
     expect(translate(JSON.stringify({ type: "result", status: "success", stats: { total_tokens: 9653 } }))).toEqual([{ type: "done", usage: { totalTokens: 9653 } }]);
+  });
+
+  it("translates Gemini assistant deltas without duplicating the final message", () => {
+    const translate = createGeminiStreamTranslator();
+
+    expect(translate(JSON.stringify({ type: "message", role: "assistant", content: "hel", delta: true }))).toEqual([{ type: "text", text: "hel" }]);
+    expect(translate(JSON.stringify({ type: "message", role: "assistant", content: "lo", delta: true }))).toEqual([{ type: "text", text: "lo" }]);
+    expect(translate(JSON.stringify({ type: "message", role: "assistant", content: "hello" }))).toEqual([]);
   });
 
   it("translates real OpenCode json events into normalized run events", () => {
@@ -776,6 +986,130 @@ describe("vite agents plugin", () => {
         }),
       ),
     ).toEqual([{ type: "done", costUsd: 0.0017, usage: { totalTokens: 42, inputTokens: 30, outputTokens: 2, reasoningTokens: 10 } }]);
+  });
+
+  it("translates OpenCode SDK assistant text deltas without duplicating the final part", () => {
+    const translate = createOpenCodeStreamTranslator();
+
+    expect(
+      translate(
+        JSON.stringify({
+          type: "sdk_event",
+          event: {
+            type: "message.updated",
+            properties: {
+              info: { id: "message-1", sessionID: "session-1", role: "assistant" },
+            },
+          },
+        }),
+      ),
+    ).toEqual([]);
+
+    expect(
+      translate(
+        JSON.stringify({
+          type: "sdk_event",
+          event: {
+            type: "message.part.updated",
+            properties: {
+              delta: "hel",
+              part: { type: "text", sessionID: "session-1", messageID: "message-1", text: "hel" },
+            },
+          },
+        }),
+      ),
+    ).toEqual([{ type: "text", text: "hel" }]);
+
+    expect(
+      translate(
+        JSON.stringify({
+          type: "sdk_event",
+          event: {
+            type: "message.part.updated",
+            properties: {
+              delta: "lo",
+              part: { type: "text", sessionID: "session-1", messageID: "message-1", text: "hello" },
+            },
+          },
+        }),
+      ),
+    ).toEqual([{ type: "text", text: "lo" }]);
+
+    expect(
+      translate(
+        JSON.stringify({
+          type: "sdk_event",
+          event: {
+            type: "message.part.updated",
+            properties: {
+              part: { type: "text", sessionID: "session-1", messageID: "message-1", text: "hello" },
+            },
+          },
+        }),
+      ),
+    ).toEqual([]);
+  });
+
+  it("translates OpenCode SDK reasoning deltas without duplicating the final part", () => {
+    const translate = createOpenCodeStreamTranslator();
+
+    expect(
+      translate(
+        JSON.stringify({
+          type: "sdk_event",
+          event: {
+            type: "message.updated",
+            properties: {
+              info: { id: "message-2", sessionID: "session-1", role: "assistant" },
+            },
+          },
+        }),
+      ),
+    ).toEqual([]);
+
+    expect(
+      translate(
+        JSON.stringify({
+          type: "sdk_event",
+          event: {
+            type: "message.part.updated",
+            properties: {
+              delta: "ana",
+              part: { type: "reasoning", sessionID: "session-1", messageID: "message-2", text: "ana" },
+            },
+          },
+        }),
+      ),
+    ).toEqual([{ type: "reasoning", text: "ana" }]);
+
+    expect(
+      translate(
+        JSON.stringify({
+          type: "sdk_event",
+          event: {
+            type: "message.part.updated",
+            properties: {
+              delta: "lyze",
+              part: { type: "reasoning", sessionID: "session-1", messageID: "message-2", text: "analyze" },
+            },
+          },
+        }),
+      ),
+    ).toEqual([{ type: "reasoning", text: "lyze" }]);
+
+    expect(
+      translate(
+        JSON.stringify({
+          type: "sdk_event",
+          event: {
+            type: "message.part.updated",
+            properties: {
+              part: { type: "reasoning", sessionID: "session-1", messageID: "message-2", text: "analyze" },
+            },
+          },
+        }),
+      ),
+    ).toEqual([]);
   });
 
   it("lists mentionable project files without dependency folders", () => {
@@ -1774,6 +2108,81 @@ describe("vite agents plugin", () => {
       activeRunId: "run-live",
       status: "running",
       snippet: "Still running",
+    });
+  });
+
+  it("serializes active background run handles for browser reconnects", () => {
+    const binding: BackgroundRunBinding = {
+      conversationId: "chat-2",
+      runId: "run-background",
+      userMessageId: "u-background",
+      userMessageTime: "2026-06-06T14:00:00.000Z",
+      agentMessageId: "a-background",
+      agentMessageTime: "2026-06-06T14:00:01.000Z",
+    };
+    const handles = new Map<string, BackgroundRunHandle>([
+      [
+        binding.runId,
+        {
+          binding,
+          startedAt: "2026-06-06T14:00:02.000Z",
+          cancel: () => undefined,
+        },
+      ],
+    ]);
+
+    expect(activeBackgroundRunSnapshotsFromHandles(handles)).toEqual([
+      {
+        runId: "run-background",
+        conversationId: "chat-2",
+        userMessageId: "u-background",
+        agentMessageId: "a-background",
+        startedAt: "2026-06-06T14:00:02.000Z",
+      },
+    ]);
+  });
+
+  it("builds attach stream updates from persisted background run state", () => {
+    const binding: BackgroundRunBinding = {
+      conversationId: "chat-2",
+      runId: "run-existing",
+      userMessageId: "u-existing",
+      userMessageTime: "14:00",
+      agentMessageId: "a-existing",
+      agentMessageTime: "14:01",
+    };
+    const state = buildInitialWorkspaceState();
+    const runningState = {
+      ...state,
+      chats: state.chats.map((chat) =>
+        chat.id === "chat-2"
+          ? {
+              ...chat,
+              activeRunId: binding.runId,
+              status: "running" as const,
+              snippet: "Working",
+              time: binding.agentMessageTime,
+            }
+          : chat,
+      ),
+      threads: {
+        ...state.threads,
+        "chat-2": [
+          ...state.threads["chat-2"],
+          { id: binding.agentMessageId, role: "agent" as const, time: binding.agentMessageTime, blocks: [{ kind: "text" as const, text: "live" }] },
+        ],
+      },
+    };
+
+    expect(activeBackgroundRunUpdateFromState(runningState, binding, false)).toEqual({
+      runId: binding.runId,
+      conversationId: binding.conversationId,
+      agentMessageId: binding.agentMessageId,
+      status: "running",
+      snippet: "Working",
+      time: binding.agentMessageTime,
+      done: false,
+      blocks: [{ kind: "text", text: "live" }],
     });
   });
 

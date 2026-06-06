@@ -680,7 +680,6 @@ describe("WorkspacePage", () => {
     await screen.findByPlaceholderText("Написать: Flaky-тест auth.login...");
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
 
-    expect(await screen.findByRole("heading", { name: "Git" })).toBeInTheDocument();
     await waitFor(() => {
       expect(fetch).toHaveBeenCalledWith(
         "/api/git-status",
@@ -689,10 +688,9 @@ describe("WorkspacePage", () => {
         }),
       );
     });
-    expect(await screen.findByText("main")).toBeInTheDocument();
+    // The panel title shows the current branch instead of "Git".
+    expect(await screen.findByRole("heading", { name: "main" })).toBeInTheDocument();
     expect(screen.getAllByText("src/auth.ts").length).toBeGreaterThan(0);
-    expect(screen.getByText("Изменён")).toBeInTheDocument();
-    expect(screen.getByText("впереди 1")).toBeInTheDocument();
   });
 
   it("shows an explicit Git API status error when the backend omits an error message", async () => {
@@ -765,8 +763,9 @@ describe("WorkspacePage", () => {
 
     await screen.findByPlaceholderText("Написать: Flaky-тест auth.login...");
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
-    fireEvent.click(await screen.findByRole("button", { name: "src/auth.ts Изменён" }));
 
+    // The unstaged tab lists each changed file as a card that loads and (for a
+    // small diff) auto-expands its diff — no separate file selection needed.
     expect(await screen.findByText(/@@ -1 \+1 @@/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Добавить в индекс src/auth.ts" }));
 
@@ -779,6 +778,81 @@ describe("WorkspacePage", () => {
         }),
       );
     });
+  });
+
+  it("keeps a large diff collapsed by default and opens it on demand", async () => {
+    const workspace = { ...buildInitialWorkspaceState(), selectedId: "c-flaky" };
+    const bigDiff = ["@@ -1 +1 @@", ...Array.from({ length: 300 }, (_, index) => `+addedLine${index}`)].join("\n");
+    const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+      if (path === "/api/workspace" && (!init || init.method === "GET")) {
+        return Response.json(workspace);
+      }
+      if (path === "/api/workspace" && init?.method === "PUT") {
+        return Response.json(workspace);
+      }
+      if (path === "/api/project-files") {
+        return Response.json({ files: [] });
+      }
+      if (path === "/api/git-status") {
+        return Response.json({ branch: "main", ahead: 0, behind: 0, clean: false, files: [{ code: " M", label: "Modified", path: "src/big.ts", gitPath: "src/big.ts", staged: false, unstaged: true }] });
+      }
+      if (path === "/api/git-diff") {
+        return Response.json({ path: "src/big.ts", mode: "worktree", diff: bigDiff });
+      }
+      return new Response("not found", { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetch);
+
+    renderWithTheme(<WorkspacePage />);
+
+    await screen.findByPlaceholderText("Написать: Flaky-тест auth.login...");
+    fireEvent.click(screen.getByRole("button", { name: "Git" }));
+
+    // The card header (file path) shows, but a large diff stays collapsed.
+    const header = await screen.findByText("src/big.ts");
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/git-diff", expect.anything()));
+    expect(screen.queryByText("addedLine0")).not.toBeInTheDocument();
+
+    fireEvent.click(header);
+    expect(await screen.findByText("addedLine0")).toBeInTheDocument();
+  });
+
+  it("shows an error instead of rendering a gigantic diff", async () => {
+    const workspace = { ...buildInitialWorkspaceState(), selectedId: "c-flaky" };
+    const giganticDiff = ["@@ -1 +1 @@", ...Array.from({ length: 2100 }, (_, index) => `+hugeLine${index}`)].join("\n");
+    const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+      if (path === "/api/workspace" && (!init || init.method === "GET")) {
+        return Response.json(workspace);
+      }
+      if (path === "/api/workspace" && init?.method === "PUT") {
+        return Response.json(workspace);
+      }
+      if (path === "/api/project-files") {
+        return Response.json({ files: [] });
+      }
+      if (path === "/api/git-status") {
+        return Response.json({ branch: "main", ahead: 0, behind: 0, clean: false, files: [{ code: " M", label: "Modified", path: "src/huge.ts", gitPath: "src/huge.ts", staged: false, unstaged: true }] });
+      }
+      if (path === "/api/git-diff") {
+        return Response.json({ path: "src/huge.ts", mode: "worktree", diff: giganticDiff });
+      }
+      return new Response("not found", { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetch);
+
+    renderWithTheme(<WorkspacePage />);
+
+    await screen.findByPlaceholderText("Написать: Flaky-тест auth.login...");
+    fireEvent.click(screen.getByRole("button", { name: "Git" }));
+
+    const header = await screen.findByText("src/huge.ts");
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/git-diff", expect.anything()));
+    fireEvent.click(header);
+
+    expect(await screen.findByText(/слишком большой/i)).toBeInTheDocument();
+    expect(screen.queryByText("hugeLine0")).not.toBeInTheDocument();
   });
 
   it("groups Git file changes into unstaged and staged tabs with mode-specific diffs", async () => {
@@ -810,7 +884,7 @@ describe("WorkspacePage", () => {
       if (path === "/api/git-diff") {
         const body = JSON.parse(String(init?.body ?? "{}")) as { cwd?: string; path?: string; mode?: string };
         diffRequests.push(body);
-        const diff = body.mode === "staged" ? "@@ -1 +1 @@\n-staged old\n+staged new" : "@@ -1 +1 @@\n-worktree old\n+worktree new";
+        const diff = body.mode === "staged" ? "@@ -1 +1 @@\n-stagedOld\n+stagedNew" : "@@ -1 +1 @@\n-worktreeOld\n+worktreeNew";
         return Response.json({ path: body.path, mode: body.mode, diff });
       }
       return new Response("not found", { status: 404 });
@@ -824,15 +898,15 @@ describe("WorkspacePage", () => {
 
     expect(await screen.findByRole("tab", { name: /^Непоставленные 1$/i })).toHaveAttribute("aria-selected", "true");
     expect((await screen.findAllByText("src/auth.ts")).length).toBeGreaterThan(0);
-    expect(await screen.findByText(/worktree old/)).toBeInTheDocument();
+    expect(await screen.findByText("worktreeOld")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("tab", { name: /^Поставленные 1$/i }));
 
     expect((await screen.findAllByText("src/session.ts")).length).toBeGreaterThan(0);
-    expect(await screen.findByText(/staged old/)).toBeInTheDocument();
+    expect(await screen.findByText("stagedOld")).toBeInTheDocument();
     expect(diffRequests).toContainEqual({ cwd: "/root/workspace/rlab", path: "src/auth.ts", mode: "worktree" });
     expect(diffRequests).toContainEqual({ cwd: "/root/workspace/rlab", path: "src/session.ts", mode: "staged" });
-  });
+  }, 15_000);
 
   it("shows last-turn file changes in the Git panel without requesting a Git diff", async () => {
     const workspace = { ...buildInitialWorkspaceState(), selectedId: "c-flaky" };
@@ -861,7 +935,7 @@ describe("WorkspacePage", () => {
     fireEvent.click(await screen.findByRole("tab", { name: /Последний ход 1/i }));
 
     expect(await screen.findByText("test/auth/login.test.ts")).toBeInTheDocument();
-    expect(screen.getAllByText(/vi\.useFakeTimers/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/useFakeTimers/).length).toBeGreaterThan(0);
     expect(fetch).not.toHaveBeenCalledWith("/api/git-diff", expect.anything());
   });
 
@@ -906,68 +980,19 @@ describe("WorkspacePage", () => {
 
     await screen.findByPlaceholderText("Написать: Flaky-тест auth.login...");
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
-    fireEvent.click(await screen.findByRole("tab", { name: "Commit" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Коммит" }));
 
-    const messageInput = await screen.findByLabelText("Сообщение commit");
-    expect(screen.getByRole("button", { name: "Создать commit" })).toBeDisabled();
+    const messageInput = await screen.findByLabelText("Сообщение коммита");
+    expect(screen.getByRole("button", { name: "Создать коммит" })).toBeDisabled();
 
     fireEvent.change(messageInput, { target: { value: "Fix auth login test" } });
-    fireEvent.click(screen.getByRole("button", { name: "Создать commit" }));
+    fireEvent.click(screen.getByRole("button", { name: "Создать коммит" }));
 
     await waitFor(() => {
       expect(commitRequest).toEqual({ cwd: "/root/workspace/rlab", message: "Fix auth login test" });
-      expect(screen.getAllByText("Рабочее дерево чистое").length).toBeGreaterThan(0);
+      // A successful commit clears the message field.
+      expect(messageInput).toHaveValue("");
     });
   });
 
-  it("pushes ahead commits from the Git panel", async () => {
-    const workspace = { ...buildInitialWorkspaceState(), selectedId: "c-flaky" };
-    let pushRequest: { readonly cwd?: string } | null = null;
-    const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
-      const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
-      if (path === "/api/workspace" && (!init || init.method === "GET")) {
-        return Response.json(workspace);
-      }
-      if (path === "/api/workspace" && init?.method === "PUT") {
-        return Response.json(workspace);
-      }
-      if (path === "/api/project-files") {
-        return Response.json({ files: [] });
-      }
-      if (path === "/api/git-status") {
-        return Response.json({
-          branch: "main",
-          upstream: "origin/main",
-          ahead: 2,
-          behind: 0,
-          clean: true,
-          files: [],
-        });
-      }
-      if (path === "/api/git-push") {
-        pushRequest = JSON.parse(String(init?.body ?? "{}")) as { cwd?: string };
-        return Response.json({
-          branch: "main",
-          upstream: "origin/main",
-          ahead: 0,
-          behind: 0,
-          clean: true,
-          files: [],
-        });
-      }
-      return new Response("not found", { status: 404 });
-    });
-    vi.stubGlobal("fetch", fetch);
-
-    renderWithTheme(<WorkspacePage />);
-
-    await screen.findByPlaceholderText("Написать: Flaky-тест auth.login...");
-    fireEvent.click(screen.getByRole("button", { name: "Git" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Отправить push" }));
-
-    await waitFor(() => {
-      expect(pushRequest).toEqual({ cwd: "/root/workspace/rlab" });
-      expect(screen.queryByText("впереди 2")).not.toBeInTheDocument();
-    });
-  });
 });

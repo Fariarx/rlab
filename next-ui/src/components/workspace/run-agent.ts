@@ -1,4 +1,15 @@
-import { type AgentBlock, type AgentProfile, type CodeBlockData, type DiffBlock, type PlanBlock, type RunState, type RunUsage, type SearchBlock, type SuggestedActionsBlock } from "../agent";
+import {
+  type AgentBlock,
+  type AgentProfile,
+  type CodeBlockData,
+  type ConversationStatus,
+  type DiffBlock,
+  type PlanBlock,
+  type RunState,
+  type RunUsage,
+  type SearchBlock,
+  type SuggestedActionsBlock,
+} from "../agent";
 import { translate } from "../../i18n/I18nProvider";
 import { type Locale } from "./app-settings";
 import { type AgentAccessMode } from "./app-settings";
@@ -136,6 +147,126 @@ interface RunPersistenceBinding {
   readonly userMessageTime: string;
   readonly agentMessageId: string;
   readonly agentMessageTime: string;
+}
+
+export interface ActiveRunSnapshot {
+  readonly runId: string;
+  readonly conversationId: string;
+  readonly userMessageId: string;
+  readonly agentMessageId: string;
+  readonly startedAt: string;
+}
+
+export interface ActiveRunUpdate {
+  readonly runId: string;
+  readonly conversationId: string;
+  readonly agentMessageId: string;
+  readonly status: ConversationStatus;
+  readonly snippet: string;
+  readonly time: string;
+  readonly done: boolean;
+  readonly blocks: readonly AgentBlock[];
+  readonly costUsd?: number;
+  readonly usage?: RunUsage;
+}
+
+type RunAttachEvent = { readonly type: "update"; readonly update: ActiveRunUpdate };
+
+function isActiveRunSnapshot(value: unknown): value is ActiveRunSnapshot {
+  return (
+    isRecord(value) &&
+    typeof value.runId === "string" &&
+    typeof value.conversationId === "string" &&
+    typeof value.userMessageId === "string" &&
+    typeof value.agentMessageId === "string" &&
+    typeof value.startedAt === "string"
+  );
+}
+
+function isConversationStatus(value: unknown): value is ConversationStatus {
+  return value === "running" || value === "waiting" || value === "done" || value === "error" || value === "idle";
+}
+
+function isRunUsage(value: unknown): value is RunUsage {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return ["totalTokens", "inputTokens", "outputTokens", "reasoningTokens", "cacheReadTokens", "cacheWriteTokens"].every(
+    (key) => value[key] === undefined || typeof value[key] === "number",
+  );
+}
+
+function isActiveRunUpdate(value: unknown): value is ActiveRunUpdate {
+  return (
+    isRecord(value) &&
+    typeof value.runId === "string" &&
+    typeof value.conversationId === "string" &&
+    typeof value.agentMessageId === "string" &&
+    isConversationStatus(value.status) &&
+    typeof value.snippet === "string" &&
+    typeof value.time === "string" &&
+    typeof value.done === "boolean" &&
+    Array.isArray(value.blocks) &&
+    (value.costUsd === undefined || typeof value.costUsd === "number") &&
+    (value.usage === undefined || isRunUsage(value.usage))
+  );
+}
+
+function isRunAttachEvent(value: unknown): value is RunAttachEvent {
+  return isRecord(value) && value.type === "update" && isActiveRunUpdate(value.update);
+}
+
+export async function loadActiveRuns(): Promise<ActiveRunSnapshot[]> {
+  const response = await fetch("/api/runs", { method: "GET", cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(`Active runs load failed (${response.status})`);
+  }
+  const payload = (await response.json()) as unknown;
+  if (!isRecord(payload) || !Array.isArray(payload.runs) || !payload.runs.every(isActiveRunSnapshot)) {
+    throw new Error("Active runs response is invalid.");
+  }
+  return payload.runs.map((run) => ({
+    runId: run.runId,
+    conversationId: run.conversationId,
+    userMessageId: run.userMessageId,
+    agentMessageId: run.agentMessageId,
+    startedAt: run.startedAt,
+  }));
+}
+
+export async function attachRunUpdates(opts: {
+  readonly runId: string;
+  readonly signal?: AbortSignal;
+  readonly onUpdate: (update: ActiveRunUpdate) => void;
+}): Promise<void> {
+  const query = new URLSearchParams({ runId: opts.runId });
+  const response = await fetch(`/api/run-attach?${query.toString()}`, { method: "GET", cache: "no-store", signal: opts.signal });
+  if (!response.ok || !response.body) {
+    throw new Error(`Run attach failed (${response.status})`);
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    buffer += decoder.decode(value, { stream: true });
+    let nl: number;
+    while ((nl = buffer.indexOf("\n")) >= 0) {
+      const line = buffer.slice(0, nl).trim();
+      buffer = buffer.slice(nl + 1);
+      if (!line) {
+        continue;
+      }
+      const parsed = JSON.parse(line) as unknown;
+      if (!isRunAttachEvent(parsed)) {
+        throw new Error(`Malformed run attach event: ${line}`);
+      }
+      opts.onUpdate(parsed.update);
+    }
+  }
 }
 
 export async function cancelRun(runId: string): Promise<void> {

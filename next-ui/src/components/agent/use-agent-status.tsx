@@ -1,7 +1,7 @@
 import { createContext, type ReactNode, useContext, useEffect, useMemo, useState } from "react";
 import { makeAutoObservable, runInAction } from "mobx";
 import { observer } from "mobx-react-lite";
-import { AGENTS, AGENT_STATUS, STATIC_AGENT_CLI_INFO, type AgentCliInfo, type AgentCliMap, type AgentId, type AgentSystemStatus } from "./agents";
+import { AGENTS, AGENT_STATUS, STATIC_AGENT_CLI_INFO, type AgentCliInfo, type AgentCliMap, type AgentId, type AgentOption, type AgentSystemStatus } from "./agents";
 
 type StatusMap = Partial<Record<AgentId, AgentSystemStatus>>;
 type AgentApiValue = AgentSystemStatus | AgentCliInfo;
@@ -41,6 +41,17 @@ function stringArray(value: unknown): readonly string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
 
+function isAgentOption(value: unknown): value is AgentOption {
+  return isRecord(value) && typeof value.id === "string" && typeof value.label === "string" && (value.value === undefined || typeof value.value === "string");
+}
+
+function agentOptions(value: unknown): readonly AgentOption[] | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  return Array.isArray(value) && value.every(isAgentOption) ? value : undefined;
+}
+
 function isAgentCliInfo(value: unknown): value is AgentCliInfo {
   return (
     isRecord(value) &&
@@ -52,7 +63,9 @@ function isAgentCliInfo(value: unknown): value is AgentCliInfo {
     typeof value.selectable === "boolean" &&
     Array.isArray(value.env) &&
     value.env.every((item) => typeof item === "string") &&
-    (typeof value.installCommand === "string" || value.installCommand === null)
+    (typeof value.installCommand === "string" || value.installCommand === null) &&
+    (value.models === undefined || agentOptions(value.models) !== undefined) &&
+    (value.reasoning === undefined || agentOptions(value.reasoning) !== undefined)
   );
 }
 
@@ -81,6 +94,8 @@ function normalizeAgentPayload(payload: unknown): AgentCliMap {
         ...value,
         bins: stringArray(value.bins),
         env: stringArray(value.env),
+        models: agentOptions(value.models),
+        reasoning: agentOptions(value.reasoning),
       };
     }
   }

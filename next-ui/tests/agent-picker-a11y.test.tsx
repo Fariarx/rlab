@@ -80,6 +80,44 @@ describe("AgentPicker a11y", () => {
     expect(onSelect).toHaveBeenCalledWith({ agent: "codex", model: "default", reasoning: "default", mode: "default" });
   });
 
+  it("uses live CLI model options from the agent detection payload", async () => {
+    const onSelect = vi.fn();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL | Request) => {
+        const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+        if (path === "/api/agents") {
+          return Response.json({
+            opencode: {
+              status: "available",
+              bins: ["opencode"],
+              resolvedBin: "C:\\tools\\opencode.cmd",
+              runAdapter: true,
+              selectable: true,
+              env: [],
+              installCommand: "npm install -g opencode-ai@latest",
+              models: [{ id: "anthropic/claude-custom-lab", label: "Claude Custom Lab", value: "anthropic/claude-custom-lab" }],
+            },
+          });
+        }
+        return Response.json({});
+      }),
+    );
+
+    renderWithTheme(
+      <AgentStatusProvider>
+        <AgentPicker open value={DEFAULT_PROFILE} onClose={vi.fn()} onSelect={onSelect} />
+      </AgentStatusProvider>,
+    );
+
+    expect(await screen.findByText("CLI-путь: C:\\tools\\opencode.cmd")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Выбрать OpenCode из CLI" }));
+    fireEvent.click(screen.getByRole("button", { name: "Claude Custom Lab" }));
+    fireEvent.click(screen.getByRole("button", { name: "Использовать OpenCode" }));
+
+    expect(onSelect).toHaveBeenCalledWith({ agent: "opencode", model: "anthropic/claude-custom-lab", reasoning: "default", mode: "default" });
+  });
+
   it("exposes exact Claude Code model IDs and reasoning options but no work-mode control", () => {
     renderWithTheme(<AgentPicker open value={DEFAULT_PROFILE} onClose={vi.fn()} onSelect={vi.fn()} />);
 
@@ -97,12 +135,12 @@ describe("AgentPicker a11y", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Выбрать Gemini из CLI" }));
 
-    expect(screen.getByRole("button", { name: "Gemini 3 Pro" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Flash-Lite" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Gemini 3 Pro Preview" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Gemini 2.5 Flash-Lite" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Выбрать OpenCode из CLI" }));
 
-    expect(screen.getByRole("button", { name: "GPT-5.1 Codex" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Claude Sonnet 4.5" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Claude Opus 4.7" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "OpenCode Big Pickle" })).toBeInTheDocument();
   });
 });

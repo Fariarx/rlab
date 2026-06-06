@@ -2,7 +2,7 @@ import { type IReactionDisposer, makeAutoObservable, reaction, runInAction } fro
 import { useEffect, useState } from "react";
 import { agentProfileEquals, normalizeAgentProfile, type AgentBlock, type AgentProfile, type ApprovalDecision, type ChatMessage, type ComposerDraft, type ConversationStatus, type ConversationSummary, type Project } from "../agent";
 import { translate } from "../../i18n/I18nProvider";
-import { cancelRun, runConversation, type RunConversationResult } from "./run-agent";
+import { attachRunUpdates, cancelRun, loadActiveRuns, runConversation, type ActiveRunSnapshot, type ActiveRunUpdate, type RunConversationResult } from "./run-agent";
 import { nowLabel, starterThread, truncate } from "./sample-data";
 import { type AppSettings, type AppSettingsPatch, type Locale, mergeAppSettings } from "./app-settings";
 import { buildInitialWorkspaceState, cloneWorkspaceState, type WorkspaceState } from "./workspace-state";
@@ -163,6 +163,31 @@ function finalRunPatch(
   };
 }
 
+function isLiveRunStatus(status: ConversationStatus): boolean {
+  return status === "running" || status === "waiting";
+}
+
+function patchActiveRunUpdate(state: WorkspaceState, update: ActiveRunUpdate): WorkspaceState {
+  const messages = state.threads[update.conversationId] ?? [];
+  const previousBlocks = messages.find((message) => message.id === update.agentMessageId)?.blocks;
+  const blocks = mergeInputBlockState(update.blocks, previousBlocks);
+  const message: ChatMessage = { id: update.agentMessageId, role: "agent", time: update.time, blocks };
+  const threads = {
+    ...state.threads,
+    [update.conversationId]: messages.some((item) => item.id === update.agentMessageId)
+      ? messages.map((item) => (item.id === update.agentMessageId ? message : item))
+      : [...messages, message],
+  };
+  return patchConversation({ ...state, threads }, update.conversationId, {
+    activeRunId: update.done || !isLiveRunStatus(update.status) ? undefined : update.runId,
+    status: update.status,
+    snippet: update.snippet,
+    time: update.time,
+    ...(update.costUsd === undefined ? {} : { costUsd: update.costUsd }),
+    ...(update.usage === undefined ? {} : { usage: update.usage }),
+  });
+}
+
 function projectIdFromName(name: string): string {
   const id = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
   if (!id) {
@@ -225,10 +250,12 @@ class WorkspaceStore implements Workspace {
 
   private loadRetryTimer: ReturnType<typeof setInterval> | null = null;
 
+  private skipNextSave = false;
+
   private readonly runs = new Map<string, RunHandle>();
 
   constructor() {
-    makeAutoObservable<WorkspaceStore, "hydrated" | "loadSeq" | "runs" | "saveDisposer" | "pollTimer" | "loadRetryTimer">(
+    makeAutoObservable<WorkspaceStore, "hydrated" | "loadSeq" | "runs" | "saveDisposer" | "pollTimer" | "loadRetryTimer" | "skipNextSave">(
       this,
       {
         hydrated: false,
@@ -237,6 +264,7 @@ class WorkspaceStore implements Workspace {
         saveDisposer: false,
         pollTimer: false,
         loadRetryTimer: false,
+        skipNextSave: false,
       },
       { autoBind: true },
     );
@@ -266,12 +294,23 @@ class WorkspaceStore implements Workspace {
     return this.state.settings;
   }
 
+  private applyServerState(state: WorkspaceState): void {
+    if (this.state !== state) {
+      this.skipNextSave = true;
+      this.state = state;
+    }
+  }
+
   mount(): void {
     if (!this.saveDisposer) {
       this.saveDisposer = reaction(
         () => this.state,
         (state) => {
           if (!this.hydrated) {
+            return;
+          }
+          if (this.skipNextSave) {
+            this.skipNextSave = false;
             return;
           }
           void saveWorkspaceState(state).catch((error) => {
@@ -303,6 +342,10 @@ class WorkspaceStore implements Workspace {
     this.loadSeq += 1;
     this.saveDisposer?.();
     this.saveDisposer = null;
+    for (const run of this.runs.values()) {
+      run.controller.abort();
+    }
+    this.runs.clear();
     if (this.pollTimer) {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
@@ -322,7 +365,7 @@ class WorkspaceStore implements Workspace {
           return;
         }
         runInAction(() => {
-          this.state = cloneWorkspaceState(loadedState);
+          this.applyServerState(cloneWorkspaceState(loadedState));
           this.loadError = null;
           this.loaded = true;
           this.hydrated = true;
@@ -358,14 +401,19 @@ class WorkspaceStore implements Workspace {
   private async syncBackgroundRuns(): Promise<void> {
     const seq = this.loadSeq;
     try {
+      const activeRuns = await loadActiveRuns();
+      const activeRunIds = new Set(activeRuns.map((run) => run.runId));
       const loadedState = await loadWorkspaceState();
       if (seq !== this.loadSeq) {
         return;
       }
       runInAction(() => {
-        this.state = this.mergeBackgroundRunState(this.state, loadedState);
+        this.applyServerState(this.mergeBackgroundRunState(this.state, loadedState, activeRunIds));
         this.loadError = null;
       });
+      for (const run of activeRuns) {
+        this.attachBackgroundRun(run);
+      }
     } catch (error) {
       if (seq !== this.loadSeq) {
         return;
@@ -376,7 +424,7 @@ class WorkspaceStore implements Workspace {
     }
   }
 
-  private mergeBackgroundRunState(current: WorkspaceState, loaded: WorkspaceState): WorkspaceState {
+  private mergeBackgroundRunState(current: WorkspaceState, loaded: WorkspaceState, activeRunIds: ReadonlySet<string>): WorkspaceState {
     const ids = new Set(
       workspaceConversations(current)
         .filter((conversation) => Boolean(conversation.activeRunId) && !this.runs.has(conversation.id))
@@ -393,6 +441,14 @@ class WorkspaceStore implements Workspace {
         continue;
       }
       const currentConversation = findConversation(next, id);
+      if (
+        currentConversation?.activeRunId &&
+        !activeRunIds.has(currentConversation.activeRunId) &&
+        loadedConversation.activeRunId === currentConversation.activeRunId &&
+        (loadedConversation.status === "running" || loadedConversation.status === "waiting")
+      ) {
+        throw new Error(`Workspace API returned stale active run ${currentConversation.activeRunId}.`);
+      }
       if (!serializableEqual(currentConversation, loadedConversation)) {
         next = patchConversation(next, id, loadedConversation);
       }
@@ -404,6 +460,42 @@ class WorkspaceStore implements Workspace {
       }
     }
     return threads ? { ...next, threads } : next;
+  }
+
+  private attachBackgroundRun(run: ActiveRunSnapshot): void {
+    if (this.runs.has(run.conversationId)) {
+      return;
+    }
+    const controller = new AbortController();
+    const runHandle: RunHandle = { controller, runId: run.runId, canceled: false };
+    this.runs.set(run.conversationId, runHandle);
+    attachRunUpdates({
+      runId: run.runId,
+      signal: controller.signal,
+      onUpdate: (update) => {
+        if (this.runs.get(run.conversationId) !== runHandle) {
+          return;
+        }
+        runInAction(() => {
+          this.skipNextSave = true;
+          this.state = patchActiveRunUpdate(this.state, update);
+          this.loadError = null;
+        });
+      },
+    })
+      .catch((error) => {
+        if (controller.signal.aborted || runHandle.canceled) {
+          return;
+        }
+        runInAction(() => {
+          this.loadError = error instanceof Error ? error.message : String(error);
+        });
+      })
+      .finally(() => {
+        if (this.runs.get(run.conversationId) === runHandle) {
+          this.runs.delete(run.conversationId);
+        }
+      });
   }
 
   find(id: string): ConversationSummary | null {
