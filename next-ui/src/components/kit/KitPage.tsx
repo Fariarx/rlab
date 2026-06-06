@@ -1,9 +1,10 @@
 import DarkModeIcon from "@mui/icons-material/DarkMode";
 import LightModeIcon from "@mui/icons-material/LightMode";
 import { Box, Container, Divider, Link, Stack, Tooltip, Typography } from "@mui/material";
-import { type ThemeMode } from "../../lib/use-theme-mode";
+import { type ThemeMode } from "../workspace/app-settings";
 import { IconButton, StatusDot } from "../ui";
 import { ButtonsSection } from "./sections/ButtonsSection";
+import { AgentBlocksSection } from "./sections/AgentBlocksSection";
 import { ControlsSection } from "./sections/ControlsSection";
 import { DataSection } from "./sections/DataSection";
 import { InputsSection } from "./sections/InputsSection";
@@ -43,25 +44,25 @@ export function KitPage({ mode = "dark", onToggleMode }: KitPageProps) {
             sx={{ alignItems: "center", justifyContent: "space-between", py: 1.5 }}
           >
             <Stack direction="row" spacing={1.25} sx={{ alignItems: "center" }}>
-              <StatusDot status="ok" label="Live" pulse={false} />
+              <StatusDot status="ok" label="Живой стенд" pulse={false} />
               <Typography sx={{ fontFamily: (t) => t.custom.fonts.mono, fontWeight: 700, fontSize: "0.9rem" }}>
                 rlab/ui-kit
               </Typography>
               <Typography variant="microLabel" sx={{ color: "text.secondary" }}>
-                component library
+                библиотека компонентов
               </Typography>
             </Stack>
             <Stack direction="row" spacing={1.5} sx={{ alignItems: "center" }}>
-              <Tooltip title={mode === "dark" ? "Switch to light" : "Switch to dark"}>
-                <IconButton tone="subtle" aria-label="Toggle theme" onClick={onToggleMode}>
+              <Tooltip title={mode === "dark" ? "Включить светлую тему" : "Включить тёмную тему"}>
+                <IconButton tone="subtle" aria-label="Переключить тему" onClick={onToggleMode}>
                   {mode === "dark" ? <LightModeIcon fontSize="small" /> : <DarkModeIcon fontSize="small" />}
                 </IconButton>
               </Tooltip>
               <Link href="#/agent" underline="hover" sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.78rem" }}>
-                agent →
+                агенты →
               </Link>
               <Link href="#/" underline="hover" sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.78rem" }}>
-                ← workspace
+                ← рабочая область
               </Link>
             </Stack>
           </Stack>
@@ -76,6 +77,7 @@ export function KitPage({ mode = "dark", onToggleMode }: KitPageProps) {
           <InputsSection />
           <ControlsSection />
           <PanelsSection />
+          <AgentBlocksSection />
           <StatusSection />
           <OverlaysSection />
           <DataSection />

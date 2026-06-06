@@ -1,6 +1,5 @@
-import { type ReactNode } from "react";
 import { type StatusKey } from "../../theme/tokens";
-import { type AgentId } from "./agents";
+import { type AgentId, type AgentProfile } from "./agents";
 
 /** Run state shared by tool/command/plan-step style blocks. */
 export type RunState = "pending" | "running" | "ok" | "error";
@@ -66,16 +65,22 @@ export interface CodeBlockData {
 
 export interface OptionsBlock {
   readonly kind: "options";
+  readonly id?: string;
   readonly prompt: string;
   readonly multi?: boolean;
   readonly options: ReadonlyArray<{ readonly id: string; readonly label: string; readonly description?: string }>;
+  readonly selected?: readonly string[];
 }
 
 export interface ApprovalBlock {
   readonly kind: "approval";
+  readonly id?: string;
   readonly title: string;
   readonly detail?: string;
+  readonly decision?: ApprovalDecision;
 }
+
+export type ApprovalDecision = "approved" | "rejected";
 
 export interface StatusBlock {
   readonly kind: "status";
@@ -93,10 +98,12 @@ export interface SuggestedActionsBlock {
   readonly actions: ReadonlyArray<{
     readonly id: string;
     readonly label: string;
-    readonly icon?: ReactNode;
+    readonly icon?: SuggestedActionIconKey;
     readonly tone?: "default" | "primary" | "danger";
   }>;
 }
+
+export type SuggestedActionIconKey = "arrow-forward" | "copy" | "refresh";
 
 export type AgentBlock =
   | ReasoningBlock
@@ -122,9 +129,45 @@ export interface ChatMessage {
   readonly blocks?: readonly AgentBlock[];
 }
 
+export interface ComposerAttachmentDraft {
+  readonly id: string;
+  readonly name: string;
+  readonly type: string;
+  /** Inlined text content for text-like files. Empty for files referenced by path. */
+  readonly content: string;
+  readonly size: number;
+  readonly lastModified: number;
+  /** Absolute path on disk for non-text files (images, binaries) the agent reads by path. */
+  readonly path?: string;
+}
+
+export interface ComposerDraft {
+  readonly text: string;
+  readonly attachments: readonly ComposerAttachmentDraft[];
+}
+
 /* ----------------------------- Sidebar / projects --------------------------- */
 
 export type ConversationStatus = "running" | "waiting" | "done" | "error" | "idle";
+
+/** Maps a conversation status to its status-dot color key (shared by the
+ *  sidebar list and the conversation header so they always agree). */
+export const conversationStatusKey: Record<ConversationStatus, StatusKey> = {
+  running: "running",
+  waiting: "warn",
+  done: "ok",
+  error: "error",
+  idle: "idle",
+};
+
+export interface RunUsage {
+  readonly totalTokens?: number;
+  readonly inputTokens?: number;
+  readonly outputTokens?: number;
+  readonly reasoningTokens?: number;
+  readonly cacheReadTokens?: number;
+  readonly cacheWriteTokens?: number;
+}
 
 export interface ConversationSummary {
   readonly id: string;
@@ -133,7 +176,10 @@ export interface ConversationSummary {
   readonly time: string;
   readonly status: ConversationStatus;
   readonly agent: AgentId;
+  readonly profile?: AgentProfile;
   readonly unread?: boolean;
+  readonly costUsd?: number;
+  readonly usage?: RunUsage;
 }
 
 export interface Project {

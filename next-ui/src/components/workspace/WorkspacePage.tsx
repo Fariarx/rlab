@@ -1,14 +1,17 @@
 import AddIcon from "@mui/icons-material/Add";
+import AccountTreeIcon from "@mui/icons-material/AccountTree";
 import ChatBubbleOutlineIcon from "@mui/icons-material/ChatOutlined";
+import CreateNewFolderIcon from "@mui/icons-material/CreateNewFolder";
 import FolderOutlinedIcon from "@mui/icons-material/FolderOutlined";
 import DarkModeIcon from "@mui/icons-material/DarkMode";
 import LightModeIcon from "@mui/icons-material/LightMode";
 import MenuIcon from "@mui/icons-material/Menu";
 import ReplayIcon from "@mui/icons-material/Replay";
+import RestartAltIcon from "@mui/icons-material/RestartAlt";
 import SettingsIcon from "@mui/icons-material/Settings";
 import {
+  Alert,
   Box,
-  Container,
   Dialog,
   DialogActions,
   DialogContent,
@@ -22,56 +25,289 @@ import {
   Tooltip,
   Typography,
 } from "@mui/material";
-import { useState } from "react";
-import { type ThemeMode } from "../../lib/use-theme-mode";
+import { useEffect, useRef, useState } from "react";
+import { I18nProvider, useI18n } from "../../i18n/I18nProvider";
+import { type HashRoute } from "../../lib/use-hash-route";
 import {
   type AgentProfile,
+  type ApprovalDecision,
+  AGENTS,
   AgentBadge,
   AgentPicker,
   Composer,
   Conversation,
   ConversationList,
+  conversationStatusKey,
   DEFAULT_PROFILE,
+  formatCostUsd,
+  formatTokenUsage,
+  messageToPlainText,
+  type ChatMessage,
+  type ConversationStatus,
+  type ConversationSummary,
+  useAgentStatus,
+  useAgentStatusError,
+  useAgentStatusLive,
+  useReloadAgentStatus,
 } from "../agent";
 import { SettingsDialog } from "../settings/SettingsDialog";
 import { Button, EmptyState, IconButton, StatusDot, useToast } from "../ui";
-import { useWorkspace } from "./use-workspace";
+import { CommandPalette, type CommandPaletteItem } from "./CommandPalette";
+import { CreateProjectDialog } from "./CreateProjectDialog";
+import { GitPanel } from "./GitPanel";
+import { conversationProfile, type Workspace, useWorkspace } from "./use-workspace";
 
 type WorkspaceMode = "chats" | "projects";
 const SIDEBAR_WIDTH = 300;
+// Max width for the centered thread/composer content. The scroll container
+// itself is full-width so its scrollbar sits at the screen edge.
+const THREAD_MAX_WIDTH = 1040;
+const THREAD_PADDING_X = { xs: 2, sm: 3 } as const;
 
-interface WorkspacePageProps {
-  readonly mode?: ThemeMode;
-  readonly onToggleMode?: () => void;
+function projectForConversation(workspace: Workspace, conversationId: string): { readonly id: string; readonly name: string } | null {
+  const project = workspace.projects.find((item) => item.conversations.some((conversation) => conversation.id === conversationId));
+  return project ? { id: project.id, name: project.name } : null;
 }
 
-export function WorkspacePage({ mode = "dark", onToggleMode }: WorkspacePageProps) {
-  const ws = useWorkspace();
+function routeForConversation(workspace: Workspace, conversationId: string): HashRoute {
+  const project = projectForConversation(workspace, conversationId);
+  return project ? { kind: "project", projectId: project.id, conversationId } : { kind: "chat", conversationId };
+}
+
+function workspaceConversations(workspace: Workspace): readonly ConversationSummary[] {
+  return [...workspace.chats, ...workspace.projects.flatMap((project) => project.conversations)];
+}
+
+function runToastForStatus(status: ConversationStatus, title: string, t: ReturnType<typeof useI18n>["t"]) {
+  if (status === "done") {
+    return { message: t("runCompletedToast", { title }), severity: "success" as const };
+  }
+  if (status === "waiting") {
+    return { message: t("runNeedsInputToast", { title }), severity: "warning" as const };
+  }
+  if (status === "error") {
+    return { message: t("runFailedToast", { title }), severity: "error" as const };
+  }
+  return null;
+}
+
+function runNotificationForStatus(status: ConversationStatus, title: string, t: ReturnType<typeof useI18n>["t"]) {
+  if (status === "done") {
+    return { title: t("runCompletedNotificationTitle"), body: title };
+  }
+  if (status === "waiting") {
+    return { title: t("runNeedsInputNotificationTitle"), body: title };
+  }
+  if (status === "error") {
+    return { title: t("runFailedNotificationTitle"), body: title };
+  }
+  return null;
+}
+
+function showDesktopNotification(enabled: boolean, notification: { readonly title: string; readonly body: string } | null): void {
+  if (!enabled || notification == null || typeof Notification === "undefined" || Notification.permission !== "granted") {
+    return;
+  }
+  new Notification(notification.title, { body: notification.body });
+}
+
+export function WorkspacePage() {
+  const workspace = useWorkspace();
+
+  return (
+    <I18nProvider locale={workspace.settings.general.locale}>
+      <WorkspacePageView workspace={workspace} />
+    </I18nProvider>
+  );
+}
+
+export function WorkspacePageView({
+  workspace: ws,
+  route,
+  onNavigate,
+}: {
+  readonly workspace: Workspace;
+  readonly route?: HashRoute;
+  readonly onNavigate?: (route: HashRoute) => void;
+}) {
+  const { t, conversationStatus } = useI18n();
   const { toast } = useToast();
+  const statusOf = useAgentStatus();
+  const agentStatusLive = useAgentStatusLive();
+  const agentStatusError = useAgentStatusError();
+  const reloadAgentStatus = useReloadAgentStatus();
 
   const [wsMode, setWsMode] = useState<WorkspaceMode>("chats");
-  const [profile, setProfile] = useState<AgentProfile>(DEFAULT_PROFILE);
+  const [profile, setProfile] = useState<AgentProfile>(ws.settings.agents.defaultProfile ?? DEFAULT_PROFILE);
   const [pickerOpen, setPickerOpen] = useState(false);
-  const [pickerIntent, setPickerIntent] = useState<"switch" | "new">("switch");
+  // A pending new chat that exists only in the composer until the user sends
+  // the first message (then it's created with the current/default agent).
+  const [composingNew, setComposingNew] = useState<{ readonly projectId?: string } | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const [projectDialogOpen, setProjectDialogOpen] = useState(false);
+  const [gitOpen, setGitOpen] = useState(false);
+  const [mentionableFiles, setMentionableFiles] = useState<readonly string[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [runKey, setRunKey] = useState(0);
+  const notifiableRuns = useRef(new Set<string>());
+  const previousStatuses = useRef(new Map<string, ConversationStatus>());
 
-  const selected = ws.find(ws.selectedId);
+  const selected = composingNew ? null : ws.find(ws.selectedId);
   const messages = ws.threads[ws.selectedId] ?? [];
+  const composerDraft = ws.composerDrafts[ws.selectedId] ?? { text: "", attachments: [] };
+  const selectedCwd = ws.cwdOf(ws.selectedId);
+  const draftProject = composingNew?.projectId ? ws.projects.find((p) => p.id === composingNew.projectId) ?? null : null;
+  const activeCwd = composingNew ? draftProject?.path : selectedCwd;
+  const headerTitle = composingNew ? t("newChat") : selected?.title ?? t("noConversation");
+  const accessMode = ws.settings.agents.accessMode;
+  const workingDirectoryAccessText = activeCwd
+    ? t(accessMode === "read-write" ? "workingDirectoryWritable" : "workingDirectoryReadOnly", { cwd: activeCwd })
+    : "";
+  const mode = ws.settings.appearance.theme;
+  const routeKind = route?.kind;
+  const routeConversationId = route && (route.kind === "chat" || route.kind === "project") ? route.conversationId : undefined;
+  const noAgentsAvailable = agentStatusLive && AGENTS.every((agent) => statusOf(agent.id) !== "available" && statusOf(agent.id) !== "running");
 
-  const openConversation = (id: string) => {
+  useEffect(() => {
+    if (selected) {
+      setProfile(conversationProfile(selected));
+    } else {
+      setProfile(ws.settings.agents.defaultProfile);
+    }
+  }, [selected, ws.settings.agents.defaultProfile]);
+
+  useEffect(() => {
+    let alive = true;
+    if (!activeCwd) {
+      setMentionableFiles([]);
+      return;
+    }
+
+    fetch("/api/project-files", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: activeCwd }),
+    })
+      .then(async (response) => {
+        const payload = (await response.json()) as { files?: string[]; error?: string };
+        if (!response.ok) {
+          throw new Error(payload.error ?? t("projectFilesUnavailable"));
+        }
+        if (alive) {
+          setMentionableFiles(payload.files ?? []);
+        }
+      })
+      .catch((error) => {
+        if (alive) {
+          setMentionableFiles([]);
+          toast({ message: error instanceof Error ? error.message : String(error), severity: "error", duration: 3000 });
+        }
+      });
+
+    return () => {
+      alive = false;
+    };
+  }, [activeCwd, t, toast]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLocaleLowerCase() === "k") {
+        event.preventDefault();
+        setCommandPaletteOpen(true);
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  useEffect(() => {
+    if (routeKind === "chat" && routeConversationId) {
+      setWsMode("chats");
+      if (ws.selectedId !== routeConversationId) {
+        ws.select(routeConversationId);
+      }
+      const conv = ws.find(routeConversationId);
+      if (conv) {
+        setProfile((current) => {
+          const nextProfile = conversationProfile(conv);
+          return current.agent === nextProfile.agent && current.variant === nextProfile.variant ? current : nextProfile;
+        });
+      }
+    } else if (routeKind === "project" && routeConversationId) {
+      setWsMode("projects");
+      if (ws.selectedId !== routeConversationId) {
+        ws.select(routeConversationId);
+      }
+      const conv = ws.find(routeConversationId);
+      if (conv) {
+        setProfile((current) => {
+          const nextProfile = conversationProfile(conv);
+          return current.agent === nextProfile.agent && current.variant === nextProfile.variant ? current : nextProfile;
+        });
+      }
+    }
+  }, [routeKind, routeConversationId, ws.selectedId, ws.select, ws.find]);
+
+  // Once the workspace loads, align the sidebar mode with the persisted
+  // selection so a project conversation doesn't open under the Chats tab.
+  // Runs once and only when the URL isn't deep-linking a specific conversation.
+  const initialModeSynced = useRef(false);
+  useEffect(() => {
+    if (initialModeSynced.current || !ws.loaded) {
+      return;
+    }
+    initialModeSynced.current = true;
+    if (!routeConversationId && projectForConversation(ws, ws.selectedId)) {
+      setWsMode("projects");
+    }
+  }, [ws.loaded, ws.selectedId, routeConversationId]);
+
+  useEffect(() => {
+    const conversations = workspaceConversations(ws);
+    const nextStatuses = new Map(conversations.map((conversation) => [conversation.id, conversation.status]));
+    for (const conversation of conversations) {
+      const previousStatus = previousStatuses.current.get(conversation.id);
+      const activeRunStatusChanged =
+        previousStatus !== undefined &&
+        previousStatus !== conversation.status &&
+        (previousStatus === "running" || previousStatus === "waiting") &&
+        conversation.status !== "running";
+      if (
+        activeRunStatusChanged &&
+        notifiableRuns.current.has(conversation.id)
+      ) {
+        if (conversation.status !== "waiting") {
+          notifiableRuns.current.delete(conversation.id);
+        }
+        const runToast = runToastForStatus(conversation.status, conversation.title, t);
+        if (runToast) {
+          toast({ ...runToast, duration: 3500 });
+        }
+        showDesktopNotification(ws.settings.general.desktopNotifications, runNotificationForStatus(conversation.status, conversation.title, t));
+      }
+    }
+    previousStatuses.current = nextStatuses;
+  }, [ws.chats, ws.projects, ws.settings.general.desktopNotifications, t, toast]);
+
+  const openConversation = (id: string, updateRoute = true) => {
+    setComposingNew(null);
     ws.select(id);
     const conv = ws.find(id);
     if (conv) {
-      setProfile({ agent: conv.agent, variant: "DEFAULT" });
+      setProfile(conversationProfile(conv));
+    }
+    if (updateRoute) {
+      onNavigate?.(routeForConversation(ws, id));
     }
     setDrawerOpen(false);
     setRunKey((k) => k + 1);
   };
 
   const switchMode = (next: WorkspaceMode) => {
+    setComposingNew(null);
     setWsMode(next);
     const firstId = next === "chats" ? ws.chats[0]?.id : ws.projects.find((p) => p.conversations.length > 0)?.conversations[0]?.id;
     if (firstId) {
@@ -79,18 +315,55 @@ export function WorkspacePage({ mode = "dark", onToggleMode }: WorkspacePageProp
     }
   };
 
-  const openPicker = (intent: "switch" | "new") => {
-    setPickerIntent(intent);
+  // Start a new chat using the default agent without a confirmation dialog. The
+  // conversation isn't created until the user sends the first message.
+  const startNewChat = () => {
+    setProfile(ws.settings.agents.defaultProfile ?? DEFAULT_PROFILE);
+    if (wsMode === "projects") {
+      const targetProject = projectForConversation(ws, ws.selectedId) ?? ws.projects[0] ?? null;
+      if (!targetProject) {
+        toast({ message: t("noProjectForNewChat"), severity: "error", duration: 3000 });
+        return;
+      }
+      setComposingNew({ projectId: targetProject.id });
+    } else {
+      setComposingNew({});
+    }
+    setDrawerOpen(false);
+  };
+
+  const openPicker = () => {
     setPickerOpen(true);
   };
 
+  const openKit = () => {
+    if (onNavigate) {
+      onNavigate({ kind: "kit" });
+      return;
+    }
+
+    window.location.hash = "#/kit";
+  };
+
+  // The picker now only switches the agent (for the draft or the open
+  // conversation); new chats default to the configured agent.
   const handlePicked = (picked: AgentProfile) => {
     setProfile(picked);
-    if (pickerIntent === "new") {
-      ws.newChat(picked.agent);
-      setWsMode("chats");
+    if (!composingNew && selected) {
+      ws.setConversationProfile(ws.selectedId, picked);
+    }
+  };
+
+  const handleCreateProject = (input: Parameters<typeof ws.createProject>[0]) => {
+    try {
+      const created = ws.createProject(input);
+      setComposingNew(null);
+      setWsMode("projects");
+      onNavigate?.({ kind: "project", projectId: created.projectId, conversationId: created.conversationId });
       setRunKey((k) => k + 1);
-      toast({ message: `New chat with ${picked.agent}`, severity: "info", duration: 2500 });
+      toast({ message: t("newProjectChatWith", { agent: input.profile.agent, project: input.name }), severity: "info", duration: 2500 });
+    } catch (error) {
+      toast({ message: error instanceof Error ? error.message : String(error), severity: "error", duration: 3000 });
     }
   };
 
@@ -98,39 +371,177 @@ export function WorkspacePage({ mode = "dark", onToggleMode }: WorkspacePageProp
     onRename: ws.rename,
     onArchive: (id: string) => {
       ws.remove(id);
-      toast({ message: "Conversation archived", severity: "info", duration: 2500 });
+      toast({ message: t("conversationArchived"), severity: "info", duration: 2500 });
     },
-    onDelete: (id: string) => setConfirmDelete(id),
+    onDelete: (id: string) => {
+      if (ws.settings.general.confirmDestructiveActions) {
+        setConfirmDelete(id);
+        return;
+      }
+      ws.remove(id);
+      toast({ message: t("conversationDeleted"), severity: "warning", duration: 2500 });
+    },
   };
 
   const doDelete = () => {
     if (confirmDelete) {
       ws.remove(confirmDelete);
       setConfirmDelete(null);
-      toast({ message: "Conversation deleted", severity: "warning", duration: 2500 });
+      toast({ message: t("conversationDeleted"), severity: "warning", duration: 2500 });
     }
   };
+
+  const messageActions = {
+    onCopy: async (message: ChatMessage) => {
+      try {
+        await navigator.clipboard.writeText(messageToPlainText(message));
+        toast({ message: t("messageCopied"), severity: "success", duration: 1800 });
+      } catch {
+        toast({ message: t("clipboardUnavailable"), severity: "error", duration: 2500 });
+      }
+    },
+    onRetry: (message: ChatMessage) => {
+      notifiableRuns.current.add(ws.selectedId);
+      ws.retryMessage(ws.selectedId, message.id);
+    },
+    onEditAndResend: (message: ChatMessage, text: string) => {
+      notifiableRuns.current.add(ws.selectedId);
+      ws.editAndResendMessage(ws.selectedId, message.id, text);
+    },
+    onApprovalDecision: async (approvalId: string, decision: ApprovalDecision) => {
+      try {
+        const response = await fetch("/api/run-approval", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: approvalId, decision }),
+        });
+        if (!response.ok) {
+          const payload = (await response.json().catch(() => ({}))) as { error?: string };
+          throw new Error(payload.error ?? `Approval decision failed (${response.status})`);
+        }
+        ws.decideApproval(ws.selectedId, approvalId, decision);
+      } catch (error) {
+        toast({ message: error instanceof Error ? error.message : String(error), severity: "error", duration: 3000 });
+        throw error;
+      }
+    },
+    onOptionSelection: async (optionBlockId: string, selectedLabels: readonly string[]) => {
+      try {
+        const response = await fetch("/api/run-input", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: optionBlockId, selected: selectedLabels }),
+        });
+        if (!response.ok) {
+          const payload = (await response.json().catch(() => ({}))) as { error?: string };
+          throw new Error(payload.error ?? `Option selection failed (${response.status})`);
+        }
+        ws.selectOptions(ws.selectedId, optionBlockId, selectedLabels);
+      } catch (error) {
+        toast({ message: error instanceof Error ? error.message : String(error), severity: "error", duration: 3000 });
+        throw error;
+      }
+    },
+  };
+
+  const retryLastUserMessage = () => {
+    const lastUserMessage = [...messages].reverse().find((message) => message.role === "user");
+    if (lastUserMessage) {
+      notifiableRuns.current.add(ws.selectedId);
+      ws.retryMessage(ws.selectedId, lastUserMessage.id);
+    }
+  };
+
+  const commandItems: readonly CommandPaletteItem[] = [
+    {
+      id: "new-conversation",
+      label: t("commandNewConversation"),
+      keywords: [t("newConversation"), t("newChat")],
+      shortcut: ["Ctrl", "N"],
+      action: startNewChat,
+    },
+    {
+      id: "go-chats",
+      label: t("commandGoChats"),
+      keywords: [t("chats"), "chat"],
+      action: () => switchMode("chats"),
+    },
+    {
+      id: "go-projects",
+      label: t("commandGoProjects"),
+      keywords: [t("projects"), "project"],
+      action: () => switchMode("projects"),
+    },
+    {
+      id: "open-settings",
+      label: t("commandOpenSettings"),
+      keywords: [t("settings"), t("appearance"), t("general")],
+      shortcut: ["Ctrl", ","],
+      action: () => setSettingsOpen(true),
+    },
+    {
+      id: "open-git",
+      label: t("commandOpenGit"),
+      keywords: [t("git"), t("gitStatus")],
+      action: () => setGitOpen(true),
+    },
+    {
+      id: "toggle-theme",
+      label: t("commandToggleTheme"),
+      keywords: [t("theme"), t("dark"), t("light")],
+      action: () => ws.updateSettings({ appearance: { theme: mode === "dark" ? "light" : "dark" } }),
+    },
+    {
+      id: "open-kit",
+      label: t("commandOpenKit"),
+      keywords: [t("kit")],
+      action: openKit,
+    },
+  ];
+
+  if (ws.loadError && !ws.loaded) {
+    return (
+      <Box sx={{ minHeight: "100dvh", display: "flex", alignItems: "center", justifyContent: "center", bgcolor: "background.default", p: 2 }}>
+        <Alert
+          severity="error"
+          action={
+            <Button variant="subtle" size="small" onClick={ws.reloadWorkspace} disabled={ws.loading}>
+              {t("retryWorkspaceLoad")}
+            </Button>
+          }
+          sx={{ maxWidth: 720 }}
+        >
+          {t("workspaceError", { error: ws.loadError })}
+        </Alert>
+      </Box>
+    );
+  }
 
   const sidebar = (
     <Stack sx={{ height: "100%", minHeight: 0, backgroundColor: (t) => t.custom.surfaces.s1 }}>
       <Stack spacing={1.25} sx={{ p: 1.5, borderBottom: (t) => `1px solid ${t.custom.borders.subtle}` }}>
         <Stack direction="row" sx={{ alignItems: "center", justifyContent: "space-between" }}>
-          <Typography sx={{ fontFamily: (t) => t.custom.fonts.mono, fontWeight: 700, fontSize: "0.9rem" }}>rlab / agents</Typography>
+          <Typography sx={{ fontFamily: (t) => t.custom.fonts.mono, fontWeight: 700, fontSize: "0.9rem" }}>{t("appTitle")}</Typography>
           <Stack direction="row" spacing={0.5}>
-            <Tooltip title="Settings">
-              <IconButton aria-label="Settings" onClick={() => setSettingsOpen(true)}>
+            <Tooltip title={t("settings")}>
+              <IconButton aria-label={t("settings")} onClick={() => setSettingsOpen(true)}>
                 <SettingsIcon sx={{ fontSize: 18 }} />
               </IconButton>
             </Tooltip>
-            <Tooltip title="New conversation">
-              <IconButton tone="subtle" aria-label="New conversation" onClick={() => openPicker("new")}>
+            {wsMode === "projects" && (
+              <Tooltip title={t("newProject")}>
+                <IconButton tone="subtle" aria-label={t("newProject")} onClick={() => setProjectDialogOpen(true)}>
+                  <CreateNewFolderIcon sx={{ fontSize: 18 }} />
+                </IconButton>
+              </Tooltip>
+            )}
+            <Tooltip title={t("newConversation")}>
+              <IconButton tone="subtle" aria-label={t("newConversation")} onClick={startNewChat}>
                 <AddIcon sx={{ fontSize: 18 }} />
               </IconButton>
             </Tooltip>
           </Stack>
         </Stack>
-
-        <AgentBadge profile={profile} onClick={() => openPicker("switch")} fill />
 
         <ToggleButtonGroup
           exclusive
@@ -138,12 +549,12 @@ export function WorkspacePage({ mode = "dark", onToggleMode }: WorkspacePageProp
           onChange={(_, next: WorkspaceMode | null) => next && switchMode(next)}
           sx={{ display: "flex", "& .MuiToggleButton-root": { flex: 1 } }}
         >
-          <ToggleButton value="chats">Chats</ToggleButton>
-          <ToggleButton value="projects">Projects</ToggleButton>
+          <ToggleButton value="chats">{t("chats")}</ToggleButton>
+          <ToggleButton value="projects">{t("projects")}</ToggleButton>
         </ToggleButtonGroup>
       </Stack>
 
-      <ConversationList mode={wsMode} projects={ws.projects} chats={ws.chats} selectedId={ws.selectedId} onSelect={openConversation} actions={conversationActions} />
+      <ConversationList mode={wsMode} projects={ws.projects} chats={ws.chats} selectedId={ws.selectedId} onSelect={openConversation} actions={conversationActions} threads={ws.threads} />
     </Stack>
   );
 
@@ -157,99 +568,216 @@ export function WorkspacePage({ mode = "dark", onToggleMode }: WorkspacePageProp
 
       <Box sx={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
         <Box component="header" sx={{ flex: "0 0 auto", backgroundColor: (t) => t.custom.surfaces.s1, borderBottom: (t) => `1px solid ${t.custom.borders.subtle}` }}>
-          <Stack direction="row" spacing={1.5} sx={{ alignItems: "center", justifyContent: "space-between", px: { xs: 1.5, sm: 3 }, py: 1.5 }}>
+          <Stack direction="row" spacing={1.5} sx={{ alignItems: "center", justifyContent: "space-between", px: { xs: 1.5, sm: 2 }, py: 1.5 }}>
             <Stack direction="row" spacing={1.25} sx={{ alignItems: "center", minWidth: 0 }}>
-              <IconButton aria-label="Open conversations" onClick={() => setDrawerOpen(true)} sx={{ display: { md: "none" } }}>
+              <IconButton aria-label={t("openConversations")} onClick={() => setDrawerOpen(true)} sx={{ display: { md: "none" } }}>
                 <MenuIcon sx={{ fontSize: 20 }} />
               </IconButton>
-              {selected && <StatusDot status="running" label="Agent online" pulse={selected.status === "running"} />}
+              {selected && <StatusDot status={conversationStatusKey[selected.status]} label={conversationStatus(selected.status)} pulse={selected.status === "running"} />}
               <Box sx={{ minWidth: 0 }}>
                 <Typography noWrap sx={{ fontFamily: (t) => t.custom.fonts.mono, fontWeight: 700, fontSize: "0.9rem" }}>
-                  {selected?.title ?? "No conversation"}
+                  {headerTitle}
                 </Typography>
-                {selected && ws.cwdOf(ws.selectedId) && (
+                {activeCwd && (
                   <Stack direction="row" spacing={0.5} sx={{ alignItems: "center", display: { xs: "none", sm: "flex" } }}>
                     <FolderOutlinedIcon sx={{ fontSize: 12, color: "text.secondary" }} />
                     <Typography noWrap sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.64rem", color: "text.secondary" }}>
-                      {ws.cwdOf(ws.selectedId)}
+                      {activeCwd}
                     </Typography>
                   </Stack>
                 )}
               </Box>
             </Stack>
             <Stack direction="row" spacing={1} sx={{ alignItems: "center", flex: "0 0 auto" }}>
-              <Tooltip title="Replay animations">
-                <IconButton tone="subtle" aria-label="Replay" onClick={() => setRunKey((k) => k + 1)}>
+              {(selected || composingNew) && <AgentBadge profile={profile} onClick={openPicker} compact />}
+              {selected?.costUsd !== undefined && (
+                <Typography sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.72rem", color: (theme) => theme.palette.status.info.main }}>
+                  {formatCostUsd(selected.costUsd)}
+                </Typography>
+              )}
+              {selected?.usage !== undefined && (
+                <Typography sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.72rem", color: "text.secondary" }}>
+                  {formatTokenUsage(selected.usage)}
+                </Typography>
+              )}
+              {activeCwd && (
+                <Typography sx={{ display: { xs: "none", lg: "block" }, fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.7rem", color: (theme) => theme.palette.status.warn.main }}>
+                  {workingDirectoryAccessText}
+                </Typography>
+              )}
+              <Tooltip title={t("git")}>
+                <IconButton tone="subtle" aria-label={t("git")} onClick={() => setGitOpen(true)}>
+                  <AccountTreeIcon sx={{ fontSize: 17 }} />
+                </IconButton>
+              </Tooltip>
+              <Tooltip title={t("replay")}>
+                <IconButton tone="subtle" aria-label={t("replay")} onClick={() => setRunKey((k) => k + 1)}>
                   <ReplayIcon sx={{ fontSize: 17 }} />
                 </IconButton>
               </Tooltip>
-              <Tooltip title={mode === "dark" ? "Switch to light" : "Switch to dark"}>
-                <IconButton tone="subtle" aria-label="Toggle theme" onClick={onToggleMode}>
+              {selected?.status === "error" && (
+                <Tooltip title={t("retryRun")}>
+                  <IconButton tone="subtle" aria-label={t("retryRun")} onClick={retryLastUserMessage}>
+                    <RestartAltIcon sx={{ fontSize: 17 }} />
+                  </IconButton>
+                </Tooltip>
+              )}
+              <Tooltip title={mode === "dark" ? t("toggleThemeDark") : t("toggleThemeLight")}>
+                <IconButton
+                  tone="subtle"
+                  aria-label={mode === "dark" ? t("toggleThemeDark") : t("toggleThemeLight")}
+                  onClick={() => ws.updateSettings({ appearance: { theme: mode === "dark" ? "light" : "dark" } })}
+                >
                   {mode === "dark" ? <LightModeIcon fontSize="small" /> : <DarkModeIcon fontSize="small" />}
                 </IconButton>
               </Tooltip>
               <Link href="#/kit" underline="hover" sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.78rem", display: { xs: "none", sm: "block" } }}>
-                kit →
+                {t("kit")}
               </Link>
             </Stack>
           </Stack>
         </Box>
 
-        <Box sx={{ flex: 1, overflow: "auto" }}>
-          <Container maxWidth="md" sx={{ py: { xs: 2.5, sm: 4 }, height: messages.length === 0 ? "100%" : "auto" }}>
-            {!selected ? (
-              <Stack sx={{ height: "100%", justifyContent: "center" }}>
-                <EmptyState icon={<ChatBubbleOutlineIcon />} title="No conversation selected" description="Pick a conversation from the sidebar, or start a new one." action={<Button variant="contained" onClick={() => openPicker("new")}>New chat</Button>} />
-              </Stack>
-            ) : messages.length === 0 ? (
-              <Stack sx={{ height: "100%", justifyContent: "center" }}>
-                <EmptyState icon={<ChatBubbleOutlineIcon />} title="Start the conversation" description={`Message ${selected.title} below — the agent has full computer access.`} />
-              </Stack>
-            ) : (
-              <Conversation
-                key={`${ws.selectedId}-${runKey}`}
-                messages={messages}
-                typing={selected.status === "running" && messages[messages.length - 1]?.role === "user"}
-              />
+        <Box sx={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+          <Box sx={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+            <Box sx={{ width: "100%", maxWidth: THREAD_MAX_WIDTH, mx: "auto", px: THREAD_PADDING_X, "&:empty": { display: "none" }, "&:not(:empty)": { pt: 2 } }}>
+              {ws.loadError && (
+              <Alert
+                severity="error"
+                action={
+                  <Button variant="subtle" size="small" onClick={ws.reloadWorkspace}>
+                    {t("retryWorkspaceLoad")}
+                  </Button>
+                }
+                sx={{ mb: 2 }}
+              >
+                {t("workspaceError", { error: ws.loadError })}
+              </Alert>
             )}
-          </Container>
+            {agentStatusError && (
+              <Alert
+                severity="error"
+                action={
+                  <Button variant="subtle" size="small" onClick={reloadAgentStatus}>
+                    {t("retryAgentDetection")}
+                  </Button>
+                }
+                sx={{ mb: 2 }}
+              >
+                {t("agentDetectionError", { error: agentStatusError })}
+              </Alert>
+            )}
+            {noAgentsAvailable && (
+              <Alert severity="warning" sx={{ mb: 2 }}>
+                {t("noAgentsAvailable")}
+              </Alert>
+            )}
+            </Box>
+            <Box sx={{ flex: 1, minHeight: 0 }}>
+              {composingNew ? (
+                <Stack sx={{ height: "100%", justifyContent: "center", alignItems: "center", px: THREAD_PADDING_X }}>
+                  <EmptyState
+                    icon={<ChatBubbleOutlineIcon />}
+                    title={t("startConversation")}
+                    description={t(accessMode === "read-write" ? "messageAgentAccess" : "messageAgentReadOnlyAccess", { title: draftProject?.name ?? t("newChat") })}
+                  />
+                </Stack>
+              ) : !selected ? (
+                <Stack sx={{ height: "100%", justifyContent: "center", alignItems: "center", px: THREAD_PADDING_X }}>
+                  <EmptyState
+                    icon={<ChatBubbleOutlineIcon />}
+                    title={t("noConversationSelected")}
+                    description={t("pickConversation")}
+                    action={<Button variant="contained" onClick={startNewChat}>{t("newChat")}</Button>}
+                  />
+                </Stack>
+              ) : messages.length === 0 ? (
+                <Stack sx={{ height: "100%", justifyContent: "center", alignItems: "center", px: THREAD_PADDING_X }}>
+                  <EmptyState
+                    icon={<ChatBubbleOutlineIcon />}
+                    title={t("startConversation")}
+                    description={t(accessMode === "read-write" ? "messageAgentAccess" : "messageAgentReadOnlyAccess", { title: selected.title })}
+                  />
+                </Stack>
+              ) : (
+                <Conversation
+                  key={`${ws.selectedId}-${runKey}`}
+                  messages={messages}
+                  typing={selected.status === "running" && messages[messages.length - 1]?.role === "user"}
+                  actions={messageActions}
+                  contentMaxWidth={THREAD_MAX_WIDTH}
+                  contentPaddingX={THREAD_PADDING_X}
+                />
+              )}
+            </Box>
+          </Box>
         </Box>
 
         <Box sx={{ flex: "0 0 auto", borderTop: (t) => `1px solid ${t.custom.borders.subtle}`, backgroundColor: (t) => t.custom.surfaces.s1 }}>
-          <Container maxWidth="md" sx={{ py: 1.5 }}>
-            <Composer
-              placeholder={selected ? `Message ${selected.title}…` : "Start a new conversation…"}
-              onSend={(text) => {
-                if (selected) {
-                  ws.sendMessage(ws.selectedId, text);
-                }
-              }}
-            />
-          </Container>
+          <Box sx={{ width: "100%", maxWidth: THREAD_MAX_WIDTH, mx: "auto", px: THREAD_PADDING_X, py: 1.5 }}>
+            {composingNew ? (
+              <Composer
+                key="new-draft"
+                placeholder={t("startPlaceholder")}
+                onSend={(text) => {
+                  const id = composingNew.projectId ? ws.newProjectChat(composingNew.projectId, profile) : ws.newChat(profile);
+                  setComposingNew(null);
+                  notifiableRuns.current.add(id);
+                  ws.sendMessage(id, text);
+                  setRunKey((k) => k + 1);
+                  onNavigate?.(routeForConversation(ws, id));
+                }}
+                mentionableFiles={mentionableFiles}
+                onAttachmentError={(message) => toast({ message, severity: "error", duration: 3000 })}
+              />
+            ) : (
+              <Composer
+                placeholder={selected ? t("messagePlaceholder", { title: selected.title }) : t("startPlaceholder")}
+                value={composerDraft.text}
+                attachments={composerDraft.attachments}
+                onDraftChange={(draft) => {
+                  if (selected) {
+                    ws.updateComposerDraft(ws.selectedId, draft);
+                  }
+                }}
+                onSend={(text) => {
+                  if (selected) {
+                    notifiableRuns.current.add(ws.selectedId);
+                    ws.sendMessage(ws.selectedId, text);
+                  }
+                }}
+                mentionableFiles={mentionableFiles}
+                onStop={() => ws.stopRun(ws.selectedId)}
+                onAttachmentError={(message) => toast({ message, severity: "error", duration: 3000 })}
+                running={selected?.status === "running"}
+              />
+            )}
+          </Box>
         </Box>
       </Box>
 
       <AgentPicker open={pickerOpen} value={profile} onClose={() => setPickerOpen(false)} onSelect={handlePicked} />
+      <GitPanel open={gitOpen} cwd={selectedCwd} onClose={() => setGitOpen(false)} />
+      <CommandPalette open={commandPaletteOpen} items={commandItems} onClose={() => setCommandPaletteOpen(false)} />
+      <CreateProjectDialog open={projectDialogOpen} defaultProfile={ws.settings.agents.defaultProfile} onClose={() => setProjectDialogOpen(false)} onCreate={handleCreateProject} />
       <SettingsDialog
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
-        mode={mode}
-        onToggleMode={onToggleMode}
-        defaultAgent={profile.agent}
-        onDefaultAgentChange={(id) => setProfile({ agent: id, variant: "DEFAULT" })}
+        settings={ws.settings}
+        onSettingsChange={ws.updateSettings}
       />
 
       <Dialog open={confirmDelete != null} onClose={() => setConfirmDelete(null)} maxWidth="xs" fullWidth>
-        <DialogTitle>Delete conversation?</DialogTitle>
+        <DialogTitle>{t("deleteConversationTitle")}</DialogTitle>
         <DialogContent>
-          <DialogContentText>This permanently removes the conversation and its thread.</DialogContentText>
+          <DialogContentText>{t("deleteConversationBody")}</DialogContentText>
         </DialogContent>
         <DialogActions sx={{ px: 2.5, pb: 2 }}>
           <Button variant="text" onClick={() => setConfirmDelete(null)}>
-            Cancel
+            {t("cancel")}
           </Button>
           <Button variant="contained" color="error" onClick={doDelete}>
-            Delete
+            {t("delete")}
           </Button>
         </DialogActions>
       </Dialog>

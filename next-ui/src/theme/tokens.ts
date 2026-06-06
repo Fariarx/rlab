@@ -115,3 +115,31 @@ export const light: ModeTokens = {
   secondary: { main: "#4d7c0f", contrastText: "#ffffff" },
   cardShadow: "0 1px 2px rgba(20, 26, 33, 0.06), 0 10px 28px rgba(20, 26, 33, 0.07)",
 };
+
+export const highContrast: ModeTokens = {
+  mode: "dark",
+  surfaces: {
+    s1: "#000000",
+    s2: "#050505",
+    s3: "#111111",
+    s4: "#1f1f1f",
+  },
+  status: {
+    running: { main: "#00e5ff", soft: "rgba(0, 229, 255, 0.20)", border: "#00e5ff" },
+    ok: { main: "#00ff66", soft: "rgba(0, 255, 102, 0.18)", border: "#00ff66" },
+    warn: { main: "#ffdd00", soft: "rgba(255, 221, 0, 0.18)", border: "#ffdd00" },
+    error: { main: "#ff4d4d", soft: "rgba(255, 77, 77, 0.20)", border: "#ff4d4d" },
+    idle: { main: "#c9d1d9", soft: "rgba(201, 209, 217, 0.16)", border: "#c9d1d9" },
+    info: { main: "#66ccff", soft: "rgba(102, 204, 255, 0.18)", border: "#66ccff" },
+  },
+  borders: {
+    subtle: "#8b949e",
+    strong: "#ffffff",
+    focus: "#00e5ff",
+  },
+  text: { primary: "#ffffff", secondary: "#d0d7de" },
+  background: { default: "#000000", paper: "#050505" },
+  primary: { main: "#00e5ff", contrastText: "#000000" },
+  secondary: { main: "#ffdd00", contrastText: "#000000" },
+  cardShadow: "none",
+};

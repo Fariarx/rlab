@@ -2,12 +2,15 @@
 export * from "./types";
 export * from "./agents";
 export { AgentMonogram } from "./AgentMonogram";
+export { AgentGlyph } from "./AgentGlyph";
 export { AgentBadge } from "./AgentBadge";
 export { AgentPicker } from "./AgentPicker";
-export { AgentStatusProvider, useAgentStatus, useAgentStatusLive } from "./use-agent-status";
+export { AgentStatusProvider, useAgentCliInfo, useAgentStatus, useAgentStatusError, useAgentStatusLive, useReloadAgentStatus } from "./use-agent-status";
 export { Conversation } from "./Conversation";
 export { ConversationList, type ConversationActions } from "./ConversationList";
 export { Message } from "./Message";
+export { messageToPlainText, type MessageActionHandlers } from "./message-actions";
+export { formatCostUsd, formatTokenUsage, totalUsageTokens } from "./usage-cost";
 export { Composer } from "./Composer";
 export { AgentBlockRenderer } from "./AgentBlockRenderer";
 export { Reasoning } from "./Reasoning";

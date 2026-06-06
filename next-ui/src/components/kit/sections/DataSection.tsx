@@ -17,44 +17,44 @@ const rows: readonly AgentRow[] = [
 ];
 
 const columns: ReadonlyArray<DataColumn<AgentRow>> = [
-  { key: "name", header: "Agent", render: (row) => row.name },
+  { key: "name", header: "Агент", render: (row) => row.name },
   {
     key: "status",
-    header: "Status",
+    header: "Статус",
     render: (row) => <Tag status={row.status} label={row.status} />,
   },
-  { key: "latency", header: "Latency", align: "right", render: (row) => row.latency },
+  { key: "latency", header: "Задержка", align: "right", render: (row) => row.latency },
 ];
 
 export function DataSection() {
   return (
-    <KitSectionShell id="data" title="Data & State" description="Tables, timelines, progress, and loading states.">
+    <KitSectionShell id="data" title="Данные и состояния" description="Таблицы, лента событий, прогресс и loading-состояния.">
       <Box sx={{ display: "grid", gap: 2.5, gridTemplateColumns: { xs: "1fr", md: "1fr 1fr" } }}>
-        <Panel title="Agents">
+        <Panel title="Агенты">
           <DataTable columns={columns} rows={rows} getRowKey={(row) => row.id} />
         </Panel>
 
-        <Panel title="Timeline">
+        <Panel title="Лента событий">
           <Timeline
             items={[
-              { id: "1", status: "ok", time: "12:00", title: "Run started" },
-              { id: "2", status: "running", time: "12:01", title: "Building", detail: "compiling 1,204 modules" },
-              { id: "3", status: "warn", time: "12:05", title: "Slow upstream" },
-              { id: "4", status: "idle", time: "—", title: "Deploy", detail: "waiting" },
+              { id: "1", status: "ok", time: "12:00", title: "Прогон стартовал" },
+              { id: "2", status: "running", time: "12:01", title: "Сборка", detail: "компилируется 1 204 модуля" },
+              { id: "3", status: "warn", time: "12:05", title: "Медленный upstream" },
+              { id: "4", status: "idle", time: "—", title: "Деплой", detail: "ожидает" },
             ]}
           />
         </Panel>
 
-        <Panel title="Progress">
+        <Panel title="Прогресс">
           <Stack spacing={2}>
             <LinearProgress variant="determinate" value={68} />
             <LinearProgress variant="determinate" value={32} color="warning" />
             <LinearProgress />
             <Stack direction="row" spacing={2} sx={{ alignItems: "center" }}>
               <CircularProgress size={20} />
-              <StatusDot status="running" label="Running" />
+              <StatusDot status="running" label="В работе" />
               <Typography sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.78rem", color: "text.secondary" }}>
-                working…
+                работает…
               </Typography>
             </Stack>
             <Stack spacing={0.75}>

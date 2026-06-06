@@ -1,8 +1,8 @@
 import CheckIcon from "@mui/icons-material/Check";
 import CloseIcon from "@mui/icons-material/Close";
-import SearchIcon from "@mui/icons-material/Search";
-import { Box, Dialog, DialogActions, InputAdornment, InputBase, Stack, Typography } from "@mui/material";
-import { useMemo, useState } from "react";
+import { Alert, Box, Dialog, DialogActions, Stack, Typography } from "@mui/material";
+import { useEffect, useState } from "react";
+import { useI18n } from "../../i18n/I18nProvider";
 import { Button, IconButton, StatusDot } from "../ui";
 import { AgentMonogram } from "./AgentMonogram";
 import { pop } from "./anim";
@@ -11,11 +11,14 @@ import {
   type AgentId,
   type AgentProfile,
   agentStatusKey,
-  agentStatusLabel,
   getAgent,
   withAlpha,
 } from "./agents";
-import { useAgentStatus } from "./use-agent-status";
+import { useAgentCliInfo, useAgentStatus, useAgentStatusError, useAgentStatusLive, useReloadAgentStatus } from "./use-agent-status";
+
+function cliBinsLabel(bins: readonly string[]): string {
+  return bins.length > 0 ? bins.join(", ") : "unknown";
+}
 
 /** AgentPicker — a polished dialog for choosing the agent + variant, showing
  * each agent's status in the system. */
@@ -32,20 +35,25 @@ export function AgentPicker({
 }) {
   const [agent, setAgent] = useState<AgentId>(value.agent);
   const [variant, setVariant] = useState<string>(value.variant);
-  const [query, setQuery] = useState("");
   const statusOf = useAgentStatus();
+  const cliInfoOf = useAgentCliInfo();
+  const liveCliDetection = useAgentStatusLive();
+  const detectionError = useAgentStatusError();
+  const reloadAgentStatus = useReloadAgentStatus();
+  const { t, agentStatus } = useI18n();
 
   const def = getAgent(agent);
+  const selectedCli = cliInfoOf(agent);
   const selectedStatus = statusOf(agent);
-  const canUse = selectedStatus !== "unavailable";
+  const canUse = selectedCli?.selectable ?? (selectedStatus !== "unavailable" && selectedStatus !== "unsupported");
+  const titleId = "agent-picker-title";
 
-  const agents = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (q === "") {
-      return AGENTS;
+  useEffect(() => {
+    if (open) {
+      setAgent(value.agent);
+      setVariant(value.variant);
     }
-    return AGENTS.filter((a) => a.name.toLowerCase().includes(q) || a.vendor.toLowerCase().includes(q));
-  }, [query]);
+  }, [open, value.agent, value.variant]);
 
   const choose = (id: AgentId) => {
     setAgent(id);
@@ -57,62 +65,82 @@ export function AgentPicker({
     onClose();
   };
 
+  const cliDetailText = (id: AgentId): string => {
+    const agentDef = getAgent(id);
+    const sys = statusOf(id);
+    const cli = cliInfoOf(id);
+    const bins = cliBinsLabel(cli?.bins ?? agentDef.cliBins);
+    if (sys === "unavailable") {
+      return t("agentCliNotFound", { bins });
+    }
+    if (sys === "needs-setup") {
+      const env = cli?.env.length ? cli.env.join(", ") : "";
+      return env ? t("agentCliNeedsSetup", { env }) : agentStatus(sys);
+    }
+    if (sys === "unsupported" || cli?.runAdapter === false || !agentDef.runAdapter) {
+      return t("agentCliAdapterMissing");
+    }
+    if (cli?.resolvedBin) {
+      return t("agentCliPath", { path: cli.resolvedBin });
+    }
+    return liveCliDetection ? t("agentCliAdapterReady") : t("agentCliDetectionPending");
+  };
+
   return (
-    <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
+    <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth aria-labelledby={titleId}>
       <Stack
         direction="row"
         sx={{ alignItems: "center", justifyContent: "space-between", px: 2.5, pt: 2, pb: 1.5 }}
       >
         <Box>
-          <Typography sx={{ fontSize: "1rem", fontWeight: 700, color: "text.primary" }}>Choose agent</Typography>
+          <Typography id={titleId} component="h2" sx={{ fontSize: "1rem", fontWeight: 700, color: "text.primary" }}>{t("chooseAgent")}</Typography>
           <Typography variant="body2" sx={{ color: "text.secondary" }}>
-            Every agent runs with full computer access.
+            {t("agentAccessWarning")}
           </Typography>
         </Box>
-        <IconButton aria-label="Close" onClick={onClose}>
+        <IconButton aria-label={t("cancel")} onClick={onClose}>
           <CloseIcon sx={{ fontSize: 18 }} />
         </IconButton>
       </Stack>
 
-      <Box sx={{ px: 2.5, pb: 1.5 }}>
-        <InputBase
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search agents…"
-          autoFocus
-          startAdornment={
-            <InputAdornment position="start">
-              <SearchIcon sx={{ fontSize: 17, color: "text.secondary" }} />
-            </InputAdornment>
-          }
-          sx={{
-            width: "100%",
-            px: 1.25,
-            py: 0.75,
-            fontSize: "0.85rem",
-            borderRadius: (t) => `${t.custom.radii.md}px`,
-            backgroundColor: (t) => t.custom.surfaces.s3,
-            border: (t) => `1px solid ${t.custom.borders.subtle}`,
-          }}
-        />
-      </Box>
-
       <Box sx={{ px: 2.5, pb: 1, maxHeight: 360, overflow: "auto" }}>
+        {detectionError && (
+          <Alert
+            severity="error"
+            sx={{ mb: 1 }}
+            action={
+              <Button size="small" variant="text" onClick={reloadAgentStatus}>
+                {t("retryAgentDetection")}
+              </Button>
+            }
+          >
+            {t("agentDetectionError", { error: detectionError })}
+          </Alert>
+        )}
         <Box sx={{ display: "grid", gap: 1, gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr" } }}>
-          {agents.map((a) => {
+          {AGENTS.map((a) => {
             const sys = statusOf(a.id);
+            const cli = cliInfoOf(a.id);
             const active = a.id === agent;
-            const disabled = sys === "unavailable";
+            const disabled = sys === "unavailable" || sys === "unsupported";
+            const bins = cliBinsLabel(cli?.bins ?? a.cliBins);
             return (
               <Stack
                 key={a.id}
+                component="button"
+                type="button"
+                aria-label={t("selectCliAgent", { agent: a.name })}
+                aria-pressed={active}
                 direction="row"
                 spacing={1.25}
                 onClick={() => choose(a.id)}
                 sx={{
+                  font: "inherit",
                   position: "relative",
+                  minWidth: 0,
                   alignItems: "center",
                   p: 1.25,
+                  textAlign: "left",
                   borderRadius: (t) => `${t.custom.radii.md}px`,
                   cursor: "pointer",
                   opacity: disabled ? 0.55 : 1,
@@ -120,6 +148,10 @@ export function AgentPicker({
                   backgroundColor: (t) => (active ? withAlpha(a.accent, 0.1) : t.custom.surfaces.s2),
                   transition: "transform 150ms ease, border-color 150ms ease, background-color 150ms ease",
                   "&:hover": { transform: "translateY(-1px)", borderColor: (t) => withAlpha(a.accent, 0.45) },
+                  "&:focus-visible": {
+                    outline: (t) => `2px solid ${t.custom.borders.focus}`,
+                    outlineOffset: 2,
+                  },
                 }}
               >
                 <AgentMonogram agent={a.id} size={32} />
@@ -128,32 +160,32 @@ export function AgentPicker({
                     {a.name}
                   </Typography>
                   <Typography noWrap sx={{ fontSize: "0.72rem", color: "text.secondary" }}>
-                    {a.vendor}
+                    {t("agentCliCommand", { command: bins })}
+                  </Typography>
+                  <Typography noWrap title={cli?.resolvedBin ?? undefined} sx={{ fontSize: "0.68rem", color: "text.secondary" }}>
+                    {cliDetailText(a.id)}
                   </Typography>
                 </Box>
-                <Stack spacing={0.5} sx={{ alignItems: "flex-end", flex: "0 0 auto" }}>
-                  <StatusDot status={agentStatusKey[sys]} label={agentStatusLabel[sys]} size="sm" pulse={sys === "running"} />
+                <Stack direction="row" spacing={1} sx={{ alignItems: "center", flex: "0 0 auto" }}>
+                  <StatusDot status={agentStatusKey[sys]} label={agentStatus(sys)} size="sm" pulse={sys === "running"} />
+                  {active && (
+                    <Box
+                      sx={{
+                        width: 16,
+                        height: 16,
+                        borderRadius: "50%",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        color: "#fff",
+                        backgroundColor: a.accent,
+                        animation: `${pop} 220ms ease both`,
+                      }}
+                    >
+                      <CheckIcon sx={{ fontSize: 11 }} />
+                    </Box>
+                  )}
                 </Stack>
-                {active && (
-                  <Box
-                    sx={{
-                      position: "absolute",
-                      top: 8,
-                      right: 8,
-                      width: 16,
-                      height: 16,
-                      borderRadius: "50%",
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      color: "#fff",
-                      backgroundColor: a.accent,
-                      animation: `${pop} 220ms ease both`,
-                    }}
-                  >
-                    <CheckIcon sx={{ fontSize: 11 }} />
-                  </Box>
-                )}
               </Stack>
             );
           })}
@@ -163,7 +195,7 @@ export function AgentPicker({
       {def.variants.length > 1 && (
         <Box sx={{ px: 2.5, pt: 1, pb: 0.5 }}>
           <Typography variant="microLabel" sx={{ color: "text.secondary", display: "block", mb: 0.75 }}>
-            {def.name} · variant
+            {t("agentVariant", { agent: def.name })}
           </Typography>
           <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap", gap: 1 }}>
             {def.variants.map((v) => {
@@ -198,15 +230,15 @@ export function AgentPicker({
         <Box sx={{ flex: 1 }}>
           {!canUse && (
             <Typography sx={{ fontSize: "0.74rem", color: (t) => t.palette.status.warn.main }}>
-              {def.name} isn’t installed on this machine.
+              {t(selectedStatus === "unsupported" ? "agentUnsupported" : "notInstalled", { agent: def.name })}
             </Typography>
           )}
         </Box>
         <Button variant="text" onClick={onClose}>
-          Cancel
+          {t("cancel")}
         </Button>
         <Button variant="contained" onClick={confirm} disabled={!canUse}>
-          Use {def.name}
+          {t("useAgent", { agent: def.name })}
         </Button>
       </DialogActions>
     </Dialog>

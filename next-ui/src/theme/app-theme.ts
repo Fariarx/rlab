@@ -1,6 +1,7 @@
 import { createTheme, type Theme } from "@mui/material/styles";
 import { checkboxIcons } from "../components/ui/checkbox-icons";
-import { dark, fonts, light, microLabel, type ModeTokens, radii } from "./tokens";
+import { type DensityMode, type ThemeMode } from "../components/workspace/app-settings";
+import { dark, fonts, highContrast, light, microLabel, type ModeTokens, radii } from "./tokens";
 
 /**
  * Kit theme — technical, restrained UI in dark and light modes.
@@ -11,11 +12,13 @@ import { dark, fonts, light, microLabel, type ModeTokens, radii } from "./tokens
  * accents, the `microLabel`/`subtle` variants, and component overrides. See
  * ./theme-augmentation.d.ts for the typing.
  */
-function buildTheme(t: ModeTokens): Theme {
+function buildTheme(t: ModeTokens, density: DensityMode): Theme {
   const { surfaces, borders, status, text } = t;
   const accent = status.running.main;
+  const compact = density === "compact";
 
   return createTheme({
+    spacing: compact ? 6 : 8,
     palette: {
       mode: t.mode,
       background: t.background,
@@ -27,7 +30,7 @@ function buildTheme(t: ModeTokens): Theme {
       text,
       status,
     },
-    custom: { surfaces, status, borders, radii, fonts },
+    custom: { surfaces, status, borders, radii, fonts, density },
     shape: { borderRadius: radii.md },
     typography: {
       fontFamily: fonts.sans,
@@ -43,6 +46,23 @@ function buildTheme(t: ModeTokens): Theme {
       MuiCssBaseline: {
         styleOverrides: {
           "code, kbd, samp, pre": { fontFamily: fonts.mono },
+          // Slim, themed scrollbars so they don't look like default OS bars.
+          "*": {
+            scrollbarWidth: "thin",
+            scrollbarColor: `${surfaces.s4} transparent`,
+          },
+          "*::-webkit-scrollbar": { width: 10, height: 10 },
+          "*::-webkit-scrollbar-track": { backgroundColor: "transparent" },
+          "*::-webkit-scrollbar-thumb": {
+            backgroundColor: surfaces.s4,
+            borderRadius: 999,
+            border: "2px solid transparent",
+            backgroundClip: "content-box",
+          },
+          "*::-webkit-scrollbar-thumb:hover": {
+            backgroundColor: borders.strong,
+          },
+          "*::-webkit-scrollbar-corner": { backgroundColor: "transparent" },
         },
       },
       MuiButton: {
@@ -87,8 +107,8 @@ function buildTheme(t: ModeTokens): Theme {
             fontSize: "0.7rem",
             letterSpacing: "0.02em",
             borderRadius: radii.sm,
-            paddingTop: 4,
-            paddingBottom: 4,
+            paddingTop: compact ? 3 : 4,
+            paddingBottom: compact ? 3 : 4,
           },
           arrow: { color: surfaces.s3 },
         },
@@ -134,6 +154,13 @@ function buildTheme(t: ModeTokens): Theme {
           },
         },
       },
+      MuiDialogContent: {
+        styleOverrides: {
+          // Keep a small gap below the title so floating labels / first-row
+          // controls in popups aren't clipped (MUI zeroes this after a title).
+          root: { paddingTop: 12 },
+        },
+      },
       MuiMenu: {
         styleOverrides: {
           paper: {
@@ -148,7 +175,7 @@ function buildTheme(t: ModeTokens): Theme {
         styleOverrides: {
           root: {
             fontFamily: fonts.mono,
-            fontSize: "0.82rem",
+            fontSize: compact ? "0.78rem" : "0.82rem",
             "&:hover": { backgroundColor: surfaces.s3 },
             "&.Mui-selected": { backgroundColor: surfaces.s3 },
           },
@@ -156,15 +183,15 @@ function buildTheme(t: ModeTokens): Theme {
       },
       MuiTabs: {
         styleOverrides: {
-          root: { minHeight: 40, borderBottom: `1px solid ${borders.subtle}` },
+          root: { minHeight: compact ? 34 : 40, borderBottom: `1px solid ${borders.subtle}` },
           indicator: { backgroundColor: accent, height: 2 },
         },
       },
       MuiTab: {
         styleOverrides: {
           root: {
-            minHeight: 40,
-            padding: "8px 12px",
+            minHeight: compact ? 34 : 40,
+            padding: compact ? "6px 10px" : "8px 12px",
             fontFamily: fonts.mono,
             fontSize: "0.78rem",
             fontWeight: 600,
@@ -283,9 +310,9 @@ function buildTheme(t: ModeTokens): Theme {
           root: {
             border: 0,
             borderRadius: radii.sm,
-            padding: "4px 12px",
+            padding: compact ? "3px 9px" : "4px 12px",
             fontFamily: fonts.mono,
-            fontSize: "0.75rem",
+            fontSize: compact ? "0.72rem" : "0.75rem",
             fontWeight: 600,
             letterSpacing: "0.03em",
             textTransform: "none",
@@ -303,8 +330,19 @@ function buildTheme(t: ModeTokens): Theme {
   });
 }
 
-export const darkTheme = buildTheme(dark);
-export const lightTheme = buildTheme(light);
+export function buildAppTheme(mode: ThemeMode, density: DensityMode): Theme {
+  if (mode === "light") {
+    return buildTheme(light, density);
+  }
+  if (mode === "high-contrast") {
+    return buildTheme(highContrast, density);
+  }
+  return buildTheme(dark, density);
+}
+
+export const darkTheme = buildTheme(dark, "comfortable");
+export const lightTheme = buildTheme(light, "comfortable");
+export const highContrastTheme = buildTheme(highContrast, "comfortable");
 
 /** Default theme (dark). Kept as a named export for tests/back-compat. */
 export const appTheme = darkTheme;

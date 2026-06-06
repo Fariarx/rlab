@@ -30,61 +30,61 @@ export function OverlaysSection() {
   return (
     <KitSectionShell
       id="overlays"
-      title="Overlays & Navigation"
-      description="Dialogs, menus, tooltips, tabs, and queued toasts — themed to match the surface."
+      title="Оверлеи и навигация"
+      description="Диалоги, меню, подсказки, вкладки и очередь тостов в общей surface-теме."
     >
       <Stack spacing={2.5}>
-        <Panel title="Triggers">
+        <Panel title="Триггеры">
           <Stack direction="row" spacing={1.5} sx={{ flexWrap: "wrap", gap: 1.5, alignItems: "center" }}>
             <Button variant="subtle" onClick={() => setDialogOpen(true)}>
-              open dialog
+              открыть диалог
             </Button>
             <Button variant="subtle" onClick={openMenu}>
-              open menu
+              открыть меню
             </Button>
-            <Tooltip title="Runs the active agent">
-              <Button variant="subtle">hover me</Button>
+            <Tooltip title="Запускает активного агента">
+              <Button variant="subtle">подсказка</Button>
             </Tooltip>
-            <Button variant="subtle" onClick={() => toast({ message: "Run queued · agent delta", severity: "info" })}>
-              info toast
+            <Button variant="subtle" onClick={() => toast({ message: "Прогон поставлен в очередь · agent delta", severity: "info" })}>
+              инфо-тост
             </Button>
-            <Button variant="subtle" onClick={() => toast({ message: "Run failed · exit 1", severity: "error" })}>
-              error toast
+            <Button variant="subtle" onClick={() => toast({ message: "Прогон упал · код выхода 1", severity: "error" })}>
+              тост ошибки
             </Button>
           </Stack>
         </Panel>
 
-        <Panel title="Tabs">
+        <Panel title="Вкладки">
           <Tabs value={tab} onChange={(_, value: number) => setTab(value)}>
-            <Tab label="overview" />
-            <Tab label="logs" />
-            <Tab label="config" />
+            <Tab label="обзор" />
+            <Tab label="логи" />
+            <Tab label="конфиг" />
           </Tabs>
           <Box sx={{ pt: 2, fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.8rem", color: "text.secondary" }}>
-            panel {tab}
+            панель {tab}
           </Box>
         </Panel>
       </Stack>
 
       <Dialog open={dialogOpen} onClose={() => setDialogOpen(false)}>
-        <DialogTitle>Abort run?</DialogTitle>
+        <DialogTitle>Остановить прогон?</DialogTitle>
         <DialogContent>
-          <DialogContentText>This stops agent delta and discards in-flight work.</DialogContentText>
+          <DialogContentText>Это остановит агент delta и отбросит работу в процессе.</DialogContentText>
         </DialogContent>
         <DialogActions>
           <Button variant="text" onClick={() => setDialogOpen(false)}>
-            cancel
+            отмена
           </Button>
           <Button variant="contained" color="error" onClick={() => setDialogOpen(false)}>
-            abort
+            остановить
           </Button>
         </DialogActions>
       </Dialog>
 
       <Menu anchorEl={anchor} open={anchor != null} onClose={closeMenu}>
-        <MenuItem onClick={closeMenu}>Restart</MenuItem>
-        <MenuItem onClick={closeMenu}>Inspect</MenuItem>
-        <MenuItem onClick={closeMenu}>Remove</MenuItem>
+        <MenuItem onClick={closeMenu}>Перезапустить</MenuItem>
+        <MenuItem onClick={closeMenu}>Инспектировать</MenuItem>
+        <MenuItem onClick={closeMenu}>Удалить</MenuItem>
       </Menu>
     </KitSectionShell>
   );

@@ -24,8 +24,8 @@ export function TokensSection() {
   return (
     <KitSectionShell
       id="tokens"
-      title="Colors & Tokens"
-      description="Surfaces, muted borders, and a tight status palette — the only color the UI spends. Adapts to the active theme."
+      title="Цвета и токены"
+      description="Surfaces, приглушённые borders и компактная status-палитра. Подстраивается под активную тему."
     >
       <Stack spacing={2.5}>
         <Panel title="Surfaces">
@@ -52,7 +52,7 @@ export function TokensSection() {
           </Stack>
         </Panel>
 
-        <Panel title="Radii & Borders">
+        <Panel title="Radii и borders">
           <Stack direction="row" spacing={3} sx={{ flexWrap: "wrap", gap: 3, alignItems: "flex-end" }}>
             {Object.entries(radii)
               .filter(([name]) => name !== "pill")

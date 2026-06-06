@@ -1,11 +1,8 @@
-import ArrowForwardIcon from "@mui/icons-material/ArrowForward";
-import ContentCopyIcon from "@mui/icons-material/ContentCopy";
-import RefreshIcon from "@mui/icons-material/Refresh";
-import { type ChatMessage, type ConversationSummary, type Project } from "../agent";
+import { type ChatMessage, type ConversationSummary, type Project } from "../agent/types";
 
 /** The detailed sample thread (flaky-test investigation). */
 const flakyThread: readonly ChatMessage[] = [
-  { id: "u1", role: "user", time: "14:02", text: "Investigate the flaky `auth.login` test and propose a fix." },
+  { id: "u1", role: "user", time: "14:02", text: "Разбери flaky-тест `auth.login` и предложи исправление." },
   {
     id: "a1",
     role: "agent",
@@ -14,16 +11,16 @@ const flakyThread: readonly ChatMessage[] = [
       {
         kind: "reasoning",
         duration: "6s",
-        text: "The suite passes on retry, which smells like a timing dependency. Likely the token-expiry assertion reads the real clock. I'll reproduce, read the test, confirm the clock usage, then switch to fake timers.",
+        text: "Сьют проходит при повторе, значит проблема похожа на зависимость от времени. Скорее всего, проверка срока действия токена читает реальные часы. Сначала воспроизведу, затем прочитаю тест, подтвержу работу с часами и переведу проверку на fake timers.",
       },
-      { kind: "text", text: "I'll reproduce the failure first, then inspect the test and how it measures token expiry." },
+      { kind: "text", text: "Сначала воспроизведу падение, затем посмотрю тест и то, как он измеряет срок действия токена." },
       {
         kind: "plan",
         steps: [
-          { label: "Reproduce the flake", state: "ok" },
-          { label: "Read the failing test", state: "ok" },
-          { label: "Patch the clock handling", state: "running" },
-          { label: "Verify across runs", state: "pending" },
+          { label: "Воспроизвести flaky-падение", state: "ok" },
+          { label: "Прочитать падающий тест", state: "ok" },
+          { label: "Исправить работу с часами", state: "running" },
+          { label: "Проверить на повторных прогонах", state: "pending" },
         ],
       },
       { kind: "command", command: "npm test -- auth.login", state: "ok", exitCode: 0, output: "✓ auth.login (1 retry)\n1 flaky · passed on attempt 2/2" },
@@ -45,7 +42,7 @@ const flakyThread: readonly ChatMessage[] = [
           { title: "RFC 0042 — deterministic clocks in tests", url: "rlab/rfcs/0042-clocks" },
         ],
       },
-      { kind: "text", text: "Root cause confirmed: the test compares `expiresAt` against the real `Date.now()`, so it flakes under load. Switching to fake timers makes it deterministic." },
+      { kind: "text", text: "Причина подтверждена: тест сравнивает `expiresAt` с реальным `Date.now()`, поэтому flaky под нагрузкой. Переход на fake timers делает проверку детерминированной." },
       {
         kind: "diff",
         file: "test/auth/login.test.ts",
@@ -62,24 +59,24 @@ const flakyThread: readonly ChatMessage[] = [
           { type: "ctx", text: "  });" },
         ],
       },
-      { kind: "approval", title: "Apply patch to test/auth/login.test.ts?", detail: "Switches the suite to deterministic fake timers (vi.useFakeTimers)." },
+      { kind: "approval", title: "Применить patch к test/auth/login.test.ts?", detail: "Переводит сьют на детерминированные fake timers (vi.useFakeTimers)." },
       {
         kind: "options",
-        prompt: "How thoroughly should I verify the fix?",
+        prompt: "Насколько тщательно проверить исправление?",
         options: [
-          { id: "once", label: "Run once", description: "Fast sanity check." },
-          { id: "stress", label: "Stress run · 50×", description: "Confirm the flake is gone." },
-          { id: "ci", label: "CI only", description: "Defer to the pipeline." },
+          { id: "once", label: "Один прогон", description: "Быстрая sanity-проверка." },
+          { id: "stress", label: "Стресс-прогон · 50×", description: "Подтвердить, что flake ушёл." },
+          { id: "ci", label: "Только CI", description: "Доверить проверку pipeline." },
         ],
       },
-      { kind: "status", level: "ok", text: "Patch staged · 1 file changed" },
-      { kind: "text", text: "Want me to open a PR with this fix?", streaming: true },
+      { kind: "status", level: "ok", text: "Patch добавлен в индекс · 1 файл изменён" },
+      { kind: "text", text: "Открыть PR с этим исправлением?", streaming: true },
       {
         kind: "suggested",
         actions: [
-          { id: "pr", label: "Open PR", icon: <ArrowForwardIcon sx={{ fontSize: 15 }} />, tone: "primary" },
-          { id: "rerun", label: "Re-run tests", icon: <RefreshIcon sx={{ fontSize: 15 }} /> },
-          { id: "copy", label: "Copy patch", icon: <ContentCopyIcon sx={{ fontSize: 15 }} /> },
+          { id: "pr", label: "Открыть PR", icon: "arrow-forward", tone: "primary" },
+          { id: "rerun", label: "Перезапустить тесты", icon: "refresh" },
+          { id: "copy", label: "Скопировать patch", icon: "copy" },
         ],
       },
     ],
@@ -87,17 +84,17 @@ const flakyThread: readonly ChatMessage[] = [
 ];
 
 const releaseThread: readonly ChatMessage[] = [
-  { id: "u1", role: "user", time: "15:12", text: "Draft release notes for 0.1.69 from the merged PRs." },
+  { id: "u1", role: "user", time: "15:12", text: "Собери черновик release notes для 0.1.69 по merged PR." },
   {
     id: "a1",
     role: "agent",
     time: "15:12",
     blocks: [
-      { kind: "reasoning", duration: "3s", text: "I'll list merged PRs since the last tag, group them by type, and write a concise changelog." },
+      { kind: "reasoning", duration: "3s", text: "Соберу merged PR после последнего тега, сгруппирую их по типам и напишу короткий changelog." },
       { kind: "command", command: "git log v0.1.68..HEAD --oneline", state: "ok", exitCode: 0, output: "cb1bf3d chore(deps): pin protobufjs\n00598a3 fix: keep Codex hook config\n7cb95e1 fix: pretrust Kanban Codex hooks" },
       { kind: "code", language: "md", code: "## 0.1.69\n- fix: keep Codex hook config before resume\n- fix: pretrust Kanban Codex hooks\n- chore(deps): pin protobufjs to 7.5.8" },
-      { kind: "text", text: "Draft is ready. Want me to open a PR updating CHANGELOG.md?", streaming: true },
-      { kind: "suggested", actions: [{ id: "pr", label: "Open PR", icon: <ArrowForwardIcon sx={{ fontSize: 15 }} />, tone: "primary" }, { id: "copy", label: "Copy", icon: <ContentCopyIcon sx={{ fontSize: 15 }} /> }] },
+      { kind: "text", text: "Черновик готов. Открыть PR с обновлением CHANGELOG.md?", streaming: true },
+      { kind: "suggested", actions: [{ id: "pr", label: "Открыть PR", icon: "arrow-forward", tone: "primary" }, { id: "copy", label: "Копировать", icon: "copy" }] },
     ],
   },
 ];
@@ -111,9 +108,9 @@ export function genericThread(title: string): ChatMessage[] {
       role: "agent",
       time: "·",
       blocks: [
-        { kind: "reasoning", duration: "2s", text: `Scoping “${title}” — gathering context from the workspace before acting.` },
-        { kind: "text", text: `On it. I'll work on “${title}” and report back with concrete changes.` },
-        { kind: "suggested", actions: [{ id: "go", label: "Proceed", tone: "primary" }, { id: "scope", label: "Refine scope" }] },
+        { kind: "reasoning", duration: "2s", text: `Уточняю задачу “${title}” — собираю контекст из workspace перед действиями.` },
+        { kind: "text", text: `Принял. Поработаю над “${title}” и вернусь с конкретными изменениями.` },
+        { kind: "suggested", actions: [{ id: "go", label: "Продолжить", tone: "primary" }, { id: "scope", label: "Уточнить scope" }] },
       ],
     },
   ];
@@ -125,11 +122,11 @@ export function starterThread(): ChatMessage[] {
 }
 
 export const initialChats: readonly ConversationSummary[] = [
-  { id: "chat-2", title: "Draft release notes for 0.1.69", snippet: "Writing the changelog…", time: "15:12", status: "running", agent: "codex", unread: true },
-  { id: "chat-3", title: "Postgres vs SQLite for us", snippet: "Needs input: expected QPS?", time: "14:05", status: "waiting", agent: "gemini", unread: true },
-  { id: "chat-1", title: "Explain our auth flow", snippet: "Walked through the token lifecycle", time: "13:40", status: "done", agent: "claude-code" },
-  { id: "chat-5", title: "Summarize incident #4127", snippet: "Failed to fetch the log bundle", time: "Mon", status: "error", agent: "claude-code" },
-  { id: "chat-4", title: "Brainstorm onboarding copy", snippet: "Draft saved", time: "Mon", status: "idle", agent: "amp" },
+  { id: "chat-2", title: "Release notes для 0.1.69", snippet: "Пишет changelog…", time: "15:12", status: "running", agent: "codex", profile: { agent: "codex", variant: "DEFAULT" }, unread: true },
+  { id: "chat-3", title: "Postgres или SQLite для нас", snippet: "Ждёт ввод: ожидаемый QPS?", time: "14:05", status: "waiting", agent: "gemini", profile: { agent: "gemini", variant: "Flash" }, unread: true },
+  { id: "chat-1", title: "Объясни auth flow", snippet: "Разобрал жизненный цикл токена", time: "13:40", status: "done", agent: "claude-code", profile: { agent: "claude-code", variant: "DEFAULT" } },
+  { id: "chat-5", title: "Сводка incident #4127", snippet: "Не удалось получить bundle логов", time: "Mon", status: "error", agent: "claude-code", profile: { agent: "claude-code", variant: "DEFAULT" } },
+  { id: "chat-4", title: "Идеи текста onboarding", snippet: "Черновик сохранён", time: "Mon", status: "idle", agent: "amp", profile: { agent: "amp", variant: "DEFAULT" } },
 ];
 
 export const initialProjects: readonly Project[] = [
@@ -138,9 +135,9 @@ export const initialProjects: readonly Project[] = [
     name: "auth-service",
     path: "/root/workspace/rlab",
     conversations: [
-      { id: "c-flaky", title: "Flaky auth.login test", snippet: "Switched the suite to fake timers", time: "14:02", status: "running", agent: "claude-code", unread: true },
-      { id: "c-jwt", title: "Rotate JWT secrets", snippet: "Waiting for approval to deploy", time: "11:20", status: "waiting", agent: "codex" },
-      { id: "c-rl", title: "Rate-limit middleware", snippet: "Shipped · 6 files changed", time: "Mon", status: "done", agent: "claude-code" },
+      { id: "c-flaky", title: "Flaky-тест auth.login", snippet: "Сьют переведён на fake timers", time: "14:02", status: "running", agent: "claude-code", profile: { agent: "claude-code", variant: "DEFAULT" }, unread: true },
+      { id: "c-jwt", title: "Ротация JWT-секретов", snippet: "Ждёт подтверждение deploy", time: "11:20", status: "waiting", agent: "codex", profile: { agent: "codex", variant: "GPT-5.5" } },
+      { id: "c-rl", title: "Rate-limit middleware", snippet: "Отгружено · 6 файлов изменено", time: "Mon", status: "done", agent: "claude-code", profile: { agent: "claude-code", variant: "DEFAULT" } },
     ],
   },
   {
@@ -148,9 +145,9 @@ export const initialProjects: readonly Project[] = [
     name: "web-ui",
     path: "/root/workspace/rlab/next-ui",
     conversations: [
-      { id: "c-theme", title: "Dark / light theme tokens", snippet: "All tokens migrated", time: "Tue", status: "done", agent: "amp" },
-      { id: "c-virt", title: "Virtualize the board list", snippet: "Draft — not started", time: "Tue", status: "idle", agent: "gemini" },
-      { id: "c-toast", title: "Fix toast stacking", snippet: "Build failed on CI step 3", time: "Mon", status: "error", agent: "copilot" },
+      { id: "c-theme", title: "Токены dark/light темы", snippet: "Все токены перенесены", time: "Tue", status: "done", agent: "amp", profile: { agent: "amp", variant: "DEFAULT" } },
+      { id: "c-virt", title: "Виртуализация списка board", snippet: "Черновик — не начато", time: "Tue", status: "idle", agent: "gemini", profile: { agent: "gemini", variant: "Pro" } },
+      { id: "c-toast", title: "Починить stacking тостов", snippet: "Build упал на CI step 3", time: "Mon", status: "error", agent: "copilot", profile: { agent: "copilot", variant: "DEFAULT" } },
     ],
   },
   {
@@ -158,8 +155,8 @@ export const initialProjects: readonly Project[] = [
     name: "infra",
     path: "/root/workspace/rlab",
     conversations: [
-      { id: "c-tf", title: "Terraform drift", snippet: "Needs input: 2 resources to destroy", time: "Wed", status: "waiting", agent: "codex", unread: true },
-      { id: "c-node", title: "Bump Node to 22", snippet: "Queued behind the release", time: "Wed", status: "idle", agent: "claude-code" },
+      { id: "c-tf", title: "Terraform drift", snippet: "Ждёт ввод: 2 ресурса на destroy", time: "Wed", status: "waiting", agent: "codex", profile: { agent: "codex", variant: "DEFAULT" }, unread: true },
+      { id: "c-node", title: "Обновить Node до 22", snippet: "В очереди после release", time: "Wed", status: "idle", agent: "claude-code", profile: { agent: "claude-code", variant: "Plan" } },
     ],
   },
 ];

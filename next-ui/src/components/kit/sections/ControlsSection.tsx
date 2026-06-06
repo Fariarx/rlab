@@ -27,70 +27,70 @@ export function ControlsSection() {
   return (
     <KitSectionShell
       id="controls"
-      title="Controls"
-      description="Checkboxes, switches, radios, icon buttons, segmented toggles, and sliders."
+      title="Контролы"
+      description="Чекбоксы, переключатели, радиогруппы, икон-кнопки, сегменты и слайдеры."
     >
       <Box sx={{ display: "grid", gap: 2.5, gridTemplateColumns: { xs: "1fr", md: "1fr 1fr" } }}>
-        <Panel title="Toggles">
+        <Panel title="Чекбоксы">
           <Stack spacing={1}>
-            <FormControlLabel control={<Checkbox defaultChecked />} label="Watch run" />
-            <FormControlLabel control={<Checkbox indeterminate />} label="Partial selection" />
-            <FormControlLabel control={<Checkbox />} label="Notify on failure" />
-            <FormControlLabel control={<Checkbox disabled />} label="Disabled" />
+            <FormControlLabel control={<Checkbox defaultChecked />} label="Следить за прогоном" />
+            <FormControlLabel control={<Checkbox indeterminate />} label="Частичный выбор" />
+            <FormControlLabel control={<Checkbox />} label="Уведомлять о падении" />
+            <FormControlLabel control={<Checkbox disabled />} label="Недоступно" />
           </Stack>
         </Panel>
 
-        <Panel title="Switches">
+        <Panel title="Переключатели">
           <Stack spacing={1}>
-            <FormControlLabel control={<Switch defaultChecked />} label="Auto-retry" />
-            <FormControlLabel control={<Switch />} label="Verbose logs" />
-            <FormControlLabel control={<Switch disabled />} label="Disabled" />
+            <FormControlLabel control={<Switch defaultChecked />} label="Авто-retry" />
+            <FormControlLabel control={<Switch />} label="Подробные логи" />
+            <FormControlLabel control={<Switch disabled />} label="Недоступно" />
           </Stack>
         </Panel>
 
-        <Panel title="Radio">
+        <Panel title="Радиогруппа">
           <RadioGroup value={env} onChange={(_, value) => setEnv(value)}>
-            <FormControlLabel value="staging" control={<Radio />} label="Staging" />
-            <FormControlLabel value="production" control={<Radio />} label="Production" />
-            <FormControlLabel value="local" control={<Radio />} label="Local" disabled />
+            <FormControlLabel value="staging" control={<Radio />} label="Стенд" />
+            <FormControlLabel value="production" control={<Radio />} label="Прод" />
+            <FormControlLabel value="local" control={<Radio />} label="Локально" disabled />
           </RadioGroup>
         </Panel>
 
-        <Panel title="Icon buttons">
+        <Panel title="Икон-кнопки">
           <Stack spacing={2}>
             <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
-              <IconButton aria-label="Settings">
+              <IconButton aria-label="Настройки">
                 <SettingsIcon fontSize="small" />
               </IconButton>
-              <IconButton tone="subtle" aria-label="Refresh">
+              <IconButton tone="subtle" aria-label="Обновить">
                 <RefreshIcon fontSize="small" />
               </IconButton>
-              <IconButton tone="subtle" aria-label="Favorite">
+              <IconButton tone="subtle" aria-label="Избранное">
                 <StarIcon fontSize="small" />
               </IconButton>
-              <IconButton tone="danger" aria-label="Delete">
+              <IconButton tone="danger" aria-label="Удалить">
                 <DeleteIcon fontSize="small" />
               </IconButton>
             </Stack>
             <Typography variant="microLabel" sx={{ color: "text.secondary" }}>
-              default · subtle · danger
+              обычная · спокойная · опасная
             </Typography>
           </Stack>
         </Panel>
 
-        <Panel title="Segmented">
+        <Panel title="Сегменты">
           <ToggleButtonGroup
             exclusive
             value={view}
             onChange={(_, value: string | null) => value != null && setView(value)}
           >
-            <ToggleButton value="list">list</ToggleButton>
-            <ToggleButton value="board">board</ToggleButton>
-            <ToggleButton value="graph">graph</ToggleButton>
+            <ToggleButton value="list">список</ToggleButton>
+            <ToggleButton value="board">доска</ToggleButton>
+            <ToggleButton value="graph">граф</ToggleButton>
           </ToggleButtonGroup>
         </Panel>
 
-        <Panel title="Slider">
+        <Panel title="Слайдер">
           <Box sx={{ px: 1, pt: 1 }}>
             <Slider defaultValue={64} valueLabelDisplay="auto" />
             <Slider defaultValue={[20, 70]} valueLabelDisplay="auto" />

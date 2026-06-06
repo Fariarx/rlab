@@ -3,6 +3,7 @@ import PsychologyIcon from "@mui/icons-material/Psychology";
 import { Box, Collapse, Stack, Typography } from "@mui/material";
 import { styled } from "@mui/material/styles";
 import { useState } from "react";
+import { useI18n } from "../../i18n/I18nProvider";
 import { shimmer } from "./anim";
 import { TypingDots } from "./parts";
 import { type ReasoningBlock } from "./types";
@@ -26,6 +27,7 @@ const ShimmerText = styled("span")(({ theme }) => ({
  */
 export function Reasoning({ block }: { readonly block: ReasoningBlock }) {
   const [open, setOpen] = useState(block.active ?? false);
+  const { t } = useI18n();
 
   return (
     <Box
@@ -51,12 +53,12 @@ export function Reasoning({ block }: { readonly block: ReasoningBlock }) {
         <PsychologyIcon sx={{ fontSize: 16, color: "text.secondary" }} />
         {block.active ? (
           <Stack direction="row" spacing={1.25} sx={{ alignItems: "center", flex: 1 }}>
-            <ShimmerText>Thinking</ShimmerText>
+            <ShimmerText>{t("thinking")}</ShimmerText>
             <TypingDots />
           </Stack>
         ) : (
           <Typography variant="microLabel" sx={{ color: "text.secondary", flex: 1 }}>
-            Reasoning{block.duration ? ` · thought for ${block.duration}` : ""}
+            {block.duration ? t("reasoningThoughtFor", { duration: block.duration }) : t("reasoning")}
           </Typography>
         )}
         <KeyboardArrowDownIcon
@@ -73,7 +75,9 @@ export function Reasoning({ block }: { readonly block: ReasoningBlock }) {
           component="div"
           sx={{
             px: 1.5,
+            pt: 1.5,
             pb: 1.5,
+            borderTop: (t) => `1px dashed ${t.custom.borders.subtle}`,
             fontFamily: (t) => t.custom.fonts.mono,
             fontSize: "0.76rem",
             lineHeight: 1.7,

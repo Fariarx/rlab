@@ -13,6 +13,7 @@ web-ui/.env
 web-ui/.env.*
 !web-ui/.env.example
 next-ui/.dev-server.*.log
+next-ui/.data
 packages/desktop/out
 packages/desktop/cli
 packages/desktop/*.tgz

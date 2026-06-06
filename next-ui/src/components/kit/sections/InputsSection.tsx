@@ -5,11 +5,11 @@ import { KitSectionShell } from "../KitSectionShell";
 
 export function InputsSection() {
   return (
-    <KitSectionShell id="inputs" title="Inputs & Forms" description="Text fields, search, and select — quiet by default.">
+    <KitSectionShell id="inputs" title="Поля и формы" description="TextField, поиск и select — спокойные по умолчанию.">
       <Stack spacing={2.5}>
-        <Panel title="Search">
+        <Panel title="Поиск">
           <TextField
-            placeholder="Filter agents, runs, logs…"
+            placeholder="Фильтр агентов, прогонов, логов…"
             size="small"
             fullWidth
             slotProps={{
@@ -24,15 +24,15 @@ export function InputsSection() {
           />
         </Panel>
 
-        <Panel title="Fields">
+        <Panel title="Поля">
           <Stack direction="row" spacing={2} sx={{ flexWrap: "wrap", gap: 2 }}>
-            <TextField label="Agent" defaultValue="delta" size="small" />
-            <TextField label="Environment" defaultValue="staging" size="small" select sx={{ minWidth: 160 }}>
-              <MenuItem value="staging">staging</MenuItem>
-              <MenuItem value="production">production</MenuItem>
+            <TextField label="Агент" defaultValue="delta" size="small" />
+            <TextField label="Окружение" defaultValue="staging" size="small" select sx={{ minWidth: 160 }}>
+              <MenuItem value="staging">стенд</MenuItem>
+              <MenuItem value="production">прод</MenuItem>
             </TextField>
-            <TextField label="Disabled" defaultValue="locked" size="small" disabled />
-            <TextField label="Error" defaultValue="bad-value" size="small" error helperText="invalid" />
+            <TextField label="Недоступно" defaultValue="заблокировано" size="small" disabled />
+            <TextField label="Ошибка" defaultValue="плохое-значение" size="small" error helperText="невалидно" />
           </Stack>
         </Panel>
       </Stack>

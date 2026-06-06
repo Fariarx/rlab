@@ -1,15 +1,29 @@
 import CheckIcon from "@mui/icons-material/Check";
 import { Box, Stack, Typography } from "@mui/material";
 import { useState } from "react";
+import { useI18n } from "../../i18n/I18nProvider";
 import { Button } from "../ui";
 import { pop } from "./anim";
 import { StatusNote } from "./parts";
 import { type OptionsBlock } from "./types";
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 /** OptionSelect — the agent offers choices; the user picks one or several. */
-export function OptionSelect({ block }: { readonly block: OptionsBlock }) {
-  const [selected, setSelected] = useState<readonly string[]>([]);
-  const [confirmed, setConfirmed] = useState(false);
+export function OptionSelect({
+  block,
+  onSelection,
+}: {
+  readonly block: OptionsBlock;
+  readonly onSelection?: (optionBlockId: string, selectedLabels: readonly string[]) => void | Promise<void>;
+}) {
+  const [selected, setSelected] = useState<readonly string[]>(block.selected ?? []);
+  const [confirmed, setConfirmed] = useState(Boolean(block.selected?.length));
+  const [pending, setPending] = useState(false);
+  const [selectionError, setSelectionError] = useState<string | null>(null);
+  const { t } = useI18n();
 
   const toggle = (id: string) => {
     if (confirmed) {
@@ -23,6 +37,21 @@ export function OptionSelect({ block }: { readonly block: OptionsBlock }) {
   };
 
   const chosenLabels = block.options.filter((o) => selected.includes(o.id)).map((o) => o.label);
+  const confirm = () => {
+    if (selected.length === 0) {
+      return;
+    }
+    if (!block.id || !onSelection) {
+      setConfirmed(true);
+      return;
+    }
+    setPending(true);
+    setSelectionError(null);
+    void Promise.resolve(onSelection(block.id, chosenLabels))
+      .then(() => setConfirmed(true))
+      .catch((error) => setSelectionError(errorMessage(error)))
+      .finally(() => setPending(false));
+  };
 
   return (
     <Box
@@ -86,11 +115,16 @@ export function OptionSelect({ block }: { readonly block: OptionsBlock }) {
 
       <Box sx={{ mt: 1.5 }}>
         {confirmed ? (
-          <StatusNote level="ok">Selected: {chosenLabels.join(", ")}</StatusNote>
+          <StatusNote level="ok">{t("selectedOptions", { items: chosenLabels.join(", ") })}</StatusNote>
         ) : (
-          <Button variant="contained" size="small" disabled={selected.length === 0} onClick={() => setConfirmed(true)}>
-            Confirm{block.multi && selected.length > 0 ? ` (${selected.length})` : ""}
+          <Button variant="contained" size="small" disabled={selected.length === 0 || pending} onClick={confirm}>
+            {block.multi && selected.length > 0 ? t("confirmSelectionCount", { count: selected.length }) : t("confirm")}
           </Button>
+        )}
+        {selectionError && (
+          <Box sx={{ mt: 1 }}>
+            <StatusNote level="error">{t("optionSelectionError", { error: selectionError })}</StatusNote>
+          </Box>
         )}
       </Box>
     </Box>

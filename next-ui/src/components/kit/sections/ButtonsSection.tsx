@@ -6,34 +6,34 @@ import { KitSectionShell } from "../KitSectionShell";
 
 export function ButtonsSection() {
   return (
-    <KitSectionShell id="buttons" title="Buttons" description="Standard MUI variants plus a mono `subtle` secondary variant.">
-      <Panel title="Variants">
+    <KitSectionShell id="buttons" title="Кнопки" description="Стандартные MUI-варианты плюс моноширинный вторичный вариант `subtle`.">
+      <Panel title="Варианты">
         <Stack spacing={2}>
           <Stack direction="row" spacing={1.5} sx={{ flexWrap: "wrap", gap: 1.5, alignItems: "center" }}>
             <Button variant="contained" startIcon={<PlayArrowIcon />}>
-              Launch run
+              Запустить прогон
             </Button>
-            <Button variant="outlined">Outlined</Button>
-            <Button variant="text">Text</Button>
+            <Button variant="outlined">Контурная</Button>
+            <Button variant="text">Текстовая</Button>
             <Button variant="subtle" startIcon={<RefreshIcon />}>
-              Subtle
+              Спокойная
             </Button>
             <Button variant="contained" color="error">
-              Abort
+              Остановить
             </Button>
           </Stack>
           <Stack direction="row" spacing={1.5} sx={{ flexWrap: "wrap", gap: 1.5, alignItems: "center" }}>
             <Button variant="contained" size="small">
-              Small
+              Маленькая
             </Button>
             <Button variant="subtle" size="small">
-              Subtle sm
+              Спокойная sm
             </Button>
             <Button variant="contained" disabled>
-              Disabled
+              Недоступна
             </Button>
             <Button variant="subtle" disabled>
-              Subtle off
+              Спокойная off
             </Button>
           </Stack>
         </Stack>

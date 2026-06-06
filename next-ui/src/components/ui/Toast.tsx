@@ -2,6 +2,7 @@ import CloseIcon from "@mui/icons-material/Close";
 import { Box, IconButton, Stack } from "@mui/material";
 import { styled } from "@mui/material/styles";
 import { type ReactNode } from "react";
+import { useI18n } from "../../i18n/I18nProvider";
 import { type StatusKey } from "../../theme/tokens";
 
 /**
@@ -48,6 +49,8 @@ const Surface = styled("div", {
 });
 
 export function Toast({ severity = "info", message, action, onClose }: ToastProps) {
+  const { t } = useI18n();
+
   return (
     <Surface severity={severity} role="status">
       <Box sx={{ flex: 1, minWidth: 0, lineHeight: 1.5, whiteSpace: "pre-line" }}>{message}</Box>
@@ -55,7 +58,7 @@ export function Toast({ severity = "info", message, action, onClose }: ToastProp
         <Stack direction="row" spacing={0.5} sx={{ alignItems: "center", flex: "0 0 auto" }}>
           {action}
           {onClose != null && (
-            <IconButton size="small" onClick={onClose} aria-label="Dismiss notification" sx={{ color: "text.secondary" }}>
+            <IconButton size="small" onClick={onClose} aria-label={t("dismissNotification")} sx={{ color: "text.secondary" }}>
               <CloseIcon sx={{ fontSize: 16 }} />
             </IconButton>
           )}

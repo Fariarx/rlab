@@ -6,12 +6,15 @@ import SearchIcon from "@mui/icons-material/Search";
 import TerminalIcon from "@mui/icons-material/Terminal";
 import { Box, CircularProgress, Collapse, Link, Stack, Typography } from "@mui/material";
 import { type ReactNode, useState } from "react";
+import { useI18n } from "../../i18n/I18nProvider";
 import { StatusDot } from "../ui";
 import { type CommandBlock, type RunState, type SearchBlock, type ToolBlock } from "./types";
 
 /* ------------------------------ Run indicator ------------------------------- */
 
 export function RunIndicator({ state }: { readonly state: RunState }) {
+  const { t } = useI18n();
+
   if (state === "running") {
     return <CircularProgress size={14} thickness={5} sx={{ color: (t) => t.palette.status.running.main }} />;
   }
@@ -36,7 +39,7 @@ export function RunIndicator({ state }: { readonly state: RunState }) {
       </Box>
     );
   }
-  return <StatusDot status="idle" label="pending" pulse={false} />;
+  return <StatusDot status="idle" label={t("pending")} pulse={false} />;
 }
 
 const stateBorder: Record<RunState, "running" | "ok" | "error" | "idle"> = {
@@ -102,7 +105,7 @@ export function ActionFrame({ icon, title, meta, state, defaultOpen, collapsible
       </Stack>
       {hasBody && (
         <Collapse in={collapsible ? open : true} unmountOnExit>
-          <Box sx={{ px: 1.5, pb: 1.5, pt: 0.5, borderTop: (t) => `1px solid ${t.custom.borders.subtle}` }}>
+          <Box sx={{ px: 1.5, py: 1.5, borderTop: (t) => `1px solid ${t.custom.borders.subtle}` }}>
             {children}
           </Box>
         </Collapse>
@@ -125,6 +128,11 @@ const outputSx = {
 /* ---------------------------------- Tool ------------------------------------ */
 
 export function ToolCall({ block }: { readonly block: ToolBlock }) {
+  const { t } = useI18n();
+  const hasArgs = block.args != null && Object.keys(block.args).length > 0;
+  const hasOutput = typeof block.output === "string" && block.output.length > 0;
+  const hasContent = hasArgs || hasOutput;
+
   return (
     <ActionFrame
       icon={<CodeIcon sx={{ fontSize: 16 }} />}
@@ -144,23 +152,29 @@ export function ToolCall({ block }: { readonly block: ToolBlock }) {
       }
       meta={block.duration && <Typography component="span" sx={metaSx}>{block.duration}</Typography>}
     >
-      <Stack spacing={1}>
-        {block.args && (
-          <Stack spacing={0.25}>
-            {Object.entries(block.args).map(([key, value]) => (
-              <Stack key={key} direction="row" spacing={1} sx={{ flexWrap: "wrap" }}>
-                <Typography component="span" sx={{ ...metaSx, color: (t) => t.palette.status.running.main }}>
-                  {key}
-                </Typography>
-                <Typography component="span" sx={outputSx}>
-                  {value}
-                </Typography>
-              </Stack>
-            ))}
-          </Stack>
-        )}
-        {block.output && <Typography component="div" sx={outputSx}>{block.output}</Typography>}
-      </Stack>
+      {hasContent ? (
+        <Stack spacing={1}>
+          {hasArgs && (
+            <Stack spacing={0.25}>
+              {Object.entries(block.args ?? {}).map(([key, value]) => (
+                <Stack key={key} direction="row" spacing={1} sx={{ flexWrap: "wrap" }}>
+                  <Typography component="span" sx={{ ...metaSx, color: (t) => t.palette.status.running.main }}>
+                    {key}
+                  </Typography>
+                  <Typography component="span" sx={outputSx}>
+                    {value}
+                  </Typography>
+                </Stack>
+              ))}
+            </Stack>
+          )}
+          {hasOutput && <Typography component="div" sx={outputSx}>{block.output}</Typography>}
+        </Stack>
+      ) : (
+        <Typography component="div" sx={{ ...outputSx, fontStyle: "italic", opacity: 0.8 }}>
+          {t("noOutput")}
+        </Typography>
+      )}
     </ActionFrame>
   );
 }
@@ -168,6 +182,8 @@ export function ToolCall({ block }: { readonly block: ToolBlock }) {
 /* --------------------------------- Command ---------------------------------- */
 
 export function CommandCard({ block }: { readonly block: CommandBlock }) {
+  const { t } = useI18n();
+
   return (
     <ActionFrame
       icon={<TerminalIcon sx={{ fontSize: 16 }} />}
@@ -177,7 +193,7 @@ export function CommandCard({ block }: { readonly block: CommandBlock }) {
       meta={
         block.exitCode != null && (
           <Typography component="span" sx={metaSx}>
-            exit {block.exitCode}
+            {t("commandExitCode", { code: block.exitCode })}
           </Typography>
         )
       }
@@ -190,6 +206,8 @@ export function CommandCard({ block }: { readonly block: CommandBlock }) {
 /* ---------------------------------- Search ---------------------------------- */
 
 export function SearchCard({ block }: { readonly block: SearchBlock }) {
+  const { t } = useI18n();
+
   return (
     <ActionFrame
       icon={<SearchIcon sx={{ fontSize: 16 }} />}
@@ -198,14 +216,14 @@ export function SearchCard({ block }: { readonly block: SearchBlock }) {
       title={
         <Stack direction="row" spacing={1} sx={{ alignItems: "baseline", flexWrap: "wrap" }}>
           <Typography component="span" sx={titleSx}>
-            Web search
+            {t("webSearch")}
           </Typography>
           <Typography component="span" sx={{ fontSize: "0.78rem", color: "text.secondary" }}>
             “{block.query}”
           </Typography>
         </Stack>
       }
-      meta={<Typography component="span" sx={metaSx}>{block.results.length} hits</Typography>}
+      meta={<Typography component="span" sx={metaSx}>{t("searchHitCount", { count: block.results.length })}</Typography>}
     >
       <Stack spacing={0.75}>
         {block.results.map((result) => (

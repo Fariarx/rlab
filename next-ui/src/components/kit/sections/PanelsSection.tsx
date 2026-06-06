@@ -7,8 +7,8 @@ export function PanelsSection() {
   return (
     <KitSectionShell
       id="panels"
-      title="Panels & Metrics"
-      description="The standard surface chrome plus headline metrics and the idle 'no output' state."
+      title="Панели и метрики"
+      description="Стандартная surface-оболочка, ключевые метрики и пустое состояние без вывода."
     >
       <Box
         sx={{
@@ -19,34 +19,34 @@ export function PanelsSection() {
       >
         <Panel
           title="Runtime"
-          titleAdornment={<StatusDot status="running" label="Running" />}
-          actions={<Button variant="subtle" size="small">refresh</Button>}
+          titleAdornment={<StatusDot status="running" label="В работе" />}
+          actions={<Button variant="subtle" size="small">обновить</Button>}
         >
           <Stack direction="row" spacing={4} sx={{ flexWrap: "wrap", gap: 3 }}>
-            <Metric label="Throughput" value="68" unit="%" delta={{ value: "4.2", direction: "up" }} status="ok" />
-            <Metric label="Latency" value="42" unit="ms" delta={{ value: "11", direction: "down" }} />
-            <Metric label="Queue" value="7" status="warn" />
+            <Metric label="Пропускная способность" value="68" unit="%" delta={{ value: "4.2", direction: "up" }} status="ok" />
+            <Metric label="Задержка" value="42" unit="ms" delta={{ value: "11", direction: "down" }} />
+            <Metric label="Очередь" value="7" status="warn" />
           </Stack>
         </Panel>
 
-        <Panel title="Raised tone" tone="raised">
+        <Panel title="Повышенный тон" tone="raised">
           <Typography variant="body2" sx={{ color: "text.secondary" }}>
-            A panel one surface level brighter — use for nested or focused content.
+            Панель на один surface-уровень ярче — для вложенного или фокусного содержимого.
           </Typography>
         </Panel>
 
-        <Panel title="Dense" dense>
+        <Panel title="Плотная панель" dense>
           <Typography variant="body2" sx={{ color: "text.secondary" }}>
-            Tighter padding for compact lists and sidebars.
+            Более плотные отступы для compact-списков и боковых панелей.
           </Typography>
         </Panel>
 
-        <Panel title="Empty">
+        <Panel title="Пустое состояние">
           <EmptyState
             icon={<InboxIcon />}
-            title="No runs yet"
-            description="Launch a run to see activity here."
-            action={<Button variant="subtle" size="small">new run</Button>}
+            title="Прогонов пока нет"
+            description="Запустите прогон, чтобы увидеть активность."
+            action={<Button variant="subtle" size="small">новый прогон</Button>}
           />
         </Panel>
       </Box>

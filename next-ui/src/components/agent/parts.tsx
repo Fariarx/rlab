@@ -1,11 +1,15 @@
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
+import ArrowForwardIcon from "@mui/icons-material/ArrowForward";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
+import RefreshIcon from "@mui/icons-material/Refresh";
 import { Box, Stack, Typography } from "@mui/material";
 import { styled } from "@mui/material/styles";
 import { type ReactNode } from "react";
+import { useI18n } from "../../i18n/I18nProvider";
 import { type StatusKey } from "../../theme/tokens";
 import { Button, IconButton, StatusDot } from "../ui";
 import { blink, bounce } from "./anim";
+import { type SuggestedActionIconKey } from "./types";
 
 /* ---------------------------------- Avatars --------------------------------- */
 
@@ -31,6 +35,8 @@ export function AgentAvatar({ size = 30 }: { readonly size?: number }) {
 }
 
 export function UserAvatar({ size = 30 }: { readonly size?: number }) {
+  const { t } = useI18n();
+
   return (
     <Box
       sx={{
@@ -50,7 +56,7 @@ export function UserAvatar({ size = 30 }: { readonly size?: number }) {
         border: (t) => `1px solid ${t.custom.borders.subtle}`,
       }}
     >
-      YOU
+      {t("userAvatarInitials")}
     </Box>
   );
 }
@@ -92,7 +98,7 @@ export function MessageText({ text, streaming }: { readonly text: string; readon
   return (
     <Typography
       component="div"
-      sx={{ fontSize: "0.9rem", lineHeight: 1.65, color: "text.primary", whiteSpace: "pre-line" }}
+      sx={{ fontSize: "0.9rem", lineHeight: 1.65, color: "text.primary", whiteSpace: "pre-line", overflowWrap: "anywhere", wordBreak: "break-word" }}
     >
       {text}
       {streaming && <Caret />}
@@ -128,6 +134,8 @@ export function StatusNote({ level, children }: { readonly level: StatusKey; rea
 /* --------------------------------- Code block ------------------------------- */
 
 export function CodeBlock({ language, code }: { readonly language: string; readonly code: string }) {
+  const { t } = useI18n();
+
   return (
     <Box
       sx={{
@@ -150,7 +158,7 @@ export function CodeBlock({ language, code }: { readonly language: string; reado
         <Typography variant="microLabel" sx={{ color: "text.secondary" }}>
           {language}
         </Typography>
-        <IconButton aria-label="Copy code">
+        <IconButton aria-label={t("copyCode")}>
           <ContentCopyIcon sx={{ fontSize: 14 }} />
         </IconButton>
       </Stack>
@@ -219,9 +227,15 @@ export function Citations({ sources }: { readonly sources: ReadonlyArray<{ label
 export interface SuggestedAction {
   readonly id: string;
   readonly label: string;
-  readonly icon?: ReactNode;
+  readonly icon?: SuggestedActionIconKey;
   readonly tone?: "default" | "primary" | "danger";
 }
+
+const suggestedActionIcon = {
+  "arrow-forward": <ArrowForwardIcon sx={{ fontSize: 15 }} />,
+  copy: <ContentCopyIcon sx={{ fontSize: 15 }} />,
+  refresh: <RefreshIcon sx={{ fontSize: 15 }} />,
+} satisfies Record<SuggestedActionIconKey, ReactNode>;
 
 export function SuggestedActions({
   actions,
@@ -238,7 +252,7 @@ export function SuggestedActions({
           size="small"
           variant={action.tone && action.tone !== "default" ? "contained" : "subtle"}
           color={action.tone === "danger" ? "error" : "primary"}
-          startIcon={action.icon}
+          startIcon={action.icon ? suggestedActionIcon[action.icon] : undefined}
           onClick={() => onAction?.(action.id)}
         >
           {action.label}

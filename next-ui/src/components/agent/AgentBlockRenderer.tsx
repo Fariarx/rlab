@@ -5,11 +5,18 @@ import { OptionSelect } from "./OptionSelect";
 import { PlanSteps } from "./PlanSteps";
 import { Reasoning } from "./Reasoning";
 import { CodeBlock, Citations, MessageText, StatusNote, SuggestedActions } from "./parts";
+import { type MessageActionHandlers } from "./message-actions";
 import { type AgentBlock } from "./types";
 
 /** Maps an agent block to its renderer. The single switch keeps the block union
  * exhaustive — adding a kind to types.ts surfaces a missing case here. */
-export function AgentBlockRenderer({ block }: { readonly block: AgentBlock }) {
+export function AgentBlockRenderer({
+  block,
+  actions,
+}: {
+  readonly block: AgentBlock;
+  readonly actions?: Pick<MessageActionHandlers, "onApprovalDecision" | "onOptionSelection">;
+}) {
   switch (block.kind) {
     case "text":
       return <MessageText text={block.text} streaming={block.streaming} />;
@@ -26,9 +33,9 @@ export function AgentBlockRenderer({ block }: { readonly block: AgentBlock }) {
     case "plan":
       return <PlanSteps block={block} />;
     case "options":
-      return <OptionSelect block={block} />;
+      return <OptionSelect block={block} onSelection={actions?.onOptionSelection} />;
     case "approval":
-      return <ApprovalRequest block={block} />;
+      return <ApprovalRequest block={block} onDecision={actions?.onApprovalDecision} />;
     case "code":
       return <CodeBlock language={block.language} code={block.code} />;
     case "status":

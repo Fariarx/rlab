@@ -6,27 +6,27 @@ export function TypographySection() {
   return (
     <KitSectionShell
       id="typography"
-      title="Typography"
-      description="Inter for prose, JetBrains Mono for everything technical — labels, code, status, metrics."
+      title="Типографика"
+      description="Inter для основного текста, JetBrains Mono для технических элементов: метки, код, статусы, метрики."
     >
       <Stack spacing={2.5}>
-        <Panel title="Scale">
+        <Panel title="Масштаб">
           <Stack spacing={1.5}>
-            <Typography variant="h1">Control Center</Typography>
-            <Typography variant="h2">Release runs &amp; agent handoffs</Typography>
+            <Typography variant="h1">Центр управления</Typography>
+            <Typography variant="h2">Release-прогоны и handoff агентов</Typography>
             <Typography variant="body1">
-              Body copy uses Inter. The interface stays calm so the monospace accents read clearly.
+              Основной текст использует Inter. Интерфейс остаётся спокойным, чтобы monospace-акценты хорошо читались.
             </Typography>
             <Typography variant="body2" sx={{ color: "text.secondary" }}>
-              Secondary body — muted, for supporting detail.
+              Вторичный текст — приглушённый, для вспомогательных деталей.
             </Typography>
             <Typography variant="microLabel" sx={{ color: "text.secondary" }}>
-              Micro label · tracked-out mono
+              Микрометка · разряженный mono
             </Typography>
           </Stack>
         </Panel>
 
-        <Panel title="Monospace">
+        <Panel title="Моноширинный текст">
           <Stack spacing={1}>
             <Typography sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.9rem" }}>
               const run = await rlab.runs.create(&#123; agent: "delta" &#125;)

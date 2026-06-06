@@ -2,13 +2,41 @@ import ThumbDownAltIcon from "@mui/icons-material/ThumbDownAlt";
 import ThumbUpAltIcon from "@mui/icons-material/ThumbUpAlt";
 import { Box, Stack, Typography } from "@mui/material";
 import { useState } from "react";
+import { useI18n } from "../../i18n/I18nProvider";
 import { Button } from "../ui";
 import { StatusNote } from "./parts";
-import { type ApprovalBlock } from "./types";
+import { type ApprovalBlock, type ApprovalDecision } from "./types";
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 /** ApprovalRequest — the agent asks the user to approve or reject an action. */
-export function ApprovalRequest({ block }: { readonly block: ApprovalBlock }) {
-  const [result, setResult] = useState<"approved" | "rejected" | null>(null);
+export function ApprovalRequest({
+  block,
+  onDecision,
+}: {
+  readonly block: ApprovalBlock;
+  readonly onDecision?: (approvalId: string, decision: ApprovalDecision) => void | Promise<void>;
+}) {
+  const { t } = useI18n();
+  const [result, setResult] = useState<ApprovalDecision | null>(block.decision ?? null);
+  const [pendingDecision, setPendingDecision] = useState<ApprovalDecision | null>(null);
+  const [decisionError, setDecisionError] = useState<string | null>(null);
+
+  const decide = (decision: ApprovalDecision) => {
+    if (!block.id || !onDecision) {
+      setResult(decision);
+      return;
+    }
+
+    setPendingDecision(decision);
+    setDecisionError(null);
+    void Promise.resolve(onDecision(block.id, decision))
+      .then(() => setResult(decision))
+      .catch((error) => setDecisionError(errorMessage(error)))
+      .finally(() => setPendingDecision(null));
+  };
 
   return (
     <Box
@@ -20,7 +48,7 @@ export function ApprovalRequest({ block }: { readonly block: ApprovalBlock }) {
       }}
     >
       <Typography variant="microLabel" sx={{ color: (t) => t.palette.status.warn.main, display: "block", mb: 0.75 }}>
-        Approval required
+        {t("approvalRequired")}
       </Typography>
       <Typography sx={{ fontSize: "0.88rem", fontWeight: 600, color: "text.primary" }}>{block.title}</Typography>
       {block.detail && <Typography sx={{ fontSize: "0.8rem", color: "text.secondary", mt: 0.5 }}>{block.detail}</Typography>}
@@ -28,17 +56,35 @@ export function ApprovalRequest({ block }: { readonly block: ApprovalBlock }) {
       <Box sx={{ mt: 1.5 }}>
         {result == null ? (
           <Stack direction="row" spacing={1}>
-            <Button variant="contained" size="small" startIcon={<ThumbUpAltIcon sx={{ fontSize: 15 }} />} onClick={() => setResult("approved")}>
-              Approve
+            <Button
+              variant="contained"
+              size="small"
+              disabled={pendingDecision !== null}
+              startIcon={<ThumbUpAltIcon sx={{ fontSize: 15 }} />}
+              onClick={() => decide("approved")}
+            >
+              {t("approve")}
             </Button>
-            <Button variant="contained" color="error" size="small" startIcon={<ThumbDownAltIcon sx={{ fontSize: 15 }} />} onClick={() => setResult("rejected")}>
-              Reject
+            <Button
+              variant="contained"
+              color="error"
+              size="small"
+              disabled={pendingDecision !== null}
+              startIcon={<ThumbDownAltIcon sx={{ fontSize: 15 }} />}
+              onClick={() => decide("rejected")}
+            >
+              {t("reject")}
             </Button>
           </Stack>
         ) : (
           <StatusNote level={result === "approved" ? "ok" : "error"}>
-            {result === "approved" ? "Approved" : "Rejected"}
+            {result === "approved" ? t("approved") : t("rejected")}
           </StatusNote>
+        )}
+        {decisionError && (
+          <Box sx={{ mt: 1 }}>
+            <StatusNote level="error">{t("approvalDecisionError", { error: decisionError })}</StatusNote>
+          </Box>
         )}
       </Box>
     </Box>
