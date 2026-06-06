@@ -80,13 +80,14 @@ describe("AgentPicker a11y", () => {
     expect(onSelect).toHaveBeenCalledWith({ agent: "codex", model: "default", reasoning: "default", mode: "default" });
   });
 
-  it("exposes model and reasoning options but no work-mode control (mode is a chat option)", () => {
+  it("exposes exact Claude Code model IDs and reasoning options but no work-mode control", () => {
     renderWithTheme(<AgentPicker open value={DEFAULT_PROFILE} onClose={vi.fn()} onSelect={vi.fn()} />);
 
-    // Claude's model + reasoning options are present...
-    expect(screen.getByRole("button", { name: "Opus" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Opus 4.8" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sonnet 4.6" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Haiku 4.5" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Opus alias" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Max" })).toBeInTheDocument();
-    // ...but the work-mode option ("Plan") is no longer in the picker.
     expect(screen.queryByRole("button", { name: "Plan" })).not.toBeInTheDocument();
   });
 

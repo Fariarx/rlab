@@ -9,7 +9,7 @@ export function InputsSection() {
       <Stack spacing={2.5}>
         <Panel title="Поиск">
           <TextField
-            placeholder="Фильтр агентов, прогонов, логов…"
+            placeholder="Фильтр агентов, запусков, логов…"
             size="small"
             fullWidth
             slotProps={{

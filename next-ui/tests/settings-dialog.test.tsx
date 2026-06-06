@@ -190,7 +190,7 @@ describe("SettingsDialog agent configuration", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Сделать Codex GPT-5.5 моделью по умолчанию" }));
+    fireEvent.click(screen.getByRole("button", { name: "GPT-5.5" }));
 
     expect(onSettingsChange).toHaveBeenCalledWith({
       agents: {

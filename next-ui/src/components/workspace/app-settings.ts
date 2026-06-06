@@ -3,7 +3,7 @@ import { DEFAULT_PROFILE, isAgentId, normalizeAgentProfile, type AgentProfile } 
 export type ThemeMode = "dark" | "light" | "high-contrast";
 export type Locale = "en" | "ru";
 export type DensityMode = "comfortable" | "compact";
-export type AgentAccessMode = "read-only" | "read-write";
+export type AgentAccessMode = "read-only" | "unrestricted";
 
 export interface AppearanceSettings {
   readonly density: DensityMode;
@@ -58,7 +58,7 @@ export function cloneAppSettings(settings: AppSettings): AppSettings {
     appearance: { ...settings.appearance },
     general: { ...settings.general },
     agents: {
-      accessMode: settings.agents.accessMode ?? defaultAppSettings.agents.accessMode,
+      accessMode: settings.agents.accessMode,
       defaultProfile: normalizeAgentProfile(settings.agents.defaultProfile),
     },
   };
@@ -77,7 +77,7 @@ export function mergeAppSettings(current: AppSettings, patch: AppSettingsPatch):
     agents: {
       ...current.agents,
       ...patch.agents,
-      accessMode: patch.agents?.accessMode ?? current.agents.accessMode ?? defaultAppSettings.agents.accessMode,
+      accessMode: patch.agents?.accessMode ?? current.agents.accessMode,
       defaultProfile: normalizeAgentProfile(patch.agents?.defaultProfile ?? current.agents.defaultProfile),
     },
   };
@@ -100,7 +100,7 @@ function isDensityMode(value: unknown): value is DensityMode {
 }
 
 export function isAgentAccessMode(value: unknown): value is AgentAccessMode {
-  return value === "read-only" || value === "read-write";
+  return value === "read-only" || value === "unrestricted";
 }
 
 function isAgentProfile(value: unknown): value is AgentProfile {

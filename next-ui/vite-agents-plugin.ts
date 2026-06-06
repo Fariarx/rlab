@@ -8,10 +8,27 @@ import { fileURLToPath } from "node:url";
 import { query, type CanUseTool, type EffortLevel, type Options as ClaudeQueryOptions, type PermissionResult } from "@anthropic-ai/claude-agent-sdk";
 import type { Plugin, ViteDevServer, PreviewServer } from "vite";
 import { parseGitStatusPorcelain } from "./src/lib/git-status";
-import { cloneAppSettings, defaultAppSettings, isAgentAccessMode, isAppSettings, type AgentAccessMode, type Locale } from "./src/components/workspace/app-settings";
+import {
+  cloneAppSettings,
+  defaultAppSettings,
+  isAgentAccessMode,
+  isAppSettings,
+  type AgentAccessMode,
+  type Locale,
+} from "./src/components/workspace/app-settings";
 import { buildInitialWorkspaceState, cloneWorkspaceState, type WorkspaceState } from "./src/components/workspace/workspace-state";
 import { agentProfileEquals, getAgent, isAgentId, normalizeAgentProfile, type AgentProfile } from "./src/components/agent/agents";
-import { type AgentBlock, type ChatMessage, type RunUsage } from "./src/components/agent/types";
+import {
+  type AgentBlock,
+  type ChatMessage,
+  type CodeBlockData,
+  type DiffBlock,
+  type PlanBlock,
+  type RunState,
+  type RunUsage,
+  type SearchBlock,
+  type SuggestedActionsBlock,
+} from "./src/components/agent/types";
 import { translate } from "./src/i18n/I18nProvider";
 import { pickDirectoryPathFromSystemDialog } from "../src/server/directory-picker";
 
@@ -426,8 +443,8 @@ const legacySeedCopy: Record<string, { readonly title: string; readonly snippet:
 
 const legacyServiceSnippetRu: Record<string, string> = {
   Done: "Готово",
-  "Run failed": "Прогон упал",
-  "Run canceled": "Прогон остановлен",
+  "Run failed": "Запуск завершился с ошибкой",
+  "Run canceled": "Запуск остановлен",
 };
 
 function seedConversationById(state: WorkspaceState): Map<string, WorkspaceConversation> {
@@ -512,7 +529,7 @@ export function migrateSeedWorkspaceState(state: WorkspaceState): WorkspaceState
 
 const interruptedRunSnippet: Record<Locale, string> = {
   en: "Background run interrupted",
-  ru: "Фоновый прогон прерван",
+  ru: "Фоновый запуск прерван",
 };
 
 function reconcileConversationRun(conversation: WorkspaceConversation, activeRunIds: ReadonlySet<string>, locale: Locale): WorkspaceConversation {
@@ -1384,6 +1401,11 @@ export type RunEvent =
   | { type: "text"; text: string }
   | { type: "tool"; id: string; name: string; summary?: string; args?: Record<string, string> }
   | { type: "tool_result"; id: string; ok: boolean; output: string }
+  | { type: "diff"; id?: string; file: string; additions: number; deletions: number; lines: DiffBlock["lines"] }
+  | { type: "plan"; id?: string; steps: PlanBlock["steps"] }
+  | { type: "code"; language: string; code: string }
+  | { type: "search"; id?: string; query: string; state: RunState; results?: SearchBlock["results"] }
+  | { type: "suggested"; actions: SuggestedActionsBlock["actions"] }
   | { type: "approval"; id: string; title: string; detail?: string }
   | { type: "options"; id: string; prompt: string; multi?: boolean; options: ReadonlyArray<{ readonly id: string; readonly label: string; readonly description?: string }> }
   | { type: "status"; level: "info" | "ok" | "warn" | "error"; text: string }
@@ -1441,6 +1463,18 @@ interface StreamingTool {
   output?: string;
 }
 
+interface StreamingSearch {
+  id?: string;
+  query: string;
+  state: RunState;
+  results: SearchBlock["results"];
+}
+
+interface StreamingPlan {
+  id?: string;
+  steps: PlanBlock["steps"];
+}
+
 interface BackgroundRunAccumulator {
   reasoning: string;
   hasReasoning: boolean;
@@ -1448,6 +1482,11 @@ interface BackgroundRunAccumulator {
   text: string;
   hasText: boolean;
   readonly tools: StreamingTool[];
+  readonly diffs: DiffBlock[];
+  readonly plans: StreamingPlan[];
+  readonly codes: CodeBlockData[];
+  readonly searches: StreamingSearch[];
+  readonly suggested: SuggestedActionsBlock[];
   readonly approvals: Array<{ id: string; title: string; detail?: string }>;
   readonly options: Array<{ id: string; prompt: string; multi?: boolean; options: ReadonlyArray<{ readonly id: string; readonly label: string; readonly description?: string }> }>;
   readonly statuses: Array<{ level: "warn" | "error"; text: string }>;
@@ -1460,13 +1499,18 @@ interface BackgroundRunAccumulator {
 interface RunSpec {
   readonly bin: string;
   readonly env?: readonly string[];
-  readonly supportsWritableApprovals: boolean;
   readonly args: (request: RunRequest) => string[];
   readonly createTranslator: () => (line: string) => RunEvent[];
 }
 
 const CLAUDE_SAFE_READ_TOOLS = ["Read", "Glob", "Grep", "LS"] as const;
+const CLAUDE_READ_ONLY_TOOLS = [...CLAUDE_SAFE_READ_TOOLS, "AskUserQuestion"] as const;
 const CLAUDE_EFFORT_LEVELS = new Set<EffortLevel>(["low", "medium", "high", "xhigh", "max"]);
+const CLAUDE_CHAT_UI_SYSTEM_PROMPT = [
+  "When you need user input that blocks progress, use the AskUserQuestion tool instead of asking as plain text.",
+  "Use AskUserQuestion for concrete choices, clarifying questions, or option selection that the chat UI should render as interactive controls.",
+  "Do not create a numbered question list in prose when the question can be represented with AskUserQuestion options.",
+].join("\n");
 
 function profileForArgs(agent: AgentProfile["agent"], request: RunArgsRequest): AgentProfile {
   return normalizeAgentProfile(
@@ -1618,6 +1662,13 @@ function claudePermissionModeForRequest(request: RunRequest): ClaudeQueryOptions
   return "default";
 }
 
+function claudeToolsForRequest(request: RunRequest): ClaudeQueryOptions["tools"] {
+  if (request.accessMode === "read-only" || request.mode === "plan") {
+    return [...CLAUDE_READ_ONLY_TOOLS];
+  }
+  return { type: "preset", preset: "claude_code" };
+}
+
 export function buildClaudeSdkOptions(request: RunRequest, cwd: string, abortController: AbortController, canUseTool: CanUseTool): ClaudeQueryOptions {
   const options: ClaudeQueryOptions = {
     abortController,
@@ -1625,6 +1676,8 @@ export function buildClaudeSdkOptions(request: RunRequest, cwd: string, abortCon
     canUseTool,
     cwd,
     permissionMode: claudePermissionModeForRequest(request),
+    systemPrompt: { type: "preset", preset: "claude_code", append: CLAUDE_CHAT_UI_SYSTEM_PROMPT },
+    tools: claudeToolsForRequest(request),
   };
   const profile = normalizeAgentProfile(request, "claude-code");
   const model = modelForProfile(profile);
@@ -1650,13 +1703,20 @@ export function buildClaudeRunArgs(request: RunArgsRequest): string[] {
   if (effort) {
     args.push("--effort", effort);
   }
-  args.push("--permission-mode", accessMode === "read-write" && profile.mode !== "plan" ? "acceptEdits" : "plan");
+  args.push("--permission-mode", accessMode === "unrestricted" && profile.mode !== "plan" ? "acceptEdits" : "plan");
   return args;
 }
 
 export function buildCodexRunArgs(request: RunArgsRequest): string[] {
   const profile = profileForArgs("codex", request);
-  const args = ["exec", "--json", "--sandbox", "read-only", "--skip-git-repo-check"];
+  const accessMode = request.accessMode ?? "read-only";
+  const args = ["exec", "--json"];
+  if (accessMode === "unrestricted") {
+    args.push("--dangerously-bypass-approvals-and-sandbox");
+  } else {
+    args.push("--sandbox", "read-only");
+  }
+  args.push("--skip-git-repo-check");
   const model = modelForProfile(profile);
   if (model) {
     args.push("--model", model);
@@ -1671,7 +1731,8 @@ export function buildCodexRunArgs(request: RunArgsRequest): string[] {
 
 export function buildGeminiRunArgs(request: RunArgsRequest): string[] {
   const profile = profileForArgs("gemini", request);
-  const args = ["--prompt", request.prompt, "--output-format", "stream-json", "--approval-mode", "plan", "--skip-trust"];
+  const accessMode = request.accessMode ?? "read-only";
+  const args = ["--prompt", request.prompt, "--output-format", "stream-json", "--approval-mode", accessMode === "unrestricted" ? "yolo" : "plan", "--skip-trust"];
   const model = modelForProfile(profile);
   if (model) {
     args.push("--model", model);
@@ -1682,6 +1743,9 @@ export function buildGeminiRunArgs(request: RunArgsRequest): string[] {
 export function buildOpenCodeRunArgs(request: RunArgsRequest): string[] {
   const profile = profileForArgs("opencode", request);
   const args = ["run", "--format", "json", "--thinking"];
+  if ((request.accessMode ?? "read-only") === "unrestricted") {
+    args.push("--dangerously-skip-permissions");
+  }
   const model = modelForProfile(profile);
   if (model) {
     args.push("--model", model);
@@ -1699,42 +1763,30 @@ export function buildOpenCodeRunArgs(request: RunArgsRequest): string[] {
 const RUN: Record<string, RunSpec> = {
   "claude-code": {
     bin: "claude",
-    supportsWritableApprovals: true,
     args: (request) => buildClaudeRunArgs(request),
     createTranslator: createClaudeStreamTranslator,
   },
   codex: {
     bin: "codex",
     env: DETECT.codex.env,
-    supportsWritableApprovals: false,
     args: (request) => buildCodexRunArgs(request),
     createTranslator: createCodexStreamTranslator,
   },
   gemini: {
     bin: "gemini",
     env: DETECT.gemini.env,
-    supportsWritableApprovals: false,
     args: (request) => buildGeminiRunArgs(request),
     createTranslator: createGeminiStreamTranslator,
   },
   opencode: {
     bin: "opencode",
-    supportsWritableApprovals: false,
     args: (request) => buildOpenCodeRunArgs(request),
     createTranslator: createOpenCodeStreamTranslator,
   },
 };
 
-export function writableRunUnsupportedMessage(agent: string): string {
-  return `Writable runs require a live permission bridge. ${agent || "This agent"} does not support interactive approve/deny yet.`;
-}
-
-export function validateRunAccessModeForAgent(agent: string, accessMode: AgentAccessMode): string | null {
-  if (accessMode !== "read-write") {
-    return null;
-  }
-  const spec = RUN[agent];
-  return spec?.supportsWritableApprovals ? null : writableRunUnsupportedMessage(agent);
+export function validateRunAccessModeForAgent(_agent: string, _accessMode: AgentAccessMode): string | null {
+  return null;
 }
 
 function clip(value: unknown, max = 600): string {
@@ -1770,14 +1822,14 @@ function splitDiffLines(value: string): string[] {
   return value.replace(/\r\n/g, "\n").split("\n");
 }
 
-function editPairToLines(oldText: string, newText: string): Array<{ readonly type: "add" | "del" | "ctx"; readonly text: string }> {
+function editPairToLines(oldText: string, newText: string): DiffBlock["lines"] {
   return [
     ...splitDiffLines(oldText).map((text) => ({ type: "del" as const, text })),
     ...splitDiffLines(newText).map((text) => ({ type: "add" as const, text })),
   ];
 }
 
-function parseMultiEditLines(value: string): Array<{ readonly type: "add" | "del" | "ctx"; readonly text: string }> | null {
+function parseMultiEditLines(value: string): DiffBlock["lines"] | null {
   try {
     const parsed = JSON.parse(value) as unknown;
     if (!Array.isArray(parsed)) {
@@ -1796,27 +1848,27 @@ function parseMultiEditLines(value: string): Array<{ readonly type: "add" | "del
   }
 }
 
-function toolToDiffBlock(tool: StreamingTool): AgentBlock | null {
-  if (tool.state === "error") {
-    return null;
+function normalizedToolName(name: string): string {
+  return name
+    .replace(/^mcp__[^_]+__/, "")
+    .replace(/[^a-z0-9]/gi, "")
+    .toLowerCase();
+}
+
+function firstString(record: Record<string, string> | Record<string, unknown> | undefined, keys: readonly string[]): string | undefined {
+  if (!record) {
+    return undefined;
   }
-  const args = tool.args;
-  const file = args?.file_path ?? args?.path;
-  if (!file) {
-    return null;
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim().length > 0) {
+      return value;
+    }
   }
-  const normalizedName = tool.name.toLowerCase();
-  let lines: Array<{ readonly type: "add" | "del" | "ctx"; readonly text: string }> | null = null;
-  if (normalizedName === "write" && typeof args?.content === "string") {
-    lines = splitDiffLines(args.content).map((text) => ({ type: "add", text }));
-  } else if (normalizedName === "edit" && typeof args?.old_string === "string" && typeof args?.new_string === "string") {
-    lines = editPairToLines(args.old_string, args.new_string);
-  } else if (normalizedName === "multiedit" && typeof args?.edits === "string") {
-    lines = parseMultiEditLines(args.edits);
-  }
-  if (!lines) {
-    return null;
-  }
+  return undefined;
+}
+
+function diffBlockFromLines(file: string, lines: DiffBlock["lines"]): DiffBlock {
   return {
     kind: "diff",
     file,
@@ -1824,6 +1876,225 @@ function toolToDiffBlock(tool: StreamingTool): AgentBlock | null {
     deletions: lines.filter((line) => line.type === "del").length,
     lines,
   };
+}
+
+function parseUnifiedDiffLines(value: string): DiffBlock["lines"] {
+  return splitDiffLines(value)
+    .filter((line) => !line.startsWith("diff --git ") && !line.startsWith("index ") && !line.startsWith("--- ") && !line.startsWith("+++ ") && !line.startsWith("@@"))
+    .map((line) => {
+      if (line.startsWith("+")) {
+        return { type: "add" as const, text: line.slice(1) };
+      }
+      if (line.startsWith("-")) {
+        return { type: "del" as const, text: line.slice(1) };
+      }
+      return { type: "ctx" as const, text: line.startsWith(" ") ? line.slice(1) : line };
+    });
+}
+
+function toolToDiffBlock(tool: StreamingTool): DiffBlock | null {
+  if (tool.state === "error") {
+    return null;
+  }
+  const args = tool.args;
+  const file = firstString(args, ["file_path", "filePath", "path", "filename", "file"]);
+  if (!file) {
+    return null;
+  }
+  const normalizedName = normalizedToolName(tool.name);
+  let lines: DiffBlock["lines"] | null = null;
+  if ((normalizedName === "write" || normalizedName === "writefile" || normalizedName === "filewrite") && typeof args?.content === "string") {
+    lines = splitDiffLines(args.content).map((text) => ({ type: "add", text }));
+  } else if (
+    (normalizedName === "edit" || normalizedName === "fileedit" || normalizedName === "replace") &&
+    typeof args?.old_string === "string" &&
+    typeof args?.new_string === "string"
+  ) {
+    lines = editPairToLines(args.old_string, args.new_string);
+  } else if (normalizedName === "multiedit" && typeof args?.edits === "string") {
+    lines = parseMultiEditLines(args.edits);
+  } else if ((normalizedName === "applypatch" || normalizedName === "patch" || normalizedName === "fileedit") && typeof args?.diff === "string") {
+    lines = parseUnifiedDiffLines(args.diff);
+  }
+  if (!lines) {
+    return null;
+  }
+  return diffBlockFromLines(file, lines);
+}
+
+function diffBlockFromToolInput(name: string, input: Record<string, unknown> | undefined): DiffBlock | null {
+  const file = firstString(input, ["file_path", "filePath", "path", "filename", "file"]);
+  if (!file) {
+    return null;
+  }
+  const normalizedName = normalizedToolName(name);
+  let lines: DiffBlock["lines"] | null = null;
+  if ((normalizedName === "write" || normalizedName === "writefile" || normalizedName === "filewrite") && typeof input?.content === "string") {
+    lines = splitDiffLines(input.content).map((text) => ({ type: "add", text }));
+  } else if (
+    (normalizedName === "edit" || normalizedName === "fileedit" || normalizedName === "replace") &&
+    typeof input?.old_string === "string" &&
+    typeof input?.new_string === "string"
+  ) {
+    lines = editPairToLines(input.old_string, input.new_string);
+  } else if (normalizedName === "multiedit" && input?.edits !== undefined) {
+    lines = typeof input.edits === "string" ? parseMultiEditLines(input.edits) : parseMultiEditLines(JSON.stringify(input.edits));
+  } else if ((normalizedName === "applypatch" || normalizedName === "patch" || normalizedName === "fileedit") && typeof input?.diff === "string") {
+    lines = parseUnifiedDiffLines(input.diff);
+  }
+  return lines ? diffBlockFromLines(file, lines) : null;
+}
+
+function toolToDiffEvent(id: string | undefined, name: string, input: Record<string, unknown> | undefined): Extract<RunEvent, { type: "diff" }> | null {
+  const block = diffBlockFromToolInput(name, input);
+  return block ? { type: "diff", id, file: block.file, additions: block.additions, deletions: block.deletions, lines: block.lines } : null;
+}
+
+function todoState(value: unknown): RunState {
+  const normalized = typeof value === "string" ? value.toLowerCase().replace(/[^a-z0-9]/g, "") : "";
+  if (normalized === "completed" || normalized === "complete" || normalized === "done" || normalized === "ok") {
+    return "ok";
+  }
+  if (normalized === "inprogress" || normalized === "running" || normalized === "active") {
+    return "running";
+  }
+  if (normalized === "error" || normalized === "failed" || normalized === "cancelled" || normalized === "canceled") {
+    return "error";
+  }
+  return "pending";
+}
+
+function planStepsFromTodos(value: unknown): PlanBlock["steps"] | null {
+  const todos = Array.isArray(value) ? value : isRecord(value) && Array.isArray(value.todos) ? value.todos : null;
+  if (!todos) {
+    return null;
+  }
+  const steps: Array<{ readonly label: string; readonly state: RunState }> = [];
+  for (const todo of todos) {
+    if (!isRecord(todo)) {
+      continue;
+    }
+    const label = firstString(todo, ["content", "step", "title", "text", "label"]);
+    if (!label) {
+      continue;
+    }
+    steps.push({ label, state: todoState(todo.status) });
+  }
+  return steps.length > 0 ? steps : null;
+}
+
+function planStepsFromText(value: string): PlanBlock["steps"] {
+  return value
+    .split(/\r?\n/)
+    .map((line) =>
+      line
+        .trim()
+        .replace(/^[-*]\s+/, "")
+        .replace(/^\d+[.)]\s+/, "")
+        .replace(/^\[[ xX-]\]\s+/, "")
+        .trim(),
+    )
+    .filter(Boolean)
+    .map((label) => ({ label, state: "pending" as const }));
+}
+
+function toolToPlanEvent(id: string | undefined, name: string, input: Record<string, unknown> | undefined): Extract<RunEvent, { type: "plan" }> | null {
+  const normalizedName = normalizedToolName(name);
+  if (normalizedName === "todowrite" || normalizedName === "todo" || normalizedName === "updatetodo" || normalizedName === "updateplan") {
+    const steps = planStepsFromTodos(input);
+    return steps ? { type: "plan", id, steps } : null;
+  }
+  if (normalizedName === "exitplanmode" || normalizedName === "plan" || normalizedName === "planpresentation") {
+    const plan = firstString(input, ["plan", "text", "content"]);
+    if (plan) {
+      return { type: "plan", id, steps: planStepsFromText(plan) };
+    }
+  }
+  return null;
+}
+
+function toolToSearchEvent(
+  id: string | undefined,
+  name: string,
+  input: Record<string, unknown> | undefined,
+  state: RunState,
+  output?: unknown,
+): Extract<RunEvent, { type: "search" }> | null {
+  const normalizedName = normalizedToolName(name);
+  if (normalizedName !== "websearch" && normalizedName !== "search" && normalizedName !== "grep" && normalizedName !== "glob" && normalizedName !== "codesearch") {
+    return null;
+  }
+  const query = firstString(input, ["query", "pattern", "url", "path", "glob"]) ?? name;
+  return { type: "search", id, query, state, results: searchResultsFromUnknown(output) };
+}
+
+function toolToOptionsEvents(id: string | undefined, name: string, input: Record<string, unknown> | undefined): Array<Extract<RunEvent, { type: "options" }>> {
+  const normalizedName = normalizedToolName(name);
+  if (normalizedName !== "askuserquestion" && normalizedName !== "question") {
+    return [];
+  }
+  const questions = input ? parseAskUserQuestionInput(input) : null;
+  if (!questions) {
+    return [];
+  }
+  return questions.map((question, index) => ({
+    type: "options",
+    id: `${id ?? "question"}:q${index}`,
+    prompt: question.question,
+    multi: question.multiSelect,
+    options: question.options.map((option) => ({
+      id: option.label,
+      label: option.label,
+      ...(option.description ? { description: option.description } : {}),
+    })),
+  }));
+}
+
+function searchResultsFromUnknown(value: unknown): SearchBlock["results"] {
+  const parsed = typeof value === "string" ? parseJsonRecord(value) ?? value : value;
+  const results: Array<{ readonly title: string; readonly url: string }> = [];
+  const visit = (item: unknown): void => {
+    if (results.length >= 6) {
+      return;
+    }
+    if (Array.isArray(item)) {
+      for (const entry of item) {
+        visit(entry);
+      }
+      return;
+    }
+    if (!isRecord(item)) {
+      return;
+    }
+    const url = firstString(item, ["url", "link", "href"]);
+    const title = firstString(item, ["title", "name", "label"]) ?? url;
+    if (url && title) {
+      results.push({ title, url });
+    }
+    for (const key of ["results", "items", "sources", "citations"]) {
+      visit(item[key]);
+    }
+  };
+  visit(parsed);
+  return results;
+}
+
+function richToolEvents(id: string | undefined, name: string, input: Record<string, unknown> | undefined, state: RunState, output?: unknown): RunEvent[] {
+  const events: RunEvent[] = [];
+  events.push(...toolToOptionsEvents(id, name, input));
+  const plan = toolToPlanEvent(id, name, input);
+  if (plan) {
+    events.push(plan);
+  }
+  const diff = state === "error" ? null : toolToDiffEvent(id, name, input);
+  if (diff) {
+    events.push(diff);
+  }
+  const search = toolToSearchEvent(id, name, input, state, output);
+  if (search) {
+    events.push(search);
+  }
+  return events;
 }
 
 function isApprovalDecision(value: unknown): value is ApprovalDecision {
@@ -2113,6 +2384,11 @@ function createBackgroundAccumulator(): BackgroundRunAccumulator {
     text: "",
     hasText: false,
     tools: [],
+    diffs: [],
+    plans: [],
+    codes: [],
+    searches: [],
+    suggested: [],
     approvals: [],
     options: [],
     statuses: [],
@@ -2136,6 +2412,15 @@ function backgroundBlocks(accumulator: BackgroundRunAccumulator): AgentBlock[] {
   for (const tool of accumulator.tools) {
     blocks.push(toolToDiffBlock(tool) ?? { kind: "tool", name: tool.name, summary: tool.summary, args: tool.args, state: tool.state, output: tool.output });
   }
+  blocks.push(...accumulator.diffs);
+  for (const plan of accumulator.plans) {
+    blocks.push({ kind: "plan", steps: plan.steps });
+  }
+  blocks.push(...accumulator.codes);
+  for (const search of accumulator.searches) {
+    blocks.push({ kind: "search", query: search.query, state: search.state, results: search.results });
+  }
+  blocks.push(...accumulator.suggested);
   for (const approval of accumulator.approvals) {
     blocks.push({ kind: "approval", id: approval.id, title: approval.title, detail: approval.detail });
   }
@@ -2436,6 +2721,47 @@ function accumulateBackgroundRunEvent(accumulator: BackgroundRunAccumulator, eve
       }
       break;
     }
+    case "diff": {
+      accumulator.started = true;
+      const block: DiffBlock = { kind: "diff", file: event.file, additions: event.additions, deletions: event.deletions, lines: event.lines };
+      const existingIndex = event.id ? accumulator.diffs.findIndex((item) => item.file === event.file) : -1;
+      if (existingIndex >= 0) {
+        accumulator.diffs[existingIndex] = block;
+      } else {
+        accumulator.diffs.push(block);
+      }
+      break;
+    }
+    case "plan": {
+      accumulator.started = true;
+      const existing = event.id ? accumulator.plans.find((item) => item.id === event.id) : undefined;
+      if (existing) {
+        existing.steps = event.steps;
+      } else {
+        accumulator.plans.push({ id: event.id, steps: event.steps });
+      }
+      break;
+    }
+    case "code":
+      accumulator.started = true;
+      accumulator.codes.push({ kind: "code", language: event.language, code: event.code });
+      break;
+    case "search": {
+      accumulator.started = true;
+      const existing = event.id ? accumulator.searches.find((item) => item.id === event.id) : accumulator.searches.find((item) => item.query === event.query);
+      if (existing) {
+        existing.query = event.query;
+        existing.state = event.state;
+        existing.results = event.results ?? existing.results;
+      } else {
+        accumulator.searches.push({ id: event.id, query: event.query, state: event.state, results: event.results ?? [] });
+      }
+      break;
+    }
+    case "suggested":
+      accumulator.started = true;
+      accumulator.suggested.push({ kind: "suggested", actions: event.actions });
+      break;
     case "approval":
       accumulator.started = true;
       accumulator.approvals.push({ id: event.id, title: event.title, detail: event.detail });
@@ -2486,7 +2812,17 @@ export function finishBackgroundRunState(state: WorkspaceState, binding: Backgro
     blocks = blocks.length === 0 ? [canceledStatusBlock] : hasCanceledStatus ? blocks : [...blocks, canceledStatusBlock];
   }
   const hadError = accumulator.statuses.some((status) => status.level === "error");
-  const hadOutput = accumulator.hasText || accumulator.hasReasoning || accumulator.tools.length > 0 || accumulator.approvals.length > 0 || accumulator.options.length > 0;
+  const hadOutput =
+    accumulator.hasText ||
+    accumulator.hasReasoning ||
+    accumulator.tools.length > 0 ||
+    accumulator.diffs.length > 0 ||
+    accumulator.plans.length > 0 ||
+    accumulator.codes.length > 0 ||
+    accumulator.searches.length > 0 ||
+    accumulator.suggested.length > 0 ||
+    accumulator.approvals.length > 0 ||
+    accumulator.options.length > 0;
   const warningOnlyFailure = accumulator.statuses.some((status) => status.level === "warn") && !hadOutput;
   const failed = hadError || warningOnlyFailure;
   const waiting = !canceled && !failed && blocksNeedInput(blocks);
@@ -2549,6 +2885,7 @@ interface StreamedTool {
 interface ClaudeStreamState {
   sawPartialAssistantContent: boolean;
   readonly toolsByIndex: Map<number, StreamedTool>;
+  readonly toolsById: Map<string, StreamedTool>;
 }
 
 function parseJsonRecord(value: string): Record<string, unknown> | null {
@@ -2565,6 +2902,26 @@ function toolRunEvent(tool: StreamedTool): Extract<RunEvent, { type: "tool" }> {
   const args = parsedInput ? toArgs(parsedInput) : tool.inputJson.trim() ? { input: clip(tool.inputJson, 160) } : {};
   const summarySource = parsedInput ? (parsedInput.command ?? parsedInput.file_path ?? "") : tool.inputJson;
   return { type: "tool", id: tool.id, name: tool.name, summary: clip(summarySource, 80), args };
+}
+
+function toolInput(tool: StreamedTool): Record<string, unknown> | undefined {
+  return tool.inputJson.trim() ? parseJsonRecord(tool.inputJson) ?? tool.input : tool.input;
+}
+
+function toolStartEvents(tool: StreamedTool, state: ClaudeStreamState): RunEvent[] {
+  state.toolsById.set(tool.id, tool);
+  const rich = richToolEvents(tool.id, tool.name, toolInput(tool), "running");
+  return rich.length > 0 ? rich : [toolRunEvent(tool)];
+}
+
+function toolResultEvents(tool: StreamedTool | undefined, id: string, ok: boolean, output: unknown): RunEvent[] {
+  if (tool) {
+    const rich = richToolEvents(id, tool.name, toolInput(tool), ok ? "ok" : "error", output);
+    if (rich.length > 0) {
+      return rich;
+    }
+  }
+  return [{ type: "tool_result", id, ok, output: resultText(output) }];
 }
 
 function approvalDetail(input: unknown): string | undefined {
@@ -2608,7 +2965,7 @@ function translateClaudeStreamEvent(msg: Record<string, unknown>, state: ClaudeS
       inputJson: "",
     };
     state.toolsByIndex.set(index, tool);
-    return [toolRunEvent(tool)];
+    return toolStartEvents(tool, state);
   }
 
   if (eventType !== "content_block_delta" || !isRecord(event.delta)) {
@@ -2629,7 +2986,7 @@ function translateClaudeStreamEvent(msg: Record<string, unknown>, state: ClaudeS
       return [];
     }
     tool.inputJson += delta.partial_json;
-    return [toolRunEvent(tool)];
+    return toolStartEvents(tool, state);
   }
 
   return [];
@@ -2662,14 +3019,21 @@ function translateClaudeMessage(msg: Record<string, unknown>, state: ClaudeStrea
       } else if (block.type === "thinking" && typeof block.thinking === "string") {
         events.push({ type: "reasoning", text: block.thinking });
       } else if (block.type === "tool_use") {
-        events.push({ type: "tool", id: String(block.id), name: String(block.name), summary: clip((block.input as Record<string, unknown>)?.command ?? (block.input as Record<string, unknown>)?.file_path ?? "", 80), args: toArgs(block.input) });
+        const tool: StreamedTool = {
+          id: String(block.id),
+          name: String(block.name),
+          input: isRecord(block.input) ? block.input : {},
+          inputJson: "",
+        };
+        events.push(...toolStartEvents(tool, state));
       }
     }
   } else if (type === "user") {
     const content = ((msg.message as { content?: unknown[] })?.content) ?? [];
     for (const block of content as Array<Record<string, unknown>>) {
       if (block.type === "tool_result") {
-        events.push({ type: "tool_result", id: String(block.tool_use_id), ok: block.is_error !== true, output: resultText(block.content) });
+        const id = String(block.tool_use_id);
+        events.push(...toolResultEvents(state.toolsById.get(id), id, block.is_error !== true, block.content));
       }
     }
   } else if (type === "result") {
@@ -2684,7 +3048,7 @@ function translateClaudeMessage(msg: Record<string, unknown>, state: ClaudeStrea
 /** Translate Claude `stream-json` lines into normalized events while preserving
  * cross-line state, which is required for partial stream deltas. */
 export function createClaudeStreamTranslator(): (line: string) => RunEvent[] {
-  const state: ClaudeStreamState = { sawPartialAssistantContent: false, toolsByIndex: new Map() };
+  const state: ClaudeStreamState = { sawPartialAssistantContent: false, toolsByIndex: new Map(), toolsById: new Map() };
   return (line: string): RunEvent[] => {
     let msg: Record<string, unknown>;
     try {
@@ -2813,7 +3177,71 @@ function commandExecutionEvents(eventType: unknown, item: Record<string, unknown
   ];
 }
 
-function codexItemEvents(msg: Record<string, unknown>): RunEvent[] {
+interface CodexStreamState {
+  readonly planTextById: Map<string, string>;
+}
+
+function planEventFromUnknown(id: string | undefined, value: unknown): Extract<RunEvent, { type: "plan" }> | null {
+  const steps = planStepsFromTodos(value);
+  if (steps) {
+    return { type: "plan", id, steps };
+  }
+  if (isRecord(value)) {
+    const nested = value.plan ?? value.todos ?? value.steps;
+    const nestedSteps = planStepsFromTodos(nested);
+    if (nestedSteps) {
+      return { type: "plan", id, steps: nestedSteps };
+    }
+    const text = firstString(value, ["plan", "text", "content", "delta", "message"]);
+    if (text) {
+      return { type: "plan", id, steps: planStepsFromText(text) };
+    }
+  }
+  if (typeof value === "string" && value.trim().length > 0) {
+    return { type: "plan", id, steps: planStepsFromText(value) };
+  }
+  return null;
+}
+
+function codexPlanDeltaEvent(msg: Record<string, unknown>, state: CodexStreamState): RunEvent[] {
+  if (msg.type !== "plan_delta" && msg.type !== "PlanDelta" && msg.type !== "plan.update") {
+    return [];
+  }
+  const id = firstString(msg, ["item_id", "itemId", "id"]) ?? "codex-plan";
+  const delta = firstString(msg, ["delta", "text", "content"]);
+  if (!delta) {
+    return [];
+  }
+  const next = `${state.planTextById.get(id) ?? ""}${delta}`;
+  state.planTextById.set(id, next);
+  const event = planEventFromUnknown(id, next);
+  return event ? [event] : [];
+}
+
+function codexPlanEvents(msg: Record<string, unknown>): RunEvent[] {
+  if (msg.type !== "plan_update" && msg.type !== "plan" && msg.type !== "update_plan" && msg.type !== "PlanUpdate") {
+    return [];
+  }
+  const event = planEventFromUnknown(firstString(msg, ["id", "item_id", "itemId"]), msg);
+  return event ? [event] : [];
+}
+
+function codexSemanticItemEvents(eventType: unknown, item: Record<string, unknown>): RunEvent[] {
+  const type = typeof item.type === "string" ? item.type : "";
+  const id = firstString(item, ["id", "call_id", "callId", "item_id", "itemId"]);
+  if (type === "plan" || type === "plan_update" || type === "todo" || type === "todo_update") {
+    const event = planEventFromUnknown(id, item);
+    return event ? [event] : [];
+  }
+  const state: RunState =
+    eventType === "item.completed" ? (String(item.status ?? "").toLowerCase() === "failed" || String(item.status ?? "").toLowerCase() === "error" ? "error" : "ok") : "running";
+  const name = firstString(item, ["name", "tool", "tool_name", "toolName"]) ?? type;
+  const input = isRecord(item.input) ? item.input : item;
+  const rich = richToolEvents(id, name, input, state, item.output ?? item.result ?? item.aggregated_output);
+  return rich;
+}
+
+function codexItemEvents(msg: Record<string, unknown>, state: CodexStreamState): RunEvent[] {
   if (msg.type !== "item.started" && msg.type !== "item.completed") {
     return [];
   }
@@ -2825,10 +3253,25 @@ function codexItemEvents(msg: Record<string, unknown>): RunEvent[] {
     const text = textFromUnknown(item);
     return text ? [{ type: "text", text }] : [];
   }
-  return commandExecutionEvents(msg.type, item);
+  const commandEvents = commandExecutionEvents(msg.type, item);
+  if (commandEvents.length > 0) {
+    return commandEvents;
+  }
+  const semanticEvents = codexSemanticItemEvents(msg.type, item);
+  if (semanticEvents.length > 0) {
+    if ((item.type === "plan" || item.type === "plan_update") && firstString(item, ["id"])) {
+      const text = firstString(item, ["text", "content", "plan"]);
+      if (text) {
+        state.planTextById.set(String(firstString(item, ["id"])), text);
+      }
+    }
+    return semanticEvents;
+  }
+  return [];
 }
 
 export function createCodexStreamTranslator(): (line: string) => RunEvent[] {
+  const state: CodexStreamState = { planTextById: new Map() };
   return (line: string): RunEvent[] => {
     let msg: unknown;
     try {
@@ -2840,9 +3283,17 @@ export function createCodexStreamTranslator(): (line: string) => RunEvent[] {
     if (!isRecord(msg)) {
       return [];
     }
-    const itemEvents = codexItemEvents(msg);
+    const itemEvents = codexItemEvents(msg, state);
     if (itemEvents.length > 0) {
       return itemEvents;
+    }
+    const planDeltaEvents = codexPlanDeltaEvent(msg, state);
+    if (planDeltaEvents.length > 0) {
+      return planDeltaEvents;
+    }
+    const planEvents = codexPlanEvents(msg);
+    if (planEvents.length > 0) {
+      return planEvents;
     }
     switch (msg.type) {
       case "turn.started":
@@ -2897,22 +3348,31 @@ function geminiToolEvents(value: unknown): RunEvent[] {
           : `gemini-tool-${index}`;
     const name = typeof tool.name === "string" && tool.name.trim().length > 0 ? tool.name : "tool";
     const summary = typeof tool.description === "string" && tool.description.trim().length > 0 ? tool.description : name;
-    events.push({
-      type: "tool",
-      id,
-      name,
-      summary: clip(summary, 80),
-      args: toArgs(tool.args),
-    });
+    const input = isRecord(tool.args) ? tool.args : undefined;
     const hasResult = tool.resultDisplay !== undefined || tool.result !== undefined || tool.output !== undefined || tool.status !== undefined;
-    if (hasResult) {
-      const status = typeof tool.status === "string" ? tool.status.toLowerCase() : "";
+    const status = typeof tool.status === "string" ? tool.status.toLowerCase() : "";
+    const ok = status !== "error" && status !== "failed" && status !== "failure";
+    const rich = richToolEvents(id, name, input, hasResult ? (ok ? "ok" : "error") : "running", tool.resultDisplay ?? tool.result ?? tool.output);
+    if (rich.length > 0) {
+      events.push(...rich);
+    } else {
       events.push({
-        type: "tool_result",
+        type: "tool",
         id,
-        ok: status !== "error" && status !== "failed" && status !== "failure",
-        output: resultText(tool.resultDisplay ?? tool.result ?? tool.output ?? ""),
+        name,
+        summary: clip(summary, 80),
+        args: toArgs(tool.args),
       });
+    }
+    if (hasResult) {
+      if (rich.length === 0) {
+        events.push({
+          type: "tool_result",
+          id,
+          ok,
+          output: resultText(tool.resultDisplay ?? tool.result ?? tool.output ?? ""),
+        });
+      }
     }
   });
   return events;
@@ -3002,6 +3462,29 @@ function opencodeToolName(part: Record<string, unknown>): string {
   return "tool";
 }
 
+function opencodeToolInput(part: Record<string, unknown>): Record<string, unknown> | undefined {
+  if (isRecord(part.input)) {
+    return part.input;
+  }
+  if (isRecord(part.args)) {
+    return part.args;
+  }
+  if (isRecord(part.state) && isRecord(part.state.input)) {
+    return part.state.input;
+  }
+  return undefined;
+}
+
+function opencodeToolOutput(part: Record<string, unknown>): unknown {
+  if (part.output !== undefined || part.result !== undefined || part.error !== undefined) {
+    return part.output ?? part.result ?? part.error;
+  }
+  if (isRecord(part.state)) {
+    return part.state.output ?? part.state.result ?? part.state.error;
+  }
+  return undefined;
+}
+
 function opencodeToolEvents(msg: Record<string, unknown>, part: Record<string, unknown>): RunEvent[] {
   const partType = typeof part.type === "string" ? part.type : "";
   if (!partType.toLowerCase().includes("tool")) {
@@ -3009,27 +3492,75 @@ function opencodeToolEvents(msg: Record<string, unknown>, part: Record<string, u
   }
   const id = opencodePartId(part, typeof msg.sessionID === "string" ? `opencode-tool-${msg.sessionID}` : "opencode-tool");
   const name = opencodeToolName(part);
-  const args = toArgs(part.input ?? part.args);
-  const status = typeof part.state === "string" ? part.state.toLowerCase() : typeof part.status === "string" ? part.status.toLowerCase() : "";
-  const events: RunEvent[] = [
-    {
-      type: "tool",
-      id,
-      name,
-      summary: clip(part.description ?? part.title ?? part.command ?? name, 80),
-      args,
-    },
-  ];
-  const output = part.output ?? part.result ?? part.error;
+  const input = opencodeToolInput(part);
+  const args = toArgs(input);
+  const stateRecord = isRecord(part.state) ? part.state : null;
+  const status =
+    typeof part.state === "string"
+      ? part.state.toLowerCase()
+      : typeof part.status === "string"
+        ? part.status.toLowerCase()
+        : typeof stateRecord?.status === "string"
+          ? stateRecord.status.toLowerCase()
+          : "";
+  const output = opencodeToolOutput(part);
+  const ok = status !== "error" && status !== "failed" && part.error === undefined;
+  const rich = richToolEvents(id, name, input, output !== undefined || status === "completed" ? (ok ? "ok" : "error") : "running", output);
+  const events: RunEvent[] =
+    rich.length > 0
+      ? [...rich]
+      : [
+          {
+            type: "tool",
+            id,
+            name,
+            summary: clip(part.description ?? part.title ?? part.command ?? name, 80),
+            args,
+          },
+        ];
   if (output !== undefined || status === "completed" || status === "error" || status === "failed") {
-    events.push({
-      type: "tool_result",
-      id,
-      ok: status !== "error" && status !== "failed" && part.error === undefined,
-      output: resultText(output ?? ""),
-    });
+    if (rich.length === 0) {
+      events.push({
+        type: "tool_result",
+        id,
+        ok,
+        output: resultText(output ?? ""),
+      });
+    }
   }
   return events;
+}
+
+function opencodeSdkEnvelope(msg: Record<string, unknown>): Record<string, unknown> | null {
+  if (msg.type === "sdk_event" && isRecord(msg.event)) {
+    return msg.event;
+  }
+  if (msg.type === "SdkEvent" && isRecord(msg.event)) {
+    return msg.event;
+  }
+  return null;
+}
+
+function opencodeTodoEvents(msg: Record<string, unknown>): RunEvent[] {
+  const envelope = opencodeSdkEnvelope(msg) ?? msg;
+  const type = typeof envelope.type === "string" ? envelope.type : "";
+  if (type !== "todo.updated" && type !== "todo_updated") {
+    return [];
+  }
+  const properties = isRecord(envelope.properties) ? envelope.properties : envelope;
+  const event = planEventFromUnknown("opencode-todo", properties);
+  return event ? [event] : [];
+}
+
+function opencodeQuestionEvents(msg: Record<string, unknown>): RunEvent[] {
+  const envelope = opencodeSdkEnvelope(msg) ?? msg;
+  const type = typeof envelope.type === "string" ? envelope.type : "";
+  if (type !== "question.asked" && type !== "question_asked") {
+    return [];
+  }
+  const properties = isRecord(envelope.properties) ? envelope.properties : envelope;
+  const id = firstString(properties, ["id", "callID", "callId"]) ?? "opencode-question";
+  return richToolEvents(id, "question", properties, "running");
 }
 
 export function createOpenCodeStreamTranslator(): (line: string) => RunEvent[] {
@@ -3043,6 +3574,14 @@ export function createOpenCodeStreamTranslator(): (line: string) => RunEvent[] {
     }
     if (!isRecord(msg)) {
       return [];
+    }
+    const todoEvents = opencodeTodoEvents(msg);
+    if (todoEvents.length > 0) {
+      return todoEvents;
+    }
+    const questionEvents = opencodeQuestionEvents(msg);
+    if (questionEvents.length > 0) {
+      return questionEvents;
     }
     const part = opencodePart(msg);
     if (part) {
@@ -3270,7 +3809,7 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
     };
 
     if (!accessModeValid) {
-      send({ type: "error", text: "Invalid accessMode. Expected read-only or read-write." });
+      send({ type: "error", text: "Invalid accessMode. Expected read-only or unrestricted." });
       finishAndEnd();
       return;
     }

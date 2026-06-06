@@ -13,7 +13,7 @@ export function TypographySection() {
         <Panel title="Масштаб">
           <Stack spacing={1.5}>
             <Typography variant="h1">Центр управления</Typography>
-            <Typography variant="h2">Release-прогоны и handoff агентов</Typography>
+            <Typography variant="h2">Release-запуски и передача агентов</Typography>
             <Typography variant="body1">
               Основной текст использует Inter. Интерфейс остаётся спокойным, чтобы monospace-акценты хорошо читались.
             </Typography>

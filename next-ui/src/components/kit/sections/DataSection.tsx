@@ -37,7 +37,7 @@ export function DataSection() {
         <Panel title="Лента событий">
           <Timeline
             items={[
-              { id: "1", status: "ok", time: "12:00", title: "Прогон стартовал" },
+              { id: "1", status: "ok", time: "12:00", title: "Запуск начался" },
               { id: "2", status: "running", time: "12:01", title: "Сборка", detail: "компилируется 1 204 модуля" },
               { id: "3", status: "warn", time: "12:05", title: "Медленный upstream" },
               { id: "4", status: "idle", time: "—", title: "Деплой", detail: "ожидает" },

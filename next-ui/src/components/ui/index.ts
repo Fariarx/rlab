@@ -17,6 +17,7 @@ export { EmptyState, type EmptyStateProps } from "./EmptyState";
 export { KeyHint } from "./KeyHint";
 export { StatusDot, type StatusDotProps } from "./StatusDot";
 export { IconButton, type IconButtonProps, type IconButtonTone } from "./IconButton";
+export { TagSelect, type TagOption } from "./TagSelect";
 
 // --- Overlays & notifications ---
 export { Toast, type ToastProps, type ToastSeverity } from "./Toast";

@@ -5,6 +5,8 @@ import RefreshIcon from "@mui/icons-material/Refresh";
 import { Box, Stack, Typography } from "@mui/material";
 import { styled } from "@mui/material/styles";
 import { type ReactNode } from "react";
+import Markdown, { type Components } from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { useI18n } from "../../i18n/I18nProvider";
 import { type StatusKey } from "../../theme/tokens";
 import { Button, IconButton, StatusDot } from "../ui";
@@ -94,15 +96,158 @@ const Caret = styled("span")(({ theme }) => ({
   animation: `${blink} 1s steps(1) infinite`,
 }));
 
+function textFromReactNode(children: ReactNode): string {
+  if (typeof children === "string" || typeof children === "number") {
+    return String(children);
+  }
+  if (Array.isArray(children)) {
+    return children.map(textFromReactNode).join("");
+  }
+  return "";
+}
+
+const markdownComponents = {
+  p({ children }) {
+    return (
+      <Typography component="p" sx={{ m: 0, color: "text.primary", fontSize: "0.9rem", lineHeight: 1.65, overflowWrap: "anywhere", wordBreak: "break-word" }}>
+        {children}
+      </Typography>
+    );
+  },
+  ol({ children }) {
+    return (
+      <Box component="ol" sx={{ m: 0, pl: 2.5, color: "text.primary", fontSize: "0.9rem", lineHeight: 1.65 }}>
+        {children}
+      </Box>
+    );
+  },
+  ul({ children }) {
+    return (
+      <Box component="ul" sx={{ m: 0, pl: 2.5, color: "text.primary", fontSize: "0.9rem", lineHeight: 1.65 }}>
+        {children}
+      </Box>
+    );
+  },
+  li({ children }) {
+    return (
+      <Box component="li" sx={{ pl: 0.25, mb: 0.5, "&:last-child": { mb: 0 } }}>
+        {children}
+      </Box>
+    );
+  },
+  strong({ children }) {
+    return (
+      <Typography component="strong" sx={{ font: "inherit", fontWeight: 700, color: "text.primary" }}>
+        {children}
+      </Typography>
+    );
+  },
+  em({ children }) {
+    return (
+      <Typography component="em" sx={{ font: "inherit", fontStyle: "italic", color: "text.primary" }}>
+        {children}
+      </Typography>
+    );
+  },
+  a({ href, children }) {
+    return (
+      <Box
+        component="a"
+        href={href}
+        target="_blank"
+        rel="noreferrer"
+        sx={{
+          color: "primary.main",
+          textDecorationColor: "currentColor",
+          textUnderlineOffset: 3,
+          "&:hover": { color: "primary.light" },
+        }}
+      >
+        {children}
+      </Box>
+    );
+  },
+  blockquote({ children }) {
+    return (
+      <Box
+        component="blockquote"
+        sx={{
+          m: 0,
+          pl: 1.5,
+          borderLeft: (t) => `2px solid ${t.palette.primary.main}`,
+          color: "text.secondary",
+        }}
+      >
+        {children}
+      </Box>
+    );
+  },
+  code({ className, children }) {
+    const match = /language-([^\s]+)/.exec(className ?? "");
+    if (match?.[1]) {
+      return <CodeBlock language={match[1]} code={textFromReactNode(children).replace(/\n$/, "")} />;
+    }
+    return (
+      <Box
+        component="code"
+        sx={{
+          px: 0.4,
+          py: 0.1,
+          borderRadius: (t) => `${t.custom.radii.sm}px`,
+          fontFamily: (t) => t.custom.fonts.mono,
+          fontSize: "0.82em",
+          color: "text.primary",
+          backgroundColor: (t) => t.custom.surfaces.s3,
+        }}
+      >
+        {children}
+      </Box>
+    );
+  },
+  pre({ children }) {
+    return <Box sx={{ my: 0.5 }}>{children}</Box>;
+  },
+  table({ children }) {
+    return (
+      <Box sx={{ overflowX: "auto" }}>
+        <Box component="table" sx={{ width: "100%", borderCollapse: "collapse", fontSize: "0.84rem", color: "text.primary" }}>
+          {children}
+        </Box>
+      </Box>
+    );
+  },
+  th({ children }) {
+    return (
+      <Box component="th" sx={{ px: 1, py: 0.75, border: (t) => `1px solid ${t.custom.borders.subtle}`, textAlign: "left", fontWeight: 700 }}>
+        {children}
+      </Box>
+    );
+  },
+  td({ children }) {
+    return (
+      <Box component="td" sx={{ px: 1, py: 0.75, border: (t) => `1px solid ${t.custom.borders.subtle}`, verticalAlign: "top" }}>
+        {children}
+      </Box>
+    );
+  },
+} satisfies Components;
+
+function MarkdownMessage({ text }: { readonly text: string }) {
+  return (
+    <Stack spacing={1} sx={{ minWidth: 0 }}>
+      <Markdown remarkPlugins={[remarkGfm]} skipHtml components={markdownComponents}>
+        {text}
+      </Markdown>
+    </Stack>
+  );
+}
+
 export function MessageText({ text, streaming }: { readonly text: string; readonly streaming?: boolean }) {
   return (
-    <Typography
-      component="div"
-      sx={{ fontSize: "0.9rem", lineHeight: 1.65, color: "text.primary", whiteSpace: "pre-line", overflowWrap: "anywhere", wordBreak: "break-word" }}
-    >
-      {text}
+    <Box sx={{ minWidth: 0 }}>
+      <MarkdownMessage text={text} />
       {streaming && <Caret />}
-    </Typography>
+    </Box>
   );
 }
 

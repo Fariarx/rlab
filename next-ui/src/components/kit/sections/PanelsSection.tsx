@@ -44,9 +44,9 @@ export function PanelsSection() {
         <Panel title="Пустое состояние">
           <EmptyState
             icon={<InboxIcon />}
-            title="Прогонов пока нет"
-            description="Запустите прогон, чтобы увидеть активность."
-            action={<Button variant="subtle" size="small">новый прогон</Button>}
+            title="Запусков пока нет"
+            description="Запустите выполнение, чтобы увидеть активность."
+            action={<Button variant="subtle" size="small">новый запуск</Button>}
           />
         </Panel>
       </Box>

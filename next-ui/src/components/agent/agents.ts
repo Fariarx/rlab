@@ -59,6 +59,14 @@ const CLAUDE_REASONING_OPTIONS = [
   { id: "xhigh", label: "Extra High", value: "xhigh" },
   { id: "max", label: "Max", value: "max" },
 ] as const;
+const CLAUDE_MODEL_OPTIONS = [
+  DEFAULT_OPTION,
+  { id: "claude-opus-4-8", label: "Opus 4.8", value: "claude-opus-4-8" },
+  { id: "claude-sonnet-4-6", label: "Sonnet 4.6", value: "claude-sonnet-4-6" },
+  { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5", value: "claude-haiku-4-5-20251001" },
+  { id: "opus", label: "Opus alias", value: "opus" },
+  { id: "sonnet", label: "Sonnet alias", value: "sonnet" },
+] as const;
 const CODEX_REASONING_OPTIONS = [
   DEFAULT_OPTION,
   { id: "low", label: "Low", value: "low" },
@@ -92,7 +100,7 @@ export const AGENTS: readonly AgentDef[] = [
     runAdapter: true,
     short: "CC",
     accent: "#D2A24C",
-    models: [DEFAULT_OPTION, { id: "sonnet", label: "Sonnet", value: "sonnet" }, { id: "opus", label: "Opus", value: "opus" }],
+    models: CLAUDE_MODEL_OPTIONS,
     reasoning: CLAUDE_REASONING_OPTIONS,
     modes: CLAUDE_MODE_OPTIONS,
   },

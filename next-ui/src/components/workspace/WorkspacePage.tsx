@@ -7,6 +7,7 @@ import FolderOutlinedIcon from "@mui/icons-material/FolderOutlined";
 import DarkModeIcon from "@mui/icons-material/DarkMode";
 import LightModeIcon from "@mui/icons-material/LightMode";
 import MenuIcon from "@mui/icons-material/Menu";
+import MenuOpenIcon from "@mui/icons-material/MenuOpen";
 import ReplayIcon from "@mui/icons-material/Replay";
 import RestartAltIcon from "@mui/icons-material/RestartAlt";
 import SearchIcon from "@mui/icons-material/Search";
@@ -25,7 +26,7 @@ import {
   Tooltip,
   Typography,
 } from "@mui/material";
-import { type DragEvent, useEffect, useRef, useState } from "react";
+import { type DragEvent, type MouseEvent as ReactMouseEvent, useEffect, useRef, useState } from "react";
 import { I18nProvider, useI18n } from "../../i18n/I18nProvider";
 import { type HashRoute } from "../../lib/use-hash-route";
 import {
@@ -62,6 +63,17 @@ import { GitPanel } from "./GitPanel";
 import { conversationProfile, type Workspace, useWorkspace } from "./use-workspace";
 
 const SIDEBAR_WIDTH = 300;
+const SIDEBAR_MIN_WIDTH = 240;
+const SIDEBAR_MAX_WIDTH = 520;
+const SIDEBAR_WIDTH_KEY = "next-ui:sidebar-width";
+
+function loadSidebarWidth(): number {
+  if (typeof window === "undefined") {
+    return SIDEBAR_WIDTH;
+  }
+  const saved = Number(window.localStorage?.getItem(SIDEBAR_WIDTH_KEY));
+  return Number.isFinite(saved) && saved >= SIDEBAR_MIN_WIDTH && saved <= SIDEBAR_MAX_WIDTH ? saved : SIDEBAR_WIDTH;
+}
 // The sidebar title bar and the chat pane header share one fixed height so the
 // two columns line up across the top.
 const HEADER_MIN_HEIGHT = 53;
@@ -72,6 +84,18 @@ const SIDEBAR_INSET = 1.5;
 // itself is full-width so its scrollbar sits at the screen edge.
 const THREAD_MAX_WIDTH = 1040;
 const THREAD_PADDING_X = { xs: 2, sm: 3 } as const;
+const WORKSPACE_ERROR_ALERT_SX = {
+  alignItems: "center",
+  "& .MuiAlert-message": {
+    display: "flex",
+    alignItems: "center",
+    minHeight: 32,
+  },
+  "& .MuiAlert-action": {
+    alignItems: "center",
+    pt: 0,
+  },
+} as const;
 
 function projectForConversation(workspace: Workspace, conversationId: string): { readonly id: string; readonly name: string } | null {
   const project = workspace.projects.find((item) => item.conversations.some((conversation) => conversation.id === conversationId));
@@ -158,6 +182,9 @@ export function WorkspacePageView({
   const [gitOpen, setGitOpen] = useState(false);
   const [mentionableFiles, setMentionableFiles] = useState<readonly string[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth);
+  const [isResizingSidebar, setIsResizingSidebar] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [runKey, setRunKey] = useState(0);
   const [paneDragDepth, setPaneDragDepth] = useState(0);
@@ -264,15 +291,22 @@ export function WorkspacePageView({
         if (conversation.status !== "waiting") {
           notifiableRuns.current.delete(conversation.id);
         }
-        const runToast = runToastForStatus(conversation.status, conversation.title, t);
-        if (runToast) {
-          toast({ ...runToast, duration: 3500 });
+        // A plain "done" on the conversation you're already looking at is just
+        // noise — you can see the result. Only surface done for background runs;
+        // keep error / needs-input notifications everywhere (they're actionable).
+        const isForeground = !composingNew && conversation.id === ws.selectedId;
+        const skip = conversation.status === "done" && isForeground;
+        if (!skip) {
+          const runToast = runToastForStatus(conversation.status, conversation.title, t);
+          if (runToast) {
+            toast({ ...runToast, duration: 3500 });
+          }
+          showDesktopNotification(ws.settings.general.desktopNotifications, runNotificationForStatus(conversation.status, conversation.title, t));
         }
-        showDesktopNotification(ws.settings.general.desktopNotifications, runNotificationForStatus(conversation.status, conversation.title, t));
       }
     }
     previousStatuses.current = nextStatuses;
-  }, [ws.chats, ws.projects, ws.settings.general.desktopNotifications, t, toast]);
+  }, [ws.chats, ws.projects, ws.selectedId, composingNew, ws.settings.general.desktopNotifications, t, toast]);
 
   const openConversation = (id: string, updateRoute = true) => {
     setComposingNew(null);
@@ -326,6 +360,32 @@ export function WorkspacePageView({
     if (!composingNew && selected) {
       ws.setConversationProfile(ws.selectedId, next);
     }
+  };
+
+  useEffect(() => {
+    try {
+      window.localStorage?.setItem(SIDEBAR_WIDTH_KEY, String(sidebarWidth));
+    } catch {
+      // Ignore storage failures (private mode, quota) — width just won't persist.
+    }
+  }, [sidebarWidth]);
+
+  const startSidebarResize = (event: ReactMouseEvent) => {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = sidebarWidth;
+    setIsResizingSidebar(true);
+    const onMove = (moveEvent: MouseEvent) => {
+      const next = Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, startWidth + (moveEvent.clientX - startX)));
+      setSidebarWidth(next);
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      setIsResizingSidebar(false);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
   };
 
   // Files can be dropped anywhere on the chat pane; the whole pane dims and the
@@ -509,7 +569,7 @@ export function WorkspacePageView({
               {t("retryWorkspaceLoad")}
             </Button>
           }
-          sx={{ maxWidth: 720 }}
+          sx={{ ...WORKSPACE_ERROR_ALERT_SX, maxWidth: 720, width: "100%" }}
         >
           {t("workspaceError", { error: ws.loadError })}
         </Alert>
@@ -523,7 +583,14 @@ export function WorkspacePageView({
         direction="row"
         sx={{ alignItems: "center", justifyContent: "space-between", px: SIDEBAR_INSET, minHeight: HEADER_MIN_HEIGHT, flex: "0 0 auto", borderBottom: (t) => `1px solid ${t.custom.borders.subtle}` }}
       >
-        <Typography sx={{ fontFamily: (t) => t.custom.fonts.mono, fontWeight: 700, fontSize: "0.9rem" }}>{t("appTitle")}</Typography>
+        <Stack direction="row" spacing={0.5} sx={{ alignItems: "center", minWidth: 0 }}>
+          <Tooltip title={t("toggleSidebar")}>
+            <IconButton aria-label={t("toggleSidebar")} onClick={() => setSidebarCollapsed(true)} sx={{ display: { xs: "none", md: "inline-flex" } }}>
+              <MenuOpenIcon sx={{ fontSize: 18 }} />
+            </IconButton>
+          </Tooltip>
+          <Typography noWrap sx={{ fontFamily: (t) => t.custom.fonts.mono, fontWeight: 700, fontSize: "0.9rem" }}>{t("appTitle")}</Typography>
+        </Stack>
         <Stack direction="row" spacing={0.25}>
           <Tooltip title={t("searchConversations")}>
             <IconButton aria-label={t("searchConversations")} onClick={() => setSearchOpen(true)}>
@@ -554,7 +621,34 @@ export function WorkspacePageView({
 
   return (
     <Box sx={{ height: "100dvh", display: "flex", overflow: "hidden", bgcolor: "background.default" }}>
-      <Box sx={{ display: { xs: "none", md: "block" }, width: SIDEBAR_WIDTH, flex: "0 0 auto", borderRight: (t) => `1px solid ${t.custom.borders.subtle}` }}>{sidebar}</Box>
+      <Box
+        sx={{
+          display: { xs: "none", md: "block" },
+          width: sidebarCollapsed ? 0 : sidebarWidth,
+          flex: "0 0 auto",
+          overflow: "hidden",
+          transition: isResizingSidebar ? "none" : "width 200ms ease",
+        }}
+      >
+        <Box sx={{ width: sidebarWidth, height: "100%" }}>{sidebar}</Box>
+      </Box>
+      {!sidebarCollapsed && (
+        <Box
+          role="separator"
+          aria-orientation="vertical"
+          aria-label={t("resizeSidebar")}
+          onMouseDown={startSidebarResize}
+          sx={{
+            display: { xs: "none", md: "block" },
+            flex: "0 0 auto",
+            width: "5px",
+            cursor: "col-resize",
+            borderLeft: (t) => `1px solid ${t.custom.borders.subtle}`,
+            transition: "background-color 120ms ease",
+            "&:hover": { backgroundColor: (t) => t.palette.status.running.soft },
+          }}
+        />
+      )}
 
       <Drawer open={drawerOpen} onClose={() => setDrawerOpen(false)} sx={{ display: { md: "none" } }} slotProps={{ paper: { sx: { width: SIDEBAR_WIDTH, backgroundImage: "none" } } }}>
         {sidebar}
@@ -610,7 +704,16 @@ export function WorkspacePageView({
             sx={{ alignItems: "center", justifyContent: "space-between", px: SIDEBAR_INSET, minHeight: HEADER_MIN_HEIGHT, borderBottom: (t) => `1px solid ${t.custom.borders.subtle}` }}
           >
             <Stack direction="row" spacing={1.5} sx={{ alignItems: "center", minWidth: 0 }}>
-              <IconButton aria-label={t("openConversations")} onClick={() => setDrawerOpen(true)} sx={{ display: { md: "none" } }}>
+              {/* Mobile: opens the drawer. Desktop: only shown to re-open a
+                  collapsed sidebar. */}
+              <IconButton
+                aria-label={t("openConversations")}
+                onClick={() => {
+                  setDrawerOpen(true);
+                  setSidebarCollapsed(false);
+                }}
+                sx={{ display: { xs: "inline-flex", md: sidebarCollapsed ? "inline-flex" : "none" } }}
+              >
                 <MenuIcon sx={{ fontSize: 20 }} />
               </IconButton>
               {selected && (
@@ -675,7 +778,7 @@ export function WorkspacePageView({
                     {t("retryWorkspaceLoad")}
                   </Button>
                 }
-                sx={{ mb: 2 }}
+                sx={{ ...WORKSPACE_ERROR_ALERT_SX, mb: 2 }}
               >
                 {t("workspaceError", { error: ws.loadError })}
               </Alert>
@@ -705,7 +808,7 @@ export function WorkspacePageView({
                   <EmptyState
                     icon={<ChatBubbleOutlineIcon />}
                     title={t("startConversation")}
-                    description={t(accessMode === "read-write" ? "messageAgentAccess" : "messageAgentReadOnlyAccess", { title: draftProject?.name ?? t("newChat") })}
+                    description={t(accessMode === "unrestricted" ? "messageAgentAccess" : "messageAgentReadOnlyAccess", { title: draftProject?.name ?? t("newChat") })}
                   />
                 </Stack>
               ) : !selected ? (
@@ -722,7 +825,7 @@ export function WorkspacePageView({
                   <EmptyState
                     icon={<ChatBubbleOutlineIcon />}
                     title={t("startConversation")}
-                    description={t(accessMode === "read-write" ? "messageAgentAccess" : "messageAgentReadOnlyAccess", { title: selected.title })}
+                    description={t(accessMode === "unrestricted" ? "messageAgentAccess" : "messageAgentReadOnlyAccess", { title: selected.title })}
                   />
                 </Stack>
               ) : (

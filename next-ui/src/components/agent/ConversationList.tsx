@@ -9,7 +9,7 @@ import { Box, Collapse, InputBase, Menu, MenuItem, Stack, Tooltip, Typography } 
 import { type KeyboardEvent, type MouseEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import { IconButton, StatusDot } from "../ui";
-import { AgentMonogram } from "./AgentMonogram";
+import { type AgentId, getAgent, withAlpha } from "./agents";
 import { rise } from "./anim";
 import { messageToPlainText } from "./message-actions";
 import { type ChatMessage, conversationStatusKey as statusToKey, type ConversationStatus, type ConversationSummary, type Project } from "./types";
@@ -30,17 +30,58 @@ export function conversationMatches(conversation: ConversationSummary, query: st
 
 // Status dots on the avatar are noise for resting conversations, so only the
 // actionable states (running / waiting / error) get one. Idle (gray) and done
-// (green) render the bare monogram.
+// (green) render the bare avatar.
 const STATUSES_WITH_DOT: ReadonlySet<ConversationStatus> = new Set<ConversationStatus>(["running", "waiting", "error"]);
+
+/** 1–2 capitalised letters derived from the conversation title. */
+function titleInitials(title: string): string {
+  const words = title.trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) {
+    return "?";
+  }
+  if (words.length === 1) {
+    return words[0].slice(0, 2).toUpperCase();
+  }
+  return `${words[0][0]}${words[1][0]}`.toUpperCase();
+}
+
+function InitialsAvatar({ title, agent }: { readonly title: string; readonly agent: AgentId }) {
+  // Initials for the label, but the tile keeps the agent's brand accent (tint +
+  // border + text) so the per-agent colour coding survives.
+  const accent = getAgent(agent).accent;
+  return (
+    <Box
+      aria-hidden
+      sx={{
+        width: 32,
+        height: 32,
+        flex: "0 0 auto",
+        borderRadius: (t) => `${t.custom.radii.sm}px`,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        backgroundColor: withAlpha(accent, 0.16),
+        border: `1px solid ${withAlpha(accent, 0.32)}`,
+        color: accent,
+        fontFamily: (t) => t.custom.fonts.mono,
+        fontSize: "0.7rem",
+        fontWeight: 700,
+        lineHeight: 1,
+      }}
+    >
+      {titleInitials(title)}
+    </Box>
+  );
+}
 
 function ConversationAvatar({ conversation }: { readonly conversation: ConversationSummary }) {
   const { conversationStatus } = useI18n();
   if (!STATUSES_WITH_DOT.has(conversation.status)) {
-    return <AgentMonogram agent={conversation.agent} size={28} />;
+    return <InitialsAvatar title={conversation.title} agent={conversation.agent} />;
   }
   return (
     <Box sx={{ position: "relative", flex: "0 0 auto" }}>
-      <AgentMonogram agent={conversation.agent} size={28} />
+      <InitialsAvatar title={conversation.title} agent={conversation.agent} />
       <Tooltip title={conversationStatus(conversation.status)}>
         <Box sx={{ position: "absolute", right: -3, bottom: -3, borderRadius: "50%", display: "flex", p: "2px", backgroundColor: (t) => t.custom.surfaces.s1 }}>
           <StatusDot status={statusToKey[conversation.status]} label={conversationStatus(conversation.status)} pulse={conversation.status === "running"} size="sm" />

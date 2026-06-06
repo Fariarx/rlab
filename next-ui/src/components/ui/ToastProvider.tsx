@@ -5,7 +5,7 @@ import { Toast, type ToastSeverity } from "./Toast";
 /**
  * ToastProvider — an imperative, queued notification system layered over the
  * kit's <Toast/> surface. MUI's Snackbar shows one message at a time with no
- * queue; this stacks them bottom-right and auto-dismisses. Mount once near the
+ * queue; this stacks them bottom-left (top on mobile) and auto-dismisses. Mount once near the
  * app root, then call `useToast()` anywhere beneath it.
  */
 export interface ToastOptions {
@@ -69,10 +69,13 @@ export function ToastProvider({ children }: { readonly children: ReactNode }) {
         spacing={1.25}
         sx={{
           position: "fixed",
-          right: 20,
-          bottom: 20,
           zIndex: (theme) => theme.zIndex.snackbar,
-          alignItems: "flex-end",
+          // Desktop: bottom-left. Mobile (narrow width): pinned to the top.
+          bottom: { xs: "auto", md: 20 },
+          top: { xs: 16, md: "auto" },
+          left: { xs: 16, md: 20 },
+          right: { xs: 16, md: "auto" },
+          alignItems: { xs: "center", md: "flex-start" },
           pointerEvents: "none",
           "& > *": { pointerEvents: "auto" },
         }}

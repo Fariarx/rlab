@@ -14,6 +14,7 @@ function Probe() {
       <div data-testid="locale">{workspace.settings.general.locale}</div>
       <div data-testid="density">{workspace.settings.appearance.density}</div>
       <div data-testid="loading">{String(workspace.loading)}</div>
+      <div data-testid="error">{workspace.loadError ?? "none"}</div>
       <div data-testid="cost">{selected?.costUsd ?? "none"}</div>
       <div data-testid="usage">{selected?.usage?.totalTokens ?? "none"}</div>
       <button type="button" onClick={() => workspace.sendMessage(workspace.selectedId, "Persist this message")}>
@@ -147,6 +148,47 @@ describe("useWorkspace", () => {
     expect(fetch).toHaveBeenCalledWith("/api/workspace", expect.objectContaining({ method: "GET" }));
   });
 
+  it("retries failed initial workspace loads every 15 seconds", async () => {
+    vi.useFakeTimers();
+    let workspaceReads = 0;
+    vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/workspace" && (!init || init.method === "GET")) {
+        workspaceReads += 1;
+        if (workspaceReads === 1) {
+          throw new TypeError("Failed to fetch");
+        }
+        return Response.json(state);
+      }
+      if (url === "/api/workspace" && init?.method === "PUT") {
+        state = JSON.parse(String(init.body)) as WorkspaceState;
+        return Response.json(state);
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    render(<Probe />);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByTestId("error")).toHaveTextContent("Failed to fetch");
+    expect(workspaceReads).toBe(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(14_999);
+    });
+    expect(workspaceReads).toBe(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+
+    expect(screen.getByText("chat-2")).toBeInTheDocument();
+    expect(screen.getByTestId("error")).toHaveTextContent("none");
+    expect(workspaceReads).toBe(2);
+  });
+
   it("persists thread changes to the server instead of localStorage", async () => {
     render(<Probe />);
 
@@ -192,7 +234,7 @@ describe("useWorkspace", () => {
       expect(runCancelRequests).toEqual([{ runId: runRequests[0]?.runId }]);
       expect(screen.getByTestId("status")).toHaveTextContent("idle");
     });
-    expect(state.chats.find((chat) => chat.id === "chat-2")?.snippet).toBe("Прогон остановлен");
+    expect(state.chats.find((chat) => chat.id === "chat-2")?.snippet).toBe("Запуск остановлен");
     expect(JSON.stringify(state.threads["chat-2"])).not.toContain("Aborted");
     activeRunController = undefined;
   });
@@ -271,7 +313,7 @@ describe("useWorkspace", () => {
     expect(screen.getByTestId("status")).toHaveTextContent("running");
     expect(state.chats.find((chat) => chat.id === "chat-2")?.activeRunId).toBe(runRequests[0]?.runId);
     expect(JSON.stringify(state.threads["chat-2"])).not.toContain("client stream disconnected");
-    expect(JSON.stringify(state.threads["chat-2"])).toContain("Прогон продолжается в фоне");
+    expect(JSON.stringify(state.threads["chat-2"])).toContain("Запуск продолжается в фоне");
 
     state = {
       ...state,
@@ -496,15 +538,17 @@ describe("useWorkspace", () => {
     expect(workspaceSavesAfterPoll).toBe(workspaceSavesAfterLoad);
   });
 
-  it("retries a user message by resending its original text", async () => {
+  it("retries a user message in place without duplicating it", async () => {
     render(<Probe />);
 
     await screen.findByText("chat-2");
     screen.getByRole("button", { name: "retry" }).click();
 
     await waitFor(() => {
+      // Re-run keeps a single copy of the user turn (the stale reply is dropped
+      // and regenerated), not a duplicate.
       const repeated = state.threads["chat-2"].filter((message) => message.text === "Собери черновик release notes для 0.1.69 по merged PR.");
-      expect(repeated).toHaveLength(2);
+      expect(repeated).toHaveLength(1);
     });
   });
 

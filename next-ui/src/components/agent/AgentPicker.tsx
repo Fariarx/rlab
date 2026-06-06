@@ -3,7 +3,7 @@ import CloseIcon from "@mui/icons-material/Close";
 import { Alert, Box, Dialog, DialogActions, Stack, Typography } from "@mui/material";
 import { useEffect, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
-import { Button, IconButton, StatusDot } from "../ui";
+import { Button, IconButton, StatusDot, TagSelect } from "../ui";
 import { AgentMonogram } from "./AgentMonogram";
 import { pop } from "./anim";
 import {
@@ -249,40 +249,7 @@ function AgentOptionGroup({
       <Typography variant="microLabel" sx={{ color: "text.secondary", display: "block", mb: 0.75 }}>
         {label}
       </Typography>
-      <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap", gap: 1 }}>
-        {options.map((option) => {
-          const on = option.id === value;
-          return (
-            <Box
-              key={option.id}
-              component="button"
-              type="button"
-              aria-pressed={on}
-              onClick={() => onSelect(option.id)}
-              sx={{
-                px: 1.25,
-                py: 0.5,
-                borderRadius: (t) => `${t.custom.radii.pill}px`,
-                cursor: "pointer",
-                font: "inherit",
-                fontFamily: (t) => t.custom.fonts.mono,
-                fontSize: "0.72rem",
-                fontWeight: 600,
-                color: (t) => (on ? t.palette.status.running.main : t.palette.text.secondary),
-                border: (t) => `1px solid ${on ? t.palette.status.running.border : t.custom.borders.subtle}`,
-                backgroundColor: (t) => (on ? t.palette.status.running.soft : t.custom.surfaces.s2),
-                transition: "all 140ms ease",
-                "&:focus-visible": {
-                  outline: (t) => `2px solid ${t.custom.borders.focus}`,
-                  outlineOffset: 2,
-                },
-              }}
-            >
-              {option.label}
-            </Box>
-          );
-        })}
-      </Stack>
+      <TagSelect value={value} options={options} onSelect={onSelect} ariaLabel={label} />
     </Box>
   );
 }

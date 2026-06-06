@@ -45,10 +45,10 @@ export function OverlaysSection() {
             <Tooltip title="Запускает активного агента">
               <Button variant="subtle">подсказка</Button>
             </Tooltip>
-            <Button variant="subtle" onClick={() => toast({ message: "Прогон поставлен в очередь · agent delta", severity: "info" })}>
+            <Button variant="subtle" onClick={() => toast({ message: "Запуск поставлен в очередь · agent delta", severity: "info" })}>
               инфо-тост
             </Button>
-            <Button variant="subtle" onClick={() => toast({ message: "Прогон упал · код выхода 1", severity: "error" })}>
+            <Button variant="subtle" onClick={() => toast({ message: "Запуск завершился с ошибкой · код выхода 1", severity: "error" })}>
               тост ошибки
             </Button>
           </Stack>
@@ -67,7 +67,7 @@ export function OverlaysSection() {
       </Stack>
 
       <Dialog open={dialogOpen} onClose={() => setDialogOpen(false)}>
-        <DialogTitle>Остановить прогон?</DialogTitle>
+        <DialogTitle>Остановить запуск?</DialogTitle>
         <DialogContent>
           <DialogContentText>Это остановит агент delta и отбросит работу в процессе.</DialogContentText>
         </DialogContent>

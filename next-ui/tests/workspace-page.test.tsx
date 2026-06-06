@@ -158,7 +158,7 @@ describe("WorkspacePage", () => {
 
     fireEvent.click(screen.getByText("Сводка incident #4127"));
 
-    expect(screen.getByRole("button", { name: "Повторить прогон" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Повторить запуск" })).toBeInTheDocument();
   });
 
   it("deletes a conversation immediately when destructive confirmations are disabled", async () => {
@@ -336,21 +336,24 @@ describe("WorkspacePage", () => {
     renderWithTheme(<WorkspacePage />);
 
     await waitFor(() => {
-      expect(screen.queryByRole("button", { name: "Остановить прогон" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Остановить запуск" })).not.toBeInTheDocument();
     });
     const input = screen.getByPlaceholderText(/^Написать:/);
     fireEvent.change(input, { target: { value: "Notify me" } });
     fireEvent.keyDown(input, { key: "Enter" });
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Остановить прогон" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Остановить запуск" })).toBeInTheDocument();
     });
+    // Switch away so the run completes in the background — a focused "done" is
+    // intentionally silent, but background completions still notify.
+    fireEvent.click(screen.getByText("Объясни auth flow"));
     activeRunController?.enqueue(new TextEncoder().encode(`${JSON.stringify({ type: "done" })}\n`));
     activeRunController?.close();
 
-    expect(await screen.findByText("Прогон завершён: Release notes для 0.1.69")).toBeInTheDocument();
+    expect(await screen.findByText("Запуск завершён: Release notes для 0.1.69")).toBeInTheDocument();
     expect(notifications).toContainEqual({
-      title: "Прогон завершён",
+      title: "Запуск завершён",
       options: { body: "Release notes для 0.1.69" },
     });
   });
@@ -401,14 +404,14 @@ describe("WorkspacePage", () => {
     renderWithTheme(<WorkspacePage />);
 
     await waitFor(() => {
-      expect(screen.queryByRole("button", { name: "Остановить прогон" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Остановить запуск" })).not.toBeInTheDocument();
     });
     const input = screen.getByPlaceholderText(/^Написать:/);
     fireEvent.change(input, { target: { value: "Ask before running tests" } });
     fireEvent.keyDown(input, { key: "Enter" });
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Остановить прогон" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Остановить запуск" })).toBeInTheDocument();
     });
 
     activeRunController?.enqueue(
@@ -433,13 +436,15 @@ describe("WorkspacePage", () => {
       );
     });
 
+    // Switch away so the post-approval completion lands in the background.
+    fireEvent.click(screen.getByText("Объясни auth flow"));
     activeRunController?.enqueue(new TextEncoder().encode(`${JSON.stringify({ type: "text", text: "done after approval" })}\n`));
     activeRunController?.enqueue(new TextEncoder().encode(`${JSON.stringify({ type: "done" })}\n`));
     activeRunController?.close();
 
-    expect(await screen.findByText("Прогон завершён: Release notes для 0.1.69")).toBeInTheDocument();
+    expect(await screen.findByText("Запуск завершён: Release notes для 0.1.69")).toBeInTheDocument();
     expect(notifications).toContainEqual({
-      title: "Прогон завершён",
+      title: "Запуск завершён",
       options: { body: "Release notes для 0.1.69" },
     });
   });
@@ -447,7 +452,7 @@ describe("WorkspacePage", () => {
   it("shows a stop button for a running conversation", () => {
     renderWithTheme(<WorkspacePage />);
 
-    expect(screen.getByRole("button", { name: "Остановить прогон" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Остановить запуск" })).toBeInTheDocument();
   });
 
   it("retries loading workspace state after a workspace API error", async () => {
@@ -472,6 +477,7 @@ describe("WorkspacePage", () => {
     renderWithTheme(<WorkspacePage />);
 
     expect(await screen.findByText("Ошибка Workspace API: Workspace load failed (503)")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveStyle({ alignItems: "center" });
     expect(screen.queryByText("Release notes для 0.1.69")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Повторить загрузку" }));

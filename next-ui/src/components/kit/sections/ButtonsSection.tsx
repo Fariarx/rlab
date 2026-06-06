@@ -11,7 +11,7 @@ export function ButtonsSection() {
         <Stack spacing={2}>
           <Stack direction="row" spacing={1.5} sx={{ flexWrap: "wrap", gap: 1.5, alignItems: "center" }}>
             <Button variant="contained" startIcon={<PlayArrowIcon />}>
-              Запустить прогон
+              Запустить
             </Button>
             <Button variant="outlined">Контурная</Button>
             <Button variant="text">Текстовая</Button>

@@ -26,8 +26,10 @@ const ShimmerText = styled("span")(({ theme }) => ({
  * otherwise a collapsed "Thought for …" summary that expands to the trace.
  */
 export function Reasoning({ block }: { readonly block: ReasoningBlock }) {
-  const [open, setOpen] = useState(block.active ?? false);
+  // Always start collapsed; only offer the toggle when there's a trace to show.
+  const [open, setOpen] = useState(false);
   const { t } = useI18n();
+  const hasBody = Boolean(block.text && block.text.trim().length > 0);
 
   return (
     <Box
@@ -41,13 +43,13 @@ export function Reasoning({ block }: { readonly block: ReasoningBlock }) {
       <Stack
         direction="row"
         spacing={1.25}
-        onClick={() => setOpen((v) => !v)}
+        onClick={hasBody ? () => setOpen((v) => !v) : undefined}
         sx={{
           alignItems: "center",
           px: 1.5,
           py: 1,
-          cursor: "pointer",
-          "&:hover": { backgroundColor: (t) => t.custom.surfaces.s3 },
+          cursor: hasBody ? "pointer" : "default",
+          ...(hasBody && { "&:hover": { backgroundColor: (t) => t.custom.surfaces.s3 } }),
         }}
       >
         <PsychologyIcon sx={{ fontSize: 16, color: "text.secondary" }} />
@@ -61,16 +63,18 @@ export function Reasoning({ block }: { readonly block: ReasoningBlock }) {
             {block.duration ? t("reasoningThoughtFor", { duration: block.duration }) : t("reasoning")}
           </Typography>
         )}
-        <KeyboardArrowDownIcon
-          sx={{
-            fontSize: 18,
-            color: "text.secondary",
-            transition: "transform 180ms ease",
-            transform: open ? "rotate(180deg)" : "none",
-          }}
-        />
+        {hasBody && (
+          <KeyboardArrowDownIcon
+            sx={{
+              fontSize: 18,
+              color: "text.secondary",
+              transition: "transform 180ms ease",
+              transform: open ? "rotate(180deg)" : "none",
+            }}
+          />
+        )}
       </Stack>
-      <Collapse in={open} unmountOnExit>
+      <Collapse in={open && hasBody} unmountOnExit>
         <Typography
           component="div"
           sx={{

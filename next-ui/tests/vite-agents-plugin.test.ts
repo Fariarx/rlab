@@ -236,6 +236,23 @@ describe("vite agents plugin", () => {
     ]);
   });
 
+  it("builds Claude args with an exact selected model ID", () => {
+    expect(buildClaudeRunArgs({ prompt: "hello", model: "claude-opus-4-8", reasoning: "high", mode: "default", accessMode: "read-only" })).toEqual([
+      "-p",
+      "hello",
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      "--include-partial-messages",
+      "--model",
+      "claude-opus-4-8",
+      "--effort",
+      "high",
+      "--permission-mode",
+      "plan",
+    ]);
+  });
+
   it("translates Claude text deltas without duplicating the final assistant message", () => {
     const translate = createClaudeStreamTranslator();
 
@@ -737,11 +754,11 @@ describe("vite agents plugin", () => {
     });
   });
 
-  it("migrates legacy read-write run requests to unrestricted access", () => {
+  it("rejects removed read-write run requests", () => {
     expect(parseRunRequestPayload(JSON.stringify({ agent: "codex", accessMode: "read-write", prompt: "hello" }))).toMatchObject({
       ok: true,
-      accessMode: "unrestricted",
-      accessModeValid: true,
+      accessMode: "read-only",
+      accessModeValid: false,
     });
   });
 
@@ -1186,12 +1203,12 @@ describe("vite agents plugin", () => {
     expect(canceledConversation).toMatchObject({
       activeRunId: undefined,
       status: "idle",
-      snippet: "Прогон остановлен",
+      snippet: "Запуск остановлен",
     });
     expect(canceledBlocks).toEqual([
       { kind: "reasoning", text: "Still running", active: false },
       { kind: "text", text: "partial", streaming: false },
-      { kind: "status", level: "warn", text: "Прогон остановлен" },
+      { kind: "status", level: "warn", text: "Запуск остановлен" },
     ]);
   });
 
@@ -1230,11 +1247,11 @@ describe("vite agents plugin", () => {
     expect(result.state.chats.find((conversation) => conversation.id === "chat-2")).toMatchObject({
       activeRunId: undefined,
       status: "idle",
-      snippet: "Прогон остановлен",
+      snippet: "Запуск остановлен",
     });
     expect(result.state.threads["chat-2"].find((message) => message.id === "a-detached")?.blocks).toEqual([
       { kind: "reasoning", text: "Still running", active: false },
-      { kind: "status", level: "warn", text: "Прогон остановлен" },
+      { kind: "status", level: "warn", text: "Запуск остановлен" },
     ]);
   });
 
@@ -1303,12 +1320,12 @@ describe("vite agents plugin", () => {
     expect(finished.chats.find((conversation) => conversation.id === "chat-2")).toMatchObject({
       activeRunId: undefined,
       status: "idle",
-      snippet: "Прогон остановлен",
+      snippet: "Запуск остановлен",
     });
     expect(blocks).toEqual([
       { kind: "reasoning", text: "Still running", active: false, duration: expect.stringMatching(/s$/) },
       { kind: "text", text: "partial", streaming: false },
-      { kind: "status", level: "warn", text: "Прогон остановлен" },
+      { kind: "status", level: "warn", text: "Запуск остановлен" },
     ]);
   });
 
@@ -1407,13 +1424,13 @@ describe("vite agents plugin", () => {
     expect(merged.threads["c-flaky"]).toEqual(serverState.threads["c-flaky"]);
   });
 
-  it("builds Claude SDK options with a live permission handler for writable runs", () => {
+  it("builds Claude SDK options with a live permission handler for unrestricted runs", () => {
     const controller = new AbortController();
     const canUseTool = (() => Promise.resolve({ behavior: "deny", message: "test" })) satisfies CanUseTool;
 
     expect(
       buildClaudeSdkOptions(
-        { agent: "claude-code", model: "default", reasoning: "default", mode: "default", prompt: "hello", accessMode: "read-write" },
+        { agent: "claude-code", model: "default", reasoning: "default", mode: "default", prompt: "hello", accessMode: "unrestricted" },
         "C:/repo",
         controller,
         canUseTool,
@@ -1424,11 +1441,15 @@ describe("vite agents plugin", () => {
       canUseTool,
       cwd: "C:/repo",
       permissionMode: "default",
+      systemPrompt: expect.objectContaining({
+        append: expect.stringContaining("AskUserQuestion"),
+      }),
+      tools: { type: "preset", preset: "claude_code" },
     });
 
     expect(
       buildClaudeSdkOptions(
-        { agent: "claude-code", model: "opus", reasoning: "max", mode: "plan", prompt: "hello", accessMode: "read-write" },
+        { agent: "claude-code", model: "opus", reasoning: "max", mode: "plan", prompt: "hello", accessMode: "unrestricted" },
         "C:/repo",
         controller,
         canUseTool,
@@ -1437,6 +1458,7 @@ describe("vite agents plugin", () => {
       effort: "max",
       model: "opus",
       permissionMode: "plan",
+      tools: ["Read", "Glob", "Grep", "LS", "AskUserQuestion"],
     });
   });
 
@@ -1547,13 +1569,13 @@ describe("vite agents plugin", () => {
     expect(reconciled.chats.find((conversation) => conversation.id === "chat-2")).toMatchObject({
       activeRunId: undefined,
       status: "error",
-      snippet: "Фоновый прогон прерван",
+      snippet: "Фоновый запуск прерван",
     });
     const staleBlocks = reconciled.threads["chat-2"].find((message) => message.id === "a-stale")?.blocks;
     expect(staleBlocks).toEqual([
       { kind: "reasoning", text: "Still thinking", active: false },
       { kind: "text", text: "partial answer", streaming: false },
-      { kind: "status", level: "error", text: "Фоновый прогон прерван" },
+      { kind: "status", level: "error", text: "Фоновый запуск прерван" },
     ]);
     expect(reconciled.projects[0]?.conversations.find((conversation) => conversation.id === "c-flaky")).toMatchObject({
       activeRunId: "run-live",
@@ -1591,7 +1613,7 @@ describe("vite agents plugin", () => {
     expect(settled.chats.find((conversation) => conversation.id === "chat-2")).toMatchObject({
       activeRunId: undefined,
       status: "error",
-      snippet: "Прогон упал",
+      snippet: "Запуск завершился с ошибкой",
     });
     expect(settled.threads["chat-2"]).toEqual(
       expect.arrayContaining([
@@ -1634,7 +1656,7 @@ describe("vite agents plugin", () => {
     expect(settled.chats.find((conversation) => conversation.id === "chat-2")).toMatchObject({
       activeRunId: undefined,
       status: "error",
-      snippet: "Прогон упал",
+      snippet: "Запуск завершился с ошибкой",
     });
     expect(settled.threads["chat-2"]).toEqual(
       expect.arrayContaining([

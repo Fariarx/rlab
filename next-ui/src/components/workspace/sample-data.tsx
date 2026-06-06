@@ -20,7 +20,7 @@ const flakyThread: readonly ChatMessage[] = [
           { label: "Воспроизвести flaky-падение", state: "ok" },
           { label: "Прочитать падающий тест", state: "ok" },
           { label: "Исправить работу с часами", state: "running" },
-          { label: "Проверить на повторных прогонах", state: "pending" },
+          { label: "Проверить на повторных запусках", state: "pending" },
         ],
       },
       { kind: "command", command: "npm test -- auth.login", state: "ok", exitCode: 0, output: "✓ auth.login (1 retry)\n1 flaky · passed on attempt 2/2" },
@@ -64,8 +64,8 @@ const flakyThread: readonly ChatMessage[] = [
         kind: "options",
         prompt: "Насколько тщательно проверить исправление?",
         options: [
-          { id: "once", label: "Один прогон", description: "Быстрая sanity-проверка." },
-          { id: "stress", label: "Стресс-прогон · 50×", description: "Подтвердить, что flake ушёл." },
+          { id: "once", label: "Один запуск", description: "Быстрая проверка работоспособности." },
+          { id: "stress", label: "Стресс-запуск · 50×", description: "Подтвердить, что нестабильность устранена." },
           { id: "ci", label: "Только CI", description: "Доверить проверку pipeline." },
         ],
       },
@@ -147,7 +147,7 @@ export const initialProjects: readonly Project[] = [
     conversations: [
       { id: "c-theme", title: "Токены dark/light темы", snippet: "Все токены перенесены", time: "Tue", status: "done", agent: "amp", profile: { agent: "amp", model: "default", reasoning: "default", mode: "default" } },
       { id: "c-virt", title: "Виртуализация списка board", snippet: "Черновик — не начато", time: "Tue", status: "idle", agent: "gemini", profile: { agent: "gemini", model: "pro", reasoning: "default", mode: "default" } },
-      { id: "c-toast", title: "Починить stacking тостов", snippet: "Build упал на CI step 3", time: "Mon", status: "error", agent: "copilot", profile: { agent: "copilot", model: "default", reasoning: "default", mode: "default" } },
+      { id: "c-toast", title: "Починить stacking тостов", snippet: "Ошибка сборки на шаге CI 3", time: "Mon", status: "error", agent: "copilot", profile: { agent: "copilot", model: "default", reasoning: "default", mode: "default" } },
     ],
   },
   {

@@ -20,7 +20,7 @@ import {
   useAgentStatus,
   useReloadAgentStatus,
 } from "../agent";
-import { Button, IconButton, StatusDot } from "../ui";
+import { Button, IconButton, StatusDot, TagSelect } from "../ui";
 
 interface SettingsDialogProps {
   readonly open: boolean;
@@ -46,43 +46,24 @@ function ProfileToggleRow({
   ariaLabel,
   options,
   value,
-  optionAriaLabel,
   onSelect,
 }: {
   readonly label: string;
   readonly ariaLabel: string;
   readonly options: readonly AgentOption[];
   readonly value: string;
-  readonly optionAriaLabel: (option: AgentOption) => string;
   readonly onSelect: (value: string) => void;
 }) {
   if (options.length <= 1) {
     return null;
   }
   return (
-    <Stack direction={{ xs: "column", sm: "row" }} spacing={1} sx={{ alignItems: { xs: "stretch", sm: "center" } }}>
-      <Typography variant="microLabel" sx={{ color: "text.secondary", minWidth: 128 }}>
+    <Box>
+      <Typography variant="microLabel" sx={{ color: "text.secondary", display: "block", mb: 0.75 }}>
         {label}
       </Typography>
-      <ToggleButtonGroup
-        exclusive
-        size="small"
-        value={value}
-        aria-label={ariaLabel}
-        onChange={(_, nextValue: string | null) => {
-          if (nextValue) {
-            onSelect(nextValue);
-          }
-        }}
-        sx={{ flexWrap: "wrap", gap: 0.75 }}
-      >
-        {options.map((option) => (
-          <ToggleButton key={option.id} value={option.id} aria-label={optionAriaLabel(option)}>
-            {option.label}
-          </ToggleButton>
-        ))}
-      </ToggleButtonGroup>
-    </Stack>
+      <TagSelect value={value} options={options} onSelect={onSelect} ariaLabel={ariaLabel} />
+    </Box>
   );
 }
 
@@ -291,22 +272,22 @@ function AgentsSection({
         title={t("agentAccessMode")}
         description={t("agentAccessModeDescription")}
         control={
-          <ToggleButtonGroup
-            exclusive
-            size="small"
+          <TagSelect
             value={accessMode}
-            onChange={(_, nextMode: AgentAccessMode | null) => {
-              if (nextMode && nextMode !== accessMode) {
-                onAccessModeChange(nextMode);
+            ariaLabel={t("agentAccessMode")}
+            options={[
+              { id: "read-only", label: t("agentReadOnly") },
+              { id: "unrestricted", label: t("agentUnrestricted") },
+            ]}
+            onSelect={(next) => {
+              if (next !== accessMode) {
+                onAccessModeChange(next as AgentAccessMode);
               }
             }}
-          >
-            <ToggleButton value="read-only">{t("agentReadOnly")}</ToggleButton>
-            <ToggleButton value="read-write">{t("agentReadWrite")}</ToggleButton>
-          </ToggleButtonGroup>
+          />
         }
       />
-      {accessMode === "read-write" && <Alert severity="warning">{t("writableBridgeHint")}</Alert>}
+      {accessMode === "unrestricted" && <Alert severity="warning">{t("unrestrictedAccessHint")}</Alert>}
       <Typography variant="body2" sx={{ color: "text.secondary", mb: 0.5 }}>
         {t("settingsAgentsHint")}
       </Typography>
@@ -401,7 +382,6 @@ function AgentsSection({
                   ariaLabel={t("defaultModelFor", { agent: a.name })}
                   options={a.models}
                   value={defaultProfile.model}
-                  optionAriaLabel={(option) => t("makeDefaultAgentModel", { agent: a.name, option: option.label })}
                   onSelect={(model) => selectDefaultProfileOption(a.id, { model })}
                 />
                 <ProfileToggleRow
@@ -409,7 +389,6 @@ function AgentsSection({
                   ariaLabel={t("defaultReasoningFor", { agent: a.name })}
                   options={a.reasoning}
                   value={defaultProfile.reasoning}
-                  optionAriaLabel={(option) => t("makeDefaultAgentReasoning", { agent: a.name, option: option.label })}
                   onSelect={(reasoning) => selectDefaultProfileOption(a.id, { reasoning })}
                 />
                 <ProfileToggleRow
@@ -417,7 +396,6 @@ function AgentsSection({
                   ariaLabel={t("defaultWorkModeFor", { agent: a.name })}
                   options={a.modes}
                   value={defaultProfile.mode}
-                  optionAriaLabel={(option) => t("makeDefaultAgentWorkMode", { agent: a.name, option: option.label })}
                   onSelect={(mode) => selectDefaultProfileOption(a.id, { mode: mode === "plan" ? "plan" : "default" })}
                 />
               </Stack>

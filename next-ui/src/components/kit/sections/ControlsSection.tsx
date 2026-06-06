@@ -33,7 +33,7 @@ export function ControlsSection() {
       <Box sx={{ display: "grid", gap: 2.5, gridTemplateColumns: { xs: "1fr", md: "1fr 1fr" } }}>
         <Panel title="Чекбоксы">
           <Stack spacing={1}>
-            <FormControlLabel control={<Checkbox defaultChecked />} label="Следить за прогоном" />
+            <FormControlLabel control={<Checkbox defaultChecked />} label="Следить за выполнением" />
             <FormControlLabel control={<Checkbox indeterminate />} label="Частичный выбор" />
             <FormControlLabel control={<Checkbox />} label="Уведомлять о падении" />
             <FormControlLabel control={<Checkbox disabled />} label="Недоступно" />

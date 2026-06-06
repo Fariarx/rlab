@@ -138,7 +138,7 @@ describe("runConversation", () => {
     const result = await runConversation({
       profile: DEFAULT_PROFILE,
       prompt: "run tests",
-      accessMode: "read-write",
+      accessMode: "unrestricted",
       locale: "ru",
       onBlocks: (nextBlocks) => blocks.push(nextBlocks),
     });
@@ -175,7 +175,7 @@ describe("runConversation", () => {
     const result = await runConversation({
       profile: DEFAULT_PROFILE,
       prompt: "choose format",
-      accessMode: "read-write",
+      accessMode: "unrestricted",
       locale: "ru",
       onBlocks: (nextBlocks) => blocks.push(nextBlocks),
     });
@@ -261,7 +261,7 @@ describe("runConversation", () => {
     });
 
     expect(result.status).toBe("error");
-    expect(result.snippet).toBe("Прогон упал");
+    expect(result.snippet).toBe("Запуск завершился с ошибкой");
   });
 
   it("returns usage from completed run events", async () => {

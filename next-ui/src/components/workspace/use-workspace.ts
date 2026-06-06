@@ -7,6 +7,8 @@ import { nowLabel, starterThread, truncate } from "./sample-data";
 import { type AppSettings, type AppSettingsPatch, type Locale, mergeAppSettings } from "./app-settings";
 import { buildInitialWorkspaceState, cloneWorkspaceState, type WorkspaceState } from "./workspace-state";
 
+const WORKSPACE_LOAD_RETRY_MS = 15_000;
+
 let idSeq = 1000;
 const nextId = (prefix: string) => `${prefix}-${++idSeq}`;
 
@@ -169,15 +171,6 @@ function projectIdFromName(name: string): string {
   return id;
 }
 
-function userMessageText(state: WorkspaceState, conversationId: string, messageId: string): string | null {
-  const message = state.threads[conversationId]?.find((item) => item.id === messageId);
-  if (message?.role !== "user") {
-    return null;
-  }
-  const text = message.text?.trim();
-  return text ? text : null;
-}
-
 function isDefaultConversationTitle(title: string | undefined): boolean {
   return title === undefined || title === translate("en", "newChat") || title === translate("ru", "newChat");
 }
@@ -230,10 +223,12 @@ class WorkspaceStore implements Workspace {
 
   private pollTimer: ReturnType<typeof setInterval> | null = null;
 
+  private loadRetryTimer: ReturnType<typeof setInterval> | null = null;
+
   private readonly runs = new Map<string, RunHandle>();
 
   constructor() {
-    makeAutoObservable<WorkspaceStore, "hydrated" | "loadSeq" | "runs" | "saveDisposer" | "pollTimer">(
+    makeAutoObservable<WorkspaceStore, "hydrated" | "loadSeq" | "runs" | "saveDisposer" | "pollTimer" | "loadRetryTimer">(
       this,
       {
         hydrated: false,
@@ -241,6 +236,7 @@ class WorkspaceStore implements Workspace {
         runs: false,
         saveDisposer: false,
         pollTimer: false,
+        loadRetryTimer: false,
       },
       { autoBind: true },
     );
@@ -293,6 +289,13 @@ class WorkspaceStore implements Workspace {
         }
       }, 2000);
     }
+    if (!this.loadRetryTimer) {
+      this.loadRetryTimer = setInterval(() => {
+        if (!this.loaded && this.loadError && !this.loading) {
+          this.reloadWorkspace();
+        }
+      }, WORKSPACE_LOAD_RETRY_MS);
+    }
     this.reloadWorkspace();
   }
 
@@ -303,6 +306,10 @@ class WorkspaceStore implements Workspace {
     if (this.pollTimer) {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
+    }
+    if (this.loadRetryTimer) {
+      clearInterval(this.loadRetryTimer);
+      this.loadRetryTimer = null;
     }
   }
 
@@ -537,10 +544,20 @@ class WorkspaceStore implements Workspace {
   }
 
   sendMessage(id: string, text: string): void {
+    const userMsg: ChatMessage = { id: nextId("u"), role: "user", text, time: nowLabel() };
+    this.setState((current) => ({
+      ...current,
+      threads: { ...current.threads, [id]: [...(current.threads[id] ?? []), userMsg] },
+    }));
+    this.runTurn(id, userMsg);
+  }
+
+  /** Run (or re-run) the agent for an existing user message in the thread. */
+  private runTurn(id: string, userMsg: ChatMessage): void {
     const conv = this.find(id);
     const profile = conversationProfile(conv);
     const isDefaultTitle = isDefaultConversationTitle(conv?.title);
-    const userMsg: ChatMessage = { id: nextId("u"), role: "user", text, time: nowLabel() };
+    const text = userMsg.text ?? "";
     const runId = nextId("run");
 
     const runningPatch: Partial<ConversationSummary> = {
@@ -553,16 +570,7 @@ class WorkspaceStore implements Workspace {
       usage: undefined,
     };
     const conversationPatch = isDefaultTitle ? { ...runningPatch, title: truncate(text, 40) } : runningPatch;
-    this.setState((current) =>
-      patchConversation(
-        {
-          ...current,
-          threads: { ...current.threads, [id]: [...(current.threads[id] ?? []), userMsg] },
-        },
-        id,
-        conversationPatch,
-      ),
-    );
+    this.setState((current) => patchConversation(current, id, conversationPatch));
 
     const aId = nextId("a");
     const agentTime = nowLabel();
@@ -667,20 +675,32 @@ class WorkspaceStore implements Workspace {
   }
 
   retryMessage(id: string, messageId: string): void {
-    const text = userMessageText(this.state, id, messageId);
-    if (text) {
-      this.sendMessage(id, text);
+    const thread = this.state.threads[id] ?? [];
+    const index = thread.findIndex((message) => message.role === "user" && message.id === messageId);
+    if (index < 0) {
+      return;
     }
+    const userMsg = thread[index];
+    // Drop everything after this user message (the stale agent reply) and re-run
+    // it in place — no duplicate user turn.
+    this.setState((current) => ({ ...current, threads: { ...current.threads, [id]: thread.slice(0, index + 1) } }));
+    this.runTurn(id, userMsg);
   }
 
   editAndResendMessage(id: string, messageId: string, text: string): void {
-    if (!userMessageText(this.state, id, messageId)) {
+    const trimmed = text.trim();
+    if (!trimmed) {
       return;
     }
-    const trimmed = text.trim();
-    if (trimmed) {
-      this.sendMessage(id, trimmed);
+    const thread = this.state.threads[id] ?? [];
+    const index = thread.findIndex((message) => message.role === "user" && message.id === messageId);
+    if (index < 0) {
+      return;
     }
+    // Replace the edited user message, drop everything after it, and re-run.
+    const userMsg: ChatMessage = { ...thread[index], text: trimmed, time: nowLabel() };
+    this.setState((current) => ({ ...current, threads: { ...current.threads, [id]: [...thread.slice(0, index), userMsg] } }));
+    this.runTurn(id, userMsg);
   }
 
   decideApproval(id: string, approvalId: string, decision: ApprovalDecision): void {

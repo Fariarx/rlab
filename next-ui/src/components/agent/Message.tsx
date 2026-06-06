@@ -1,4 +1,5 @@
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
+import DescriptionOutlinedIcon from "@mui/icons-material/DescriptionOutlined";
 import EditIcon from "@mui/icons-material/Edit";
 import ReplayIcon from "@mui/icons-material/Replay";
 import SendIcon from "@mui/icons-material/Send";
@@ -12,6 +13,59 @@ import { rise } from "./anim";
 import { type MessageActionHandlers } from "./message-actions";
 import { AgentAvatar, UserAvatar } from "./parts";
 import { type ChatMessage } from "./types";
+
+/**
+ * Split a sent user message into its visible text and the attachments that the
+ * composer appended (inline text-file blocks and path-based file links). Files
+ * are shown as compact tags instead of dumping their contents into the thread.
+ */
+function splitUserContent(raw: string): { readonly text: string; readonly attachments: readonly string[] } {
+  const names: string[] = [];
+  let text = raw.replace(/<attachment\s+name="([^"]*)"[^>]*>[\s\S]*?<\/attachment>/g, (_match, name: string) => {
+    names.push(name);
+    return "";
+  });
+  text = text.replace(/!?\[([^\]\n]+)\]\(([^)\s]+)\)/g, (whole: string, label: string, target: string) => {
+    if (/[\\/]/.test(target) || /\.[a-z0-9]{1,8}$/i.test(target)) {
+      names.push(label);
+      return "";
+    }
+    return whole;
+  });
+  return { text: text.trim(), attachments: names };
+}
+
+function MessageAttachments({ names }: { readonly names: readonly string[] }) {
+  return (
+    <Stack direction="row" sx={{ flexWrap: "wrap", gap: 0.5, justifyContent: "flex-end" }}>
+      {names.map((name, index) => (
+        <Box
+          key={`${name}-${index}`}
+          component="span"
+          sx={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 0.5,
+            maxWidth: 240,
+            px: 0.875,
+            py: 0.25,
+            borderRadius: (t) => `${t.custom.radii.pill}px`,
+            fontSize: "0.72rem",
+            fontWeight: 600,
+            color: "text.primary",
+            backgroundColor: (t) => t.custom.surfaces.s3,
+            border: (t) => `1px solid ${t.custom.borders.strong}`,
+          }}
+        >
+          <DescriptionOutlinedIcon sx={{ fontSize: 13, color: "text.secondary", flex: "0 0 auto" }} />
+          <Box component="span" sx={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {name}
+          </Box>
+        </Box>
+      ))}
+    </Stack>
+  );
+}
 
 /** Compact styling for inline message action icons (copy / retry / edit). */
 const messageActionButtonSx = { p: 0.5 } as const;
@@ -46,8 +100,9 @@ function MessageActionBar({
 }
 
 function UserMessage({ message, delay, actions }: { readonly message: ChatMessage; readonly delay: number; readonly actions?: MessageActionHandlers }) {
+  const { text: displayText, attachments } = splitUserContent(message.text ?? "");
   const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(message.text ?? "");
+  const [draft, setDraft] = useState(displayText);
   const { t } = useI18n();
 
   const submitEdit = () => {
@@ -106,20 +161,25 @@ function UserMessage({ message, delay, actions }: { readonly message: ChatMessag
             </Stack>
           </Box>
         ) : (
-          <Box
-            sx={{
-              px: 1.75,
-              py: 1.25,
-              borderRadius: (t) => `${t.custom.radii.lg}px`,
-              borderTopRightRadius: (t) => `${t.custom.radii.sm}px`,
-              backgroundColor: (t) => t.custom.surfaces.s3,
-              border: (t) => `1px solid ${t.custom.borders.subtle}`,
-            }}
-          >
-            <Typography sx={{ fontSize: "0.9rem", lineHeight: 1.6, color: "text.primary", whiteSpace: "pre-line", overflowWrap: "anywhere", wordBreak: "break-word" }}>
-              {message.text}
-            </Typography>
-          </Box>
+          <Stack spacing={0.5} sx={{ alignItems: "flex-end", minWidth: 0 }}>
+            {displayText && (
+              <Box
+                sx={{
+                  px: 1.75,
+                  py: 1.25,
+                  borderRadius: (t) => `${t.custom.radii.lg}px`,
+                  borderTopRightRadius: (t) => `${t.custom.radii.sm}px`,
+                  backgroundColor: (t) => t.custom.surfaces.s3,
+                  border: (t) => `1px solid ${t.custom.borders.subtle}`,
+                }}
+              >
+                <Typography sx={{ fontSize: "0.9rem", lineHeight: 1.6, color: "text.primary", whiteSpace: "pre-line", overflowWrap: "anywhere", wordBreak: "break-word" }}>
+                  {displayText}
+                </Typography>
+              </Box>
+            )}
+            {attachments.length > 0 && <MessageAttachments names={attachments} />}
+          </Stack>
         )}
         {message.time && (
           <Typography sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.66rem", color: "text.secondary" }}>

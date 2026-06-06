@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cloneAppSettings, defaultAppSettings, isAgentAccessMode, mergeAppSettings, normalizeAgentAccessMode } from "../src/components/workspace/app-settings";
+import { cloneAppSettings, defaultAppSettings, isAgentAccessMode, mergeAppSettings } from "../src/components/workspace/app-settings";
 
 describe("app settings", () => {
   it("uses unrestricted as the writable access mode", () => {
@@ -8,14 +8,13 @@ describe("app settings", () => {
     expect(isAgentAccessMode("read-write")).toBe(false);
   });
 
-  it("migrates legacy read-write access settings to unrestricted", () => {
-    expect(normalizeAgentAccessMode("read-write")).toBe("unrestricted");
+  it("clones and merges unrestricted access settings", () => {
     expect(
       cloneAppSettings({
         ...defaultAppSettings,
-        agents: { ...defaultAppSettings.agents, accessMode: "read-write" },
+        agents: { ...defaultAppSettings.agents, accessMode: "unrestricted" },
       }).agents.accessMode,
     ).toBe("unrestricted");
-    expect(mergeAppSettings(defaultAppSettings, { agents: { accessMode: "read-write" } }).agents.accessMode).toBe("unrestricted");
+    expect(mergeAppSettings(defaultAppSettings, { agents: { accessMode: "unrestricted" } }).agents.accessMode).toBe("unrestricted");
   });
 });

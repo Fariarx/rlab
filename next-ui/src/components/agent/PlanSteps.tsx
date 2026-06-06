@@ -26,7 +26,9 @@ export function PlanSteps({ block }: { readonly block: PlanBlock }) {
                 <Box sx={{ width: 18, height: 18, display: "flex", alignItems: "center", justifyContent: "center", mt: "1px" }}>
                   <RunIndicator state={step.state} />
                 </Box>
-                {!isLast && <Box sx={{ width: 1, flex: 1, minHeight: 14, my: 0.25, backgroundColor: (t) => t.custom.borders.subtle }} />}
+                {/* `width: "2px"` (string), not `1` — MUI treats numeric width ≤ 1
+                    as a percentage, which rendered the rail as a square block. */}
+                {!isLast && <Box sx={{ width: "2px", flex: 1, minHeight: 14, my: 0.25, borderRadius: "1px", backgroundColor: (t) => t.custom.borders.strong }} />}
               </Stack>
               <Typography
                 sx={{

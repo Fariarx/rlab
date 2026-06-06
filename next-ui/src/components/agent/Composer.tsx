@@ -6,11 +6,14 @@ import ImageOutlinedIcon from "@mui/icons-material/ImageOutlined";
 import SendIcon from "@mui/icons-material/Send";
 import StopCircleIcon from "@mui/icons-material/StopCircle";
 import TuneRoundedIcon from "@mui/icons-material/TuneRounded";
-import { Box, Divider, InputBase, Menu, MenuItem, Stack, Switch, type SxProps, type Theme, Typography } from "@mui/material";
-import { type ChangeEvent, forwardRef, type KeyboardEvent, type MouseEvent, type ReactNode, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Box, InputBase, Menu, MenuItem, Stack, Switch, type SxProps, type Theme, Typography } from "@mui/material";
+import { type ChangeEvent, type ClipboardEvent, forwardRef, type KeyboardEvent, type MouseEvent, type ReactNode, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import { Button, IconButton, KeyHint } from "../ui";
 import { type ComposerAttachmentDraft, type ComposerDraft } from "./types";
+
+/** Pastes longer than this become a text-file attachment instead of flooding the input. */
+const PASTE_AS_FILE_CHARS = 1500;
 
 interface SlashCommand {
   readonly id: string;
@@ -348,6 +351,14 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     await addFiles(files);
   };
 
+  const handlePaste = (event: ClipboardEvent<HTMLDivElement>) => {
+    const pasted = event.clipboardData?.getData("text/plain") ?? "";
+    if (pasted.length > PASTE_AS_FILE_CHARS) {
+      event.preventDefault();
+      void addFiles([new File([pasted], `pasted-${pasted.length}.txt`, { type: "text/plain" })]);
+    }
+  };
+
   // The whole chat pane is the drop zone (see WorkspacePage); it hands dropped
   // files here through this imperative handle.
   useImperativeHandle(ref, () => ({ addFiles }), [addFiles]);
@@ -462,12 +473,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             <AttachFileIcon sx={{ fontSize: 16, color: "text.secondary" }} />
             <Box component="span">{t("attach")}</Box>
           </MenuItem>
-          {modes.length > 0 && <Divider sx={{ my: 0.25 }} />}
           {modes.map((mode) => (
             <MenuItem key={mode.id} onClick={() => onModeChange?.(mode.id === activeMode ? "default" : mode.id)} sx={{ gap: 1, fontSize: "0.8rem", minHeight: 0 }}>
               <AutoAwesomeRoundedIcon sx={{ fontSize: 15, color: "text.secondary" }} />
               <Box component="span" sx={{ flex: 1, minWidth: 84 }}>{mode.label}</Box>
-              <Switch size="small" edge="end" checked={mode.id === activeMode} onChange={() => undefined} tabIndex={-1} sx={{ pointerEvents: "none", ml: 0.5 }} />
+              <Switch size="small" checked={mode.id === activeMode} onChange={() => undefined} tabIndex={-1} sx={{ pointerEvents: "none" }} />
             </MenuItem>
           ))}
         </Menu>
@@ -517,6 +527,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             value={composerValue}
             onChange={(event) => setComposerValue(event.target.value)}
             onKeyDown={handleKeyDown}
+            onPaste={handlePaste}
             placeholder={placeholder}
             multiline
             minRows={1}

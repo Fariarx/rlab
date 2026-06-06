@@ -1,4 +1,4 @@
-import { type AgentBlock, type AgentProfile, type DiffBlock, type RunUsage } from "../agent";
+import { type AgentBlock, type AgentProfile, type CodeBlockData, type DiffBlock, type PlanBlock, type RunState, type RunUsage, type SearchBlock, type SuggestedActionsBlock } from "../agent";
 import { translate } from "../../i18n/I18nProvider";
 import { type Locale } from "./app-settings";
 import { type AgentAccessMode } from "./app-settings";
@@ -10,6 +10,11 @@ type RunEvent =
   | { type: "text"; text: string }
   | { type: "tool"; id: string; name: string; summary?: string; args?: Record<string, string> }
   | { type: "tool_result"; id: string; ok: boolean; output: string }
+  | { type: "diff"; id?: string; file: string; additions: number; deletions: number; lines: DiffBlock["lines"] }
+  | { type: "plan"; id?: string; steps: PlanBlock["steps"] }
+  | { type: "code"; language: string; code: string }
+  | { type: "search"; id?: string; query: string; state: RunState; results?: SearchBlock["results"] }
+  | { type: "suggested"; actions: SuggestedActionsBlock["actions"] }
   | { type: "approval"; id: string; title: string; detail?: string }
   | { type: "options"; id: string; prompt: string; multi?: boolean; options: ReadonlyArray<{ readonly id: string; readonly label: string; readonly description?: string }> }
   | { type: "status"; level: "info" | "ok" | "warn" | "error"; text: string }
@@ -30,6 +35,18 @@ type StreamingTool = {
   args?: Record<string, string>;
   state: "running" | "ok" | "error";
   output?: string;
+};
+
+type StreamingSearch = {
+  id?: string;
+  query: string;
+  state: RunState;
+  results: SearchBlock["results"];
+};
+
+type StreamingPlan = {
+  id?: string;
+  steps: PlanBlock["steps"];
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -198,6 +215,11 @@ export async function runConversation(opts: {
   let text = "";
   let hasText = false;
   const tools: StreamingTool[] = [];
+  const diffs: DiffBlock[] = [];
+  const plans: StreamingPlan[] = [];
+  const codes: CodeBlockData[] = [];
+  const searches: StreamingSearch[] = [];
+  const suggested: SuggestedActionsBlock[] = [];
   const approvals: Array<{ id: string; title: string; detail?: string }> = [];
   const options: Array<{ id: string; prompt: string; multi?: boolean; options: ReadonlyArray<{ readonly id: string; readonly label: string; readonly description?: string }> }> = [];
   const statuses: Array<{ level: "warn" | "error"; text: string }> = [];
@@ -219,6 +241,15 @@ export async function runConversation(opts: {
     for (const t of tools) {
       blocks.push(toolToDiffBlock(t) ?? { kind: "tool", name: t.name, summary: t.summary, args: t.args, state: t.state, output: t.output });
     }
+    blocks.push(...diffs);
+    for (const plan of plans) {
+      blocks.push({ kind: "plan", steps: plan.steps });
+    }
+    blocks.push(...codes);
+    for (const search of searches) {
+      blocks.push({ kind: "search", query: search.query, state: search.state, results: search.results });
+    }
+    blocks.push(...suggested);
     for (const approval of approvals) {
       blocks.push({ kind: "approval", id: approval.id, title: approval.title, detail: approval.detail });
     }
@@ -272,6 +303,52 @@ export async function runConversation(opts: {
         opts.onBlocks(rebuild());
         break;
       }
+      case "diff": {
+        started = true;
+        const block: DiffBlock = { kind: "diff", file: e.file, additions: e.additions, deletions: e.deletions, lines: e.lines };
+        const existingIndex = diffs.findIndex((item) => item.file === e.file);
+        if (existingIndex >= 0) {
+          diffs[existingIndex] = block;
+        } else {
+          diffs.push(block);
+        }
+        opts.onBlocks(rebuild());
+        break;
+      }
+      case "plan": {
+        started = true;
+        const existing = e.id ? plans.find((item) => item.id === e.id) : undefined;
+        if (existing) {
+          existing.steps = e.steps;
+        } else {
+          plans.push({ id: e.id, steps: e.steps });
+        }
+        opts.onBlocks(rebuild());
+        break;
+      }
+      case "code":
+        started = true;
+        codes.push({ kind: "code", language: e.language, code: e.code });
+        opts.onBlocks(rebuild());
+        break;
+      case "search": {
+        started = true;
+        const existing = e.id ? searches.find((item) => item.id === e.id) : searches.find((item) => item.query === e.query);
+        if (existing) {
+          existing.query = e.query;
+          existing.state = e.state;
+          existing.results = e.results ?? existing.results;
+        } else {
+          searches.push({ id: e.id, query: e.query, state: e.state, results: e.results ?? [] });
+        }
+        opts.onBlocks(rebuild());
+        break;
+      }
+      case "suggested":
+        started = true;
+        suggested.push({ kind: "suggested", actions: e.actions });
+        opts.onBlocks(rebuild());
+        break;
       case "approval":
         started = true;
         approvals.push({ id: e.id, title: e.title, detail: e.detail });
@@ -355,7 +432,17 @@ export async function runConversation(opts: {
   opts.onBlocks(finalBlocks);
 
   const hadError = statuses.some((s) => s.level === "error");
-  const hadOutput = hasText || hasReasoning || tools.length > 0 || approvals.length > 0 || options.length > 0;
+  const hadOutput =
+    hasText ||
+    hasReasoning ||
+    tools.length > 0 ||
+    diffs.length > 0 ||
+    plans.length > 0 ||
+    codes.length > 0 ||
+    searches.length > 0 ||
+    suggested.length > 0 ||
+    approvals.length > 0 ||
+    options.length > 0;
   const warningOnlyFailure = statuses.some((s) => s.level === "warn") && !hadOutput;
   const needsInput = approvals.length > 0 || options.length > 0;
   const status = hadError || warningOnlyFailure ? "error" : needsInput ? "waiting" : "done";

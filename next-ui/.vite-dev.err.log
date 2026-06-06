@@ -1,150 +1,59 @@
-[2m17:24:58[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.
-[2m17:32:31[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.
-[2m17:32:50[22m [31m[1m[vite][22m[39m [31mInternal server error: Transform failed with 1 error:
+[2m19:03:43[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.
+[2m19:05:03[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.
+[2m19:06:33[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22mThe final argument passed to useEffect changed size between renders. The order and size of this array must remain constant.
 
-[31m[PARSE_ERROR] [0mExpected `)` but found `EOF`
-     [38;5;246m╭[0m[38;5;246m─[0m[38;5;246m[[0m src/components/agent/Composer.tsx:620:3 [38;5;246m][0m
-     [38;5;246m│[0m
- [38;5;246m620 │[0m [38;5;249m}[0m
- [38;5;240m    │[0m   │ 
- [38;5;240m    │[0m   ╰─ `)` expected
-[38;5;246m─────╯[0m
-[39m
-  Plugin: [35mvite:oxc[39m
-  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/agent/Composer.tsx[39m
-      at transformWithOxc (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:3344:19)
-      at TransformPluginContext.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:3415:26)
-      at EnvironmentPluginContainer.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30387:51)
-      at async loadAndTransform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24646:26)
-      at async viteTransformMiddleware (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24440:20)
-[2m17:32:50[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22m[vite] Failed to reload /src/components/agent/Composer.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above)
-[2m17:32:50[22m [31m[1m[vite][22m[39m [31mInternal server error: Transform failed with 1 error:
-
-[31m[PARSE_ERROR] [0mExpected `)` but found `EOF`
-     [38;5;246m╭[0m[38;5;246m─[0m[38;5;246m[[0m src/components/agent/Composer.tsx:620:3 [38;5;246m][0m
-     [38;5;246m│[0m
- [38;5;246m620 │[0m [38;5;249m}[0m
- [38;5;240m    │[0m   │ 
- [38;5;240m    │[0m   ╰─ `)` expected
-[38;5;246m─────╯[0m
-[39m
-  Plugin: [35mvite:oxc[39m
-  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/agent/Composer.tsx[39m
-      at transformWithOxc (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:3344:19)
-      at TransformPluginContext.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:3415:26)
-      at EnvironmentPluginContainer.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30387:51)
-      at async loadAndTransform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24646:26)
-      at async viteTransformMiddleware (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24440:20)
-[2m17:32:50[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22m[vite] Failed to reload /src/components/agent/Composer.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above)
-[2m17:33:12[22m [31m[1m[vite][22m[39m [31mInternal server error: Transform failed with 1 error:
-
-[31m[PARSE_ERROR] [0mExpected `)` but found `EOF`
-     [38;5;246m╭[0m[38;5;246m─[0m[38;5;246m[[0m src/components/agent/Composer.tsx:592:3 [38;5;246m][0m
-     [38;5;246m│[0m
- [38;5;246m592 │[0m [38;5;249m}[0m
- [38;5;240m    │[0m   │ 
- [38;5;240m    │[0m   ╰─ `)` expected
-[38;5;246m─────╯[0m
-[39m
-  Plugin: [35mvite:oxc[39m
-  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/agent/Composer.tsx[39m
-      at transformWithOxc (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:3344:19)
-      at TransformPluginContext.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:3415:26)
-      at EnvironmentPluginContainer.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30387:51)
-      at async loadAndTransform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24646:26)
-      at async viteTransformMiddleware (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24440:20)
-[2m17:33:12[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22m[vite] Failed to reload /src/components/agent/Composer.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above)
-[2m17:33:12[22m [31m[1m[vite][22m[39m [31mInternal server error: Transform failed with 1 error:
-
-[31m[PARSE_ERROR] [0mExpected `)` but found `EOF`
-     [38;5;246m╭[0m[38;5;246m─[0m[38;5;246m[[0m src/components/agent/Composer.tsx:592:3 [38;5;246m][0m
-     [38;5;246m│[0m
- [38;5;246m592 │[0m [38;5;249m}[0m
- [38;5;240m    │[0m   │ 
- [38;5;240m    │[0m   ╰─ `)` expected
-[38;5;246m─────╯[0m
-[39m
-  Plugin: [35mvite:oxc[39m
-  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/agent/Composer.tsx[39m
-      at transformWithOxc (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:3344:19)
-      at TransformPluginContext.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:3415:26)
-      at EnvironmentPluginContainer.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30387:51)
-      at async loadAndTransform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24646:26)
-      at async viteTransformMiddleware (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24440:20)
-[2m17:33:12[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22m[vite] Failed to reload /src/components/agent/Composer.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above)
-[2m17:33:20[22m [31m[1m[vite][22m[39m [31mInternal server error: Transform failed with 1 error:
-
-[31m[PARSE_ERROR] [0mExpected `)` but found `EOF`
-     [38;5;246m╭[0m[38;5;246m─[0m[38;5;246m[[0m src/components/agent/Composer.tsx:590:3 [38;5;246m][0m
-     [38;5;246m│[0m
- [38;5;246m590 │[0m [38;5;249m}[0m
- [38;5;240m    │[0m   │ 
- [38;5;240m    │[0m   ╰─ `)` expected
-[38;5;246m─────╯[0m
-[39m
-  Plugin: [35mvite:oxc[39m
-  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/agent/Composer.tsx[39m
-      at transformWithOxc (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:3344:19)
-      at TransformPluginContext.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:3415:26)
-      at EnvironmentPluginContainer.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30387:51)
-      at async loadAndTransform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24646:26)
-[2m17:33:20[22m [31m[1m[vite][22m[39m [31mInternal server error: Transform failed with 1 error:
-
-[31m[PARSE_ERROR] [0mExpected `)` but found `EOF`
-     [38;5;246m╭[0m[38;5;246m─[0m[38;5;246m[[0m src/components/agent/Composer.tsx:590:3 [38;5;246m][0m
-     [38;5;246m│[0m
- [38;5;246m590 │[0m [38;5;249m}[0m
- [38;5;240m    │[0m   │ 
- [38;5;240m    │[0m   ╰─ `)` expected
-[38;5;246m─────╯[0m
-[39m
-  Plugin: [35mvite:oxc[39m
-  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/agent/Composer.tsx[39m
-      at transformWithOxc (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:3344:19)
-      at TransformPluginContext.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:3415:26)
-      at EnvironmentPluginContainer.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30387:51)
-      at async loadAndTransform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24646:26)
-[2m17:33:20[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22m[vite] Failed to reload /src/components/agent/Composer.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above)
-[2m17:33:20[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22m[vite] Failed to reload /src/components/agent/Composer.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above)
-[2m17:34:32[22m [31m[1m[vite][22m[39m [31mInternal server error: Transform failed with 1 error:
-
-[31m[PARSE_ERROR] [0mExpected `)` but found `EOF`
-     [38;5;246m╭[0m[38;5;246m─[0m[38;5;246m[[0m src/components/agent/Composer.tsx:566:3 [38;5;246m][0m
-     [38;5;246m│[0m
- [38;5;246m566 │[0m [38;5;249m}[0m
- [38;5;240m    │[0m   │ 
- [38;5;240m    │[0m   ╰─ `)` expected
-[38;5;246m─────╯[0m
-[39m
-  Plugin: [35mvite:oxc[39m
-  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/agent/Composer.tsx[39m
-      at transformWithOxc (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:3344:19)
-      at TransformPluginContext.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:3415:26)
-      at EnvironmentPluginContainer.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30387:51)
-      at async loadAndTransform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24646:26)
-      at async viteTransformMiddleware (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24440:20)
-[2m17:34:32[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22m[vite] Failed to reload /src/components/agent/Composer.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above)
-[2m17:34:33[22m [31m[1m[vite][22m[39m [31mInternal server error: Transform failed with 1 error:
-
-[31m[PARSE_ERROR] [0mExpected `)` but found `EOF`
-     [38;5;246m╭[0m[38;5;246m─[0m[38;5;246m[[0m src/components/agent/Composer.tsx:566:3 [38;5;246m][0m
-     [38;5;246m│[0m
- [38;5;246m566 │[0m [38;5;249m}[0m
- [38;5;240m    │[0m   │ 
- [38;5;240m    │[0m   ╰─ `)` expected
-[38;5;246m─────╯[0m
-[39m
-  Plugin: [35mvite:oxc[39m
-  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/agent/Composer.tsx[39m
-      at transformWithOxc (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:3344:19)
-      at TransformPluginContext.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:3415:26)
-      at EnvironmentPluginContainer.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30387:51)
-      at async loadAndTransform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24646:26)
-      at async viteTransformMiddleware (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24440:20)
-[2m17:34:33[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22m[vite] Failed to reload /src/components/agent/Composer.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above)
-[2m17:36:04[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.
-[2m17:36:08[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.
-[2m17:38:38[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.
-[2m17:38:43[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.
-[2m17:50:43[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.
-[2m17:52:42[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.
+Previous: [[object Object],[object Object],[object Object],[object Object],[object Object],[object Object], [object Object],[object Object],[object Object], true, (key, params) => translate(locale, key, params), (options) => {
+		toastSeq += 1;
+		const id = `toast-${toastSeq}`;
+		setToasts((current) => [...current, {
+			...options,
+			id
+		}]);
+		const duration = options.duration ?? 5e3;
+		if (duration > 0) {
+			timers.current.set(id, setTimeout(() => dismiss(id), duration));
+		}
+		return id;
+	}]
+Incoming: [[object Object],[object Object],[object Object],[object Object],[object Object],[object Object], [object Object],[object Object],[object Object], chat-1001, , true, (key, params) => translate(locale, key, params), (options) => {
+		toastSeq += 1;
+		const id = `toast-${toastSeq}`;
+		setToasts((current) => [...current, {
+			...options,
+			id
+		}]);
+		const duration = options.duration ?? 5e3;
+		if (duration > 0) {
+			timers.current.set(id, setTimeout(() => dismiss(id), duration));
+		}
+		return id;
+	}]
+[2m19:08:48[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.
+[2m19:08:59[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.
+[2m19:18:30[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.
+[2m19:19:27[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.
+[2m19:20:13[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22mEncountered two children with the same key, `u-1001`. Keys should be unique so that components maintain their identity across updates. Non-unique keys may cause children to be duplicated and/or omitted — the behavior is unsupported and could change in a future version.
+[2m19:20:13[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22mEncountered two children with the same key, `u-1001`. Keys should be unique so that components maintain their identity across updates. Non-unique keys may cause children to be duplicated and/or omitted — the behavior is unsupported and could change in a future version.
+[2m19:20:14[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22mEncountered two children with the same key, `u-1001`. Keys should be unique so that components maintain their identity across updates. Non-unique keys may cause children to be duplicated and/or omitted — the behavior is unsupported and could change in a future version.
+[2m19:20:21[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22mEncountered two children with the same key, `u-1001`. Keys should be unique so that components maintain their identity across updates. Non-unique keys may cause children to be duplicated and/or omitted — the behavior is unsupported and could change in a future version.
+[2m19:20:23[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22mEncountered two children with the same key, `u-1001`. Keys should be unique so that components maintain their identity across updates. Non-unique keys may cause children to be duplicated and/or omitted — the behavior is unsupported and could change in a future version.
+[2m19:20:23[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22mEncountered two children with the same key, `u-1001`. Keys should be unique so that components maintain their identity across updates. Non-unique keys may cause children to be duplicated and/or omitted — the behavior is unsupported and could change in a future version.
+[2m19:20:29[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22mEncountered two children with the same key, `u-1001`. Keys should be unique so that components maintain their identity across updates. Non-unique keys may cause children to be duplicated and/or omitted — the behavior is unsupported and could change in a future version.
+[2m19:20:29[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22mEncountered two children with the same key, `u-1001`. Keys should be unique so that components maintain their identity across updates. Non-unique keys may cause children to be duplicated and/or omitted — the behavior is unsupported and could change in a future version.
+[2m19:20:29[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22mEncountered two children with the same key, `u-1001`. Keys should be unique so that components maintain their identity across updates. Non-unique keys may cause children to be duplicated and/or omitted — the behavior is unsupported and could change in a future version.
+[2m19:20:35[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22mEncountered two children with the same key, `u-1001`. Keys should be unique so that components maintain their identity across updates. Non-unique keys may cause children to be duplicated and/or omitted — the behavior is unsupported and could change in a future version.
+[2m19:20:35[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22mEncountered two children with the same key, `u-1001`. Keys should be unique so that components maintain their identity across updates. Non-unique keys may cause children to be duplicated and/or omitted — the behavior is unsupported and could change in a future version.
+[2m19:20:35[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22mEncountered two children with the same key, `u-1001`. Keys should be unique so that components maintain their identity across updates. Non-unique keys may cause children to be duplicated and/or omitted — the behavior is unsupported and could change in a future version.
+[2m19:20:41[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22mEncountered two children with the same key, `u-1001`. Keys should be unique so that components maintain their identity across updates. Non-unique keys may cause children to be duplicated and/or omitted — the behavior is unsupported and could change in a future version.
+[2m19:20:41[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22mEncountered two children with the same key, `u-1001`. Keys should be unique so that components maintain their identity across updates. Non-unique keys may cause children to be duplicated and/or omitted — the behavior is unsupported and could change in a future version.
+[2m19:20:43[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22mEncountered two children with the same key, `u-1001`. Keys should be unique so that components maintain their identity across updates. Non-unique keys may cause children to be duplicated and/or omitted — the behavior is unsupported and could change in a future version.
+[2m19:20:48[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22mEncountered two children with the same key, `u-1001`. Keys should be unique so that components maintain their identity across updates. Non-unique keys may cause children to be duplicated and/or omitted — the behavior is unsupported and could change in a future version.
+[2m19:20:49[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22mEncountered two children with the same key, `u-1001`. Keys should be unique so that components maintain their identity across updates. Non-unique keys may cause children to be duplicated and/or omitted — the behavior is unsupported and could change in a future version.
+[2m19:20:49[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22mEncountered two children with the same key, `u-1001`. Keys should be unique so that components maintain their identity across updates. Non-unique keys may cause children to be duplicated and/or omitted — the behavior is unsupported and could change in a future version.
+[2m19:23:06[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.
+[2m19:24:05[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.
+[2m19:26:48[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.
+[2m19:26:48[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.
+[2m19:26:57[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.
+[2m19:27:36[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.
+[2m19:27:52[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.
