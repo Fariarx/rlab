@@ -1,18 +1,20 @@
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import DescriptionOutlinedIcon from "@mui/icons-material/DescriptionOutlined";
 import EditIcon from "@mui/icons-material/Edit";
+import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
+import PsychologyIcon from "@mui/icons-material/Psychology";
 import ReplayIcon from "@mui/icons-material/Replay";
 import SendIcon from "@mui/icons-material/Send";
 import CloseIcon from "@mui/icons-material/Close";
-import { Box, Stack, Typography } from "@mui/material";
+import { Box, Collapse, Stack, Typography } from "@mui/material";
 import { type ChangeEvent, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import { Button, IconButton, Tooltip } from "../ui";
 import { AgentBlockRenderer } from "./AgentBlockRenderer";
 import { rise } from "./anim";
 import { type MessageActionHandlers } from "./message-actions";
-import { AgentAvatar, UserAvatar } from "./parts";
-import { type ChatMessage } from "./types";
+import { AgentAvatar, TypingDots, UserAvatar } from "./parts";
+import { type AgentBlock, type ChatMessage } from "./types";
 
 /**
  * Split a sent user message into its visible text and the attachments that the
@@ -217,8 +219,65 @@ function UserMessage({ message, delay, actions }: { readonly message: ChatMessag
   );
 }
 
+// The agent's actual reply / things the user must act on stay visible; all the
+// intermediate work (reasoning, tool calls, commands, diffs, searches, plans,
+// code, status, citations) is folded into one collapsed container.
+const ANSWER_BLOCK_KINDS: ReadonlySet<AgentBlock["kind"]> = new Set(["text", "options", "approval", "suggested"]);
+
+/** Collapsed-by-default container holding an agent turn's intermediate work, so
+ *  threads stay readable — only the answer and the (collapsed) details show. */
+function AgentDetails({ blocks, actions }: { readonly blocks: readonly AgentBlock[]; readonly actions?: MessageActionHandlers }) {
+  const [open, setOpen] = useState(false);
+  const { t } = useI18n();
+  const reasoning = blocks.find((block) => block.kind === "reasoning");
+  const reasoningDuration = reasoning?.kind === "reasoning" ? reasoning.duration : undefined;
+  const active = blocks.some((block) => block.kind === "reasoning" && block.active);
+
+  return (
+    <Box sx={{ borderRadius: (t) => `${t.custom.radii.md}px`, border: (t) => `1px dashed ${t.custom.borders.subtle}`, backgroundColor: (t) => t.custom.surfaces.s1, overflow: "hidden" }}>
+      <Stack
+        direction="row"
+        spacing={1.25}
+        onClick={() => setOpen((value) => !value)}
+        sx={{ alignItems: "center", px: 1.5, py: 1, cursor: "pointer", "&:hover": { backgroundColor: (t) => t.custom.surfaces.s3 } }}
+      >
+        <PsychologyIcon sx={{ fontSize: 16, color: "text.secondary" }} />
+        <Typography variant="microLabel" sx={{ color: "text.secondary", flex: 1, minWidth: 0 }}>
+          {reasoningDuration ? t("reasoningThoughtFor", { duration: reasoningDuration }) : t("reasoning")}
+        </Typography>
+        {active && <TypingDots />}
+        <KeyboardArrowDownIcon sx={{ fontSize: 18, color: "text.secondary", transition: "transform 180ms ease", transform: open ? "rotate(180deg)" : "none" }} />
+      </Stack>
+      <Collapse in={open} unmountOnExit>
+        <Stack spacing={1.25} sx={{ px: 1.5, py: 1.5, borderTop: (t) => `1px dashed ${t.custom.borders.subtle}` }}>
+          {blocks.map((block, index) =>
+            block.kind === "reasoning" ? (
+              <Typography
+                key={index}
+                component="div"
+                sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.76rem", lineHeight: 1.7, color: "text.secondary", whiteSpace: "pre-line", fontStyle: "italic" }}
+              >
+                {block.text}
+              </Typography>
+            ) : (
+              <AgentBlockRenderer
+                key={index}
+                block={block}
+                actions={actions ? { onApprovalDecision: actions.onApprovalDecision, onOptionSelection: actions.onOptionSelection } : undefined}
+              />
+            ),
+          )}
+        </Stack>
+      </Collapse>
+    </Box>
+  );
+}
+
 function AgentMessage({ message, delay, actions }: { readonly message: ChatMessage; readonly delay: number; readonly actions?: MessageActionHandlers }) {
   const { t } = useI18n();
+  const blocks = message.blocks ?? [];
+  const detailBlocks = blocks.filter((block) => !ANSWER_BLOCK_KINDS.has(block.kind));
+  const answerBlocks = blocks.filter((block) => ANSWER_BLOCK_KINDS.has(block.kind));
   return (
     <Stack direction="row" spacing={1.25} sx={{ alignItems: "flex-start", ...rise(delay), ...revealActionsOnHover }}>
       <AgentAvatar />
@@ -234,8 +293,13 @@ function AgentMessage({ message, delay, actions }: { readonly message: ChatMessa
           )}
         </Stack>
         <Stack spacing={1.25}>
-          {message.blocks?.map((block, index) => (
-            <Box key={index} sx={rise(delay + 120 + index * 90)}>
+          {detailBlocks.length > 0 && (
+            <Box sx={rise(delay + 120)}>
+              <AgentDetails blocks={detailBlocks} actions={actions} />
+            </Box>
+          )}
+          {answerBlocks.map((block, index) => (
+            <Box key={index} sx={rise(delay + 200 + index * 90)}>
               <AgentBlockRenderer
                 block={block}
                 actions={actions ? { onApprovalDecision: actions.onApprovalDecision, onOptionSelection: actions.onOptionSelection } : undefined}

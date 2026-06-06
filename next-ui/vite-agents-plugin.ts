@@ -2399,6 +2399,11 @@ function createBackgroundAccumulator(): BackgroundRunAccumulator {
 
 function backgroundBlocks(accumulator: BackgroundRunAccumulator): AgentBlock[] {
   const blocks: AgentBlock[] = [];
+  const plans = accumulator.plans ?? [];
+  const diffs = accumulator.diffs ?? [];
+  const codes = accumulator.codes ?? [];
+  const searches = accumulator.searches ?? [];
+  const suggested = accumulator.suggested ?? [];
   if (accumulator.hasReasoning) {
     blocks.push({
       kind: "reasoning",
@@ -2409,18 +2414,18 @@ function backgroundBlocks(accumulator: BackgroundRunAccumulator): AgentBlock[] {
   } else if (accumulator.started && !accumulator.done) {
     blocks.push({ kind: "reasoning", text: "", active: true });
   }
+  for (const plan of plans) {
+    blocks.push({ kind: "plan", steps: plan.steps });
+  }
   for (const tool of accumulator.tools) {
     blocks.push(toolToDiffBlock(tool) ?? { kind: "tool", name: tool.name, summary: tool.summary, args: tool.args, state: tool.state, output: tool.output });
   }
-  blocks.push(...accumulator.diffs);
-  for (const plan of accumulator.plans) {
-    blocks.push({ kind: "plan", steps: plan.steps });
-  }
-  blocks.push(...accumulator.codes);
-  for (const search of accumulator.searches) {
+  blocks.push(...diffs);
+  blocks.push(...codes);
+  for (const search of searches) {
     blocks.push({ kind: "search", query: search.query, state: search.state, results: search.results });
   }
-  blocks.push(...accumulator.suggested);
+  blocks.push(...suggested);
   for (const approval of accumulator.approvals) {
     blocks.push({ kind: "approval", id: approval.id, title: approval.title, detail: approval.detail });
   }
@@ -2816,11 +2821,11 @@ export function finishBackgroundRunState(state: WorkspaceState, binding: Backgro
     accumulator.hasText ||
     accumulator.hasReasoning ||
     accumulator.tools.length > 0 ||
-    accumulator.diffs.length > 0 ||
-    accumulator.plans.length > 0 ||
-    accumulator.codes.length > 0 ||
-    accumulator.searches.length > 0 ||
-    accumulator.suggested.length > 0 ||
+    (accumulator.diffs?.length ?? 0) > 0 ||
+    (accumulator.plans?.length ?? 0) > 0 ||
+    (accumulator.codes?.length ?? 0) > 0 ||
+    (accumulator.searches?.length ?? 0) > 0 ||
+    (accumulator.suggested?.length ?? 0) > 0 ||
     accumulator.approvals.length > 0 ||
     accumulator.options.length > 0;
   const warningOnlyFailure = accumulator.statuses.some((status) => status.level === "warn") && !hadOutput;
@@ -3440,14 +3445,14 @@ function opencodePart(msg: Record<string, unknown>): Record<string, unknown> | n
 }
 
 function opencodePartId(part: Record<string, unknown>, fallback: string): string {
-  if (typeof part.id === "string" && part.id.trim().length > 0) {
-    return part.id;
-  }
   if (typeof part.callID === "string" && part.callID.trim().length > 0) {
     return part.callID;
   }
   if (typeof part.toolCallID === "string" && part.toolCallID.trim().length > 0) {
     return part.toolCallID;
+  }
+  if (typeof part.id === "string" && part.id.trim().length > 0) {
+    return part.id;
   }
   return fallback;
 }

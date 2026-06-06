@@ -238,13 +238,13 @@ export async function runConversation(opts: {
     } else if (started && !done) {
       blocks.push({ kind: "reasoning", text: "", active: true });
     }
+    for (const plan of plans) {
+      blocks.push({ kind: "plan", steps: plan.steps });
+    }
     for (const t of tools) {
       blocks.push(toolToDiffBlock(t) ?? { kind: "tool", name: t.name, summary: t.summary, args: t.args, state: t.state, output: t.output });
     }
     blocks.push(...diffs);
-    for (const plan of plans) {
-      blocks.push({ kind: "plan", steps: plan.steps });
-    }
     blocks.push(...codes);
     for (const search of searches) {
       blocks.push({ kind: "search", query: search.query, state: search.state, results: search.results });

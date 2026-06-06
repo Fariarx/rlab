@@ -779,6 +779,90 @@ describe("WorkspacePage", () => {
     });
   });
 
+  it("groups Git file changes into unstaged and staged tabs with mode-specific diffs", async () => {
+    const workspace = { ...buildInitialWorkspaceState(), selectedId: "c-flaky" };
+    const diffRequests: Array<{ readonly cwd?: string; readonly path?: string; readonly mode?: string }> = [];
+    const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+      if (path === "/api/workspace" && (!init || init.method === "GET")) {
+        return Response.json(workspace);
+      }
+      if (path === "/api/workspace" && init?.method === "PUT") {
+        return Response.json(workspace);
+      }
+      if (path === "/api/project-files") {
+        return Response.json({ files: [] });
+      }
+      if (path === "/api/git-status") {
+        return Response.json({
+          branch: "main",
+          ahead: 0,
+          behind: 0,
+          clean: false,
+          files: [
+            { code: " M", label: "Modified", path: "src/auth.ts", gitPath: "src/auth.ts", staged: false, unstaged: true },
+            { code: "M ", label: "Modified", path: "src/session.ts", gitPath: "src/session.ts", staged: true, unstaged: false },
+          ],
+        });
+      }
+      if (path === "/api/git-diff") {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { cwd?: string; path?: string; mode?: string };
+        diffRequests.push(body);
+        const diff = body.mode === "staged" ? "@@ -1 +1 @@\n-staged old\n+staged new" : "@@ -1 +1 @@\n-worktree old\n+worktree new";
+        return Response.json({ path: body.path, mode: body.mode, diff });
+      }
+      return new Response("not found", { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetch);
+
+    renderWithTheme(<WorkspacePage />);
+
+    await screen.findByPlaceholderText("Написать: Flaky-тест auth.login...");
+    fireEvent.click(screen.getByRole("button", { name: "Git" }));
+
+    expect(await screen.findByRole("tab", { name: /Непоставленные 1/i })).toHaveAttribute("aria-selected", "true");
+    expect(await screen.findByText("src/auth.ts")).toBeInTheDocument();
+    expect(await screen.findByText(/worktree old/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("tab", { name: /Поставленные 1/i }));
+
+    expect(await screen.findByText("src/session.ts")).toBeInTheDocument();
+    expect(await screen.findByText(/staged old/)).toBeInTheDocument();
+    expect(diffRequests).toContainEqual({ cwd: "/root/workspace/rlab", path: "src/auth.ts", mode: "worktree" });
+    expect(diffRequests).toContainEqual({ cwd: "/root/workspace/rlab", path: "src/session.ts", mode: "staged" });
+  });
+
+  it("shows last-turn file changes in the Git panel without requesting a Git diff", async () => {
+    const workspace = { ...buildInitialWorkspaceState(), selectedId: "c-flaky" };
+    const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+      if (path === "/api/workspace" && (!init || init.method === "GET")) {
+        return Response.json(workspace);
+      }
+      if (path === "/api/workspace" && init?.method === "PUT") {
+        return Response.json(workspace);
+      }
+      if (path === "/api/project-files") {
+        return Response.json({ files: [] });
+      }
+      if (path === "/api/git-status") {
+        return Response.json({ branch: "main", ahead: 0, behind: 0, clean: true, files: [] });
+      }
+      return new Response("not found", { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetch);
+
+    renderWithTheme(<WorkspacePage />);
+
+    await screen.findByPlaceholderText("Написать: Flaky-тест auth.login...");
+    fireEvent.click(screen.getByRole("button", { name: "Git" }));
+    fireEvent.click(await screen.findByRole("tab", { name: /Последний ход 1/i }));
+
+    expect(await screen.findByText("test/auth/login.test.ts")).toBeInTheDocument();
+    expect(screen.getByText(/vi\.useFakeTimers/)).toBeInTheDocument();
+    expect(fetch).not.toHaveBeenCalledWith("/api/git-diff", expect.anything());
+  });
+
   it("commits staged files from the Git panel with an explicit message", async () => {
     const workspace = { ...buildInitialWorkspaceState(), selectedId: "c-flaky" };
     let commitRequest: { readonly cwd?: string; readonly message?: string } | null = null;
@@ -820,6 +904,7 @@ describe("WorkspacePage", () => {
 
     await screen.findByPlaceholderText("Написать: Flaky-тест auth.login...");
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Commit" }));
 
     const messageInput = await screen.findByLabelText("Сообщение commit");
     expect(screen.getByRole("button", { name: "Создать commit" })).toBeDisabled();

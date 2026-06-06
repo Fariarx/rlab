@@ -337,6 +337,85 @@ describe("vite agents plugin", () => {
     ).toEqual([{ type: "tool", id: "tool-1", name: "Bash", summary: "npm test", args: { command: "npm test" } }]);
   });
 
+  it("maps Claude plan, search, and edit tools into rich chat events", () => {
+    const translate = createClaudeStreamTranslator();
+
+    expect(
+      translate(
+        JSON.stringify({
+          type: "assistant",
+          message: {
+            content: [
+              {
+                type: "tool_use",
+                id: "todo-1",
+                name: "TodoWrite",
+                input: {
+                  todos: [
+                    { content: "Inspect auth tests", status: "completed" },
+                    { content: "Patch flaky retry", status: "in_progress" },
+                  ],
+                },
+              },
+            ],
+          },
+        }),
+      ),
+    ).toEqual([
+      {
+        type: "plan",
+        id: "todo-1",
+        steps: [
+          { label: "Inspect auth tests", state: "ok" },
+          { label: "Patch flaky retry", state: "running" },
+        ],
+      },
+    ]);
+
+    expect(
+      translate(
+        JSON.stringify({
+          type: "assistant",
+          message: {
+            content: [
+              {
+                type: "tool_use",
+                id: "search-1",
+                name: "WebSearch",
+                input: { query: "vite kanban agent protocol" },
+              },
+            ],
+          },
+        }),
+      ),
+    ).toEqual([{ type: "search", id: "search-1", query: "vite kanban agent protocol", state: "running", results: [] }]);
+
+    expect(
+      translate(
+        JSON.stringify({
+          type: "user",
+          message: {
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "search-1",
+                content: JSON.stringify({ results: [{ title: "Vibe Kanban", url: "https://github.com/BloopAI/vibe-kanban" }] }),
+              },
+            ],
+          },
+        }),
+      ),
+    ).toEqual([
+      {
+        type: "search",
+        id: "search-1",
+        query: "vite kanban agent protocol",
+        state: "ok",
+        results: [{ title: "Vibe Kanban", url: "https://github.com/BloopAI/vibe-kanban" }],
+      },
+    ]);
+  });
+
   it("translates Claude permission requests into approval events", () => {
     const translate = createClaudeStreamTranslator();
 
@@ -542,13 +621,122 @@ describe("vite agents plugin", () => {
       ),
     ).toEqual([
       {
-        type: "tool",
+        type: "diff",
         id: "tool-1",
-        name: "write_file",
-        summary: "Write src/new.ts",
-        args: { file_path: "src/new.ts", content: "export const ok = true;" },
+        file: "src/new.ts",
+        additions: 1,
+        deletions: 0,
+        lines: [{ type: "add", text: "export const ok = true;" }],
       },
-      { type: "tool_result", id: "tool-1", ok: true, output: "created" },
+    ]);
+  });
+
+  it("translates Codex plan and semantic item events into rich run events", () => {
+    const translate = createCodexStreamTranslator();
+
+    expect(
+      translate(
+        JSON.stringify({
+          type: "plan_update",
+          plan: [
+            { step: "Read failing test", status: "completed" },
+            { step: "Apply fix", status: "in_progress" },
+          ],
+        }),
+      ),
+    ).toEqual([
+      {
+        type: "plan",
+        steps: [
+          { label: "Read failing test", state: "ok" },
+          { label: "Apply fix", state: "running" },
+        ],
+      },
+    ]);
+
+    expect(
+      translate(
+        JSON.stringify({
+          type: "item.completed",
+          item: {
+            id: "patch-1",
+            type: "file_edit",
+            path: "src/auth.ts",
+            diff: "@@ -1 +1 @@\n-old\n+new",
+            status: "completed",
+          },
+        }),
+      ),
+    ).toEqual([
+      {
+        type: "diff",
+        id: "patch-1",
+        file: "src/auth.ts",
+        additions: 1,
+        deletions: 1,
+        lines: [
+          { type: "del", text: "old" },
+          { type: "add", text: "new" },
+        ],
+      },
+    ]);
+  });
+
+  it("translates OpenCode todo and tool state updates into rich run events", () => {
+    const translate = createOpenCodeStreamTranslator();
+
+    expect(
+      translate(
+        JSON.stringify({
+          type: "sdk_event",
+          event: {
+            type: "todo.updated",
+            properties: {
+              todos: [
+                { content: "Inspect workspace", status: "completed" },
+                { content: "Patch mapper", status: "pending" },
+              ],
+            },
+          },
+        }),
+      ),
+    ).toEqual([
+      {
+        type: "plan",
+        id: "opencode-todo",
+        steps: [
+          { label: "Inspect workspace", state: "ok" },
+          { label: "Patch mapper", state: "pending" },
+        ],
+      },
+    ]);
+
+    expect(
+      translate(
+        JSON.stringify({
+          type: "message.part.updated",
+          part: {
+            id: "part-4",
+            type: "tool",
+            callID: "tool-4",
+            tool: "write",
+            state: {
+              status: "completed",
+              input: { file_path: "src/new.ts", content: "export const ok = true;" },
+              output: "created",
+            },
+          },
+        }),
+      ),
+    ).toEqual([
+      {
+        type: "diff",
+        id: "tool-4",
+        file: "src/new.ts",
+        additions: 1,
+        deletions: 0,
+        lines: [{ type: "add", text: "export const ok = true;" }],
+      },
     ]);
   });
 
@@ -1306,6 +1494,11 @@ describe("vite agents plugin", () => {
         text: "partial",
         hasText: true,
         tools: [],
+        diffs: [],
+        plans: [],
+        codes: [],
+        searches: [],
+        suggested: [],
         approvals: [],
         options: [],
         statuses: [],

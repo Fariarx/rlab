@@ -192,6 +192,78 @@ describe("runConversation", () => {
     });
   });
 
+  it("maps rich run events to chat components during live streams", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        streamResponse([
+          {
+            type: "plan",
+            id: "plan-1",
+            steps: [
+              { label: "Read logs", state: "ok" },
+              { label: "Patch mapper", state: "running" },
+            ],
+          },
+          {
+            type: "search",
+            id: "search-1",
+            query: "vibe kanban",
+            state: "ok",
+            results: [{ title: "Vibe Kanban", url: "https://github.com/BloopAI/vibe-kanban" }],
+          },
+          {
+            type: "diff",
+            id: "diff-1",
+            file: "src/auth.ts",
+            additions: 1,
+            deletions: 1,
+            lines: [
+              { type: "del", text: "old" },
+              { type: "add", text: "new" },
+            ],
+          },
+          { type: "done" },
+        ]),
+      ),
+    );
+    const blocks: AgentBlock[][] = [];
+
+    await runConversation({
+      profile: DEFAULT_PROFILE,
+      prompt: "map rich events",
+      accessMode: "read-only",
+      locale: "ru",
+      onBlocks: (nextBlocks) => blocks.push(nextBlocks),
+    });
+
+    expect(blocks.at(-1)).toEqual([
+      {
+        kind: "plan",
+        steps: [
+          { label: "Read logs", state: "ok" },
+          { label: "Patch mapper", state: "running" },
+        ],
+      },
+      {
+        kind: "diff",
+        file: "src/auth.ts",
+        additions: 1,
+        deletions: 1,
+        lines: [
+          { type: "del", text: "old" },
+          { type: "add", text: "new" },
+        ],
+      },
+      {
+        kind: "search",
+        query: "vibe kanban",
+        state: "ok",
+        results: [{ title: "Vibe Kanban", url: "https://github.com/BloopAI/vibe-kanban" }],
+      },
+    ]);
+  });
+
   it("shows a live thinking block after run start even before reasoning tokens arrive", async () => {
     vi.stubGlobal(
       "fetch",
