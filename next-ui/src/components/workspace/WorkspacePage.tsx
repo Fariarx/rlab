@@ -6,7 +6,9 @@ import CreateNewFolderIcon from "@mui/icons-material/CreateNewFolder";
 import FolderOutlinedIcon from "@mui/icons-material/FolderOutlined";
 import MenuIcon from "@mui/icons-material/Menu";
 import MenuOpenIcon from "@mui/icons-material/MenuOpen";
+import RateReviewOutlinedIcon from "@mui/icons-material/RateReviewOutlined";
 import RestartAltIcon from "@mui/icons-material/RestartAlt";
+import SendIcon from "@mui/icons-material/Send";
 import SearchIcon from "@mui/icons-material/Search";
 import SettingsIcon from "@mui/icons-material/Settings";
 import {
@@ -48,6 +50,7 @@ import {
   type ComposerDraft,
   type ConversationStatus,
   type ConversationSummary,
+  type ReviewCommentEntry,
   useAgentStatus,
   useAgentStatusError,
   useAgentStatusLive,
@@ -59,7 +62,7 @@ import { SettingsDialog } from "../settings/SettingsDialog";
 import { Button, EmptyState, IconButton, StatusDot, useToast } from "../ui";
 import { CommandPalette, type CommandPaletteItem } from "./CommandPalette";
 import { CreateProjectDialog } from "./CreateProjectDialog";
-import { GitView } from "./GitPanel";
+import { type DiffCommentApi, GitView } from "./GitPanel";
 import { DEFAULT_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, normalizeSidebarWidth } from "./app-settings";
 import { conversationProfile, type Workspace, useWorkspace } from "./use-workspace";
 
@@ -184,6 +187,24 @@ export function WorkspacePageView({
     setView(next);
     if (next === "git") {
       setGitMounted(true);
+    }
+  };
+  // Pending code-review comments, attached to diff lines in the Git view and sent
+  // to the thread as one block (without starting an agent run).
+  const [reviewComments, setReviewComments] = useState<readonly ReviewCommentEntry[]>([]);
+  const reviewSeq = useRef(0);
+  const review: DiffCommentApi = {
+    comments: reviewComments,
+    onAddComment: (file, line, lineText, body) =>
+      setReviewComments((prev) => [...prev, { id: `rc-${++reviewSeq.current}`, file, line, lineText, body }]),
+    onUpdateComment: (id, body) => setReviewComments((prev) => prev.map((comment) => (comment.id === id ? { ...comment, body } : comment))),
+    onDeleteComment: (id) => setReviewComments((prev) => prev.filter((comment) => comment.id !== id)),
+  };
+  const sendReviewComments = () => {
+    if (selected && reviewComments.length > 0) {
+      ws.addReviewComments(ws.selectedId, reviewComments);
+      setReviewComments([]);
+      showView("chat");
     }
   };
   const [mentionableFiles, setMentionableFiles] = useState<readonly string[]>([]);
@@ -949,7 +970,7 @@ export function WorkspacePageView({
               </Box>
               {gitMounted && (
                 <Box sx={{ position: "absolute", inset: 0, display: view === "git" ? "block" : "none" }}>
-                  <GitView cwd={selectedCwd} lastTurnDiffs={lastTurnDiffs} />
+                  <GitView cwd={selectedCwd} lastTurnDiffs={lastTurnDiffs} review={selected ? review : undefined} />
                 </Box>
               )}
             </Box>
@@ -958,6 +979,32 @@ export function WorkspacePageView({
 
         <Box sx={{ flex: "0 0 auto", borderTop: (t) => `1px solid ${t.custom.borders.subtle}`, backgroundColor: (t) => t.custom.surfaces.s1 }}>
           <Box sx={{ width: "100%", maxWidth: THREAD_MAX_WIDTH, mx: "auto", px: THREAD_PADDING_X, py: 1.5 }}>
+            {reviewComments.length > 0 && (
+              <Stack
+                direction="row"
+                spacing={1}
+                sx={{
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  mb: 1,
+                  px: 1.25,
+                  py: 0.75,
+                  borderRadius: (t) => `${t.custom.radii.md}px`,
+                  border: (t) => `1px solid ${t.palette.status.info.border}`,
+                  backgroundColor: (t) => t.palette.status.info.soft,
+                }}
+              >
+                <Stack direction="row" spacing={0.75} sx={{ alignItems: "center", minWidth: 0 }}>
+                  <RateReviewOutlinedIcon sx={{ fontSize: 16, color: (t) => t.palette.status.info.main }} />
+                  <Typography sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.78rem", color: "text.primary" }}>
+                    {t("reviewPending", { count: reviewComments.length })}
+                  </Typography>
+                </Stack>
+                <Button variant="contained" size="small" aria-label={t("reviewSendComments")} startIcon={<SendIcon sx={{ fontSize: 15 }} />} onClick={sendReviewComments}>
+                  {t("reviewSend")}
+                </Button>
+              </Stack>
+            )}
             {workspaceHydrating ? (
               <Box aria-busy="true" sx={{ minHeight: 52 }} />
             ) : composingNew ? (

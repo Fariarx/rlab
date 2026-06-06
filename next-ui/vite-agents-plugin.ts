@@ -59,6 +59,7 @@ const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url));
 const WORKSPACE_STATE_DIR = join(PLUGIN_DIR, ".data");
 const WORKSPACE_STATE_FILE = join(WORKSPACE_STATE_DIR, "workspace-state.json");
 const ATTACHMENTS_DIR = join(WORKSPACE_STATE_DIR, "attachments");
+const AMP_READ_ONLY_SETTINGS_FILE = join(WORKSPACE_STATE_DIR, "amp-read-only-settings.json");
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 export const MAX_JSON_BODY_BYTES = 40 * 1024 * 1024;
 const AGENT_CONFIG_FILE = join(WORKSPACE_STATE_DIR, "agent-config.json");
@@ -90,19 +91,21 @@ const DETECT: Record<string, Detect> = {
   gemini: { bins: ["gemini"], env: ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENAI_API_KEY"], hasAuth: hasGeminiStoredAuth },
   amp: { bins: ["amp"], env: ["AMP_API_KEY"] },
   opencode: { bins: ["opencode"] },
-  cursor: { bins: ["cursor-agent", "cursor"] },
+  cursor: { bins: ["cursor-agent"] },
   qwen: { bins: ["qwen", "qwen-code"], env: ["DASHSCOPE_API_KEY"] },
   copilot: { bins: ["copilot"] },
   droid: { bins: ["droid"], env: ["FACTORY_API_KEY"] },
 };
 
-const RUNNABLE_AGENT_IDS = new Set(["claude-code", "codex", "gemini", "opencode"]);
+const RUNNABLE_AGENT_IDS = new Set(["claude-code", "codex", "gemini", "amp", "opencode", "cursor", "qwen"]);
 
 const INSTALL_COMMANDS: Partial<Record<string, readonly string[]>> = {
   "claude-code": ["npm", "install", "-g", "@anthropic-ai/claude-code@latest"],
   codex: ["npm", "install", "-g", "@openai/codex@latest"],
   gemini: ["npm", "install", "-g", "@google/gemini-cli@latest"],
+  amp: ["npm", "install", "-g", "@sourcegraph/amp@latest"],
   opencode: ["npm", "install", "-g", "opencode-ai@latest"],
+  qwen: ["npm", "install", "-g", "@qwen-code/qwen-code@latest"],
 };
 
 export function installCommandForAgent(agent: string): readonly string[] | null {
@@ -1926,6 +1929,58 @@ export function buildGeminiRunArgs(request: RunArgsRequest): string[] {
   return args;
 }
 
+export function buildAmpRunArgs(request: RunArgsRequest): string[] {
+  const args: string[] = [];
+  if ((request.accessMode ?? "read-only") === "unrestricted") {
+    args.push("--dangerously-allow-all");
+  } else {
+    args.push("--settings-file", AMP_READ_ONLY_SETTINGS_FILE);
+  }
+  args.push("--execute", request.prompt, "--stream-json", "--stream-json-thinking");
+  return args;
+}
+
+export function buildQwenRunArgs(request: RunArgsRequest): string[] {
+  const profile = profileForArgs("qwen", request);
+  const accessMode = request.accessMode ?? "read-only";
+  const args = ["--prompt", request.prompt, "--output-format", "stream-json", "--include-partial-messages", "--approval-mode", accessMode === "unrestricted" && profile.mode !== "plan" ? "yolo" : "plan"];
+  const model = modelForProfile(profile);
+  if (model) {
+    args.push("--model", model);
+  }
+  return args;
+}
+
+export function buildCursorRunArgs(request: RunArgsRequest): string[] {
+  const profile = profileForArgs("cursor", request);
+  const args = ["-p", request.prompt, "--output-format", "stream-json"];
+  if ((request.accessMode ?? "read-only") === "unrestricted") {
+    args.push("--force");
+  }
+  const model = modelForProfile(profile);
+  if (model) {
+    args.push("--model", model);
+  }
+  return args;
+}
+
+function ensureAmpReadOnlySettingsFile(): void {
+  mkdirSync(WORKSPACE_STATE_DIR, { recursive: true });
+  const payload = {
+    "amp.tools.disable": [
+      "builtin:Bash",
+      "builtin:create_file",
+      "builtin:edit_file",
+      "builtin:undo_edit",
+      "Bash",
+      "create_file",
+      "edit_file",
+      "undo_edit",
+    ],
+  };
+  writeFileSync(AMP_READ_ONLY_SETTINGS_FILE, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+}
+
 export function buildOpenCodeRunArgs(request: RunArgsRequest): string[] {
   const profile = profileForArgs("opencode", request);
   const args = ["run", "--format", "json", "--thinking"];
@@ -1964,14 +2019,34 @@ const RUN: Record<string, RunSpec> = {
     args: (request) => buildGeminiRunArgs(request),
     createTranslator: createGeminiStreamTranslator,
   },
+  amp: {
+    bin: "amp",
+    env: DETECT.amp.env,
+    args: (request) => buildAmpRunArgs(request),
+    createTranslator: createAmpStreamTranslator,
+  },
   opencode: {
     bin: "opencode",
     args: (request) => buildOpenCodeRunArgs(request),
     createTranslator: createOpenCodeStreamTranslator,
   },
+  cursor: {
+    bin: "cursor-agent",
+    args: (request) => buildCursorRunArgs(request),
+    createTranslator: createCursorStreamTranslator,
+  },
+  qwen: {
+    bin: "qwen",
+    env: DETECT.qwen.env,
+    args: (request) => buildQwenRunArgs(request),
+    createTranslator: createQwenStreamTranslator,
+  },
 };
 
-export function validateRunAccessModeForAgent(_agent: string, _accessMode: AgentAccessMode): string | null {
+export function validateRunAccessModeForAgent(agent: string, accessMode: AgentAccessMode): string | null {
+  if (agent === "cursor" && accessMode === "read-only") {
+    return "Cursor CLI print mode does not provide a verifiable read-only sandbox. Switch agent access to unrestricted to run Cursor.";
+  }
   return null;
 }
 
@@ -2770,6 +2845,8 @@ export function activeBackgroundRunUpdateFromState(state: WorkspaceState, bindin
   }
   const agentMessage = (state.threads[binding.conversationId] ?? []).find((message) => message.id === binding.agentMessageId);
   const blocks = agentMessage?.blocks ?? [];
+  const costUsd = conversation.costUsd ?? agentMessage?.costUsd;
+  const usage = conversation.usage ?? agentMessage?.usage;
   return {
     runId: binding.runId,
     conversationId: binding.conversationId,
@@ -2779,8 +2856,8 @@ export function activeBackgroundRunUpdateFromState(state: WorkspaceState, bindin
     time: conversation.time,
     done,
     blocks,
-    ...(conversation.costUsd === undefined ? {} : { costUsd: conversation.costUsd }),
-    ...(conversation.usage === undefined ? {} : { usage: conversation.usage }),
+    ...(costUsd === undefined ? {} : { costUsd }),
+    ...(usage === undefined ? {} : { usage }),
   };
 }
 
@@ -2923,11 +3000,23 @@ function ensureBackgroundUserMessage(state: WorkspaceState, binding: BackgroundR
   };
 }
 
-function putBackgroundAgentMessage(state: WorkspaceState, binding: BackgroundRunBinding, blocks: readonly AgentBlock[]): WorkspaceState {
+function putBackgroundAgentMessage(
+  state: WorkspaceState,
+  binding: BackgroundRunBinding,
+  blocks: readonly AgentBlock[],
+  metadata: Pick<BackgroundRunAccumulator, "costUsd" | "usage"> = {},
+): WorkspaceState {
   const messages = state.threads[binding.conversationId] ?? [];
   const previousBlocks = messages.find((message) => message.id === binding.agentMessageId)?.blocks;
   const mergedBlocks = mergeInputBlockState(blocks, previousBlocks);
-  const message: ChatMessage = { id: binding.agentMessageId, role: "agent", time: binding.agentMessageTime, blocks: mergedBlocks };
+  const message: ChatMessage = {
+    id: binding.agentMessageId,
+    role: "agent",
+    time: binding.agentMessageTime,
+    blocks: mergedBlocks,
+    ...(metadata.costUsd === undefined ? {} : { costUsd: metadata.costUsd }),
+    ...(metadata.usage === undefined ? {} : { usage: metadata.usage }),
+  };
   return {
     ...state,
     threads: {
@@ -2939,9 +3028,14 @@ function putBackgroundAgentMessage(state: WorkspaceState, binding: BackgroundRun
   };
 }
 
-function persistBackgroundBlocks(binding: BackgroundRunBinding, blocks: readonly AgentBlock[], patch: Partial<WorkspaceState["chats"][number]> = {}): void {
+function persistBackgroundBlocks(
+  binding: BackgroundRunBinding,
+  blocks: readonly AgentBlock[],
+  patch: Partial<WorkspaceState["chats"][number]> = {},
+  metadata: Pick<BackgroundRunAccumulator, "costUsd" | "usage"> = {},
+): void {
   const state = readWorkspaceState();
-  const withMessage = putBackgroundAgentMessage(state, binding, blocks);
+  const withMessage = putBackgroundAgentMessage(state, binding, blocks, metadata);
   writeWorkspaceState(patchWorkspaceConversation(withMessage, binding.conversationId, patch));
 }
 
@@ -3079,7 +3173,12 @@ function applyBackgroundRunEvent(binding: BackgroundRunBinding, accumulator: Bac
   accumulateBackgroundRunEvent(accumulator, event);
   const blocks = backgroundBlocks(accumulator);
   const locale = readWorkspaceState().settings.general.locale;
-  persistBackgroundBlocks(binding, blocks, blocksNeedInput(blocks) ? { status: "waiting", snippet: translate(locale, "runNeedsInputSnippet"), time: binding.agentMessageTime } : {});
+  persistBackgroundBlocks(
+    binding,
+    blocks,
+    blocksNeedInput(blocks) ? { status: "waiting", snippet: translate(locale, "runNeedsInputSnippet"), time: binding.agentMessageTime } : {},
+    { costUsd: accumulator.costUsd, usage: accumulator.usage },
+  );
   notifyBackgroundRunUpdate(binding, false);
 }
 
@@ -3121,7 +3220,7 @@ export function finishBackgroundRunState(state: WorkspaceState, binding: Backgro
             ...(accumulator.costUsd === undefined ? {} : { costUsd: accumulator.costUsd }),
             ...(accumulator.usage === undefined ? {} : { usage: accumulator.usage }),
           };
-  return patchWorkspaceConversation(putBackgroundAgentMessage(state, binding, blocks), binding.conversationId, patch);
+  return patchWorkspaceConversation(putBackgroundAgentMessage(state, binding, blocks, { costUsd: accumulator.costUsd, usage: accumulator.usage }), binding.conversationId, patch);
 }
 
 function finishPersistedBackgroundRun(binding: BackgroundRunBinding, accumulator: BackgroundRunAccumulator, canceled: boolean): void {
@@ -3349,6 +3448,122 @@ export function createClaudeStreamTranslator(): (line: string) => RunEvent[] {
  * `createClaudeStreamTranslator` for real streams. */
 export function translateClaude(line: string): RunEvent[] {
   return createClaudeStreamTranslator()(line);
+}
+
+export function createAmpStreamTranslator(): (line: string) => RunEvent[] {
+  return createClaudeStreamTranslator();
+}
+
+export function createQwenStreamTranslator(): (line: string) => RunEvent[] {
+  const translate = createClaudeStreamTranslator();
+  return (line: string): RunEvent[] => {
+    const msg = parseJsonRecord(line);
+    if (msg?.type === "system" && msg.subtype === "session_start") {
+      const model = typeof msg.model === "string" && msg.model.trim().length > 0 ? msg.model : "qwen";
+      return [{ type: "status", level: "info", text: `model · ${model}` }];
+    }
+    return translate(line);
+  };
+}
+
+interface CursorToolCallEntry {
+  readonly name: string;
+  readonly args: Record<string, unknown>;
+  readonly result: unknown;
+}
+
+function cursorToolNameFromKey(key: string): string {
+  const name = key.replace(/ToolCall$/, "");
+  return name
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .split(/\s+/)
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+}
+
+function cursorToolCallEntry(value: unknown): CursorToolCallEntry | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  for (const [key, raw] of Object.entries(value)) {
+    if (!key.endsWith("ToolCall") || !isRecord(raw)) {
+      continue;
+    }
+    return {
+      name: cursorToolNameFromKey(key),
+      args: isRecord(raw.args) ? raw.args : {},
+      result: raw.result,
+    };
+  }
+  return null;
+}
+
+function cursorToolResultPayload(result: unknown): { readonly ok: boolean; readonly output: unknown } {
+  if (!isRecord(result)) {
+    return { ok: true, output: result };
+  }
+  if (result.success !== undefined) {
+    const success = result.success;
+    if (isRecord(success) && typeof success.content === "string") {
+      return { ok: true, output: success.content };
+    }
+    return { ok: true, output: success };
+  }
+  if (result.error !== undefined) {
+    return { ok: false, output: errorText(result.error) };
+  }
+  return { ok: true, output: result };
+}
+
+function cursorToolEvents(msg: Record<string, unknown>): RunEvent[] {
+  if (msg.type !== "tool_call") {
+    return [];
+  }
+  const tool = cursorToolCallEntry(msg.tool_call);
+  if (!tool) {
+    return [];
+  }
+  const id = firstString(msg, ["call_id", "callId", "id"]) ?? "cursor-tool";
+  if (msg.subtype === "started") {
+    const rich = richToolEvents(id, tool.name, tool.args, "running");
+    if (rich.length > 0) {
+      return rich;
+    }
+    return [
+      {
+        type: "tool",
+        id,
+        name: tool.name,
+        summary: clip(firstString(tool.args, ["command", "query", "path", "file_path", "filePath"]) ?? tool.name, 80),
+        args: toArgs(tool.args),
+      },
+    ];
+  }
+  if (msg.subtype !== "completed") {
+    return [];
+  }
+  const payload = cursorToolResultPayload(tool.result);
+  const rich = richToolEvents(id, tool.name, tool.args, payload.ok ? "ok" : "error", payload.output);
+  if (rich.length > 0) {
+    return rich;
+  }
+  return [{ type: "tool_result", id, ok: payload.ok, output: resultText(payload.output) }];
+}
+
+export function createCursorStreamTranslator(): (line: string) => RunEvent[] {
+  const translate = createClaudeStreamTranslator();
+  return (line: string): RunEvent[] => {
+    const msg = parseJsonRecord(line);
+    if (!msg) {
+      return [];
+    }
+    const toolEvents = cursorToolEvents(msg);
+    if (toolEvents.length > 0) {
+      return toolEvents;
+    }
+    return translate(line);
+  };
 }
 
 function textFromUnknown(value: unknown): string {
@@ -4393,6 +4608,16 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
     if (agent === "claude-code") {
       void runClaudeSdk(request, cwd, res, send, sendDone, sender.end, binding, accumulator);
       return;
+    }
+
+    if (agent === "amp" && accessMode === "read-only") {
+      try {
+        ensureAmpReadOnlySettingsFile();
+      } catch (error) {
+        send({ type: "error", text: error instanceof Error ? `Failed to prepare Amp read-only settings: ${error.message}` : "Failed to prepare Amp read-only settings" });
+        finishAndEnd();
+        return;
+      }
     }
 
     // stdin = /dev/null so the CLI doesn't wait for piped input (it otherwise

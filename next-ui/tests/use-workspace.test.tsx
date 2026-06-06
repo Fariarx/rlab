@@ -266,8 +266,10 @@ describe("useWorkspace", () => {
     expect(screen.getByText("chat-2")).toBeInTheDocument();
     const savesBefore = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace" && init?.method === "PUT").length;
 
-    screen.getByRole("button", { name: "draft-a" }).click();
-    screen.getByRole("button", { name: "draft-ab" }).click();
+    await act(async () => {
+      screen.getByRole("button", { name: "draft-a" }).click();
+      screen.getByRole("button", { name: "draft-ab" }).click();
+    });
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(249);
@@ -316,8 +318,8 @@ describe("useWorkspace", () => {
       expect(activeRunSignal?.aborted).toBe(true);
       expect(runCancelRequests).toEqual([{ runId: runRequests[0]?.runId }]);
       expect(screen.getByTestId("status")).toHaveTextContent("idle");
+      expect(state.chats.find((chat) => chat.id === "chat-2")?.snippet).toBe("Запуск остановлен");
     });
-    expect(state.chats.find((chat) => chat.id === "chat-2")?.snippet).toBe("Запуск остановлен");
     expect(JSON.stringify(state.threads["chat-2"])).not.toContain("Aborted");
     activeRunController = undefined;
   });
@@ -339,6 +341,9 @@ describe("useWorkspace", () => {
     });
     expect(state.chats.find((chat) => chat.id === "chat-2")?.costUsd).toBe(0.0173);
     expect(state.chats.find((chat) => chat.id === "chat-2")?.usage).toEqual({ totalTokens: 9653 });
+    const agentMessage = [...state.threads["chat-2"]].reverse().find((message) => message.role === "agent");
+    expect(agentMessage?.costUsd).toBe(0.0173);
+    expect(agentMessage?.usage).toEqual({ totalTokens: 9653 });
   });
 
   it("keeps a bound background run running after the client stream disconnects and settles from workspace sync", async () => {
@@ -393,10 +398,15 @@ describe("useWorkspace", () => {
       await vi.advanceTimersByTimeAsync(0);
     });
     expect(screen.getByText("chat-2")).toBeInTheDocument();
-    screen.getByRole("button", { name: "send" }).click();
+    await act(async () => {
+      screen.getByRole("button", { name: "send" }).click();
+    });
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(0);
+      for (let i = 0; i < 5; i += 1) {
+        await vi.advanceTimersByTimeAsync(0);
+        await Promise.resolve();
+      }
     });
     expect(screen.getByTestId("status")).toHaveTextContent("running");
     expect(state.chats.find((chat) => chat.id === "chat-2")?.activeRunId).toBe(runRequests[0]?.runId);

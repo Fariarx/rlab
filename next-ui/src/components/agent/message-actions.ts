@@ -41,5 +41,7 @@ function blockToPlainText(block: AgentBlock): string {
       return block.sources.map((source) => `${source.label} ${source.url}`).join("\n");
     case "suggested":
       return block.actions.map((action) => action.label).join("\n");
+    case "review":
+      return block.comments.map((comment) => `${comment.file}:${comment.line} ${comment.body}`).join("\n");
   }
 }

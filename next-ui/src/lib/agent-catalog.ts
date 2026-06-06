@@ -106,6 +106,16 @@ const OPENCODE_MODEL_OPTIONS = [
   { id: "lmstudio-qwen3-30b-a3b-2507", label: "LM Studio Qwen3 30B A3B", value: "lmstudio/qwen/qwen3-30b-a3b-2507" },
   { id: "lmstudio-qwen3-coder-30b", label: "LM Studio Qwen3 Coder 30B", value: "lmstudio/qwen/qwen3-coder-30b" },
 ] as const;
+const QWEN_MODEL_OPTIONS = [
+  DEFAULT_OPTION,
+  { id: "qwen3.6-plus", label: "Qwen3.6 Plus", value: "qwen3.6-plus" },
+  { id: "qwen3.5-plus", label: "Qwen3.5 Plus", value: "qwen3.5-plus" },
+  { id: "qwen3-coder-plus", label: "Qwen3 Coder Plus", value: "qwen3-coder-plus" },
+] as const;
+const CURSOR_MODEL_OPTIONS = [
+  DEFAULT_OPTION,
+  { id: "gpt-5", label: "GPT-5", value: "gpt-5" },
+] as const;
 
 export const AGENTS: readonly AgentDef[] = [
   {
@@ -150,7 +160,7 @@ export const AGENTS: readonly AgentDef[] = [
     reasoning: DEFAULT_ONLY,
     modes: DEFAULT_MODE_OPTIONS,
   },
-  { id: "amp", name: "AMP", vendor: "Sourcegraph", cliBins: ["amp"], runAdapter: false, short: "AM", accent: "#E5484D", models: DEFAULT_ONLY, reasoning: DEFAULT_ONLY, modes: DEFAULT_MODE_OPTIONS },
+  { id: "amp", name: "AMP", vendor: "Sourcegraph", cliBins: ["amp"], runAdapter: true, short: "AM", accent: "#E5484D", models: DEFAULT_ONLY, reasoning: DEFAULT_ONLY, modes: DEFAULT_MODE_OPTIONS },
   {
     id: "opencode",
     name: "OpenCode",
@@ -163,8 +173,8 @@ export const AGENTS: readonly AgentDef[] = [
     reasoning: CLAUDE_REASONING_OPTIONS,
     modes: DEFAULT_MODE_OPTIONS,
   },
-  { id: "cursor", name: "Cursor", vendor: "Anysphere", cliBins: ["cursor-agent", "cursor"], runAdapter: false, short: "CU", accent: "#9aa4ad", models: DEFAULT_ONLY, reasoning: DEFAULT_ONLY, modes: DEFAULT_MODE_OPTIONS },
-  { id: "qwen", name: "Qwen", vendor: "Alibaba", cliBins: ["qwen", "qwen-code"], runAdapter: false, short: "QW", accent: "#7C3AED", models: DEFAULT_ONLY, reasoning: DEFAULT_ONLY, modes: DEFAULT_MODE_OPTIONS },
+  { id: "cursor", name: "Cursor", vendor: "Anysphere", cliBins: ["cursor-agent"], runAdapter: true, short: "CU", accent: "#9aa4ad", models: CURSOR_MODEL_OPTIONS, reasoning: DEFAULT_ONLY, modes: DEFAULT_MODE_OPTIONS },
+  { id: "qwen", name: "Qwen", vendor: "Alibaba", cliBins: ["qwen", "qwen-code"], runAdapter: true, short: "QW", accent: "#7C3AED", models: QWEN_MODEL_OPTIONS, reasoning: DEFAULT_ONLY, modes: DEFAULT_MODE_OPTIONS },
   { id: "copilot", name: "Copilot", vendor: "GitHub", cliBins: ["copilot"], runAdapter: false, short: "CP", accent: "#3FB950", models: DEFAULT_ONLY, reasoning: DEFAULT_ONLY, modes: DEFAULT_MODE_OPTIONS },
   { id: "droid", name: "Droid", vendor: "Factory", cliBins: ["droid"], runAdapter: false, short: "DR", accent: "#22A6B3", models: DEFAULT_ONLY, reasoning: DEFAULT_ONLY, modes: DEFAULT_MODE_OPTIONS },
 ];
@@ -188,10 +198,10 @@ export const AGENT_STATUS: Record<AgentId, AgentSystemStatus> = {
   codex: "available",
   gemini: "available",
   opencode: "unavailable",
-  amp: "unsupported",
+  amp: "unavailable",
   copilot: "unsupported",
-  cursor: "unsupported",
-  qwen: "unsupported",
+  cursor: "unavailable",
+  qwen: "unavailable",
   droid: "unsupported",
 };
 
@@ -265,6 +275,10 @@ export function isDirectAgentModelValue(agent: AgentId, value: string): boolean 
       return /^gemini-[A-Za-z0-9._-]+$/.test(value);
     case "opencode":
       return /^[a-z0-9][a-z0-9.-]*(?:\/[A-Za-z0-9._-]+)+$/.test(value);
+    case "qwen":
+      return /^(?:qwen|glm|kimi)-[A-Za-z0-9._-]+$/.test(value);
+    case "cursor":
+      return /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(value);
     default:
       return false;
   }

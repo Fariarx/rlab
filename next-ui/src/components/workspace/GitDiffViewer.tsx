@@ -1,4 +1,4 @@
-import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
+import DeleteOutlineIcon from "@mui/icons-material/DeleteOutlined";
 import EditIcon from "@mui/icons-material/Edit";
 import { Box, Stack, type SxProps, type Theme, Typography } from "@mui/material";
 import { Highlight, type PrismTheme } from "prism-react-renderer";

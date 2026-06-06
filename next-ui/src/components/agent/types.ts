@@ -134,7 +134,8 @@ export type AgentBlock =
   | ApprovalBlock
   | StatusBlock
   | CitationBlock
-  | SuggestedActionsBlock;
+  | SuggestedActionsBlock
+  | ReviewBlock;
 
 export interface ChatMessage {
   readonly id: string;
@@ -143,6 +144,8 @@ export interface ChatMessage {
   /** User messages carry plain text; agent messages carry rich blocks. */
   readonly text?: string;
   readonly blocks?: readonly AgentBlock[];
+  readonly costUsd?: number;
+  readonly usage?: RunUsage;
 }
 
 export interface ComposerAttachmentDraft {

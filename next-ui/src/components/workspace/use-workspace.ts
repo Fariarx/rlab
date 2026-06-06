@@ -8,6 +8,7 @@ import { type AppSettings, type AppSettingsPatch, type Locale, mergeAppSettings 
 import { buildInitialWorkspaceState, cloneWorkspaceState, type WorkspaceState } from "./workspace-state";
 
 const WORKSPACE_LOAD_RETRY_MS = 15_000;
+const WORKSPACE_SAVE_DEBOUNCE_MS = 250;
 
 let idSeq = 1000;
 const nextId = (prefix: string) => `${prefix}-${++idSeq}`;
@@ -151,6 +152,10 @@ function blocksHaveLiveOutput(blocks: readonly AgentBlock[]): boolean {
   });
 }
 
+function blocksHaveStatus(blocks: readonly AgentBlock[]): boolean {
+  return blocks.some((block) => block.kind === "status");
+}
+
 function snippetFromBlocks(blocks: readonly AgentBlock[] | undefined, locale: Locale): string {
   const textBlock = [...(blocks ?? [])].reverse().find((block) => block.kind === "text" && block.text.trim().length > 0);
   const snippetSource = textBlock?.kind === "text" ? textBlock.text : translate(locale, "runDoneSnippet");
@@ -183,6 +188,36 @@ function finalRunPatch(
   };
 }
 
+function patchAgentMessageUsage(
+  state: WorkspaceState,
+  conversationId: string,
+  agentMessageId: string,
+  result: Pick<RunConversationResult, "costUsd" | "usage">,
+): WorkspaceState {
+  if (result.costUsd === undefined && result.usage === undefined) {
+    return state;
+  }
+  const messages = state.threads[conversationId];
+  if (!messages?.some((message) => message.id === agentMessageId)) {
+    return state;
+  }
+  return {
+    ...state,
+    threads: {
+      ...state.threads,
+      [conversationId]: messages.map((message) =>
+        message.id === agentMessageId
+          ? {
+              ...message,
+              ...(result.costUsd === undefined ? {} : { costUsd: result.costUsd }),
+              ...(result.usage === undefined ? {} : { usage: result.usage }),
+            }
+          : message,
+      ),
+    },
+  };
+}
+
 function isLiveRunStatus(status: ConversationStatus): boolean {
   return status === "running" || status === "waiting";
 }
@@ -191,7 +226,14 @@ function patchActiveRunUpdate(state: WorkspaceState, update: ActiveRunUpdate): W
   const messages = state.threads[update.conversationId] ?? [];
   const previousBlocks = messages.find((message) => message.id === update.agentMessageId)?.blocks;
   const blocks = mergeInputBlockState(update.blocks, previousBlocks);
-  const message: ChatMessage = { id: update.agentMessageId, role: "agent", time: update.time, blocks };
+  const message: ChatMessage = {
+    id: update.agentMessageId,
+    role: "agent",
+    time: update.time,
+    blocks,
+    ...(update.costUsd === undefined ? {} : { costUsd: update.costUsd }),
+    ...(update.usage === undefined ? {} : { usage: update.usage }),
+  };
   const threads = {
     ...state.threads,
     [update.conversationId]: messages.some((item) => item.id === update.agentMessageId)
@@ -267,6 +309,16 @@ class WorkspaceStore implements Workspace {
 
   private saveDisposer: IReactionDisposer | null = null;
 
+  private saveTimer: ReturnType<typeof setTimeout> | null = null;
+
+  private pendingSaveState: WorkspaceState | null = null;
+
+  private pendingSaveUrgent = false;
+
+  private saveInFlight = false;
+
+  private inFlightSaveState: WorkspaceState | null = null;
+
   private pollTimer: ReturnType<typeof setInterval> | null = null;
 
   private loadRetryTimer: ReturnType<typeof setInterval> | null = null;
@@ -276,13 +328,32 @@ class WorkspaceStore implements Workspace {
   private readonly runs = new Map<string, RunHandle>();
 
   constructor() {
-    makeAutoObservable<WorkspaceStore, "hydrated" | "loadSeq" | "runs" | "saveDisposer" | "pollTimer" | "loadRetryTimer" | "skipNextSave">(
+    makeAutoObservable<
+      WorkspaceStore,
+      | "hydrated"
+      | "loadSeq"
+      | "runs"
+      | "saveDisposer"
+      | "saveTimer"
+      | "pendingSaveState"
+      | "pendingSaveUrgent"
+      | "saveInFlight"
+      | "inFlightSaveState"
+      | "pollTimer"
+      | "loadRetryTimer"
+      | "skipNextSave"
+    >(
       this,
       {
         hydrated: false,
         loadSeq: false,
         runs: false,
         saveDisposer: false,
+        saveTimer: false,
+        pendingSaveState: false,
+        pendingSaveUrgent: false,
+        saveInFlight: false,
+        inFlightSaveState: false,
         pollTimer: false,
         loadRetryTimer: false,
         skipNextSave: false,
@@ -334,11 +405,7 @@ class WorkspaceStore implements Workspace {
             this.skipNextSave = false;
             return;
           }
-          void saveWorkspaceState(state).catch((error) => {
-            runInAction(() => {
-              this.loadError = error instanceof Error ? error.message : String(error);
-            });
-          });
+          this.scheduleSave(state);
         },
       );
     }
@@ -363,6 +430,7 @@ class WorkspaceStore implements Workspace {
     this.loadSeq += 1;
     this.saveDisposer?.();
     this.saveDisposer = null;
+    void this.flushPendingSave();
     for (const run of this.runs.values()) {
       run.controller.abort();
     }
@@ -374,6 +442,68 @@ class WorkspaceStore implements Workspace {
     if (this.loadRetryTimer) {
       clearInterval(this.loadRetryTimer);
       this.loadRetryTimer = null;
+    }
+  }
+
+  private startSaveTimer(): void {
+    if (this.saveTimer !== null || this.saveInFlight) {
+      return;
+    }
+    this.saveTimer = setTimeout(() => {
+      this.saveTimer = null;
+      void this.flushPendingSave();
+    }, WORKSPACE_SAVE_DEBOUNCE_MS);
+  }
+
+  private scheduleSave(state: WorkspaceState): void {
+    if (this.pendingSaveState === state || (this.saveInFlight && this.inFlightSaveState === state)) {
+      return;
+    }
+    this.pendingSaveState = state;
+    this.startSaveTimer();
+  }
+
+  private persistCurrentStateNow(): void {
+    this.pendingSaveState = this.state;
+    this.pendingSaveUrgent = true;
+    void this.flushPendingSave();
+  }
+
+  private async flushPendingSave(): Promise<void> {
+    if (this.saveTimer !== null) {
+      clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+    }
+    if (this.saveInFlight) {
+      this.pendingSaveUrgent = true;
+      return;
+    }
+    const state = this.pendingSaveState;
+    if (!state) {
+      return;
+    }
+    this.pendingSaveState = null;
+    this.pendingSaveUrgent = false;
+    this.saveInFlight = true;
+    this.inFlightSaveState = state;
+    try {
+      await saveWorkspaceState(state);
+    } catch (error) {
+      runInAction(() => {
+        this.loadError = error instanceof Error ? error.message : String(error);
+      });
+    } finally {
+      runInAction(() => {
+        this.saveInFlight = false;
+        this.inFlightSaveState = null;
+        if (this.pendingSaveState) {
+          if (this.pendingSaveUrgent) {
+            void this.flushPendingSave();
+          } else {
+            this.startSaveTimer();
+          }
+        }
+      });
     }
   }
 
@@ -697,17 +827,21 @@ class WorkspaceStore implements Workspace {
     };
     const conversationPatch = isDefaultTitle ? { ...runningPatch, title: truncate(text, 40) } : runningPatch;
     this.setState((current) => patchConversation(current, id, conversationPatch));
+    this.persistCurrentStateNow();
 
     const aId = nextId("a");
     const agentTime = nowLabel();
     const applyBlocks = (blocks: AgentBlock[]) => {
+      let shouldFlush = false;
       this.setState((current) => {
         const arr = current.threads[id] ?? [];
         const previousBlocks = arr.find((m) => m.id === aId)?.blocks;
         const mergedBlocks = mergeInputBlockState(blocks, previousBlocks);
-        if (runHandle.serverOwned && !blocksNeedInput(mergedBlocks) && blocksHaveLiveOutput(mergedBlocks)) {
+        const needsInput = blocksNeedInput(mergedBlocks);
+        if (runHandle.serverOwned && !needsInput && blocksHaveLiveOutput(mergedBlocks)) {
           this.skipNextSave = true;
         }
+        shouldFlush = needsInput || blocksHaveStatus(mergedBlocks);
         const message: ChatMessage = { id: aId, role: "agent", time: agentTime, blocks: mergedBlocks };
         const nextState = {
           ...current,
@@ -722,10 +856,13 @@ class WorkspaceStore implements Workspace {
         if (runHandle.canceled) {
           return nextState;
         }
-        return blocksNeedInput(mergedBlocks)
+        return needsInput
           ? patchConversation(nextState, id, { status: "waiting", snippet: translate(current.settings.general.locale, "runNeedsInputSnippet"), time: nowLabel() })
           : nextState;
       });
+      if (shouldFlush) {
+        this.persistCurrentStateNow();
+      }
     };
 
     const previous = this.runs.get(id);
@@ -762,11 +899,16 @@ class WorkspaceStore implements Workspace {
         if (runHandle.canceled || !isSettledRunConversationResult(result)) {
           return;
         }
-        this.setState((current) => patchConversation(current, id, finalRunPatch(current, id, aId, result)));
+        this.setState((current) => {
+          const withConversation = patchConversation(current, id, finalRunPatch(current, id, aId, result));
+          return patchAgentMessageUsage(withConversation, id, aId, result);
+        });
+        this.persistCurrentStateNow();
       })
       .catch(() => {
         if (!runHandle.canceled) {
           this.setState((current) => patchConversation(current, id, { activeRunId: undefined, status: "error", snippet: translate(current.settings.general.locale, "runFailedSnippet") }));
+          this.persistCurrentStateNow();
         }
       })
       .finally(() => {
@@ -804,6 +946,7 @@ class WorkspaceStore implements Workspace {
         time: nowLabel(),
       });
     });
+    this.persistCurrentStateNow();
   }
 
   retryMessage(id: string, messageId: string): void {
@@ -837,10 +980,12 @@ class WorkspaceStore implements Workspace {
 
   decideApproval(id: string, approvalId: string, decision: ApprovalDecision): void {
     this.setState((current) => patchConversation(patchApprovalDecision(current, id, approvalId, decision), id, { status: "running", time: nowLabel() }));
+    this.persistCurrentStateNow();
   }
 
   selectOptions(id: string, optionBlockId: string, selectedLabels: readonly string[]): void {
     this.setState((current) => patchConversation(patchOptionSelection(current, id, optionBlockId, selectedLabels), id, { status: "running", time: nowLabel() }));
+    this.persistCurrentStateNow();
   }
 
   updateComposerDraft(id: string, draft: ComposerDraft): void {

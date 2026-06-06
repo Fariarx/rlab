@@ -32,10 +32,10 @@ describe("AgentPicker a11y", () => {
       />,
     );
 
-    fireEvent.click(screen.getByText("AMP"));
+    fireEvent.click(screen.getByText("Copilot"));
 
-    expect(await screen.findByText("AMP установлен, но в этом UI для него ещё нет RUN-адаптера.")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Использовать AMP" })).toBeDisabled();
+    expect(await screen.findByText("Copilot установлен, но в этом UI для него ещё нет RUN-адаптера.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Использовать Copilot" })).toBeDisabled();
   });
 
   it("selects an agent discovered from the local CLI payload", async () => {

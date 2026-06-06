@@ -8,18 +8,24 @@ import {
   agentConfigErrorStatus,
   appendJsonBodyChunk,
   attachmentUploadErrorStatus,
+  buildAmpRunArgs,
   buildClaudeRunArgs,
   buildClaudeSdkOptions,
   buildCodexRunArgs,
+  buildCursorRunArgs,
   buildGeminiRunArgs,
   buildGitCommitArgs,
   buildGitPushArgs,
   buildOpenCodeRunArgs,
+  buildQwenRunArgs,
   createRunApprovalHandler,
+  createAmpStreamTranslator,
   createClaudeStreamTranslator,
   createCodexStreamTranslator,
+  createCursorStreamTranslator,
   createGeminiStreamTranslator,
   createOpenCodeStreamTranslator,
+  createQwenStreamTranslator,
   activeBackgroundRunUpdateFromState,
   activeBackgroundRunSnapshotsFromHandles,
   parseRunApprovalPayload,
@@ -141,6 +147,101 @@ describe("vite agents plugin", () => {
         selectable: true,
         env: ["OPENAI_API_KEY", "CODEX_API_KEY"],
         installCommand: "npm install -g @openai/codex@latest",
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns Amp as a runnable CLI adapter when the executable is present", () => {
+    const dir = mkdtempSync(join(tmpdir(), "rlab-amp-discovery-"));
+    try {
+      const cliPath = join(dir, "amp");
+      writeFileSync(cliPath, "", "utf8");
+
+      expect(
+        agentCliInfoForDetection(
+          "amp",
+          {
+            bins: ["amp"],
+            env: ["AMP_API_KEY"],
+          },
+          { env: { AMP_API_KEY: "amp-test" } },
+          {},
+          dir,
+          "linux",
+        ),
+      ).toEqual({
+        status: "available",
+        bins: ["amp"],
+        resolvedBin: cliPath,
+        runAdapter: true,
+        selectable: true,
+        env: ["AMP_API_KEY"],
+        installCommand: "npm install -g @sourcegraph/amp@latest",
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns Qwen as a runnable CLI adapter when the executable is present", () => {
+    const dir = mkdtempSync(join(tmpdir(), "rlab-qwen-discovery-"));
+    try {
+      const cliPath = join(dir, "qwen");
+      writeFileSync(cliPath, "", "utf8");
+
+      expect(
+        agentCliInfoForDetection(
+          "qwen",
+          {
+            bins: ["qwen", "qwen-code"],
+            env: ["DASHSCOPE_API_KEY"],
+          },
+          { env: { DASHSCOPE_API_KEY: "dashscope-test" } },
+          {},
+          dir,
+          "linux",
+        ),
+      ).toEqual({
+        status: "available",
+        bins: ["qwen", "qwen-code"],
+        resolvedBin: cliPath,
+        runAdapter: true,
+        selectable: true,
+        env: ["DASHSCOPE_API_KEY"],
+        installCommand: "npm install -g @qwen-code/qwen-code@latest",
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns Cursor as a runnable CLI adapter when the executable is present", () => {
+    const dir = mkdtempSync(join(tmpdir(), "rlab-cursor-discovery-"));
+    try {
+      const cliPath = join(dir, "cursor-agent");
+      writeFileSync(cliPath, "", "utf8");
+
+      expect(
+        agentCliInfoForDetection(
+          "cursor",
+          {
+            bins: ["cursor-agent"],
+          },
+          { env: {} },
+          {},
+          dir,
+          "linux",
+        ),
+      ).toEqual({
+        status: "available",
+        bins: ["cursor-agent"],
+        resolvedBin: cliPath,
+        runAdapter: true,
+        selectable: true,
+        env: [],
+        installCommand: null,
       });
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -516,6 +617,9 @@ describe("vite agents plugin", () => {
       "hello",
     ]);
     expect(buildGeminiRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" })).toContain("yolo");
+    expect(buildAmpRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" })).toContain("--dangerously-allow-all");
+    expect(buildQwenRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" })).toContain("yolo");
+    expect(buildCursorRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" })).toContain("--force");
   });
 
   it("allows unrestricted runs for every RUN adapter without a live permission bridge", () => {
@@ -523,7 +627,64 @@ describe("vite agents plugin", () => {
     expect(validateRunAccessModeForAgent("codex", "read-only")).toBeNull();
     expect(validateRunAccessModeForAgent("codex", "unrestricted")).toBeNull();
     expect(validateRunAccessModeForAgent("gemini", "unrestricted")).toBeNull();
+    expect(validateRunAccessModeForAgent("amp", "unrestricted")).toBeNull();
     expect(validateRunAccessModeForAgent("opencode", "unrestricted")).toBeNull();
+    expect(validateRunAccessModeForAgent("qwen", "unrestricted")).toBeNull();
+    expect(validateRunAccessModeForAgent("cursor", "unrestricted")).toBeNull();
+    expect(validateRunAccessModeForAgent("cursor", "read-only")).toBe("Cursor CLI print mode does not provide a verifiable read-only sandbox. Switch agent access to unrestricted to run Cursor.");
+  });
+
+  it("builds Amp args for read-only and unrestricted execute streams", () => {
+    expect(buildAmpRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "read-only" })).toEqual([
+      "--settings-file",
+      expect.stringContaining("amp-read-only-settings.json"),
+      "--execute",
+      "hello",
+      "--stream-json",
+      "--stream-json-thinking",
+    ]);
+    expect(buildAmpRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" })).toEqual([
+      "--dangerously-allow-all",
+      "--execute",
+      "hello",
+      "--stream-json",
+      "--stream-json-thinking",
+    ]);
+  });
+
+  it("builds Qwen args with selected model and access mode", () => {
+    expect(buildQwenRunArgs({ prompt: "hello", model: "qwen3.6-plus", reasoning: "default", mode: "default", accessMode: "read-only" })).toEqual([
+      "--prompt",
+      "hello",
+      "--output-format",
+      "stream-json",
+      "--include-partial-messages",
+      "--approval-mode",
+      "plan",
+      "--model",
+      "qwen3.6-plus",
+    ]);
+    expect(buildQwenRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" })).toEqual([
+      "--prompt",
+      "hello",
+      "--output-format",
+      "stream-json",
+      "--include-partial-messages",
+      "--approval-mode",
+      "yolo",
+    ]);
+  });
+
+  it("builds Cursor args with print-mode stream JSON and the selected model", () => {
+    expect(buildCursorRunArgs({ prompt: "hello", model: "gpt-5", reasoning: "default", mode: "default", accessMode: "unrestricted" })).toEqual([
+      "-p",
+      "hello",
+      "--output-format",
+      "stream-json",
+      "--force",
+      "--model",
+      "gpt-5",
+    ]);
   });
 
   it("builds Gemini args with the selected model", () => {
@@ -584,6 +745,68 @@ describe("vite agents plugin", () => {
     expect(translate(JSON.stringify({ type: "item.completed", item: { id: "item_0", type: "agent_message", text: "hello" } }))).toEqual([{ type: "text", text: "hello" }]);
     expect(translate(JSON.stringify({ type: "agent_message", message: "hello" }))).toEqual([{ type: "text", text: "hello" }]);
     expect(translate(JSON.stringify({ type: "turn.failed", error: { message: "model unsupported" } }))).toEqual([{ type: "error", text: "model unsupported" }]);
+  });
+
+  it("translates Amp Claude-compatible stream JSON into normalized run events", () => {
+    const translate = createAmpStreamTranslator();
+
+    expect(translate(JSON.stringify({ type: "system", subtype: "init", cwd: "/repo", session_id: "T-1", tools: ["Read"], mcp_servers: [], reasoning_effort: "high" }))).toEqual([
+      { type: "status", level: "info", text: "model · agent" },
+    ]);
+    expect(translate(JSON.stringify({ type: "assistant", message: { type: "message", role: "assistant", content: [{ type: "thinking", thinking: "scan" }, { type: "text", text: "done" }], stop_reason: "end_turn" } }))).toEqual([
+      { type: "reasoning", text: "scan" },
+      { type: "text", text: "done" },
+    ]);
+    expect(translate(JSON.stringify({ type: "result", subtype: "success", duration_ms: 10, is_error: false, num_turns: 1, result: "done", session_id: "T-1" }))).toEqual([
+      { type: "done", costUsd: undefined, usage: undefined },
+    ]);
+  });
+
+  it("translates Qwen stream JSON into normalized run events", () => {
+    const translate = createQwenStreamTranslator();
+
+    expect(translate(JSON.stringify({ type: "system", subtype: "session_start", model: "qwen3-coder-plus", session_id: "T-1" }))).toEqual([
+      { type: "status", level: "info", text: "model · qwen3-coder-plus" },
+    ]);
+    expect(translate(JSON.stringify({ type: "assistant", message: { type: "message", role: "assistant", content: [{ type: "text", text: "done" }], usage: { totalTokens: 12 } } }))).toEqual([
+      { type: "text", text: "done" },
+    ]);
+    expect(translate(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "done", usage: { totalTokens: 12 } }))).toEqual([
+      { type: "done", costUsd: undefined, usage: { totalTokens: 12 } },
+    ]);
+  });
+
+  it("translates Cursor stream JSON into normalized run events", () => {
+    const translate = createCursorStreamTranslator();
+
+    expect(translate(JSON.stringify({ type: "system", subtype: "init", model: "Claude 4 Sonnet", session_id: "T-1" }))).toEqual([
+      { type: "status", level: "info", text: "model · Claude 4 Sonnet" },
+    ]);
+    expect(translate(JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "hel" }] } }))).toEqual([{ type: "text", text: "hel" }]);
+    expect(translate(JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "lo" }] } }))).toEqual([{ type: "text", text: "lo" }]);
+    expect(
+      translate(
+        JSON.stringify({
+          type: "tool_call",
+          subtype: "started",
+          call_id: "cursor-tool-1",
+          tool_call: { readToolCall: { args: { path: "README.md" } } },
+        }),
+      ),
+    ).toEqual([{ type: "tool", id: "cursor-tool-1", name: "read", summary: "README.md", args: { path: "README.md" } }]);
+    expect(
+      translate(
+        JSON.stringify({
+          type: "tool_call",
+          subtype: "completed",
+          call_id: "cursor-tool-1",
+          tool_call: { readToolCall: { args: { path: "README.md" }, result: { success: { content: "docs" } } } },
+        }),
+      ),
+    ).toEqual([{ type: "tool_result", id: "cursor-tool-1", ok: true, output: "docs" }]);
+    expect(translate(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "hello", duration_ms: 10 }))).toEqual([
+      { type: "done", costUsd: undefined, usage: undefined },
+    ]);
   });
 
   it("translates Codex text deltas without duplicating the completed assistant message", () => {
@@ -2183,6 +2406,54 @@ describe("vite agents plugin", () => {
       time: binding.agentMessageTime,
       done: false,
       blocks: [{ kind: "text", text: "live" }],
+    });
+  });
+
+  it("builds attach stream updates with usage from the persisted agent message", () => {
+    const binding: BackgroundRunBinding = {
+      conversationId: "chat-2",
+      runId: "run-existing",
+      userMessageId: "u-existing",
+      userMessageTime: "14:00",
+      agentMessageId: "a-existing",
+      agentMessageTime: "14:01",
+    };
+    const state = buildInitialWorkspaceState();
+    const runningState = {
+      ...state,
+      chats: state.chats.map((chat) =>
+        chat.id === "chat-2"
+          ? {
+              ...chat,
+              activeRunId: binding.runId,
+              status: "running" as const,
+              snippet: "Working",
+              time: binding.agentMessageTime,
+            }
+          : chat,
+      ),
+      threads: {
+        ...state.threads,
+        "chat-2": [
+          ...state.threads["chat-2"],
+          {
+            id: binding.agentMessageId,
+            role: "agent" as const,
+            time: binding.agentMessageTime,
+            blocks: [{ kind: "text" as const, text: "live" }],
+            costUsd: 0.0173,
+            usage: { totalTokens: 9653 },
+          },
+        ],
+      },
+    };
+
+    expect(activeBackgroundRunUpdateFromState(runningState, binding, false)).toMatchObject({
+      runId: binding.runId,
+      conversationId: binding.conversationId,
+      agentMessageId: binding.agentMessageId,
+      costUsd: 0.0173,
+      usage: { totalTokens: 9653 },
     });
   });
 

@@ -995,4 +995,45 @@ describe("WorkspacePage", () => {
     });
   });
 
+  it("adds a diff-line comment and sends it as a review block in the thread", async () => {
+    const workspace = { ...buildInitialWorkspaceState(), selectedId: "c-flaky" };
+    const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+      if (path === "/api/workspace" && (!init || init.method === "GET")) {
+        return Response.json(workspace);
+      }
+      if (path === "/api/workspace" && init?.method === "PUT") {
+        return Response.json(workspace);
+      }
+      if (path === "/api/project-files") {
+        return Response.json({ files: [] });
+      }
+      if (path === "/api/git-status") {
+        return Response.json({ branch: "main", ahead: 0, behind: 0, clean: false, files: [{ code: " M", label: "Modified", path: "src/auth.ts", gitPath: "src/auth.ts", staged: false, unstaged: true }] });
+      }
+      if (path === "/api/git-diff") {
+        return Response.json({ path: "src/auth.ts", mode: "worktree", diff: "@@ -1 +1 @@\n+needsRefactor" });
+      }
+      return new Response("not found", { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetch);
+
+    renderWithTheme(<WorkspacePage />);
+
+    await screen.findByPlaceholderText("Написать: Flaky-тест auth.login...");
+    fireEvent.click(screen.getByRole("button", { name: "Git" }));
+
+    // The small diff auto-opens; click a line to attach a review comment.
+    fireEvent.click(await screen.findByText("needsRefactor"));
+    const commentInput = await screen.findByLabelText("Комментарий агенту...");
+    fireEvent.change(commentInput, { target: { value: "вынести в хелпер" } });
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить" }));
+
+    // The pending-comment tag appears above the composer; send it to the thread.
+    fireEvent.click(await screen.findByRole("button", { name: "Отправить комментарии" }));
+
+    // The review renders as a collapsible block (not plain text) in the chat.
+    expect(await screen.findByText("Ревью · 1 комментариев")).toBeInTheDocument();
+  });
+
 });

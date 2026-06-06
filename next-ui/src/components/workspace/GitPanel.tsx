@@ -128,6 +128,10 @@ function DiffFileCard({
   error = null,
   onFirstOpen,
   scrollRef,
+  comments,
+  onAddComment,
+  onUpdateComment,
+  onDeleteComment,
   t,
 }: {
   readonly path: string;
@@ -137,6 +141,10 @@ function DiffFileCard({
   readonly error?: string | null;
   readonly onFirstOpen?: () => void;
   readonly scrollRef?: RefObject<HTMLDivElement | null>;
+  readonly comments?: readonly ReviewCommentEntry[];
+  readonly onAddComment?: (line: number, lineText: string, body: string) => void;
+  readonly onUpdateComment?: (id: string, body: string) => void;
+  readonly onDeleteComment?: (id: string) => void;
   readonly t: I18nApi["t"];
 }) {
   const lineCount = lines?.length ?? 0;
@@ -246,7 +254,7 @@ function DiffFileCard({
               {t("gitDiffTooLarge", { count: lineCount })}
             </Alert>
           ) : lines && lines.length > 0 ? (
-            <GitDiffLines lines={lines} path={path} />
+            <GitDiffLines lines={lines} path={path} comments={comments} onAddComment={onAddComment} onUpdateComment={onUpdateComment} onDeleteComment={onDeleteComment} />
           ) : (
             <Typography sx={{ color: "text.secondary", fontSize: "0.8rem", px: 1.5, py: 1.25 }}>{t("gitDiffEmpty")}</Typography>
           )}
@@ -264,6 +272,7 @@ function GitFileDiffCard({
   action,
   autoLoad,
   scrollRef,
+  review,
   t,
 }: {
   readonly cwd: string;
@@ -272,6 +281,7 @@ function GitFileDiffCard({
   readonly action?: ReactNode;
   readonly autoLoad: boolean;
   readonly scrollRef?: RefObject<HTMLDivElement | null>;
+  readonly review?: DiffCommentApi;
   readonly t: I18nApi["t"];
 }) {
   const [lines, setLines] = useState<readonly DiffViewerLine[] | null>(null);
@@ -309,12 +319,16 @@ function GitFileDiffCard({
       error={error}
       onFirstOpen={loadDiff}
       scrollRef={scrollRef}
+      comments={review ? review.comments.filter((comment) => comment.file === file.gitPath) : undefined}
+      onAddComment={review ? (line, lineText, body) => review.onAddComment(file.gitPath, line, lineText, body) : undefined}
+      onUpdateComment={review?.onUpdateComment}
+      onDeleteComment={review?.onDeleteComment}
       t={t}
     />
   );
 }
 
-export function GitView({ cwd, lastTurnDiffs = [] }: GitViewProps) {
+export function GitView({ cwd, lastTurnDiffs = [], review }: GitViewProps) {
   const { t } = useI18n();
   const [status, setStatus] = useState<GitStatusPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -418,6 +432,28 @@ export function GitView({ cwd, lastTurnDiffs = [] }: GitViewProps) {
           </Tooltip>
         </Stack>
 
+        {status && (
+          <Tabs
+            value={activeTab}
+            onChange={(_, value: GitPanelTab) => setActiveTab(value)}
+            variant="scrollable"
+            scrollButtons={false}
+            aria-label={t("gitStatus")}
+            sx={{
+              flex: "0 0 auto",
+              minHeight: 40,
+              px: 1,
+              borderBottom: (theme) => `1px solid ${theme.custom.borders.subtle}`,
+              "& .MuiTab-root": { minHeight: 40, py: 0, textTransform: "none", fontSize: "0.76rem", fontFamily: (theme) => theme.custom.fonts.mono },
+            }}
+          >
+            <Tab value="unstaged" label={tabLabel(t("gitUnstagedTab"), unstagedFiles.length)} />
+            <Tab value="staged" label={tabLabel(t("gitStagedTab"), stagedFiles.length)} />
+            <Tab value="commit" label={t("gitCommitTab")} />
+            <Tab value="last-turn" label={tabLabel(t("gitLastTurnTab"), lastTurnDiffs.length)} />
+          </Tabs>
+        )}
+
         <Stack ref={scrollRef} spacing={1.5} sx={{ flex: 1, minHeight: 0, overflow: "auto", px: 1.5, pt: 0, pb: 2 }}>
           {!cwd && <Alert severity="info" sx={{ mt: 1.5 }}>{t("gitNoProject")}</Alert>}
           {loading && (
@@ -429,13 +465,6 @@ export function GitView({ cwd, lastTurnDiffs = [] }: GitViewProps) {
           {error && <Alert severity="error" sx={{ mt: 1.5 }}>{error}</Alert>}
           {status && (
             <Stack spacing={1.5} sx={{ minHeight: 0, pt: 1.5 }}>
-              <Tabs value={activeTab} onChange={(_, value: GitPanelTab) => setActiveTab(value)} aria-label={t("gitStatus")} sx={{ minHeight: 0 }}>
-                <Tab value="unstaged" label={tabLabel(t("gitUnstagedTab"), unstagedFiles.length)} />
-                <Tab value="staged" label={tabLabel(t("gitStagedTab"), stagedFiles.length)} />
-                <Tab value="commit" label={t("gitCommitTab")} />
-                <Tab value="last-turn" label={tabLabel(t("gitLastTurnTab"), lastTurnDiffs.length)} />
-              </Tabs>
-
               {activeTab === "unstaged" &&
                 cwd &&
                 (unstagedFiles.length === 0 ? (
@@ -450,6 +479,7 @@ export function GitView({ cwd, lastTurnDiffs = [] }: GitViewProps) {
                         mode="worktree"
                         autoLoad={unstagedFiles.length <= EAGER_DIFF_LIMIT}
                         scrollRef={scrollRef}
+                        review={review}
                         t={t}
                         action={
                           <Tooltip title={t("gitStage")}>
@@ -479,6 +509,7 @@ export function GitView({ cwd, lastTurnDiffs = [] }: GitViewProps) {
                         mode="staged"
                         autoLoad={stagedFiles.length <= EAGER_DIFF_LIMIT}
                         scrollRef={scrollRef}
+                        review={review}
                         t={t}
                         action={
                           <Tooltip title={t("gitUnstage")}>

@@ -15,6 +15,7 @@ import { rise } from "./anim";
 import { type MessageActionHandlers } from "./message-actions";
 import { AgentAvatar, TypingDots, UserAvatar } from "./parts";
 import { type AgentBlock, type ChatMessage } from "./types";
+import { formatCostUsd, formatTokenUsage } from "./usage-cost";
 
 /**
  * Split a sent user message into its visible text and the attachments that the
@@ -228,6 +229,50 @@ function UserMessage({ message, delay, actions }: { readonly message: ChatMessag
 // code, status, citations) is folded into one collapsed container.
 const ANSWER_BLOCK_KINDS: ReadonlySet<AgentBlock["kind"]> = new Set(["text", "options", "approval", "suggested"]);
 
+function AgentUsageMeta({ message }: { readonly message: ChatMessage }) {
+  if (message.costUsd === undefined && message.usage === undefined) {
+    return null;
+  }
+  return (
+    <Stack direction="row" spacing={0.75} sx={{ flexWrap: "wrap", rowGap: 0.5 }}>
+      {message.costUsd !== undefined && (
+        <Box
+          component="span"
+          sx={{
+            px: 0.75,
+            py: 0.2,
+            borderRadius: (t) => `${t.custom.radii.pill}px`,
+            border: (t) => `1px solid ${t.custom.borders.subtle}`,
+            color: "text.secondary",
+            fontFamily: (t) => t.custom.fonts.mono,
+            fontSize: "0.66rem",
+            lineHeight: 1.4,
+          }}
+        >
+          {formatCostUsd(message.costUsd)}
+        </Box>
+      )}
+      {message.usage !== undefined && (
+        <Box
+          component="span"
+          sx={{
+            px: 0.75,
+            py: 0.2,
+            borderRadius: (t) => `${t.custom.radii.pill}px`,
+            border: (t) => `1px solid ${t.custom.borders.subtle}`,
+            color: "text.secondary",
+            fontFamily: (t) => t.custom.fonts.mono,
+            fontSize: "0.66rem",
+            lineHeight: 1.4,
+          }}
+        >
+          {formatTokenUsage(message.usage)}
+        </Box>
+      )}
+    </Stack>
+  );
+}
+
 /** Collapsed-by-default container holding an agent turn's intermediate work, so
  *  threads stay readable — only the answer and the (collapsed) details show. */
 function AgentDetails({ blocks, actions }: { readonly blocks: readonly AgentBlock[]; readonly actions?: MessageActionHandlers }) {
@@ -295,6 +340,7 @@ function AgentMessage({ message, delay, actions }: { readonly message: ChatMessa
               {message.time}
             </Typography>
           )}
+          <AgentUsageMeta message={message} />
         </Stack>
         <Stack spacing={1.25}>
           {detailBlocks.length > 0 && (
