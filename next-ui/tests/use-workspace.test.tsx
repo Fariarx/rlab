@@ -216,6 +216,79 @@ describe("useWorkspace", () => {
     expect(state.chats.find((chat) => chat.id === "chat-2")?.usage).toEqual({ totalTokens: 9653 });
   });
 
+  it("keeps a bound background run running after the client stream disconnects and settles from workspace sync", async () => {
+    vi.useFakeTimers();
+    vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/workspace" && (!init || init.method === "GET")) {
+        return Response.json(state);
+      }
+      if (url === "/api/workspace" && init?.method === "PUT") {
+        state = JSON.parse(String(init.body)) as WorkspaceState;
+        return Response.json(state);
+      }
+      if (url === "/api/run") {
+        runRequests.push(JSON.parse(String(init?.body ?? "{}")) as {
+          accessMode?: string;
+          agent?: string;
+          agentMessageId?: string;
+          conversationId?: string;
+          prompt?: string;
+          model?: string;
+          reasoning?: string;
+          runId?: string;
+          userMessageId?: string;
+          mode?: string;
+        });
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            activeRunController = controller;
+            controller.enqueue(new TextEncoder().encode(`${JSON.stringify({ type: "start" })}\n`));
+            controller.error(new Error("client stream disconnected"));
+          },
+        });
+        return new Response(stream, {
+          headers: { "Content-Type": "application/x-ndjson" },
+        });
+      }
+      if (url === "/api/run-cancel") {
+        runCancelRequests.push(JSON.parse(String(init?.body ?? "{}")) as { runId?: string });
+        return Response.json({ canceled: true });
+      }
+      return new Response("not found", { status: 404 });
+    });
+    render(<Probe />);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByText("chat-2")).toBeInTheDocument();
+    screen.getByRole("button", { name: "send" }).click();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByTestId("status")).toHaveTextContent("running");
+    expect(state.chats.find((chat) => chat.id === "chat-2")?.activeRunId).toBe(runRequests[0]?.runId);
+    expect(JSON.stringify(state.threads["chat-2"])).not.toContain("client stream disconnected");
+    expect(JSON.stringify(state.threads["chat-2"])).toContain("Прогон продолжается в фоне");
+
+    state = {
+      ...state,
+      chats: state.chats.map((chat) => (chat.id === "chat-2" ? { ...chat, activeRunId: undefined, status: "done", snippet: "finished" } : chat)),
+      threads: {
+        ...state.threads,
+        "chat-2": [...state.threads["chat-2"], { id: "a-bg-done", role: "agent", blocks: [{ kind: "text", text: "finished" }] }],
+      },
+    };
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2100);
+    });
+
+    expect(screen.getByTestId("status")).toHaveTextContent("done");
+  });
+
   it("marks a conversation waiting while a streamed approval is pending", async () => {
     render(<Probe />);
 
@@ -349,6 +422,78 @@ describe("useWorkspace", () => {
 
     expect(screen.getByTestId("status")).toHaveTextContent("done");
     expect(screen.getByTestId("loading")).toHaveTextContent("false");
+  });
+
+  it("immediately syncs a persisted background run after loading workspace state", async () => {
+    vi.useFakeTimers();
+    const runningState: WorkspaceState = {
+      ...state,
+      chats: state.chats.map((chat) => (chat.id === "chat-2" ? { ...chat, activeRunId: "run-existing", status: "running" } : chat)),
+    };
+    const doneState: WorkspaceState = {
+      ...runningState,
+      chats: runningState.chats.map((chat) => (chat.id === "chat-2" ? { ...chat, activeRunId: undefined, status: "done", snippet: "finished" } : chat)),
+      threads: {
+        ...runningState.threads,
+        "chat-2": [...runningState.threads["chat-2"], { id: "a-bg", role: "agent", blocks: [{ kind: "text", text: "finished" }] }],
+      },
+    };
+    let workspaceReads = 0;
+    vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/workspace" && (!init || init.method === "GET")) {
+        workspaceReads += 1;
+        return Response.json(workspaceReads === 1 ? runningState : doneState);
+      }
+      if (url === "/api/workspace" && init?.method === "PUT") {
+        state = JSON.parse(String(init.body)) as WorkspaceState;
+        return Response.json(state);
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    render(<Probe />);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    expect(screen.getByText("chat-2")).toBeInTheDocument();
+    expect(screen.getByTestId("status")).toHaveTextContent("done");
+    expect(screen.getByTestId("loading")).toHaveTextContent("false");
+    expect(workspaceReads).toBe(2);
+  });
+
+  it("does not save or rerender when a persisted background run snapshot is unchanged", async () => {
+    vi.useFakeTimers();
+    let renders = 0;
+    state = {
+      ...state,
+      chats: state.chats.map((chat) => (chat.id === "chat-2" ? { ...chat, activeRunId: "run-existing", status: "running" } : chat)),
+    };
+    const CountingProbe = () => {
+      renders += 1;
+      return <Probe />;
+    };
+    render(<CountingProbe />);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByText("chat-2")).toBeInTheDocument();
+    const rendersAfterLoad = renders;
+    const workspaceSavesAfterLoad = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace" && init?.method === "PUT").length;
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2100);
+    });
+
+    const workspaceSavesAfterPoll = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace" && init?.method === "PUT").length;
+    expect(renders).toBe(rendersAfterLoad);
+    expect(workspaceSavesAfterPoll).toBe(workspaceSavesAfterLoad);
   });
 
   it("retries a user message by resending its original text", async () => {

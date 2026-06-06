@@ -13,8 +13,9 @@ describe("App", () => {
     render(<App />);
 
     expect(screen.getByText("rlab / агенты")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Чаты" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Проекты" })).toBeInTheDocument();
+    // Projects and chats share one unified sidebar list (no mode toggle).
+    expect(screen.getByText("auth-service")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Поиск диалогов..." })).toBeInTheDocument();
   });
 
   it("shows an explicit empty-agent state when live detection finds no agents", async () => {

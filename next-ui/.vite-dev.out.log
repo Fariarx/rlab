@@ -344,3 +344,80 @@
 [2m14:09:50[22m [36m[1m[vite][22m[39m server restarted.
 [2m14:10:08[22m [36m[1m[vite][22m[39m [32mvite-agents-plugin.ts changed, restarting server...[39m
 [2m14:10:08[22m [36m[1m[vite][22m[39m server restarted.
+[2m14:23:34[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/workspace/WorkspacePage.tsx[22m
+[2m14:25:22[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/agent/ConversationList.tsx[22m
+[2m14:25:22[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/components/agent/ConversationList.tsx[22m Could not Fast Refresh (new export)
+[2m14:25:22[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/workspace/WorkspacePage.tsx, /src/components/kit/sections/AgentBlocksSection.tsx, /src/components/settings/SettingsDialog.tsx[22m
+[2m14:25:42[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/agent/ConversationList.tsx[22m
+[2m14:25:42[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/components/agent/ConversationList.tsx[22m Could not Fast Refresh ("conversationMatches" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m14:25:42[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/workspace/WorkspacePage.tsx, /src/components/kit/sections/AgentBlocksSection.tsx, /src/components/settings/SettingsDialog.tsx[22m
+[2m14:25:46[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/agent/ConversationList.tsx[22m
+[2m14:25:46[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/components/agent/ConversationList.tsx[22m Could not Fast Refresh ("conversationMatches" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m14:25:46[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/workspace/WorkspacePage.tsx, /src/components/kit/sections/AgentBlocksSection.tsx, /src/components/settings/SettingsDialog.tsx[22m
+[2m14:26:02[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/agent/ConversationList.tsx[22m
+[2m14:26:03[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/components/agent/ConversationList.tsx[22m Could not Fast Refresh ("conversationMatches" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m14:26:03[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/workspace/WorkspacePage.tsx, /src/components/kit/sections/AgentBlocksSection.tsx, /src/components/settings/SettingsDialog.tsx[22m
+[2m14:26:03[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32m✨ new dependencies optimized: [33m@mui/icons-material/FolderOpenRounded, @mui/icons-material/FolderRounded[32m[39m
+[2m14:26:13[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/agent/ConversationList.tsx[22m
+[2m14:26:13[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/components/agent/ConversationList.tsx[22m Could not Fast Refresh ("conversationMatches" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m14:26:13[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/workspace/WorkspacePage.tsx, /src/components/kit/sections/AgentBlocksSection.tsx, /src/components/settings/SettingsDialog.tsx[22m
+[2m14:29:38[22m [36m[1m[vite][22m[39m [32mvite-agents-plugin.ts changed, restarting server...[39m
+[2m14:29:38[22m [36m[1m[vite][22m[39m server restarted.
+[2m14:30:52[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/agent/ConversationList.tsx[22m
+[2m14:30:52[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/components/agent/ConversationList.tsx[22m Could not Fast Refresh ("conversationMatches" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m14:30:52[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/workspace/WorkspacePage.tsx, /src/components/kit/sections/AgentBlocksSection.tsx, /src/components/settings/SettingsDialog.tsx[22m
+[2m14:31:32[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/agent/ConversationList.tsx[22m
+[2m14:31:59[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/workspace/WorkspacePage.tsx, /src/components/kit/sections/AgentBlocksSection.tsx, /src/components/settings/SettingsDialog.tsx[22m
+[2m14:32:29[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/agent/ConversationList.tsx[22m
+[2m14:32:29[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/components/agent/ConversationList.tsx[22m Could not Fast Refresh ("conversationMatches" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m14:32:29[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/workspace/WorkspacePage.tsx, /src/components/kit/sections/AgentBlocksSection.tsx, /src/components/settings/SettingsDialog.tsx[22m
+[2m14:32:44[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/agent/ConversationList.tsx[22m
+[2m14:32:44[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/components/agent/ConversationList.tsx[22m Could not Fast Refresh ("conversationMatches" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m14:32:44[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/workspace/WorkspacePage.tsx, /src/components/kit/sections/AgentBlocksSection.tsx, /src/components/settings/SettingsDialog.tsx[22m
+[2m14:34:32[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/WorkspacePage.tsx[22m
+[2m14:34:52[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/WorkspacePage.tsx[22m
+[2m14:35:21[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/WorkspacePage.tsx[22m
+[2m14:35:46[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/WorkspacePage.tsx[22m
+[2m14:36:13[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/workspace/WorkspacePage.tsx[22m
+[2m14:36:32[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/WorkspacePage.tsx[22m
+[2m14:37:37[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/WorkspacePage.tsx[22m
+[2m14:37:46[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/WorkspacePage.tsx[22m
+[2m14:41:50[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/workspace/WorkspacePage.tsx[22m
+[2m14:41:56[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/workspace/WorkspacePage.tsx[22m
+[2m14:42:21[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/workspace/WorkspacePage.tsx[22m
+[2m14:43:47[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/workspace/WorkspacePage.tsx[22m
+[2m14:44:07[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/workspace/WorkspacePage.tsx[22m
+[2m14:44:31[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/workspace/WorkspacePage.tsx[22m
+[2m14:48:11[22m [36m[1m[vite][22m[39m [32msrc/i18n/I18nProvider.tsx changed, restarting server...[39m
+[2m14:48:11[22m [36m[1m[vite][22m[39m server restarted.
+[2m14:48:16[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/workspace/WorkspacePage.tsx[22m
+[2m14:54:12[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/agent/ConversationList.tsx[22m
+[2m14:54:12[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/components/agent/ConversationList.tsx[22m Could not Fast Refresh ("conversationMatches" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m14:54:12[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/workspace/WorkspacePage.tsx, /src/components/settings/SettingsDialog.tsx, /src/components/kit/sections/AgentBlocksSection.tsx[22m
+[2m14:54:32[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/agent/ConversationList.tsx[22m
+[2m14:55:03[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/workspace/WorkspacePage.tsx, /src/components/settings/SettingsDialog.tsx, /src/components/kit/sections/AgentBlocksSection.tsx[22m
+[2m14:55:52[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/workspace/WorkspacePage.tsx, /src/components/settings/SettingsDialog.tsx, /src/components/kit/sections/AgentBlocksSection.tsx[22m
+[2m14:56:42[22m [36m[1m[vite][22m[39m [32msrc/i18n/I18nProvider.tsx changed, restarting server...[39m
+[2m14:56:42[22m [36m[1m[vite][22m[39m server restarted.
+[2m14:56:51[22m [36m[1m[vite][22m[39m [32msrc/i18n/I18nProvider.tsx changed, restarting server...[39m
+[2m14:56:51[22m [36m[1m[vite][22m[39m server restarted.
+[2m14:57:49[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/WorkspacePage.tsx[22m
+[2m14:58:22[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/WorkspacePage.tsx[22m
+[2m14:58:52[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/WorkspacePage.tsx[22m
+[2m14:59:12[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/WorkspacePage.tsx[22m
+[2m14:59:52[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/WorkspacePage.tsx[22m
+[2m15:02:42[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/WorkspacePage.tsx[22m
+[2m15:03:02[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/WorkspacePage.tsx[22m
+[2m15:03:08[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/WorkspacePage.tsx[22m
+[2m15:03:22[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/WorkspacePage.tsx[22m
+[2m15:04:02[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/workspace/WorkspacePage.tsx, /src/components/kit/sections/AgentBlocksSection.tsx, /src/components/settings/SettingsDialog.tsx, /src/components/agent/ConversationSearch.tsx[22m
+[2m15:04:03[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32m✨ new dependencies optimized: [33m@mui/icons-material/ChatBubbleOutlineRounded[32m[39m
+[2m15:18:22[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/agent/Composer.tsx[22m
+[2m15:18:29[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/agent/Composer.tsx[22m
+[2m15:18:42[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/agent/Composer.tsx[22m
+[2m15:19:02[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/agent/Composer.tsx[22m
+[2m15:19:10[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/agent/Composer.tsx[22m
+[2m15:24:52[22m [36m[1m[vite][22m[39m [32msrc/i18n/I18nProvider.tsx changed, restarting server...[39m
+[2m15:24:52[22m [36m[1m[vite][22m[39m server restarted.
+[2m15:24:59[22m [36m[1m[vite][22m[39m [32msrc/i18n/I18nProvider.tsx changed, restarting server...[39m
+[2m15:24:59[22m [36m[1m[vite][22m[39m server restarted.

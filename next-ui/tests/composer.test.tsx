@@ -46,4 +46,27 @@ describe("Composer", () => {
 
     expect(screen.getByPlaceholderText("Написать")).toHaveValue("Составь план реализации перед изменениями. ");
   });
+
+  it("lifts the input into an overlay when the text becomes multiline", () => {
+    renderWithTheme(<Composer placeholder="Написать" />);
+    const area = screen.getByTestId("composer-input-area");
+    expect(area).toHaveAttribute("data-expanded", "false");
+
+    fireEvent.change(screen.getByPlaceholderText("Написать"), { target: { value: "line one\nline two" } });
+
+    expect(area).toHaveAttribute("data-expanded", "true");
+    // The same single field is reused — no duplicate input is rendered behind the overlay.
+    expect(screen.getAllByPlaceholderText("Написать")).toHaveLength(1);
+  });
+
+  it("collapses the overlay back to a single row when multiline content is cleared", () => {
+    renderWithTheme(<Composer placeholder="Написать" />);
+    const input = screen.getByPlaceholderText("Написать");
+
+    fireEvent.change(input, { target: { value: "a\nb" } });
+    expect(screen.getByTestId("composer-input-area")).toHaveAttribute("data-expanded", "true");
+
+    fireEvent.change(input, { target: { value: "a" } });
+    expect(screen.getByTestId("composer-input-area")).toHaveAttribute("data-expanded", "false");
+  });
 });

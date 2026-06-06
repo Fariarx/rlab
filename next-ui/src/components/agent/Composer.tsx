@@ -3,7 +3,7 @@ import CloseIcon from "@mui/icons-material/Close";
 import SendIcon from "@mui/icons-material/Send";
 import StopCircleIcon from "@mui/icons-material/StopCircle";
 import { Box, Chip, InputBase, Stack, Typography } from "@mui/material";
-import { type ChangeEvent, type KeyboardEvent, useMemo, useRef, useState } from "react";
+import { type ChangeEvent, type KeyboardEvent, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import { Button, IconButton, KeyHint } from "../ui";
 import { type ComposerAttachmentDraft, type ComposerDraft } from "./types";
@@ -129,12 +129,33 @@ export function Composer({
   const [internalValue, setInternalValue] = useState("");
   const [internalAttachments, setInternalAttachments] = useState<readonly ComposerAttachmentDraft[]>([]);
   const [sending, setSending] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const singleRowRef = useRef(0);
   const { t } = useI18n();
   const composerValue = value ?? internalValue;
   const composerAttachments = attachments ?? internalAttachments;
   const latestDraftRef = useRef<ComposerDraft>({ text: composerValue, attachments: composerAttachments });
   latestDraftRef.current = { text: composerValue, attachments: composerAttachments };
+
+  // Decide whether the input would need more than one row. When it does, the
+  // input lifts into an overlay that grows upward (see render) instead of
+  // expanding the composer bar in place. Detection is driven by content height
+  // (wrapped long lines) and explicit newlines, so it works regardless of how
+  // the text reached multiple rows.
+  useLayoutEffect(() => {
+    const el = textareaRef.current;
+    if (!el) {
+      return;
+    }
+    if (singleRowRef.current === 0 && !expanded) {
+      singleRowRef.current = el.scrollHeight;
+    }
+    const baseline = singleRowRef.current || 24;
+    const needsMultiline = composerValue.length > 0 && (composerValue.includes("\n") || el.scrollHeight > baseline * 1.5);
+    setExpanded(needsMultiline);
+  }, [composerValue, expanded]);
 
   const slashCommands = useMemo<readonly SlashCommand[]>(
     () => [
@@ -247,15 +268,44 @@ export function Composer({
         <IconButton aria-label={t("attach")} sx={{ flex: "0 0 auto" }} onClick={() => fileInputRef.current?.click()}>
           <AttachFileIcon sx={{ fontSize: 18 }} />
         </IconButton>
-        <InputBase
-          value={composerValue}
-          onChange={(event) => setComposerValue(event.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder={placeholder}
-          multiline
-          maxRows={6}
-          sx={{ flex: 1, fontSize: "0.9rem", lineHeight: 1.5, py: 0.5 }}
-        />
+        {/* The input column keeps a fixed single-row height so the composer bar
+            never grows. When multiline is needed the same input lifts into an
+            overlay (position: absolute) that grows upward over the thread. */}
+        <Box
+          data-testid="composer-input-area"
+          data-expanded={expanded ? "true" : "false"}
+          sx={{ position: "relative", flex: 1, minWidth: 0, minHeight: 30, display: "flex", alignItems: "center" }}
+        >
+          <InputBase
+            inputRef={textareaRef}
+            value={composerValue}
+            onChange={(event) => setComposerValue(event.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder={placeholder}
+            multiline
+            minRows={1}
+            maxRows={expanded ? 8 : 1}
+            sx={{
+              width: "100%",
+              fontSize: "0.9rem",
+              lineHeight: 1.5,
+              py: 0.5,
+              ...(expanded && {
+                position: "absolute",
+                left: 0,
+                right: 0,
+                bottom: 0,
+                zIndex: 5,
+                px: 1,
+                py: 0.75,
+                borderRadius: (t) => `${t.custom.radii.md}px`,
+                backgroundColor: (t) => t.custom.surfaces.s2,
+                border: (t) => `1px solid ${t.custom.borders.focus}`,
+                boxShadow: "0 -10px 28px rgba(0, 0, 0, 0.45)",
+              }),
+            }}
+          />
+        </Box>
         <Stack direction="row" spacing={1} sx={{ alignItems: "center", flex: "0 0 auto" }}>
           {running ? (
             <IconButton aria-label={t("stopRun")} tone="danger" onClick={onStop}>

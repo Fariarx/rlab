@@ -465,6 +465,45 @@ export function migrateSeedWorkspaceState(state: WorkspaceState): WorkspaceState
   return changed ? { ...state, chats, projects, threads } : state;
 }
 
+const interruptedRunSnippet: Record<Locale, string> = {
+  en: "Background run interrupted",
+  ru: "Фоновый прогон прерван",
+};
+
+function reconcileConversationRun(conversation: WorkspaceConversation, activeRunIds: ReadonlySet<string>, locale: Locale): WorkspaceConversation {
+  if (!conversation.activeRunId || activeRunIds.has(conversation.activeRunId)) {
+    return conversation;
+  }
+  if (conversation.status !== "running" && conversation.status !== "waiting") {
+    return conversation;
+  }
+  return {
+    ...conversation,
+    activeRunId: undefined,
+    status: "error",
+    snippet: interruptedRunSnippet[locale],
+  };
+}
+
+export function reconcileStaleBackgroundRuns(state: WorkspaceState, activeRunIds: ReadonlySet<string>): WorkspaceState {
+  let changed = false;
+  const locale = state.settings.general.locale;
+  const chats = state.chats.map((conversation) => {
+    const reconciled = reconcileConversationRun(conversation, activeRunIds, locale);
+    changed ||= reconciled !== conversation;
+    return reconciled;
+  });
+  const projects = state.projects.map((project) => {
+    const conversations = project.conversations.map((conversation) => {
+      const reconciled = reconcileConversationRun(conversation, activeRunIds, locale);
+      changed ||= reconciled !== conversation;
+      return reconciled;
+    });
+    return conversations === project.conversations ? project : { ...project, conversations };
+  });
+  return changed ? { ...state, chats, projects } : state;
+}
+
 function readWorkspaceState(): WorkspaceState {
   if (!existsSync(WORKSPACE_STATE_FILE)) {
     const initial = normalizeSeedProjectPaths(buildInitialWorkspaceState());
@@ -473,7 +512,7 @@ function readWorkspaceState(): WorkspaceState {
   }
   const parsed = JSON.parse(readFileSync(WORKSPACE_STATE_FILE, "utf8").replace(/^\uFEFF/, "")) as unknown;
   if (isWorkspaceState(parsed)) {
-    const normalized = normalizeSeedProjectPaths(migrateSeedWorkspaceState(cloneWorkspaceState(parsed)));
+    const normalized = reconcileStaleBackgroundRuns(normalizeSeedProjectPaths(migrateSeedWorkspaceState(cloneWorkspaceState(parsed))), new Set(backgroundRunHandles.keys()));
     if (JSON.stringify(normalized) !== JSON.stringify(parsed)) {
       writeWorkspaceState(normalized);
     }
@@ -484,7 +523,7 @@ function readWorkspaceState(): WorkspaceState {
       ...parsed,
       composerDrafts: {},
     };
-    const normalized = normalizeSeedProjectPaths(migrateSeedWorkspaceState(cloneWorkspaceState(migrated)));
+    const normalized = reconcileStaleBackgroundRuns(normalizeSeedProjectPaths(migrateSeedWorkspaceState(cloneWorkspaceState(migrated))), new Set(backgroundRunHandles.keys()));
     writeWorkspaceState(normalized);
     return normalized;
   }
@@ -494,7 +533,7 @@ function readWorkspaceState(): WorkspaceState {
       composerDrafts: {},
       settings: cloneAppSettings(defaultAppSettings),
     };
-    const normalized = normalizeSeedProjectPaths(migrateSeedWorkspaceState(migrated));
+    const normalized = reconcileStaleBackgroundRuns(normalizeSeedProjectPaths(migrateSeedWorkspaceState(migrated)), new Set(backgroundRunHandles.keys()));
     writeWorkspaceState(normalized);
     return normalized;
   }

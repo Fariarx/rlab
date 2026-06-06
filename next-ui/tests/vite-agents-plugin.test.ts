@@ -23,6 +23,7 @@ import {
   parseGitStatusPorcelain,
   listMentionableFiles,
   migrateSeedWorkspaceState,
+  reconcileStaleBackgroundRuns,
   hasGeminiStoredAuthAt,
   installCommandForAgent,
   resolveAgentInstallLaunch,
@@ -822,5 +823,39 @@ describe("vite agents plugin", () => {
 
     expect(migrated.chats.find((conversation) => conversation.id === "chat-2")?.profile).toEqual({ agent: "codex", model: "gpt-5.5", reasoning: "default", mode: "default" });
     expect(migrated.projects[0]?.conversations.find((conversation) => conversation.id === "c-jwt")?.profile).toEqual({ agent: "codex", model: "gpt-5.5", reasoning: "default", mode: "default" });
+  });
+
+  it("marks persisted active background runs as interrupted when no server handle owns them", () => {
+    const state = buildInitialWorkspaceState();
+    const reconciled = reconcileStaleBackgroundRuns(
+      {
+        ...state,
+        chats: state.chats.map((conversation) =>
+          conversation.id === "chat-2" ? { ...conversation, activeRunId: "run-stale", status: "running", snippet: "Still running" } : conversation,
+        ),
+        projects: state.projects.map((project) =>
+          project.id === "auth-service"
+            ? {
+                ...project,
+                conversations: project.conversations.map((conversation) =>
+                  conversation.id === "c-flaky" ? { ...conversation, activeRunId: "run-live", status: "running", snippet: "Still running" } : conversation,
+                ),
+              }
+            : project,
+        ),
+      },
+      new Set(["run-live"]),
+    );
+
+    expect(reconciled.chats.find((conversation) => conversation.id === "chat-2")).toMatchObject({
+      activeRunId: undefined,
+      status: "error",
+      snippet: "Фоновый прогон прерван",
+    });
+    expect(reconciled.projects[0]?.conversations.find((conversation) => conversation.id === "c-flaky")).toMatchObject({
+      activeRunId: "run-live",
+      status: "running",
+      snippet: "Still running",
+    });
   });
 });

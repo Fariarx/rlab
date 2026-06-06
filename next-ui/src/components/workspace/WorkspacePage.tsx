@@ -8,6 +8,7 @@ import LightModeIcon from "@mui/icons-material/LightMode";
 import MenuIcon from "@mui/icons-material/Menu";
 import ReplayIcon from "@mui/icons-material/Replay";
 import RestartAltIcon from "@mui/icons-material/RestartAlt";
+import SearchIcon from "@mui/icons-material/Search";
 import SettingsIcon from "@mui/icons-material/Settings";
 import {
   Alert,
@@ -20,8 +21,6 @@ import {
   Drawer,
   Link,
   Stack,
-  ToggleButton,
-  ToggleButtonGroup,
   Tooltip,
   Typography,
 } from "@mui/material";
@@ -37,6 +36,7 @@ import {
   Composer,
   Conversation,
   ConversationList,
+  ConversationSearch,
   conversationStatusKey,
   DEFAULT_PROFILE,
   formatCostUsd,
@@ -58,7 +58,6 @@ import { CreateProjectDialog } from "./CreateProjectDialog";
 import { GitPanel } from "./GitPanel";
 import { conversationProfile, type Workspace, useWorkspace } from "./use-workspace";
 
-type WorkspaceMode = "chats" | "projects";
 const SIDEBAR_WIDTH = 300;
 // Max width for the centered thread/composer content. The scroll container
 // itself is full-width so its scrollbar sits at the screen edge.
@@ -138,7 +137,7 @@ export function WorkspacePageView({
   const agentStatusError = useAgentStatusError();
   const reloadAgentStatus = useReloadAgentStatus();
 
-  const [wsMode, setWsMode] = useState<WorkspaceMode>("chats");
+  const [searchOpen, setSearchOpen] = useState(false);
   const [profile, setProfile] = useState<AgentProfile>(ws.settings.agents.defaultProfile ?? DEFAULT_PROFILE);
   const [pickerOpen, setPickerOpen] = useState(false);
   // A pending new chat that exists only in the composer until the user sends
@@ -225,20 +224,7 @@ export function WorkspacePageView({
   }, []);
 
   useEffect(() => {
-    if (routeKind === "chat" && routeConversationId) {
-      setWsMode("chats");
-      if (ws.selectedId !== routeConversationId) {
-        ws.select(routeConversationId);
-      }
-      const conv = ws.find(routeConversationId);
-      if (conv) {
-        setProfile((current) => {
-          const nextProfile = conversationProfile(conv);
-          return agentProfileEquals(current, nextProfile) ? current : nextProfile;
-        });
-      }
-    } else if (routeKind === "project" && routeConversationId) {
-      setWsMode("projects");
+    if ((routeKind === "chat" || routeKind === "project") && routeConversationId) {
       if (ws.selectedId !== routeConversationId) {
         ws.select(routeConversationId);
       }
@@ -251,20 +237,6 @@ export function WorkspacePageView({
       }
     }
   }, [routeKind, routeConversationId, ws.selectedId, ws.select, ws.find]);
-
-  // Once the workspace loads, align the sidebar mode with the persisted
-  // selection so a project conversation doesn't open under the Chats tab.
-  // Runs once and only when the URL isn't deep-linking a specific conversation.
-  const initialModeSynced = useRef(false);
-  useEffect(() => {
-    if (initialModeSynced.current || !ws.loaded) {
-      return;
-    }
-    initialModeSynced.current = true;
-    if (!routeConversationId && projectForConversation(ws, ws.selectedId)) {
-      setWsMode("projects");
-    }
-  }, [ws.loaded, ws.selectedId, routeConversationId]);
 
   useEffect(() => {
     const conversations = workspaceConversations(ws);
@@ -307,29 +279,11 @@ export function WorkspacePageView({
     setRunKey((k) => k + 1);
   };
 
-  const switchMode = (next: WorkspaceMode) => {
-    setComposingNew(null);
-    setWsMode(next);
-    const firstId = next === "chats" ? ws.chats[0]?.id : ws.projects.find((p) => p.conversations.length > 0)?.conversations[0]?.id;
-    if (firstId) {
-      openConversation(firstId);
-    }
-  };
-
   // Start a new chat using the default agent without a confirmation dialog. The
   // conversation isn't created until the user sends the first message.
   const startNewChat = () => {
     setProfile(ws.settings.agents.defaultProfile ?? DEFAULT_PROFILE);
-    if (wsMode === "projects") {
-      const targetProject = projectForConversation(ws, ws.selectedId) ?? ws.projects[0] ?? null;
-      if (!targetProject) {
-        toast({ message: t("noProjectForNewChat"), severity: "error", duration: 3000 });
-        return;
-      }
-      setComposingNew({ projectId: targetProject.id });
-    } else {
-      setComposingNew({});
-    }
+    setComposingNew({});
     setDrawerOpen(false);
   };
 
@@ -359,7 +313,6 @@ export function WorkspacePageView({
     try {
       const created = ws.createProject(input);
       setComposingNew(null);
-      setWsMode("projects");
       onNavigate?.({ kind: "project", projectId: created.projectId, conversationId: created.conversationId });
       setRunKey((k) => k + 1);
       toast({ message: t("newProjectChatWith", { agent: input.profile.agent, project: input.name }), severity: "info", duration: 2500 });
@@ -462,16 +415,10 @@ export function WorkspacePageView({
       action: startNewChat,
     },
     {
-      id: "go-chats",
-      label: t("commandGoChats"),
-      keywords: [t("chats"), "chat"],
-      action: () => switchMode("chats"),
-    },
-    {
-      id: "go-projects",
-      label: t("commandGoProjects"),
-      keywords: [t("projects"), "project"],
-      action: () => switchMode("projects"),
+      id: "search-conversations",
+      label: t("searchConversations"),
+      keywords: [t("chats"), t("projects"), "search"],
+      action: () => setSearchOpen(true),
     },
     {
       id: "open-settings",
@@ -524,18 +471,21 @@ export function WorkspacePageView({
         <Stack direction="row" sx={{ alignItems: "center", justifyContent: "space-between" }}>
           <Typography sx={{ fontFamily: (t) => t.custom.fonts.mono, fontWeight: 700, fontSize: "0.9rem" }}>{t("appTitle")}</Typography>
           <Stack direction="row" spacing={0.5}>
+            <Tooltip title={t("searchConversations")}>
+              <IconButton tone="subtle" aria-label={t("searchConversations")} onClick={() => setSearchOpen(true)}>
+                <SearchIcon sx={{ fontSize: 18 }} />
+              </IconButton>
+            </Tooltip>
             <Tooltip title={t("settings")}>
               <IconButton aria-label={t("settings")} onClick={() => setSettingsOpen(true)}>
                 <SettingsIcon sx={{ fontSize: 18 }} />
               </IconButton>
             </Tooltip>
-            {wsMode === "projects" && (
-              <Tooltip title={t("newProject")}>
-                <IconButton tone="subtle" aria-label={t("newProject")} onClick={() => setProjectDialogOpen(true)}>
-                  <CreateNewFolderIcon sx={{ fontSize: 18 }} />
-                </IconButton>
-              </Tooltip>
-            )}
+            <Tooltip title={t("newProject")}>
+              <IconButton tone="subtle" aria-label={t("newProject")} onClick={() => setProjectDialogOpen(true)}>
+                <CreateNewFolderIcon sx={{ fontSize: 18 }} />
+              </IconButton>
+            </Tooltip>
             <Tooltip title={t("newConversation")}>
               <IconButton tone="subtle" aria-label={t("newConversation")} onClick={startNewChat}>
                 <AddIcon sx={{ fontSize: 18 }} />
@@ -543,19 +493,9 @@ export function WorkspacePageView({
             </Tooltip>
           </Stack>
         </Stack>
-
-        <ToggleButtonGroup
-          exclusive
-          value={wsMode}
-          onChange={(_, next: WorkspaceMode | null) => next && switchMode(next)}
-          sx={{ display: "flex", "& .MuiToggleButton-root": { flex: 1 } }}
-        >
-          <ToggleButton value="chats">{t("chats")}</ToggleButton>
-          <ToggleButton value="projects">{t("projects")}</ToggleButton>
-        </ToggleButtonGroup>
       </Stack>
 
-      <ConversationList mode={wsMode} projects={ws.projects} chats={ws.chats} selectedId={ws.selectedId} onSelect={openConversation} actions={conversationActions} threads={ws.threads} />
+      <ConversationList projects={ws.projects} chats={ws.chats} selectedId={ws.selectedId} onSelect={openConversation} actions={conversationActions} />
     </Stack>
   );
 
@@ -758,6 +698,14 @@ export function WorkspacePageView({
       </Box>
 
       <AgentPicker open={pickerOpen} value={profile} onClose={() => setPickerOpen(false)} onSelect={handlePicked} />
+      <ConversationSearch
+        open={searchOpen}
+        projects={ws.projects}
+        chats={ws.chats}
+        threads={ws.threads}
+        onClose={() => setSearchOpen(false)}
+        onSelect={openConversation}
+      />
       <GitPanel open={gitOpen} cwd={selectedCwd} onClose={() => setGitOpen(false)} />
       <CommandPalette open={commandPaletteOpen} items={commandItems} onClose={() => setCommandPaletteOpen(false)} />
       <CreateProjectDialog open={projectDialogOpen} defaultProfile={ws.settings.agents.defaultProfile} onClose={() => setProjectDialogOpen(false)} onCreate={handleCreateProject} />

@@ -7,7 +7,6 @@ describe("usage cost", () => {
   it("shows conversation cost and token usage in the sidebar row", () => {
     renderWithTheme(
       <ConversationList
-        mode="chats"
         projects={[]}
         selectedId="cost-chat"
         onSelect={vi.fn()}

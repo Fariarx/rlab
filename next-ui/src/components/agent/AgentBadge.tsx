@@ -4,12 +4,12 @@ import { useI18n } from "../../i18n/I18nProvider";
 import { StatusDot } from "../ui";
 import { AgentGlyph } from "./AgentGlyph";
 import { AgentMonogram } from "./AgentMonogram";
-import { type AgentProfile, type AgentSystemStatus, agentStatusKey, getAgent } from "./agents";
+import { type AgentProfile, type AgentSystemStatus, agentProfileLabels, agentStatusKey, getAgent } from "./agents";
 import { useAgentStatus } from "./use-agent-status";
 
 /**
  * AgentBadge — the current agent shown as a clickable control: monogram, name
- * (+ variant), and the agent's system-status dot. Opens the agent picker.
+ * (+ non-default profile details), and the agent's system-status dot.
  */
 export function AgentBadge({
   profile,
@@ -29,6 +29,7 @@ export function AgentBadge({
   const statusOf = useAgentStatus();
   const { t, agentStatus } = useI18n();
   const sys = status ?? statusOf(profile.agent);
+  const labels = agentProfileLabels(profile);
 
   if (compact) {
     return (
@@ -42,9 +43,9 @@ export function AgentBadge({
         sx={{
           alignItems: "center",
           maxWidth: 220,
+          height: 30,
           pl: 0.6,
           pr: 0.4,
-          py: 0.3,
           borderRadius: (t) => `${t.custom.radii.sm}px`,
           border: (t) => `1px solid ${t.custom.borders.subtle}`,
           backgroundColor: (t) => t.custom.surfaces.s2,
@@ -61,8 +62,8 @@ export function AgentBadge({
         </Box>
         <Typography noWrap sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.76rem", fontWeight: 600, color: "text.primary", display: { xs: "none", sm: "block" } }}>
           {def.name}
-          {profile.variant !== "DEFAULT" && (
-            <Box component="span" sx={{ color: "text.secondary", fontWeight: 500 }}>{` · ${profile.variant}`}</Box>
+          {labels.length > 0 && (
+            <Box component="span" sx={{ color: "text.secondary", fontWeight: 500 }}>{` · ${labels.join(" · ")}`}</Box>
           )}
         </Typography>
         {onClick && <KeyboardArrowDownIcon sx={{ fontSize: 16, color: "text.secondary", flex: "0 0 auto" }} />}
@@ -95,10 +96,10 @@ export function AgentBadge({
       <Box sx={{ flex: 1, minWidth: 0 }}>
         <Typography noWrap sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.8rem", fontWeight: 600, color: "text.primary", lineHeight: 1.2 }}>
           {def.name}
-          {profile.variant !== "DEFAULT" && (
+          {labels.length > 0 && (
             <Box component="span" sx={{ color: "text.secondary", fontWeight: 500 }}>
               {" · "}
-              {profile.variant}
+              {labels.join(" · ")}
             </Box>
           )}
         </Typography>

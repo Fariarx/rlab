@@ -54,6 +54,10 @@ function workspaceConversations(state: WorkspaceState): ConversationSummary[] {
   return [...state.chats, ...state.projects.flatMap((project) => project.conversations)];
 }
 
+function serializableEqual(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
 export function conversationProfile(conversation: ConversationSummary | null | undefined): AgentProfile {
   return normalizeAgentProfile(conversation?.profile, conversation?.agent ?? "claude-code");
 }
@@ -131,11 +135,17 @@ function snippetFromBlocks(blocks: readonly AgentBlock[] | undefined, locale: Lo
   return truncate(snippetSource.replace(/\s+/g, " "), 60);
 }
 
+type SettledRunConversationResult = RunConversationResult & { readonly status: "done" | "error" | "waiting" };
+
+function isSettledRunConversationResult(result: RunConversationResult): result is SettledRunConversationResult {
+  return result.status !== "detached";
+}
+
 function finalRunPatch(
   current: WorkspaceState,
   conversationId: string,
   agentMessageId: string,
-  result: RunConversationResult,
+  result: SettledRunConversationResult,
 ): Partial<ConversationSummary> {
   const locale = current.settings.general.locale;
   const agentBlocks = current.threads[conversationId]?.find((message) => message.id === agentMessageId)?.blocks;
@@ -309,6 +319,9 @@ class WorkspaceStore implements Workspace {
           this.loaded = true;
           this.hydrated = true;
         });
+        if (this.hasPersistedActiveRuns()) {
+          void this.syncBackgroundRuns();
+        }
       })
       .catch((error) => {
         if (seq !== this.loadSeq) {
@@ -365,16 +378,24 @@ class WorkspaceStore implements Workspace {
       return current;
     }
     let next = current;
-    const threads = { ...current.threads };
+    let threads: Record<string, ChatMessage[]> | null = null;
     for (const id of ids) {
       const loadedConversation = findConversation(loaded, id);
       if (!loadedConversation) {
         continue;
       }
-      next = patchConversation(next, id, loadedConversation);
-      threads[id] = loaded.threads[id] ?? current.threads[id] ?? [];
+      const currentConversation = findConversation(next, id);
+      if (!serializableEqual(currentConversation, loadedConversation)) {
+        next = patchConversation(next, id, loadedConversation);
+      }
+      const loadedThread = loaded.threads[id] ?? current.threads[id] ?? [];
+      const currentThread = current.threads[id] ?? [];
+      if (!serializableEqual(currentThread, loadedThread)) {
+        threads = threads ?? { ...current.threads };
+        threads[id] = loadedThread;
+      }
     }
-    return { ...next, threads };
+    return threads ? { ...next, threads } : next;
   }
 
   find(id: string): ConversationSummary | null {
@@ -592,9 +613,10 @@ class WorkspaceStore implements Workspace {
       onBlocks: applyBlocks,
     })
       .then((result) => {
-        if (!runHandle.canceled) {
-          this.setState((current) => patchConversation(current, id, finalRunPatch(current, id, aId, result)));
+        if (runHandle.canceled || !isSettledRunConversationResult(result)) {
+          return;
         }
+        this.setState((current) => patchConversation(current, id, finalRunPatch(current, id, aId, result)));
       })
       .catch(() => {
         if (!runHandle.canceled) {

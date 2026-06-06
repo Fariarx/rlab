@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WorkspacePage } from "../src/components/workspace/WorkspacePage";
 import { buildInitialWorkspaceState } from "../src/components/workspace/workspace-state";
@@ -61,10 +61,9 @@ describe("WorkspacePage", () => {
     expect(screen.getByText(/по merged PR/i)).toBeInTheDocument();
   });
 
-  it("switches to the Projects mode", () => {
+  it("shows projects in the unified sidebar list", () => {
     renderWithTheme(<WorkspacePage />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Проекты" }));
     expect(screen.getByText("auth-service")).toBeInTheDocument();
   });
 
@@ -84,15 +83,15 @@ describe("WorkspacePage", () => {
     expect(screen.getByPlaceholderText("Найти команду...")).toBeInTheDocument();
   });
 
-  it("runs the projects command from the command palette", async () => {
+  it("opens conversation search from the command palette", async () => {
     renderWithTheme(<WorkspacePage />);
 
     fireEvent.keyDown(window, { key: "k", metaKey: true });
-    fireEvent.click(screen.getByRole("button", { name: "Перейти к проектам" }));
+    const palette = screen.getByRole("dialog", { name: "Палитра команд" });
+    fireEvent.click(within(palette).getByRole("button", { name: "Поиск диалогов..." }));
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Проекты" })).toHaveAttribute("aria-pressed", "true");
-      expect(screen.getByText("auth-service")).toBeInTheDocument();
+      expect(screen.getByPlaceholderText("Поиск по названию или сообщению...")).toBeInTheDocument();
     });
   });
 
@@ -103,15 +102,14 @@ describe("WorkspacePage", () => {
     const input = screen.getByPlaceholderText("Найти команду...");
 
     fireEvent.keyDown(input, { key: "ArrowDown" });
-    fireEvent.keyDown(input, { key: "ArrowDown" });
 
-    expect(screen.getByRole("button", { name: "Перейти к проектам" })).toHaveAttribute("aria-current", "true");
+    const palette = screen.getByRole("dialog", { name: "Палитра команд" });
+    expect(within(palette).getByRole("button", { name: "Поиск диалогов..." })).toHaveAttribute("aria-current", "true");
 
     fireEvent.keyDown(input, { key: "Enter" });
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Проекты" })).toHaveAttribute("aria-pressed", "true");
-      expect(screen.getByText("auth-service")).toBeInTheDocument();
+      expect(screen.getByPlaceholderText("Поиск по названию или сообщению...")).toBeInTheDocument();
     });
   });
 
@@ -121,18 +119,18 @@ describe("WorkspacePage", () => {
     fireEvent.keyDown(window, { key: "k", ctrlKey: true });
     fireEvent.change(screen.getByPlaceholderText("Найти команду..."), { target: { value: "настрой" } });
 
-    expect(screen.getByRole("button", { name: "Открыть настройки" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Перейти к проектам" })).not.toBeInTheDocument();
+    const palette = screen.getByRole("dialog", { name: "Палитра команд" });
+    expect(within(palette).getByRole("button", { name: "Открыть настройки" })).toBeInTheDocument();
+    expect(within(palette).queryByRole("button", { name: "Поиск диалогов..." })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Открыть настройки" }));
 
     expect(screen.getByRole("tab", { name: "Внешний вид" })).toBeInTheDocument();
   });
 
-  it("starts a new project chat draft and creates it on first send", () => {
+  it("starts a new chat draft and creates it on first send", () => {
     renderWithTheme(<WorkspacePage />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Проекты" }));
     fireEvent.click(screen.getByRole("button", { name: "Новый диалог" }));
 
     // Draft mode: no agent-picker confirmation, conversation isn't created until
@@ -145,10 +143,9 @@ describe("WorkspacePage", () => {
     expect(screen.getByText("auth-service")).toBeInTheDocument();
   });
 
-  it("opens the create project dialog from Projects mode", () => {
+  it("opens the create project dialog", () => {
     renderWithTheme(<WorkspacePage />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Проекты" }));
     fireEvent.click(screen.getByRole("button", { name: "Новый проект" }));
 
     expect(screen.getByRole("dialog", { name: "Создать проект" })).toBeInTheDocument();
@@ -193,7 +190,10 @@ describe("WorkspacePage", () => {
 
     renderWithTheme(<WorkspacePage />);
 
-    fireEvent.click((await screen.findAllByRole("button", { name: "Действия с диалогом" }))[0]);
+    // Projects and chats share one list, so target chat-2's row explicitly
+    // rather than relying on which conversation happens to be first.
+    const chatRow = await screen.findByRole("option", { name: "Release notes для 0.1.69" });
+    fireEvent.click(within(chatRow).getByRole("button", { name: "Действия с диалогом" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "Удалить" }));
 
     await waitFor(() => {
@@ -669,7 +669,6 @@ describe("WorkspacePage", () => {
 
     renderWithTheme(<WorkspacePage />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Проекты" }));
     await screen.findByPlaceholderText("Написать: Flaky-тест auth.login...");
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
 
@@ -710,7 +709,6 @@ describe("WorkspacePage", () => {
 
     renderWithTheme(<WorkspacePage />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Проекты" }));
     await screen.findByPlaceholderText("Написать: Flaky-тест auth.login...");
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
 
@@ -757,7 +755,6 @@ describe("WorkspacePage", () => {
 
     renderWithTheme(<WorkspacePage />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Проекты" }));
     await screen.findByPlaceholderText("Написать: Flaky-тест auth.login...");
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
     fireEvent.click(await screen.findByRole("button", { name: "src/auth.ts Изменён" }));
@@ -815,7 +812,6 @@ describe("WorkspacePage", () => {
 
     renderWithTheme(<WorkspacePage />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Проекты" }));
     await screen.findByPlaceholderText("Написать: Flaky-тест auth.login...");
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
 
@@ -872,7 +868,6 @@ describe("WorkspacePage", () => {
 
     renderWithTheme(<WorkspacePage />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Проекты" }));
     await screen.findByPlaceholderText("Написать: Flaky-тест auth.login...");
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
     fireEvent.click(await screen.findByRole("button", { name: "Отправить push" }));

@@ -17,7 +17,7 @@ type RunEvent =
   | { type: "done"; costUsd?: number; usage?: RunUsage };
 
 export interface RunConversationResult {
-  readonly status: "done" | "error" | "waiting";
+  readonly status: "done" | "error" | "waiting" | "detached";
   readonly snippet: string;
   readonly costUsd?: number;
   readonly usage?: RunUsage;
@@ -141,6 +141,7 @@ async function streamRun(
   accessMode: AgentAccessMode,
   binding: RunPersistenceBinding | undefined,
   onEvent: (e: RunEvent) => void,
+  onAccepted: () => void,
   signal?: AbortSignal,
 ): Promise<void> {
   const res = await fetch("/api/run", {
@@ -152,6 +153,7 @@ async function streamRun(
   if (!res.ok || !res.body) {
     throw new Error(`Run request failed (${res.status})`);
   }
+  onAccepted();
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -203,6 +205,8 @@ export async function runConversation(opts: {
   let usage: RunUsage | undefined;
   let done = false;
   let canceled = false;
+  let detached = false;
+  let accepted = false;
   const start = performance.now();
 
   const rebuild = (): AgentBlock[] => {
@@ -313,13 +317,31 @@ export async function runConversation(opts: {
   };
 
   try {
-    await streamRun(opts.profile, opts.prompt, opts.cwd, opts.accessMode, opts.binding, onEvent, opts.signal);
+    await streamRun(
+      opts.profile,
+      opts.prompt,
+      opts.cwd,
+      opts.accessMode,
+      opts.binding,
+      onEvent,
+      () => {
+        accepted = true;
+      },
+      opts.signal,
+    );
   } catch (err) {
     if (isAbortError(err, opts.signal)) {
       canceled = true;
+    } else if (opts.binding && accepted) {
+      detached = true;
     } else {
       statuses.push({ level: "error", text: err instanceof Error ? err.message : String(err) });
     }
+  }
+
+  if (detached) {
+    opts.onBlocks([...rebuild(), { kind: "status", level: "info", text: translate(opts.locale, "runDetachedSnippet") }]);
+    return { status: "detached", snippet: "" };
   }
 
   done = true;

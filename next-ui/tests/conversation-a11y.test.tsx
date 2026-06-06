@@ -33,7 +33,6 @@ describe("Conversation a11y", () => {
   it("supports keyboard collapse and expand for project groups", () => {
     renderWithTheme(
       <ConversationList
-        mode="projects"
         projects={initialProjects}
         chats={[]}
         selectedId="c-flaky"

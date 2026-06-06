@@ -1,9 +1,9 @@
-import ChevronRightIcon from "@mui/icons-material/ChevronRight";
+import ChatBubbleOutlineIcon from "@mui/icons-material/ChatBubbleOutlineRounded";
+import FolderOpenRoundedIcon from "@mui/icons-material/FolderOpenRounded";
+import FolderRoundedIcon from "@mui/icons-material/FolderRounded";
 import MoreHorizIcon from "@mui/icons-material/MoreHoriz";
-import SearchIcon from "@mui/icons-material/Search";
-import { Box, Collapse, InputAdornment, InputBase, Menu, MenuItem, Stack, Tooltip, Typography } from "@mui/material";
+import { Box, Collapse, InputBase, Menu, MenuItem, Stack, Tooltip, Typography } from "@mui/material";
 import { type KeyboardEvent, type MouseEvent, useMemo, useRef, useState } from "react";
-import { Virtuoso } from "react-virtuoso";
 import { useI18n } from "../../i18n/I18nProvider";
 import { IconButton, StatusDot } from "../ui";
 import { AgentMonogram } from "./AgentMonogram";
@@ -18,7 +18,7 @@ export interface ConversationActions {
   readonly onDelete: (id: string) => void;
 }
 
-function conversationMatches(conversation: ConversationSummary, query: string, threads: Readonly<Record<string, readonly ChatMessage[]>>): boolean {
+export function conversationMatches(conversation: ConversationSummary, query: string, threads: Readonly<Record<string, readonly ChatMessage[]>>): boolean {
   const threadText = (threads[conversation.id] ?? []).map(messageToPlainText).join("\n");
   const searchable = `${conversation.title}\n${conversation.snippet}\n${threadText}`.toLowerCase();
   return searchable.includes(query);
@@ -129,6 +129,9 @@ function ConversationRow({
         transition: "background-color 140ms ease, box-shadow 140ms ease",
         "&:hover": { backgroundColor: (t) => t.custom.surfaces.s3 },
         "&:hover .row-more": { opacity: 1 },
+        // Fade the date out on hover so the ⋯ overlay reads cleanly (the date
+        // stays in the layout, just transparent).
+        "&:hover .row-date": { opacity: 0 },
         "&:focus-visible": {
           outline: (t) => `2px solid ${t.custom.borders.focus}`,
           outlineOffset: 2,
@@ -174,7 +177,7 @@ function ConversationRow({
                   {formatTokenUsage(conversation.usage)}
                 </Typography>
               )}
-              <Typography sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.64rem", color: "text.secondary" }}>{conversation.time}</Typography>
+              <Typography className="row-date" sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.64rem", color: "text.secondary", transition: "opacity 120ms ease" }}>{conversation.time}</Typography>
             </Stack>
           </Stack>
         )}
@@ -287,7 +290,11 @@ function ProjectGroup({
           },
         }}
       >
-        <ChevronRightIcon sx={{ fontSize: 16, color: "text.secondary", transition: "transform 160ms ease", transform: open ? "rotate(90deg)" : "none" }} />
+        {open ? (
+          <FolderOpenRoundedIcon sx={{ fontSize: 17, color: "text.secondary" }} />
+        ) : (
+          <FolderRoundedIcon sx={{ fontSize: 17, color: "text.secondary" }} />
+        )}
         <Typography variant="microLabel" sx={{ color: "text.secondary", flex: 1, minWidth: 0 }} noWrap>
           {project.name}
         </Typography>
@@ -314,38 +321,104 @@ function ProjectGroup({
   );
 }
 
+function ChatsGroup({
+  chats,
+  selectedId,
+  baseDelay,
+  onSelect,
+  onMove,
+  registerRowRef,
+  actions,
+}: {
+  readonly chats: readonly ConversationSummary[];
+  readonly selectedId: string | null;
+  readonly baseDelay: number;
+  readonly onSelect: (id: string) => void;
+  readonly onMove: (id: string, offset: -1 | 1) => void;
+  readonly registerRowRef: (id: string, element: HTMLDivElement | null) => void;
+  readonly actions: ConversationActions;
+}) {
+  const [open, setOpen] = useState(true);
+  const { t } = useI18n();
+  const runningCount = chats.filter((c) => c.status === "running").length;
+  const panelId = "chats-group-conversations";
+  const toggleOpen = () => setOpen((value) => !value);
+  const onHeaderKey = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (e.key !== "Enter" && e.key !== " ") {
+      return;
+    }
+    e.preventDefault();
+    toggleOpen();
+  };
+  return (
+    <Box>
+      <Stack
+        role="button"
+        aria-expanded={open}
+        aria-controls={panelId}
+        tabIndex={0}
+        direction="row"
+        spacing={0.75}
+        onClick={toggleOpen}
+        onKeyDown={onHeaderKey}
+        sx={{
+          alignItems: "center",
+          px: 1,
+          py: 0.75,
+          cursor: "pointer",
+          borderRadius: (t) => `${t.custom.radii.sm}px`,
+          "&:hover": { backgroundColor: (t) => t.custom.surfaces.s3 },
+          "&:focus-visible": { outline: (t) => `2px solid ${t.custom.borders.focus}`, outlineOffset: 2 },
+        }}
+      >
+        <ChatBubbleOutlineIcon sx={{ fontSize: 16, color: "text.secondary" }} />
+        <Typography variant="microLabel" sx={{ color: "text.secondary", flex: 1, minWidth: 0 }} noWrap>
+          {t("chats")}
+        </Typography>
+        {runningCount > 0 && <StatusDot status="running" label={t("runningCount", { count: runningCount })} />}
+        <Typography sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.64rem", color: "text.secondary" }}>{chats.length}</Typography>
+      </Stack>
+      <Collapse in={open} unmountOnExit>
+        <Stack id={panelId} spacing={0.25} sx={{ mt: 0.25, mb: 0.75 }}>
+          {chats.map((conversation, index) => (
+            <ConversationRow
+              key={conversation.id}
+              conversation={conversation}
+              active={conversation.id === selectedId}
+              delay={baseDelay + index * 50}
+              onSelect={onSelect}
+              onMove={onMove}
+              registerRowRef={registerRowRef}
+              actions={actions}
+            />
+          ))}
+        </Stack>
+      </Collapse>
+    </Box>
+  );
+}
+
 export function ConversationList({
-  mode,
   projects,
   chats,
   selectedId,
   onSelect,
   actions,
-  threads = {},
 }: {
-  readonly mode: "chats" | "projects";
   readonly projects: readonly Project[];
   readonly chats: readonly ConversationSummary[];
   readonly selectedId: string | null;
   readonly onSelect: (id: string) => void;
   readonly actions: ConversationActions;
-  readonly threads?: Readonly<Record<string, readonly ChatMessage[]>>;
 }) {
-  const [query, setQuery] = useState("");
   const rowRefs = useRef(new Map<string, HTMLDivElement>());
   const { t } = useI18n();
-  const q = query.trim().toLowerCase();
 
-  const filteredChats = useMemo(() => (q === "" ? chats : chats.filter((c) => conversationMatches(c, q, threads))), [chats, q, threads]);
-  const filteredProjects = useMemo(
-    () => (q === "" ? projects : projects.map((p) => ({ ...p, conversations: p.conversations.filter((c) => conversationMatches(c, q, threads)) })).filter((p) => p.conversations.length > 0)),
-    [projects, q, threads],
-  );
-
-  const empty = mode === "chats" ? filteredChats.length === 0 : filteredProjects.length === 0;
+  const empty = projects.length === 0 && chats.length === 0;
+  // Projects first, then chats — flattened for arrow-key navigation.
   const visibleConversationIds = useMemo(
-    () => (mode === "chats" ? filteredChats.map((conversation) => conversation.id) : filteredProjects.flatMap((project) => project.conversations.map((conversation) => conversation.id))),
-    [filteredChats, filteredProjects, mode],
+    () => [...projects.flatMap((project) => project.conversations.map((c) => c.id)), ...chats.map((c) => c.id)],
+    [projects, chats],
   );
   const registerRowRef = (id: string, element: HTMLDivElement | null) => {
     if (element) {
@@ -376,79 +449,44 @@ export function ConversationList({
     focusConversation(nextId);
   };
 
+  // One unified, full-width scroll list (scrollbar flush at the right edge):
+  // project folder-accordions first, then a chats group. No mode toggle, no
+  // inline search (search is a popup opened from the sidebar header).
   return (
-    <Stack sx={{ height: "100%", minHeight: 0 }}>
-      <Box sx={{ p: 1, pb: 0.5 }}>
-        <InputBase
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder={mode === "chats" ? t("searchChats") : t("searchConversations")}
-          startAdornment={
-            <InputAdornment position="start">
-              <SearchIcon sx={{ fontSize: 16, color: "text.secondary" }} />
-            </InputAdornment>
-          }
-          sx={{ width: "100%", px: 1, py: 0.5, fontSize: "0.8rem", borderRadius: (t) => `${t.custom.radii.md}px`, backgroundColor: (t) => t.custom.surfaces.s3, border: (t) => `1px solid ${t.custom.borders.subtle}` }}
-        />
-      </Box>
-
-      {/* No horizontal padding here so the Virtuoso scroller is full-width and
-          its scrollbar sits flush at the container's right edge; the per-item
-          wrappers carry the horizontal inset instead. */}
-      <Box sx={{ flex: 1, minHeight: 0, pt: 0.5 }}>
-        {mode === "chats" ? (
-          <Box data-testid="conversation-list-virtual-list" data-virtualized="true" role="listbox" aria-label={t("conversationList")} sx={{ height: "100%", minHeight: 0 }}>
-            <Virtuoso<ConversationSummary>
-              data={filteredChats}
-              computeItemKey={(index, conversation) => conversation?.id ?? `chat-placeholder-${index}`}
-              initialItemCount={Math.min(filteredChats.length, 20)}
-              itemContent={(index, conversation) => (
-                <Box sx={{ px: 1, pb: 0.25 }}>
-                  {conversation && (
-                    <ConversationRow
-                      conversation={conversation}
-                      active={conversation.id === selectedId}
-                      delay={index * 50}
-                      onSelect={onSelect}
-                      onMove={moveConversation}
-                      registerRowRef={registerRowRef}
-                      actions={actions}
-                    />
-                  )}
-                </Box>
-              )}
-              overscan={360}
-              style={{ height: "100%" }}
-            />
-          </Box>
-        ) : (
-          <Box data-testid="conversation-list-virtual-list" data-virtualized="true" role="listbox" aria-label={t("conversationList")} sx={{ height: "100%", minHeight: 0 }}>
-            <Virtuoso<Project>
-              data={filteredProjects}
-              computeItemKey={(index, project) => project?.id ?? `project-placeholder-${index}`}
-              initialItemCount={Math.min(filteredProjects.length, 20)}
-              itemContent={(index, project) => (
-                <Box sx={{ px: 1, pb: 0.5 }}>
-                  {project && (
-                    <ProjectGroup
-                      project={project}
-                      selectedId={selectedId}
-                      baseDelay={index * 120}
-                      onSelect={onSelect}
-                      onMove={moveConversation}
-                      registerRowRef={registerRowRef}
-                      actions={actions}
-                    />
-                  )}
-                </Box>
-              )}
-              overscan={360}
-              style={{ height: "100%" }}
-            />
-          </Box>
-        )}
-        {empty && <Typography sx={{ fontSize: "0.78rem", color: "text.secondary", textAlign: "center", py: 3 }}>{t("noMatches")}</Typography>}
-      </Box>
-    </Stack>
+    <Box
+      role="listbox"
+      aria-label={t("conversationList")}
+      data-testid="conversation-list-virtual-list"
+      data-virtualized="false"
+      sx={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "hidden", pt: 0.5, pb: 1 }}
+    >
+      {projects.map((project, index) => (
+        <Box key={project.id} sx={{ px: 1, pb: 0.5 }}>
+          <ProjectGroup
+            project={project}
+            selectedId={selectedId}
+            baseDelay={index * 120}
+            onSelect={onSelect}
+            onMove={moveConversation}
+            registerRowRef={registerRowRef}
+            actions={actions}
+          />
+        </Box>
+      ))}
+      {chats.length > 0 && (
+        <Box sx={{ px: 1, pb: 0.5 }}>
+          <ChatsGroup
+            chats={chats}
+            selectedId={selectedId}
+            baseDelay={projects.length * 120}
+            onSelect={onSelect}
+            onMove={moveConversation}
+            registerRowRef={registerRowRef}
+            actions={actions}
+          />
+        </Box>
+      )}
+      {empty && <Typography sx={{ fontSize: "0.78rem", color: "text.secondary", textAlign: "center", py: 3 }}>{t("noConversationsYet")}</Typography>}
+    </Box>
   );
 }

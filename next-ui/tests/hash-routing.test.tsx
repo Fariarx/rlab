@@ -13,12 +13,11 @@ describe("hash routing", () => {
     expect(screen.getByPlaceholderText("Написать: Объясни auth flow...")).toBeInTheDocument();
   });
 
-  it("opens a project conversation deep link in Projects mode", () => {
+  it("opens a project conversation deep link", () => {
     window.location.hash = "#/project/auth-service/c-jwt";
 
     renderApp();
 
-    expect(screen.getByRole("button", { name: "Проекты" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getAllByText("Ротация JWT-секретов").length).toBeGreaterThan(0);
     expect(screen.getByText("Ждёт подтверждение deploy")).toBeInTheDocument();
   });

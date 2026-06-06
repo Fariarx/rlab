@@ -40,7 +40,7 @@ describe("Conversation auto-scroll", () => {
     expect(screen.getByTestId("conversation-virtual-list")).toHaveAttribute("aria-live", "polite");
   });
 
-  it("renders every message in a scrollable thread region", () => {
+  it("renders long threads in a native scroll container so streaming content stays visible", () => {
     renderWithTheme(
       <Conversation
         messages={Array.from({ length: 50 }, (_, index) => ({
@@ -53,9 +53,9 @@ describe("Conversation auto-scroll", () => {
 
     const thread = screen.getByTestId("conversation-virtual-list");
     expect(thread).toBeInTheDocument();
-    // Unlike the previous virtualized list, the full thread is rendered so it
-    // is reliably reachable (no clipped/unscrollable tail).
-    expect(screen.getByText("Message 0")).toBeInTheDocument();
-    expect(screen.getByText("Message 49")).toBeInTheDocument();
+    // The thread uses native overflow scrolling (not windowed virtualization) so
+    // streaming agent output is never unmounted out of the viewport mid-update.
+    expect(thread).toHaveAttribute("data-virtualized", "false");
+    expect(screen.queryByTestId("virtuoso-scroller")).not.toBeInTheDocument();
   });
 });
