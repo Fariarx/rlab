@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_PROFILE, type AgentBlock } from "../src/components/agent";
-import { runConversation } from "../src/components/workspace/run-agent";
+import { attachRunUpdates, runConversation } from "../src/components/workspace/run-agent";
 
 function streamResponse(events: readonly unknown[]): Response {
   return new Response(
@@ -457,5 +457,55 @@ describe("runConversation", () => {
       costUsd: 0.0042,
       usage: { totalTokens: 1200, inputTokens: 1000, outputTokens: 200 },
     });
+  });
+
+  it("parses a final run stream event without a trailing newline", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        rawChunkResponse(
+          [
+            JSON.stringify({ type: "text", text: "answer" }),
+            JSON.stringify({ type: "done", usage: { totalTokens: 99 }, costUsd: 0.0009 }),
+          ].join("\n"),
+        ),
+      ),
+    );
+
+    const result = await runConversation({
+      profile: { agent: "opencode", model: "default", reasoning: "default", mode: "default" },
+      prompt: "answer",
+      accessMode: "read-only",
+      locale: "ru",
+      onBlocks: vi.fn(),
+    });
+
+    expect(result).toMatchObject({
+      costUsd: 0.0009,
+      usage: { totalTokens: 99 },
+    });
+  });
+
+  it("parses a final attach stream update without a trailing newline", async () => {
+    const update = {
+      runId: "run-1",
+      conversationId: "chat-1",
+      agentMessageId: "agent-1",
+      status: "done",
+      snippet: "done",
+      time: "10:00",
+      done: true,
+      blocks: [{ kind: "text", text: "done", streaming: false }],
+      usage: { totalTokens: 77 },
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => rawChunkResponse(JSON.stringify({ type: "update", update }))));
+    const updates: unknown[] = [];
+
+    await attachRunUpdates({
+      runId: "run-1",
+      onUpdate: (nextUpdate) => updates.push(nextUpdate),
+    });
+
+    expect(updates).toEqual([update]);
   });
 });

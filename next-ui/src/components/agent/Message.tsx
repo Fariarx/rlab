@@ -229,46 +229,41 @@ function UserMessage({ message, delay, actions }: { readonly message: ChatMessag
 // code, status, citations) is folded into one collapsed container.
 const ANSWER_BLOCK_KINDS: ReadonlySet<AgentBlock["kind"]> = new Set(["text", "options", "approval", "suggested"]);
 
-function AgentUsageMeta({ message }: { readonly message: ChatMessage }) {
-  if (message.costUsd === undefined && message.usage === undefined) {
+export interface MessageDisplayPrefs {
+  readonly showTokens: boolean;
+  readonly showCost: boolean;
+}
+
+function UsagePill({ children }: { readonly children: React.ReactNode }) {
+  return (
+    <Box
+      component="span"
+      sx={{
+        px: 0.75,
+        py: 0.2,
+        borderRadius: (t) => `${t.custom.radii.pill}px`,
+        border: (t) => `1px solid ${t.custom.borders.subtle}`,
+        color: "text.secondary",
+        fontFamily: (t) => t.custom.fonts.mono,
+        fontSize: "0.66rem",
+        lineHeight: 1.4,
+      }}
+    >
+      {children}
+    </Box>
+  );
+}
+
+function AgentUsageMeta({ message, displayPrefs }: { readonly message: ChatMessage; readonly displayPrefs: MessageDisplayPrefs }) {
+  const showCost = displayPrefs.showCost && message.costUsd !== undefined;
+  const showTokens = displayPrefs.showTokens && message.usage !== undefined;
+  if (!showCost && !showTokens) {
     return null;
   }
   return (
     <Stack direction="row" spacing={0.75} sx={{ flexWrap: "wrap", rowGap: 0.5 }}>
-      {message.costUsd !== undefined && (
-        <Box
-          component="span"
-          sx={{
-            px: 0.75,
-            py: 0.2,
-            borderRadius: (t) => `${t.custom.radii.pill}px`,
-            border: (t) => `1px solid ${t.custom.borders.subtle}`,
-            color: "text.secondary",
-            fontFamily: (t) => t.custom.fonts.mono,
-            fontSize: "0.66rem",
-            lineHeight: 1.4,
-          }}
-        >
-          {formatCostUsd(message.costUsd)}
-        </Box>
-      )}
-      {message.usage !== undefined && (
-        <Box
-          component="span"
-          sx={{
-            px: 0.75,
-            py: 0.2,
-            borderRadius: (t) => `${t.custom.radii.pill}px`,
-            border: (t) => `1px solid ${t.custom.borders.subtle}`,
-            color: "text.secondary",
-            fontFamily: (t) => t.custom.fonts.mono,
-            fontSize: "0.66rem",
-            lineHeight: 1.4,
-          }}
-        >
-          {formatTokenUsage(message.usage)}
-        </Box>
-      )}
+      {showCost && <UsagePill>{formatCostUsd(message.costUsd!)}</UsagePill>}
+      {showTokens && <UsagePill>{formatTokenUsage(message.usage!)}</UsagePill>}
     </Stack>
   );
 }
@@ -281,23 +276,27 @@ function AgentDetails({ blocks, actions }: { readonly blocks: readonly AgentBloc
   const reasoning = blocks.find((block) => block.kind === "reasoning");
   const reasoningDuration = reasoning?.kind === "reasoning" ? reasoning.duration : undefined;
   const active = blocks.some((block) => block.kind === "reasoning" && block.active);
+  // Only expandable when there is real content — an empty reasoning block (e.g.
+  // a still-streaming turn) shows the header but can't be opened to nothing.
+  const expandable = blocks.some((block) => (block.kind === "reasoning" ? block.text.trim().length > 0 : true));
+  const isOpen = open && expandable;
 
   return (
     <Box sx={{ borderRadius: (t) => `${t.custom.radii.md}px`, border: (t) => `1px dashed ${t.custom.borders.subtle}`, backgroundColor: (t) => t.custom.surfaces.s1, overflow: "hidden" }}>
       <Stack
         direction="row"
         spacing={1.25}
-        onClick={() => setOpen((value) => !value)}
-        sx={{ alignItems: "center", px: 1.5, py: 1, cursor: "pointer", "&:hover": { backgroundColor: (t) => t.custom.surfaces.s3 } }}
+        onClick={expandable ? () => setOpen((value) => !value) : undefined}
+        sx={{ alignItems: "center", px: 1.5, py: 1, cursor: expandable ? "pointer" : "default", "&:hover": expandable ? { backgroundColor: (t) => t.custom.surfaces.s3 } : undefined }}
       >
         <PsychologyIcon sx={{ fontSize: 16, color: "text.secondary" }} />
         <Typography variant="microLabel" sx={{ color: "text.secondary", flex: 1, minWidth: 0 }}>
           {reasoningDuration ? t("reasoningThoughtFor", { duration: reasoningDuration }) : t("reasoning")}
         </Typography>
         {active && <TypingDots />}
-        <KeyboardArrowDownIcon sx={{ fontSize: 18, color: "text.secondary", transition: "transform 180ms ease", transform: open ? "rotate(180deg)" : "none" }} />
+        {expandable && <KeyboardArrowDownIcon sx={{ fontSize: 18, color: "text.secondary", transition: "transform 180ms ease", transform: isOpen ? "rotate(180deg)" : "none" }} />}
       </Stack>
-      <Collapse in={open} unmountOnExit>
+      <Collapse in={isOpen} unmountOnExit>
         <Stack spacing={1.25} sx={{ px: 1.5, py: 1.5, borderTop: (t) => `1px dashed ${t.custom.borders.subtle}` }}>
           {blocks.map((block, index) =>
             block.kind === "reasoning" ? (

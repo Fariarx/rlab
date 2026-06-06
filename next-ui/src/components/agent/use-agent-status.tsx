@@ -6,6 +6,7 @@ import { AGENTS, AGENT_STATUS, STATIC_AGENT_CLI_INFO, type AgentCliInfo, type Ag
 type StatusMap = Partial<Record<AgentId, AgentSystemStatus>>;
 type AgentApiValue = AgentSystemStatus | AgentCliInfo;
 type AgentApiPayload = Partial<Record<AgentId, AgentApiValue>>;
+const AGENT_STATUS_RETRY_MS = 15_000;
 
 interface AgentStatusValue {
   readonly agents: AgentCliMap | null;
@@ -111,6 +112,8 @@ class AgentStatusStore {
 
   private requestId = 0;
 
+  private retryTimer: ReturnType<typeof setInterval> | null = null;
+
   constructor() {
     makeAutoObservable(this, {}, { autoBind: true });
   }
@@ -129,6 +132,25 @@ class AgentStatusStore {
 
   cancel(): void {
     this.requestId += 1;
+  }
+
+  mount(): void {
+    void this.reload();
+    if (!this.retryTimer) {
+      this.retryTimer = setInterval(() => {
+        if (this.error && !this.loading) {
+          void this.reload();
+        }
+      }, AGENT_STATUS_RETRY_MS);
+    }
+  }
+
+  unmount(): void {
+    this.cancel();
+    if (this.retryTimer) {
+      clearInterval(this.retryTimer);
+      this.retryTimer = null;
+    }
   }
 
   async reload(): Promise<void> {
@@ -196,9 +218,9 @@ export function AgentStatusProvider({ children }: { readonly children: ReactNode
   const [store] = useState(() => new AgentStatusStore());
 
   useEffect(() => {
-    void store.reload();
+    store.mount();
     return () => {
-      store.cancel();
+      store.unmount();
     };
   }, [store]);
 

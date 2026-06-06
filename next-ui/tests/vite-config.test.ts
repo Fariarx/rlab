@@ -20,6 +20,7 @@ describe("vite build config", () => {
     expect(chunkGroupNames()).toEqual(
       expect.arrayContaining([
         "react-vendor",
+        "kit-route",
         "mui-icons-vendor",
         "mui-material-vendor",
         "emotion-vendor",

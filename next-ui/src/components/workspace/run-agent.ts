@@ -174,6 +174,26 @@ export interface ActiveRunUpdate {
 
 type RunAttachEvent = { readonly type: "update"; readonly update: ActiveRunUpdate };
 
+function readBufferedNdjsonLines(buffer: string, onLine: (line: string) => void): string {
+  let nextBuffer = buffer;
+  let nl: number;
+  while ((nl = nextBuffer.indexOf("\n")) >= 0) {
+    const line = nextBuffer.slice(0, nl).trim();
+    nextBuffer = nextBuffer.slice(nl + 1);
+    if (line) {
+      onLine(line);
+    }
+  }
+  return nextBuffer;
+}
+
+function readFinalNdjsonLine(buffer: string, onLine: (line: string) => void): void {
+  const line = buffer.trim();
+  if (line) {
+    onLine(line);
+  }
+}
+
 function isActiveRunSnapshot(value: unknown): value is ActiveRunSnapshot {
   return (
     isRecord(value) &&
@@ -249,26 +269,23 @@ export async function attachRunUpdates(opts: {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  const readLine = (line: string) => {
+    const parsed = JSON.parse(line) as unknown;
+    if (!isRunAttachEvent(parsed)) {
+      throw new Error(`Malformed run attach event: ${line}`);
+    }
+    opts.onUpdate(parsed.update);
+  };
   for (;;) {
     const { done, value } = await reader.read();
     if (done) {
       break;
     }
     buffer += decoder.decode(value, { stream: true });
-    let nl: number;
-    while ((nl = buffer.indexOf("\n")) >= 0) {
-      const line = buffer.slice(0, nl).trim();
-      buffer = buffer.slice(nl + 1);
-      if (!line) {
-        continue;
-      }
-      const parsed = JSON.parse(line) as unknown;
-      if (!isRunAttachEvent(parsed)) {
-        throw new Error(`Malformed run attach event: ${line}`);
-      }
-      opts.onUpdate(parsed.update);
-    }
+    buffer = readBufferedNdjsonLines(buffer, readLine);
   }
+  buffer += decoder.decode();
+  readFinalNdjsonLine(buffer, readLine);
 }
 
 export async function cancelRun(runId: string): Promise<void> {
@@ -307,25 +324,23 @@ async function streamRun(
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  const readLine = (line: string) => {
+    try {
+      onEvent(JSON.parse(line) as RunEvent);
+    } catch {
+      onEvent({ type: "error", text: `Malformed run event: ${line}` });
+    }
+  };
   for (;;) {
     const { done, value } = await reader.read();
     if (done) {
       break;
     }
     buffer += decoder.decode(value, { stream: true });
-    let nl: number;
-    while ((nl = buffer.indexOf("\n")) >= 0) {
-      const line = buffer.slice(0, nl).trim();
-      buffer = buffer.slice(nl + 1);
-      if (line) {
-        try {
-          onEvent(JSON.parse(line) as RunEvent);
-        } catch {
-          onEvent({ type: "error", text: `Malformed run event: ${line}` });
-        }
-      }
-    }
+    buffer = readBufferedNdjsonLines(buffer, readLine);
   }
+  buffer += decoder.decode();
+  readFinalNdjsonLine(buffer, readLine);
 }
 
 /**

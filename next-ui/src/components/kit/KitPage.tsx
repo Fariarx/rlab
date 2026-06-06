@@ -13,6 +13,7 @@ import { PanelsSection } from "./sections/PanelsSection";
 import { StatusSection } from "./sections/StatusSection";
 import { TokensSection } from "./sections/TokensSection";
 import { TypographySection } from "./sections/TypographySection";
+import { WorkSurfacesSection } from "./sections/WorkSurfacesSection";
 
 interface KitPageProps {
   readonly mode?: ThemeMode;
@@ -78,6 +79,7 @@ export function KitPage({ mode = "dark", onToggleMode }: KitPageProps) {
           <ControlsSection />
           <PanelsSection />
           <AgentBlocksSection />
+          <WorkSurfacesSection />
           <StatusSection />
           <OverlaysSection />
           <DataSection />

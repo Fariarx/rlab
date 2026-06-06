@@ -22,7 +22,7 @@ describe("AgentPicker a11y", () => {
     expect(screen.getByText("Claude Code")).toBeInTheDocument();
   });
 
-  it("does not allow selecting agents without a RUN adapter", async () => {
+  it("does not display agents outside the currently supported set", () => {
     renderWithTheme(
       <AgentPicker
         open
@@ -32,10 +32,15 @@ describe("AgentPicker a11y", () => {
       />,
     );
 
-    fireEvent.click(screen.getByText("Copilot"));
-
-    expect(await screen.findByText("Copilot установлен, но в этом UI для него ещё нет RUN-адаптера.")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Использовать Copilot" })).toBeDisabled();
+    expect(screen.getByText("Claude Code")).toBeInTheDocument();
+    expect(screen.getByText("Codex")).toBeInTheDocument();
+    expect(screen.getByText("Gemini")).toBeInTheDocument();
+    expect(screen.getByText("OpenCode")).toBeInTheDocument();
+    expect(screen.queryByText("AMP")).not.toBeInTheDocument();
+    expect(screen.queryByText("Cursor")).not.toBeInTheDocument();
+    expect(screen.queryByText("Qwen")).not.toBeInTheDocument();
+    expect(screen.queryByText("Copilot")).not.toBeInTheDocument();
+    expect(screen.queryByText("Droid")).not.toBeInTheDocument();
   });
 
   it("selects an agent discovered from the local CLI payload", async () => {

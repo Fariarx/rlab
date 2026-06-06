@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import {
@@ -8,16 +8,13 @@ import {
   agentConfigErrorStatus,
   appendJsonBodyChunk,
   attachmentUploadErrorStatus,
-  buildAmpRunArgs,
   buildClaudeRunArgs,
   buildClaudeSdkOptions,
   buildCodexRunArgs,
-  buildCursorRunArgs,
   buildGeminiRunArgs,
   buildGitCommitArgs,
   buildGitPushArgs,
   buildOpenCodeRunArgs,
-  buildQwenRunArgs,
   createRunApprovalHandler,
   createAmpStreamTranslator,
   createClaudeStreamTranslator,
@@ -28,6 +25,7 @@ import {
   createQwenStreamTranslator,
   activeBackgroundRunUpdateFromState,
   activeBackgroundRunSnapshotsFromHandles,
+  appendRunAuditEvent,
   parseRunApprovalPayload,
   parseRunCancelPayload,
   parseRunInputPayload,
@@ -51,7 +49,6 @@ import {
   finishBackgroundRunState,
   mergeWorkspacePutState,
   listMentionableFiles,
-  migrateSeedWorkspaceState,
   reconcileStaleBackgroundRuns,
   hasGeminiStoredAuthAt,
   installCommandForAgent,
@@ -65,17 +62,98 @@ import {
   runControlErrorStatus,
   settleEarlyBackgroundRunState,
   shouldUseShellForBin,
+  storageHealthSnapshot,
   validateRunAccessModeForAgent,
+  withStorageFileLock,
   windowsCommandLine,
+  writeJsonFileAtomic,
   workspacePutErrorStatus,
   type BackgroundRunBinding,
   type BackgroundRunHandle,
+  visibleAgentDetectionIds,
+  readRunAuditEvents,
 } from "../vite-agents-plugin";
 import { buildInitialWorkspaceState } from "../src/components/workspace/workspace-state";
 import { type CanUseTool } from "@anthropic-ai/claude-agent-sdk";
 import { type AgentProfile } from "../src/components/agent";
 
 describe("vite agents plugin", () => {
+  it("only exposes the supported visible agents in backend discovery", () => {
+    expect(visibleAgentDetectionIds()).toEqual(["claude-code", "codex", "gemini", "opencode"]);
+  });
+
+  it("writes JSON atomically and keeps a backup of the previous payload", () => {
+    const dir = mkdtempSync(join(tmpdir(), "rlab-atomic-json-"));
+    try {
+      const file = join(dir, "state.json");
+      writeJsonFileAtomic(file, { version: 1 });
+      writeJsonFileAtomic(file, { version: 2 });
+
+      expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ version: 2 });
+      expect(JSON.parse(readFileSync(`${file}.bak`, "utf8"))).toEqual({ version: 1 });
+      expect(existsSync(`${file}.tmp`)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects concurrent storage writes while a lock file is held", () => {
+    const dir = mkdtempSync(join(tmpdir(), "rlab-storage-lock-"));
+    try {
+      const lockFile = join(dir, "state.lock");
+
+      withStorageFileLock(lockFile, () => {
+        expect(() => withStorageFileLock(lockFile, () => undefined)).toThrow("Storage state is locked.");
+      });
+
+      expect(existsSync(lockFile)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports storage and visible-agent health without exposing hidden agents", () => {
+    const snapshot = storageHealthSnapshot();
+
+    expect(snapshot.storage.stateFile).toContain("workspace-state.json");
+    expect(snapshot.storage.ok).toBe(true);
+    expect(snapshot.agents.visible).toEqual(["claude-code", "codex", "gemini", "opencode"]);
+  });
+
+  it("appends run audit events as NDJSON without storing prompt text", () => {
+    const dir = mkdtempSync(join(tmpdir(), "rlab-run-audit-"));
+    try {
+      const auditFile = join(dir, "audit.ndjson");
+
+      appendRunAuditEvent(auditFile, {
+        type: "run_started",
+        agent: "codex",
+        accessMode: "unrestricted",
+        cwd: "C:/repo",
+        model: "gpt-5.5",
+        reasoning: "high",
+        mode: "default",
+        prompt: "secret task text",
+      });
+
+      const events = readRunAuditEvents(auditFile);
+      expect(events).toEqual([
+        expect.objectContaining({
+          type: "run_started",
+          agent: "codex",
+          accessMode: "unrestricted",
+          cwd: "C:/repo",
+          model: "gpt-5.5",
+          reasoning: "high",
+          mode: "default",
+        }),
+      ]);
+      expect(JSON.stringify(events)).not.toContain("secret task text");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("treats a ChatGPT-authenticated Codex CLI as available without API key env", () => {
     const codexDetect = {
       bins: ["codex"],
@@ -153,7 +231,7 @@ describe("vite agents plugin", () => {
     }
   });
 
-  it("returns Amp as a runnable CLI adapter when the executable is present", () => {
+  it("keeps hidden agents unsupported even if their executable is present", () => {
     const dir = mkdtempSync(join(tmpdir(), "rlab-amp-discovery-"));
     try {
       const cliPath = join(dir, "amp");
@@ -171,76 +249,13 @@ describe("vite agents plugin", () => {
           dir,
           "linux",
         ),
-      ).toEqual({
-        status: "available",
+      ).toMatchObject({
+        status: "unsupported",
         bins: ["amp"],
         resolvedBin: cliPath,
-        runAdapter: true,
-        selectable: true,
+        runAdapter: false,
+        selectable: false,
         env: ["AMP_API_KEY"],
-        installCommand: "npm install -g @sourcegraph/amp@latest",
-      });
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("returns Qwen as a runnable CLI adapter when the executable is present", () => {
-    const dir = mkdtempSync(join(tmpdir(), "rlab-qwen-discovery-"));
-    try {
-      const cliPath = join(dir, "qwen");
-      writeFileSync(cliPath, "", "utf8");
-
-      expect(
-        agentCliInfoForDetection(
-          "qwen",
-          {
-            bins: ["qwen", "qwen-code"],
-            env: ["DASHSCOPE_API_KEY"],
-          },
-          { env: { DASHSCOPE_API_KEY: "dashscope-test" } },
-          {},
-          dir,
-          "linux",
-        ),
-      ).toEqual({
-        status: "available",
-        bins: ["qwen", "qwen-code"],
-        resolvedBin: cliPath,
-        runAdapter: true,
-        selectable: true,
-        env: ["DASHSCOPE_API_KEY"],
-        installCommand: "npm install -g @qwen-code/qwen-code@latest",
-      });
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("returns Cursor as a runnable CLI adapter when the executable is present", () => {
-    const dir = mkdtempSync(join(tmpdir(), "rlab-cursor-discovery-"));
-    try {
-      const cliPath = join(dir, "cursor-agent");
-      writeFileSync(cliPath, "", "utf8");
-
-      expect(
-        agentCliInfoForDetection(
-          "cursor",
-          {
-            bins: ["cursor-agent"],
-          },
-          { env: {} },
-          {},
-          dir,
-          "linux",
-        ),
-      ).toEqual({
-        status: "available",
-        bins: ["cursor-agent"],
-        resolvedBin: cliPath,
-        runAdapter: true,
-        selectable: true,
-        env: [],
         installCommand: null,
       });
     } finally {
@@ -617,9 +632,6 @@ describe("vite agents plugin", () => {
       "hello",
     ]);
     expect(buildGeminiRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" })).toContain("yolo");
-    expect(buildAmpRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" })).toContain("--dangerously-allow-all");
-    expect(buildQwenRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" })).toContain("yolo");
-    expect(buildCursorRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" })).toContain("--force");
   });
 
   it("allows unrestricted runs for every RUN adapter without a live permission bridge", () => {
@@ -627,64 +639,7 @@ describe("vite agents plugin", () => {
     expect(validateRunAccessModeForAgent("codex", "read-only")).toBeNull();
     expect(validateRunAccessModeForAgent("codex", "unrestricted")).toBeNull();
     expect(validateRunAccessModeForAgent("gemini", "unrestricted")).toBeNull();
-    expect(validateRunAccessModeForAgent("amp", "unrestricted")).toBeNull();
     expect(validateRunAccessModeForAgent("opencode", "unrestricted")).toBeNull();
-    expect(validateRunAccessModeForAgent("qwen", "unrestricted")).toBeNull();
-    expect(validateRunAccessModeForAgent("cursor", "unrestricted")).toBeNull();
-    expect(validateRunAccessModeForAgent("cursor", "read-only")).toBe("Cursor CLI print mode does not provide a verifiable read-only sandbox. Switch agent access to unrestricted to run Cursor.");
-  });
-
-  it("builds Amp args for read-only and unrestricted execute streams", () => {
-    expect(buildAmpRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "read-only" })).toEqual([
-      "--settings-file",
-      expect.stringContaining("amp-read-only-settings.json"),
-      "--execute",
-      "hello",
-      "--stream-json",
-      "--stream-json-thinking",
-    ]);
-    expect(buildAmpRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" })).toEqual([
-      "--dangerously-allow-all",
-      "--execute",
-      "hello",
-      "--stream-json",
-      "--stream-json-thinking",
-    ]);
-  });
-
-  it("builds Qwen args with selected model and access mode", () => {
-    expect(buildQwenRunArgs({ prompt: "hello", model: "qwen3.6-plus", reasoning: "default", mode: "default", accessMode: "read-only" })).toEqual([
-      "--prompt",
-      "hello",
-      "--output-format",
-      "stream-json",
-      "--include-partial-messages",
-      "--approval-mode",
-      "plan",
-      "--model",
-      "qwen3.6-plus",
-    ]);
-    expect(buildQwenRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" })).toEqual([
-      "--prompt",
-      "hello",
-      "--output-format",
-      "stream-json",
-      "--include-partial-messages",
-      "--approval-mode",
-      "yolo",
-    ]);
-  });
-
-  it("builds Cursor args with print-mode stream JSON and the selected model", () => {
-    expect(buildCursorRunArgs({ prompt: "hello", model: "gpt-5", reasoning: "default", mode: "default", accessMode: "unrestricted" })).toEqual([
-      "-p",
-      "hello",
-      "--output-format",
-      "stream-json",
-      "--force",
-      "--model",
-      "gpt-5",
-    ]);
   });
 
   it("builds Gemini args with the selected model", () => {
@@ -2210,74 +2165,6 @@ describe("vite agents plugin", () => {
       permissionMode: "plan",
       tools: ["Read", "Glob", "Grep", "LS", "AskUserQuestion"],
     });
-  });
-
-  it("migrates old persisted seed copy without touching custom conversations", () => {
-    const state = buildInitialWorkspaceState();
-    const migrated = migrateSeedWorkspaceState({
-      ...state,
-      chats: [
-        { ...state.chats[0], title: "Draft release notes for 0.1.69", snippet: "Done", status: "done" },
-        { id: "custom", title: "Draft release notes for 0.1.69", snippet: "Writing the changelog…", time: "now", status: "idle", agent: "codex" },
-        ...state.chats.slice(1),
-      ],
-      projects: state.projects.map((project) =>
-        project.id === "auth-service"
-          ? {
-              ...project,
-              conversations: project.conversations.map((conversation) =>
-                conversation.id === "c-jwt"
-                  ? { ...conversation, title: "Rotate JWT secrets", snippet: "Waiting for approval to deploy" }
-                  : conversation,
-              ),
-            }
-          : project,
-      ),
-      threads: {
-        ...state.threads,
-        "c-jwt": [
-          { id: "u1", role: "user", time: "·", text: "Rotate JWT secrets" },
-          {
-            id: "a1",
-            role: "agent",
-            time: "·",
-            blocks: [
-              { kind: "reasoning", duration: "2s", text: "Scoping “Rotate JWT secrets” — gathering context from the workspace before acting." },
-              { kind: "text", text: "On it. I'll work on “Rotate JWT secrets” and report back with concrete changes." },
-              { kind: "suggested", actions: [{ id: "go", label: "Proceed", tone: "primary" }] },
-            ],
-          },
-        ],
-      },
-    });
-
-    expect(migrated.chats[0]).toMatchObject({ title: "Release notes для 0.1.69", snippet: "Готово" });
-    expect(migrated.chats[1]).toMatchObject({ id: "custom", title: "Draft release notes for 0.1.69" });
-    expect(migrated.projects[0]?.conversations[1]).toMatchObject({ title: "Ротация JWT-секретов", snippet: "Ждёт подтверждение deploy" });
-    expect(JSON.stringify(migrated.threads["c-jwt"])).toContain("Принял");
-  });
-
-  it("migrates persisted Codex seed and legacy model variants to the supported Codex model", () => {
-    const state = buildInitialWorkspaceState();
-    const migrated = migrateSeedWorkspaceState({
-      ...state,
-      chats: state.chats.map((conversation) =>
-        conversation.id === "chat-2" ? { ...conversation, profile: { agent: "codex", variant: "GPT-5" } as unknown as AgentProfile } : conversation,
-      ),
-      projects: state.projects.map((project) =>
-        project.id === "auth-service"
-          ? {
-              ...project,
-              conversations: project.conversations.map((conversation) =>
-                conversation.id === "c-jwt" ? { ...conversation, profile: { agent: "codex", variant: "DEFAULT" } as unknown as AgentProfile } : conversation,
-              ),
-            }
-          : project,
-      ),
-    });
-
-    expect(migrated.chats.find((conversation) => conversation.id === "chat-2")?.profile).toEqual({ agent: "codex", model: "gpt-5.5", reasoning: "default", mode: "default" });
-    expect(migrated.projects[0]?.conversations.find((conversation) => conversation.id === "c-jwt")?.profile).toEqual({ agent: "codex", model: "gpt-5.5", reasoning: "default", mode: "default" });
   });
 
   it("marks persisted active background runs as interrupted when no server handle owns them", () => {

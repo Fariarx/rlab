@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { homedir, tmpdir } from "node:os";
 import { basename, delimiter, dirname, join } from "node:path";
@@ -58,6 +58,8 @@ type AgentStatus = "available" | "running" | "needs-setup" | "unavailable" | "un
 const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url));
 const WORKSPACE_STATE_DIR = join(PLUGIN_DIR, ".data");
 const WORKSPACE_STATE_FILE = join(WORKSPACE_STATE_DIR, "workspace-state.json");
+const WORKSPACE_STATE_LOCK_FILE = join(WORKSPACE_STATE_DIR, "workspace-state.lock");
+const RUN_AUDIT_FILE = join(WORKSPACE_STATE_DIR, "run-audit.ndjson");
 const ATTACHMENTS_DIR = join(WORKSPACE_STATE_DIR, "attachments");
 const AMP_READ_ONLY_SETTINGS_FILE = join(WORKSPACE_STATE_DIR, "amp-read-only-settings.json");
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
@@ -89,24 +91,21 @@ const DETECT: Record<string, Detect> = {
   "claude-code": { bins: ["claude"] },
   codex: { bins: ["codex"], env: ["OPENAI_API_KEY", "CODEX_API_KEY"], hasAuth: hasCodexStoredAuth },
   gemini: { bins: ["gemini"], env: ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENAI_API_KEY"], hasAuth: hasGeminiStoredAuth },
-  amp: { bins: ["amp"], env: ["AMP_API_KEY"] },
   opencode: { bins: ["opencode"] },
-  cursor: { bins: ["cursor-agent"] },
-  qwen: { bins: ["qwen", "qwen-code"], env: ["DASHSCOPE_API_KEY"] },
-  copilot: { bins: ["copilot"] },
-  droid: { bins: ["droid"], env: ["FACTORY_API_KEY"] },
 };
 
-const RUNNABLE_AGENT_IDS = new Set(["claude-code", "codex", "gemini", "amp", "opencode", "cursor", "qwen"]);
+const RUNNABLE_AGENT_IDS = new Set(["claude-code", "codex", "gemini", "opencode"]);
 
 const INSTALL_COMMANDS: Partial<Record<string, readonly string[]>> = {
   "claude-code": ["npm", "install", "-g", "@anthropic-ai/claude-code@latest"],
   codex: ["npm", "install", "-g", "@openai/codex@latest"],
   gemini: ["npm", "install", "-g", "@google/gemini-cli@latest"],
-  amp: ["npm", "install", "-g", "@sourcegraph/amp@latest"],
   opencode: ["npm", "install", "-g", "opencode-ai@latest"],
-  qwen: ["npm", "install", "-g", "@qwen-code/qwen-code@latest"],
 };
+
+export function visibleAgentDetectionIds(): readonly string[] {
+  return Object.keys(DETECT);
+}
 
 export function installCommandForAgent(agent: string): readonly string[] | null {
   return INSTALL_COMMANDS[agent] ?? null;
@@ -859,11 +858,99 @@ function readWorkspaceState(): WorkspaceState {
   throw new Error(`${WORKSPACE_STATE_FILE} does not contain a valid workspace state.`);
 }
 
+export function writeJsonFileAtomic(file: string, value: unknown): void {
+  mkdirSync(dirname(file), { recursive: true });
+  const tempFile = `${file}.tmp`;
+  if (existsSync(file)) {
+    copyFileSync(file, `${file}.bak`);
+  }
+  try {
+    writeFileSync(tempFile, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+    renameSync(tempFile, file);
+  } finally {
+    if (existsSync(tempFile)) {
+      unlinkSync(tempFile);
+    }
+  }
+}
+
+export function withStorageFileLock<T>(lockFile: string, fn: () => T): T {
+  mkdirSync(dirname(lockFile), { recursive: true });
+  let fd: number | null = null;
+  try {
+    fd = openSync(lockFile, "wx");
+  } catch (error) {
+    if (isRecord(error) && error.code === "EEXIST") {
+      throw new Error("Storage state is locked.");
+    }
+    throw error;
+  }
+  try {
+    return fn();
+  } finally {
+    closeSync(fd);
+    unlinkSync(lockFile);
+  }
+}
+
 function writeWorkspaceState(state: WorkspaceState): void {
-  mkdirSync(WORKSPACE_STATE_DIR, { recursive: true });
-  const tempFile = `${WORKSPACE_STATE_FILE}.tmp`;
-  writeFileSync(tempFile, `${JSON.stringify(state, null, 2)}\n`, "utf8");
-  renameSync(tempFile, WORKSPACE_STATE_FILE);
+  withStorageFileLock(WORKSPACE_STATE_LOCK_FILE, () => writeJsonFileAtomic(WORKSPACE_STATE_FILE, state));
+}
+
+export function storageHealthSnapshot(): {
+  readonly storage: { readonly ok: boolean; readonly stateFile: string; readonly lockFile: string; readonly backupFile: string; readonly error?: string };
+  readonly agents: { readonly visible: readonly string[] };
+} {
+  try {
+    mkdirSync(WORKSPACE_STATE_DIR, { recursive: true });
+    if (existsSync(WORKSPACE_STATE_FILE)) {
+      JSON.parse(readFileSync(WORKSPACE_STATE_FILE, "utf8").replace(/^\uFEFF/, "")) as unknown;
+    }
+    return {
+      storage: {
+        ok: true,
+        stateFile: WORKSPACE_STATE_FILE,
+        lockFile: WORKSPACE_STATE_LOCK_FILE,
+        backupFile: `${WORKSPACE_STATE_FILE}.bak`,
+      },
+      agents: { visible: visibleAgentDetectionIds() },
+    };
+  } catch (error) {
+    return {
+      storage: {
+        ok: false,
+        stateFile: WORKSPACE_STATE_FILE,
+        lockFile: WORKSPACE_STATE_LOCK_FILE,
+        backupFile: `${WORKSPACE_STATE_FILE}.bak`,
+        error: errorMessage(error),
+      },
+      agents: { visible: visibleAgentDetectionIds() },
+    };
+  }
+}
+
+const SENSITIVE_AUDIT_KEYS = new Set(["prompt", "apiKey", "dataBase64", "content"]);
+
+export function appendRunAuditEvent(file: string, event: Record<string, unknown> & { readonly type: string }): void {
+  mkdirSync(dirname(file), { recursive: true });
+  const sanitized: Record<string, unknown> = { timestamp: new Date().toISOString() };
+  for (const [key, value] of Object.entries(event)) {
+    if (!SENSITIVE_AUDIT_KEYS.has(key)) {
+      sanitized[key] = value;
+    }
+  }
+  appendFileSync(file, `${JSON.stringify(sanitized)}\n`, "utf8");
+}
+
+export function readRunAuditEvents(file = RUN_AUDIT_FILE): readonly Record<string, unknown>[] {
+  if (!existsSync(file)) {
+    return [];
+  }
+  return readFileSync(file, "utf8")
+    .split(/\r?\n/)
+    .filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line) as unknown)
+    .filter(isRecord);
 }
 
 const SEED_PLACEHOLDER_PROJECT_PATHS = new Set(["/root/workspace/rlab", "/root/workspace/rlab/next-ui"]);
@@ -1254,6 +1341,7 @@ function handleRunApproval(req: IncomingMessage, res: ServerResponse): void {
     try {
       const decision = parseRunApprovalPayload(body);
       const resolved = resolvePendingRunApproval(decision);
+      appendRunAuditEvent(RUN_AUDIT_FILE, { type: "approval_decision", id: resolved.id, decision: resolved.decision });
       writeWorkspaceState(applyRunApprovalDecisionState(readWorkspaceState(), resolved));
       sendJson(res, 200, resolved);
     } catch (error) {
@@ -2112,27 +2200,10 @@ const RUN: Record<string, RunSpec> = {
     args: (request) => buildGeminiRunArgs(request),
     createTranslator: createGeminiStreamTranslator,
   },
-  amp: {
-    bin: "amp",
-    env: DETECT.amp.env,
-    args: (request) => buildAmpRunArgs(request),
-    createTranslator: createAmpStreamTranslator,
-  },
   opencode: {
     bin: "opencode",
     args: (request) => buildOpenCodeRunArgs(request),
     createTranslator: createOpenCodeStreamTranslator,
-  },
-  cursor: {
-    bin: "cursor-agent",
-    args: (request) => buildCursorRunArgs(request),
-    createTranslator: createCursorStreamTranslator,
-  },
-  qwen: {
-    bin: "qwen",
-    env: DETECT.qwen.env,
-    args: (request) => buildQwenRunArgs(request),
-    createTranslator: createQwenStreamTranslator,
   },
 };
 
@@ -4697,6 +4768,24 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
       send({ type: "status", level: "info", text: `cwd · ${cwd}` });
     }
     send({ type: "status", level: "info", text: `access · ${accessMode}` });
+    try {
+      appendRunAuditEvent(RUN_AUDIT_FILE, {
+        type: "run_started",
+        agent,
+        model,
+        reasoning,
+        mode,
+        accessMode,
+        cwd,
+        runId: binding?.runId,
+        conversationId: binding?.conversationId,
+        prompt,
+      });
+    } catch (error) {
+      send({ type: "error", text: `Failed to write run audit event: ${errorMessage(error)}` });
+      finishAndEnd();
+      return;
+    }
 
     if (agent === "claude-code") {
       void runClaudeSdk(request, cwd, res, send, sendDone, sender.end, binding, accumulator);
@@ -4798,6 +4887,10 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
 }
 
 function attach(server: ViteDevServer | PreviewServer): void {
+  server.middlewares.use("/api/health", (_req, res) => {
+    const health = storageHealthSnapshot();
+    sendJson(res, health.storage.ok ? 200 : 500, health);
+  });
   server.middlewares.use("/api/workspace", handleWorkspace);
   server.middlewares.use("/api/agents", (_req, res) => {
     res.setHeader("Content-Type", "application/json");

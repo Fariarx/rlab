@@ -223,6 +223,9 @@ interface ComposerProps {
    *  button is enabled and sending also flushes the comments via onSendReview. */
   readonly reviewCount?: number;
   readonly onSendReview?: () => void;
+  /** Reports the height of the floating tags row so the thread/Git content above
+   *  can reserve matching bottom space (the tags still float over the content). */
+  readonly onTagsHeightChange?: (height: number) => void;
 }
 
 /** Composer — the chat input. Sends on Enter (Shift+Enter for newline). Sticky
@@ -245,6 +248,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     running = false,
     reviewCount = 0,
     onSendReview,
+    onTagsHeightChange,
   },
   ref,
 ) {
@@ -258,6 +262,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const activeModeOption = modes.find((mode) => mode.id === activeMode) ?? null;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const tagsRef = useRef<HTMLDivElement | null>(null);
   const singleRowRef = useRef(0);
   const initialDraftRef = useRef<ComposerDraft>({ text: initialValue, attachments: initialAttachments });
   const localDraftDirtyRef = useRef(false);
@@ -298,6 +303,24 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     const needsMultiline = composerValue.length > 0 && (composerValue.includes("\n") || el.scrollHeight > baseline * 1.5);
     setExpanded(needsMultiline);
   }, [composerValue, expanded]);
+
+  // Report the floating tags row height so the thread/Git content can reserve
+  // matching bottom space (the row keeps floating over the content).
+  useEffect(() => {
+    const el = tagsRef.current;
+    if (!el || typeof ResizeObserver === "undefined") {
+      onTagsHeightChange?.(0);
+      return;
+    }
+    const report = () => onTagsHeightChange?.(el.offsetHeight);
+    report();
+    const observer = new ResizeObserver(report);
+    observer.observe(el);
+    return () => {
+      observer.disconnect();
+      onTagsHeightChange?.(0);
+    };
+  }, [onTagsHeightChange]);
 
   const slashCommands = useMemo<readonly SlashCommand[]>(
     () => [
@@ -463,35 +486,35 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       {/* Each enabled mode and each attached file floats as its own pill above
           the divider that tops the input container (overlaying the thread),
           never boxed together and never reflowing the thread. */}
-      {(composerAttachments.length > 0 || activeModeOption || reviewCount > 0) && (
-        <Box sx={{ position: "absolute", left: 0, right: 0, bottom: "calc(100% + 22px)", display: "flex", flexWrap: "wrap", gap: 0.75, pointerEvents: "none", zIndex: 6 }}>
-          {reviewCount > 0 && (
-            <FloatingTag
-              tone="accent"
-              icon={<RateReviewOutlinedIcon sx={{ fontSize: 14 }} />}
-              label={t("reviewPending", { count: reviewCount })}
-            />
-          )}
-          {activeModeOption && (
-            <FloatingTag
-              tone="accent"
-              icon={<AutoAwesomeRoundedIcon sx={{ fontSize: 14 }} />}
-              label={activeModeOption.label}
-              removeLabel={t("disableMode", { mode: activeModeOption.label })}
-              onRemove={() => onModeChange?.("default")}
-            />
-          )}
-          {composerAttachments.map((attachment) => (
-            <FloatingTag
-              key={attachment.id}
-              icon={attachmentIcon(attachment.type)}
-              label={attachment.name}
-              removeLabel={t("removeAttachment", { name: attachment.name })}
-              onRemove={() => setComposerAttachments(composerAttachments.filter((item) => item.id !== attachment.id))}
-            />
-          ))}
-        </Box>
-      )}
+      {/* Always mounted (even when empty) so its height can be measured and the
+          content above can reserve matching space. */}
+      <Box ref={tagsRef} sx={{ position: "absolute", left: 0, right: 0, bottom: "calc(100% + 22px)", display: "flex", flexWrap: "wrap", gap: 0.75, pointerEvents: "none", zIndex: 6 }}>
+        {reviewCount > 0 && (
+          <FloatingTag
+            tone="accent"
+            icon={<RateReviewOutlinedIcon sx={{ fontSize: 14 }} />}
+            label={t("reviewPending", { count: reviewCount })}
+          />
+        )}
+        {activeModeOption && (
+          <FloatingTag
+            tone="accent"
+            icon={<AutoAwesomeRoundedIcon sx={{ fontSize: 14 }} />}
+            label={activeModeOption.label}
+            removeLabel={t("disableMode", { mode: activeModeOption.label })}
+            onRemove={() => onModeChange?.("default")}
+          />
+        )}
+        {composerAttachments.map((attachment) => (
+          <FloatingTag
+            key={attachment.id}
+            icon={attachmentIcon(attachment.type)}
+            label={attachment.name}
+            removeLabel={t("removeAttachment", { name: attachment.name })}
+            onRemove={() => setComposerAttachments(composerAttachments.filter((item) => item.id !== attachment.id))}
+          />
+        ))}
+      </Box>
       <Box
         sx={{
           display: "flex",

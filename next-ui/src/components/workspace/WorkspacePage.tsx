@@ -184,6 +184,10 @@ export function WorkspacePageView({
   const [view, setView] = useState<WorkspaceView>("chat");
   // Unstaged line totals for the header Git-tab badge, reported by the Git view.
   const [gitUnstaged, setGitUnstaged] = useState<{ readonly additions: number; readonly deletions: number }>({ additions: 0, deletions: 0 });
+  // Height of the composer's floating tags row; the thread/Git content reserves
+  // matching bottom space so the (still-floating) tags never hide content.
+  const [composerTagsHeight, setComposerTagsHeight] = useState(0);
+  const contentBottomInset = composerTagsHeight > 0 ? composerTagsHeight + 22 : 0;
   const showView = (next: WorkspaceView) => setView(next);
   // Pending code-review comments, attached to diff lines in the Git view and sent
   // to the thread as one block (without starting an agent run).
@@ -761,11 +765,11 @@ export function WorkspacePageView({
           sx={{
             display: { xs: "none", md: "block" },
             flex: "0 0 auto",
-            width: "5px",
+            width: "1px",
             cursor: "col-resize",
-            borderLeft: (t) => `1px solid ${t.custom.borders.subtle}`,
+            backgroundColor: (t) => t.custom.borders.subtle,
             transition: "background-color 120ms ease",
-            "&:hover": { backgroundColor: (t) => t.palette.status.running.soft },
+            "&:hover": { backgroundColor: (t) => t.palette.status.running.main },
           }}
         />
       )}
@@ -990,6 +994,7 @@ export function WorkspacePageView({
                     actions={messageActions}
                     contentMaxWidth={THREAD_MAX_WIDTH}
                     contentPaddingX={THREAD_PADDING_X}
+                    bottomInset={contentBottomInset}
                   />
                 )}
               </Box>
@@ -1000,6 +1005,7 @@ export function WorkspacePageView({
                   review={selected ? review : undefined}
                   active={view === "git"}
                   onUnstagedStatsChange={setGitUnstaged}
+                  bottomInset={contentBottomInset}
                 />
               </Box>
               {/* Keyed by folder so each project's terminal keeps its own scrollback. */}
@@ -1010,6 +1016,9 @@ export function WorkspacePageView({
           </Box>
         </Box>
 
+        {/* The terminal tab is a pure web terminal — it has its own input, so the
+            agent composer (and its tags) is hidden there. */}
+        {view !== "terminal" && (
         <Box sx={{ flex: "0 0 auto", borderTop: (t) => `1px solid ${t.custom.borders.subtle}`, backgroundColor: (t) => t.custom.surfaces.s1 }}>
           <Box sx={{ width: "100%", maxWidth: THREAD_MAX_WIDTH, mx: "auto", px: THREAD_PADDING_X, py: 1.5 }}>
             {workspaceHydrating ? (
@@ -1032,6 +1041,7 @@ export function WorkspacePageView({
                 activeMode={profile.mode}
                 onModeChange={handleModeChange}
                 onAttachmentError={(message) => toast({ message, severity: "error", duration: 3000 })}
+                onTagsHeightChange={setComposerTagsHeight}
               />
             ) : (
               <Composer
@@ -1063,10 +1073,12 @@ export function WorkspacePageView({
                 running={selected?.status === "running"}
                 reviewCount={reviewComments.length}
                 onSendReview={sendReviewComments}
+                onTagsHeightChange={setComposerTagsHeight}
               />
             )}
           </Box>
         </Box>
+        )}
       </Box>
 
       <AgentPicker open={pickerOpen} value={profile} onClose={() => setPickerOpen(false)} onSelect={handlePicked} />

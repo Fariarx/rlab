@@ -1,9 +1,10 @@
 import KeyboardArrowRightIcon from "@mui/icons-material/KeyboardArrowRight";
+import StopCircleOutlinedIcon from "@mui/icons-material/StopCircleOutlined";
 import TerminalIcon from "@mui/icons-material/Terminal";
 import { Box, CircularProgress, InputBase, Stack, Typography } from "@mui/material";
 import { type KeyboardEvent, useEffect, useRef, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
-import { EmptyState } from "../ui";
+import { EmptyState, IconButton } from "../ui";
 
 type OutputSegment = { readonly stream: "out" | "err"; readonly text: string };
 
@@ -13,12 +14,31 @@ interface TerminalEntry {
   segments: OutputSegment[];
   exitCode?: number;
   running: boolean;
+  stopped?: boolean;
 }
 
 type TerminalEvent =
   | { readonly type: "out"; readonly chunk: string }
   | { readonly type: "err"; readonly chunk: string }
   | { readonly type: "exit"; readonly code: number };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseTerminalEvent(line: string): TerminalEvent {
+  const value: unknown = JSON.parse(line);
+  if (!isRecord(value) || typeof value.type !== "string") {
+    throw new Error("invalid event");
+  }
+  if ((value.type === "out" || value.type === "err") && typeof value.chunk === "string") {
+    return { type: value.type, chunk: value.chunk };
+  }
+  if (value.type === "exit" && typeof value.code === "number") {
+    return { type: "exit", code: value.code };
+  }
+  throw new Error(`invalid ${value.type} event`);
+}
 
 /** TerminalView — a per-folder command runner. Each command runs in the chat's
  *  cwd and streams stdout/stderr back; it is stateless between commands (a `cd`
@@ -30,7 +50,10 @@ export function TerminalView({ cwd }: { readonly cwd?: string }) {
   const [historyIndex, setHistoryIndex] = useState<number | null>(null);
   const seqRef = useRef(0);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const abortControllers = useRef(new Map<number, AbortController>());
+  const stoppedIds = useRef(new Set<number>());
   const history = entries.map((entry) => entry.command);
+  const hasRunningEntry = entries.some((entry) => entry.running);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -45,6 +68,9 @@ export function TerminalView({ cwd }: { readonly cwd?: string }) {
 
   const run = async (command: string, cwdForRun: string) => {
     const id = ++seqRef.current;
+    const abortController = new AbortController();
+    abortControllers.current.set(id, abortController);
+    stoppedIds.current.delete(id);
     setEntries((current) => [...current, { id, command, segments: [], running: true }]);
 
     const append = (segment: OutputSegment) =>
@@ -62,6 +88,7 @@ export function TerminalView({ cwd }: { readonly cwd?: string }) {
       const response = await fetch("/api/terminal", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: abortController.signal,
         body: JSON.stringify({ cwd: cwdForRun, command }),
       });
       if (!response.ok || !response.body) {
@@ -85,7 +112,14 @@ export function TerminalView({ cwd }: { readonly cwd?: string }) {
           if (!line.trim()) {
             continue;
           }
-          const event = JSON.parse(line) as TerminalEvent;
+          let event: TerminalEvent;
+          try {
+            event = parseTerminalEvent(line);
+          } catch (error) {
+            append({ stream: "err", text: `${t("terminalProtocolError", { error: error instanceof Error ? error.message : String(error) })}\n` });
+            patchEntry(id, (entry) => ({ ...entry, running: false, exitCode: 1 }));
+            return;
+          }
           if (event.type === "out") {
             append({ stream: "out", text: event.chunk });
           } else if (event.type === "err") {
@@ -97,9 +131,21 @@ export function TerminalView({ cwd }: { readonly cwd?: string }) {
       }
       patchEntry(id, (entry) => (entry.running ? { ...entry, running: false } : entry));
     } catch (error) {
+      if (stoppedIds.current.has(id)) {
+        return;
+      }
       append({ stream: "err", text: error instanceof Error ? error.message : String(error) });
       patchEntry(id, (entry) => ({ ...entry, running: false, exitCode: 1 }));
+    } finally {
+      abortControllers.current.delete(id);
     }
+  };
+
+  const stop = (id: number) => {
+    stoppedIds.current.add(id);
+    abortControllers.current.get(id)?.abort();
+    abortControllers.current.delete(id);
+    patchEntry(id, (entry) => ({ ...entry, running: false, stopped: true }));
   };
 
   const submit = () => {
@@ -140,17 +186,6 @@ export function TerminalView({ cwd }: { readonly cwd?: string }) {
 
   return (
     <Stack sx={{ height: "100%", minHeight: 0, backgroundColor: (theme) => theme.custom.surfaces.s1 }}>
-      <Stack
-        direction="row"
-        spacing={1}
-        sx={{ alignItems: "center", px: 1.5, py: 0.75, flex: "0 0 auto", borderBottom: (theme) => `1px solid ${theme.custom.borders.subtle}` }}
-      >
-        <TerminalIcon sx={{ fontSize: 16, color: "text.secondary", flex: "0 0 auto" }} />
-        <Typography noWrap sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.72rem", color: "text.secondary" }}>
-          {cwd ?? t("terminalTab")}
-        </Typography>
-      </Stack>
-
       {!cwd ? (
         <Stack sx={{ flex: 1, minHeight: 0, justifyContent: "center", alignItems: "center", px: 3, py: 4 }}>
           <EmptyState icon={<TerminalIcon />} title={t("terminalTab")} description={t("gitNoProject")} />
@@ -159,6 +194,10 @@ export function TerminalView({ cwd }: { readonly cwd?: string }) {
         <>
           <Box
             ref={scrollRef}
+            role="log"
+            aria-label={t("terminalOutput")}
+            aria-live="polite"
+            aria-busy={hasRunningEntry ? "true" : "false"}
             sx={{
               flex: 1,
               minHeight: 0,
@@ -181,6 +220,11 @@ export function TerminalView({ cwd }: { readonly cwd?: string }) {
                   <Box component="span" sx={{ color: (theme) => theme.palette.status.ok.main, flex: "0 0 auto" }}>❯</Box>
                   <Box component="span" sx={{ color: "text.primary", whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{entry.command}</Box>
                   {entry.running && <CircularProgress size={11} sx={{ flex: "0 0 auto", alignSelf: "center" }} />}
+                  {entry.running && (
+                    <IconButton aria-label={t("stopTerminalCommand")} tone="danger" onClick={() => stop(entry.id)} sx={{ ml: 0.25, width: 22, height: 22 }}>
+                      <StopCircleOutlinedIcon sx={{ fontSize: 16 }} />
+                    </IconButton>
+                  )}
                 </Stack>
                 {entry.segments.length > 0 && (
                   <Box component="pre" sx={{ m: 0, mt: 0.25, whiteSpace: "pre-wrap", overflowWrap: "anywhere", fontFamily: "inherit" }}>
@@ -200,6 +244,11 @@ export function TerminalView({ cwd }: { readonly cwd?: string }) {
                     {t("terminalExitCode", { code: entry.exitCode })}
                   </Typography>
                 )}
+                {entry.stopped === true && (
+                  <Typography component="span" sx={{ fontFamily: "inherit", fontSize: "0.7rem", color: "text.secondary" }}>
+                    {t("terminalStopped")}
+                  </Typography>
+                )}
               </Box>
             ))}
           </Box>
@@ -216,8 +265,24 @@ export function TerminalView({ cwd }: { readonly cwd?: string }) {
               backgroundColor: (theme) => theme.custom.surfaces.s2,
             }}
           >
+            <Typography
+              noWrap
+              sx={{
+                fontFamily: (theme) => theme.custom.fonts.mono,
+                fontSize: "0.7rem",
+                color: "text.tertiary",
+                flex: "0 1 auto",
+                minWidth: 0,
+                maxWidth: "40%",
+                direction: "rtl",
+                textAlign: "left",
+              }}
+            >
+              {cwd}
+            </Typography>
             <KeyboardArrowRightIcon sx={{ fontSize: 18, color: (theme) => theme.palette.status.ok.main, flex: "0 0 auto" }} />
             <InputBase
+              inputProps={{ "aria-label": t("terminalCommandInput") }}
               value={input}
               onChange={(event) => setInput(event.target.value)}
               onKeyDown={handleKeyDown}

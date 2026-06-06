@@ -13,6 +13,9 @@ describe("KitPage", () => {
     expect(screen.getByRole("heading", { name: /блоки агента/i })).toBeInTheDocument();
     expect(screen.getByText("Стримящийся блок ответа")).toBeInTheDocument();
     expect(screen.getAllByText("src/session.ts").length).toBeGreaterThan(0);
+    expect(screen.getByRole("heading", { name: /рабочие поверхности/i })).toBeInTheDocument();
+    expect(screen.getByRole("log", { name: "Вывод терминала" })).toBeInTheDocument();
+    expect(screen.getByText("Агент может писать в /root/workspace/rlab")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: /статусы и теги/i })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: /данные и состояния/i })).toBeInTheDocument();
   });

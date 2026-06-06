@@ -63,6 +63,7 @@ export function Conversation({
   actions,
   contentMaxWidth,
   contentPaddingX,
+  bottomInset = 0,
 }: {
   readonly messages: readonly ChatMessage[];
   readonly typing?: boolean;
@@ -71,6 +72,8 @@ export function Conversation({
    *  full-width so its scrollbar sits at the screen edge. */
   readonly contentMaxWidth?: number;
   readonly contentPaddingX?: { readonly xs: number; readonly sm: number };
+  /** Extra bottom space (px) reserved for the composer's floating tags row. */
+  readonly bottomInset?: number;
 }) {
   const { t } = useI18n();
   const virtuosoRef = useRef<VirtuosoHandle | null>(null);
@@ -115,6 +118,7 @@ export function Conversation({
         initialItemCount={Math.min(items.length, 20)}
         minOverscanItemCount={{ bottom: 8, top: 4 }}
         style={{ height: "100%" }}
+        components={{ Footer: bottomInset > 0 ? () => <Box sx={{ height: bottomInset }} /> : undefined }}
         itemContent={(index, item) => (
           <Box sx={{ width: "100%", maxWidth: contentMaxWidth, mx: "auto", px: contentPaddingX, pt: index === 0 ? { xs: 2.5, sm: 4 } : 0, pb: 3 }}>
             {item.kind === "message" ? <Message actions={actions} message={item.message} index={index} /> : <TypingRow delay={messages.length * 120} />}

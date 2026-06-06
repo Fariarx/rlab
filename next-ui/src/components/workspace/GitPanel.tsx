@@ -30,6 +30,8 @@ interface GitViewProps {
   readonly active?: boolean;
   /** Reports the unstaged line totals up for the header Git-tab badge. */
   readonly onUnstagedStatsChange?: (stats: { readonly additions: number; readonly deletions: number }) => void;
+  /** Extra bottom space (px) reserved for the composer's floating tags row. */
+  readonly bottomInset?: number;
 }
 
 type GitApiErrorPayload = {
@@ -347,7 +349,7 @@ function GitFileDiffCard({
   );
 }
 
-export function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnstagedStatsChange }: GitViewProps) {
+export function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnstagedStatsChange, bottomInset = 0 }: GitViewProps) {
   const { t } = useI18n();
   const [status, setStatus] = useState<GitStatusPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -481,7 +483,7 @@ export function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnst
           </Tabs>
         )}
 
-        <Stack ref={scrollRef} spacing={1.5} sx={{ flex: 1, minHeight: 0, overflow: "auto", px: 1.5, pt: 0, pb: 2 }}>
+        <Stack ref={scrollRef} spacing={1.5} sx={{ flex: 1, minHeight: 0, overflow: "auto", px: 1.5, pt: 0, pb: `${16 + bottomInset}px` }}>
           {loading && (
             <Stack direction="row" spacing={1} sx={{ alignItems: "center", color: "text.secondary", pt: 1.5 }}>
               <CircularProgress size={16} />

@@ -6,8 +6,8 @@ export type AgentId =
   | "claude-code"
   | "codex"
   | "gemini"
-  | "amp"
   | "opencode"
+  | "amp"
   | "cursor"
   | "qwen"
   | "copilot"
@@ -160,7 +160,6 @@ export const AGENTS: readonly AgentDef[] = [
     reasoning: DEFAULT_ONLY,
     modes: DEFAULT_MODE_OPTIONS,
   },
-  { id: "amp", name: "AMP", vendor: "Sourcegraph", cliBins: ["amp"], runAdapter: true, short: "AM", accent: "#E5484D", models: DEFAULT_ONLY, reasoning: DEFAULT_ONLY, modes: DEFAULT_MODE_OPTIONS },
   {
     id: "opencode",
     name: "OpenCode",
@@ -173,10 +172,6 @@ export const AGENTS: readonly AgentDef[] = [
     reasoning: CLAUDE_REASONING_OPTIONS,
     modes: DEFAULT_MODE_OPTIONS,
   },
-  { id: "cursor", name: "Cursor", vendor: "Anysphere", cliBins: ["cursor-agent"], runAdapter: true, short: "CU", accent: "#9aa4ad", models: CURSOR_MODEL_OPTIONS, reasoning: DEFAULT_ONLY, modes: DEFAULT_MODE_OPTIONS },
-  { id: "qwen", name: "Qwen", vendor: "Alibaba", cliBins: ["qwen", "qwen-code"], runAdapter: true, short: "QW", accent: "#7C3AED", models: QWEN_MODEL_OPTIONS, reasoning: DEFAULT_ONLY, modes: DEFAULT_MODE_OPTIONS },
-  { id: "copilot", name: "Copilot", vendor: "GitHub", cliBins: ["copilot"], runAdapter: false, short: "CP", accent: "#3FB950", models: DEFAULT_ONLY, reasoning: DEFAULT_ONLY, modes: DEFAULT_MODE_OPTIONS },
-  { id: "droid", name: "Droid", vendor: "Factory", cliBins: ["droid"], runAdapter: false, short: "DR", accent: "#22A6B3", models: DEFAULT_ONLY, reasoning: DEFAULT_ONLY, modes: DEFAULT_MODE_OPTIONS },
 ];
 
 export const AGENTS_BY_ID: Record<AgentId, AgentDef> = Object.fromEntries(AGENTS.map((agent) => [agent.id, agent])) as Record<

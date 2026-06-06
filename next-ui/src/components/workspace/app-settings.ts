@@ -12,6 +12,8 @@ export const MAX_SIDEBAR_WIDTH = 520;
 export interface AppearanceSettings {
   readonly density: DensityMode;
   readonly reduceMotion: boolean;
+  readonly showCost: boolean;
+  readonly showTokens: boolean;
   readonly sidebarWidth: number;
   readonly theme: ThemeMode;
 }
@@ -44,6 +46,8 @@ export const defaultAppSettings: AppSettings = {
   appearance: {
     density: "comfortable",
     reduceMotion: false,
+    showCost: false,
+    showTokens: true,
     sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
     theme: "dark",
   },
@@ -139,6 +143,8 @@ export function isAppSettings(value: unknown): value is AppSettings {
     isThemeMode(appearance.theme) &&
     isDensityMode(appearance.density) &&
     typeof appearance.reduceMotion === "boolean" &&
+    (appearance.showTokens === undefined || typeof appearance.showTokens === "boolean") &&
+    (appearance.showCost === undefined || typeof appearance.showCost === "boolean") &&
     (appearance.sidebarWidth === undefined || normalizeSidebarWidth(appearance.sidebarWidth) === appearance.sidebarWidth) &&
     isLocale(general.locale) &&
     typeof general.desktopNotifications === "boolean" &&

@@ -25,5 +25,5 @@ export function totalUsageTokens(usage: RunUsage): number | undefined {
 
 export function formatTokenUsage(usage: RunUsage): string {
   const total = totalUsageTokens(usage);
-  return total === undefined ? "tokens n/a" : `${compactCount(total)} tok`;
+  return total === undefined ? "—" : compactCount(total);
 }
