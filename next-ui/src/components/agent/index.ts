@@ -1,6 +1,7 @@
 /** Agent conversation kit — messages, reasoning, actions, and the composer. */
 export * from "./types";
 export * from "./agents";
+export { AgentBrandIcon } from "./AgentBrandIcon";
 export { AgentMonogram } from "./AgentMonogram";
 export { AgentGlyph } from "./AgentGlyph";
 export { AgentBadge } from "./AgentBadge";
@@ -12,7 +13,7 @@ export { ConversationSearch } from "./ConversationSearch";
 export { Message } from "./Message";
 export { messageToPlainText, type MessageActionHandlers } from "./message-actions";
 export { formatCostUsd, formatTokenUsage, totalUsageTokens } from "./usage-cost";
-export { Composer } from "./Composer";
+export { Composer, type ComposerHandle } from "./Composer";
 export { AgentBlockRenderer } from "./AgentBlockRenderer";
 export { Reasoning } from "./Reasoning";
 export { DiffCard } from "./DiffCard";

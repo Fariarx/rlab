@@ -1,17 +1,15 @@
 import AttachFileIcon from "@mui/icons-material/AttachFile";
 import AutoAwesomeRoundedIcon from "@mui/icons-material/AutoAwesomeRounded";
-import CheckRoundedIcon from "@mui/icons-material/CheckRounded";
 import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
 import DescriptionOutlinedIcon from "@mui/icons-material/DescriptionOutlined";
 import ImageOutlinedIcon from "@mui/icons-material/ImageOutlined";
 import SendIcon from "@mui/icons-material/Send";
 import StopCircleIcon from "@mui/icons-material/StopCircle";
 import TuneRoundedIcon from "@mui/icons-material/TuneRounded";
-import { Box, InputBase, Menu, MenuItem, Stack, type SxProps, type Theme, Typography } from "@mui/material";
-import { type ChangeEvent, type DragEvent, type KeyboardEvent, type MouseEvent, type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Box, Divider, InputBase, Menu, MenuItem, Stack, Switch, type SxProps, type Theme, Typography } from "@mui/material";
+import { type ChangeEvent, forwardRef, type KeyboardEvent, type MouseEvent, type ReactNode, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import { Button, IconButton, KeyHint } from "../ui";
-import { dropIn } from "./anim";
 import { type ComposerAttachmentDraft, type ComposerDraft } from "./types";
 
 interface SlashCommand {
@@ -149,23 +147,16 @@ function FloatingTag({
         borderRadius: (t) => `${t.custom.radii.pill}px`,
         fontSize: "0.74rem",
         fontWeight: 600,
+        // Solid, opaque surface — these sit over the thread, so no translucency.
+        color: "text.primary",
+        backgroundColor: (t) => t.custom.surfaces.s3,
+        border: (t) => `1px solid ${t.custom.borders.strong}`,
         boxShadow: "0 2px 10px rgba(0, 0, 0, 0.35)",
         transition: "transform 120ms ease, box-shadow 120ms ease",
         "&:hover": { boxShadow: "0 4px 14px rgba(0, 0, 0, 0.45)" },
-        ...(tone === "accent"
-          ? {
-              color: (t) => t.palette.status.info.main,
-              backgroundColor: (t) => t.palette.status.info.soft,
-              border: (t) => `1px solid ${t.palette.status.info.border}`,
-            }
-          : {
-              color: "text.primary",
-              backgroundColor: (t) => t.custom.surfaces.s3,
-              border: (t) => `1px solid ${t.custom.borders.strong}`,
-            }),
       }}
     >
-      <Box component="span" sx={{ display: "inline-flex", flex: "0 0 auto", color: tone === "accent" ? "inherit" : "text.secondary" }}>
+      <Box component="span" sx={{ display: "inline-flex", flex: "0 0 auto", color: tone === "accent" ? (t) => t.palette.status.info.main : "text.secondary" }}>
         {icon}
       </Box>
       <Box component="span" sx={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
@@ -178,22 +169,13 @@ function FloatingTag({
   );
 }
 
-/** Composer — the chat input. Sends on Enter (Shift+Enter for newline). Sticky
- * at the bottom on mobile; the send button stays a comfortable tap target. */
-export function Composer({
-  placeholder = "Message the agent…",
-  mentionableFiles = [],
-  value,
-  attachments,
-  modes = [],
-  activeMode = "default",
-  onModeChange,
-  onDraftChange,
-  onSend,
-  onStop,
-  onAttachmentError,
-  running = false,
-}: {
+/** Imperative handle so a parent drop-zone (the whole chat pane) can hand files
+ *  to the composer's attachment pipeline. */
+export interface ComposerHandle {
+  readonly addFiles: (files: readonly File[]) => Promise<void>;
+}
+
+interface ComposerProps {
   readonly placeholder?: string;
   readonly mentionableFiles?: readonly string[];
   readonly value?: string;
@@ -208,15 +190,33 @@ export function Composer({
   readonly onStop?: () => void;
   readonly onAttachmentError?: (message: string) => void;
   readonly running?: boolean;
-}) {
+}
+
+/** Composer — the chat input. Sends on Enter (Shift+Enter for newline). Sticky
+ * at the bottom on mobile; the send button stays a comfortable tap target. */
+export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer(
+  {
+    placeholder = "Message the agent…",
+    mentionableFiles = [],
+    value,
+    attachments,
+    modes = [],
+    activeMode = "default",
+    onModeChange,
+    onDraftChange,
+    onSend,
+    onStop,
+    onAttachmentError,
+    running = false,
+  },
+  ref,
+) {
   const [internalValue, setInternalValue] = useState("");
   const [internalAttachments, setInternalAttachments] = useState<readonly ComposerAttachmentDraft[]>([]);
   const [sending, setSending] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [activeSuggestion, setActiveSuggestion] = useState(0);
   const [suggestDismissed, setSuggestDismissed] = useState(false);
-  const [dragDepth, setDragDepth] = useState(0);
-  const dragging = dragDepth > 0;
   const [modeMenuAnchor, setModeMenuAnchor] = useState<null | HTMLElement>(null);
   const activeModeOption = modes.find((mode) => mode.id === activeMode) ?? null;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -348,37 +348,9 @@ export function Composer({
     await addFiles(files);
   };
 
-  // File drag-and-drop onto the composer. `dragDepth` counts enter/leave so
-  // moving over child elements doesn't flicker the overlay off.
-  const dragHasFiles = (event: DragEvent) => Array.from(event.dataTransfer.types ?? []).includes("Files");
-  const onDragEnter = (event: DragEvent) => {
-    if (!dragHasFiles(event)) {
-      return;
-    }
-    event.preventDefault();
-    setDragDepth((depth) => depth + 1);
-  };
-  const onDragOver = (event: DragEvent) => {
-    if (!dragHasFiles(event)) {
-      return;
-    }
-    event.preventDefault();
-    event.dataTransfer.dropEffect = "copy";
-  };
-  const onDragLeave = (event: DragEvent) => {
-    if (!dragHasFiles(event)) {
-      return;
-    }
-    setDragDepth((depth) => Math.max(0, depth - 1));
-  };
-  const onDrop = (event: DragEvent) => {
-    if (!dragHasFiles(event)) {
-      return;
-    }
-    event.preventDefault();
-    setDragDepth(0);
-    void addFiles(Array.from(event.dataTransfer.files));
-  };
+  // The whole chat pane is the drop zone (see WorkspacePage); it hands dropped
+  // files here through this imperative handle.
+  useImperativeHandle(ref, () => ({ addFiles }), [addFiles]);
 
   const insertMention = (file: string) => {
     setComposerValue(composerValue.replace(/@([^\s@/]*)$/, `@${file} `));
@@ -413,35 +385,15 @@ export function Composer({
   };
 
   return (
-    <Stack spacing={0.75} sx={{ position: "relative" }} onDragEnter={onDragEnter} onDragOver={onDragOver} onDragLeave={onDragLeave} onDrop={onDrop}>
-      {/* Animated drop target shown while files are dragged over the composer. */}
-      {dragging && (
-        <Box
-          sx={{
-            position: "absolute",
-            inset: 0,
-            zIndex: 20,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: 1,
-            borderRadius: (t) => `${t.custom.radii.lg}px`,
-            border: (t) => `1.5px dashed ${t.custom.borders.strong}`,
-            backgroundColor: (t) => t.custom.surfaces.s3,
-            color: "text.secondary",
-            animation: `${dropIn} 160ms ease both`,
-            pointerEvents: "none",
-          }}
-        >
-          <AttachFileIcon sx={{ fontSize: 18 }} />
-          <Typography sx={{ fontSize: "0.82rem", fontWeight: 600 }}>{t("dropFilesHint")}</Typography>
-        </Box>
-      )}
+    // Plain Box (not a spaced Stack): the only in-flow child is the input bar;
+    // tags + suggestions are absolutely positioned. A Stack's sibling spacing
+    // would otherwise push the bar down once the (absolute) tags row mounts.
+    <Box sx={{ position: "relative" }}>
       {/* Each enabled mode and each attached file floats as its own pill above
-          the composer — never boxed into a shared container, never reflowing the
-          thread. */}
+          the divider that tops the input container (overlaying the thread),
+          never boxed together and never reflowing the thread. */}
       {(composerAttachments.length > 0 || activeModeOption) && (
-        <Box sx={{ position: "absolute", left: 0, right: 0, bottom: "100%", pb: 1, display: "flex", flexWrap: "wrap", gap: 0.75, pointerEvents: "none", zIndex: 6 }}>
+        <Box sx={{ position: "absolute", left: 0, right: 0, bottom: "calc(100% + 22px)", display: "flex", flexWrap: "wrap", gap: 0.75, pointerEvents: "none", zIndex: 6 }}>
           {activeModeOption && (
             <FloatingTag
               tone="accent"
@@ -487,38 +439,37 @@ export function Composer({
           onChange={chooseFiles}
           style={{ position: "absolute", width: 1, height: 1, opacity: 0, pointerEvents: "none" }}
         />
-        <IconButton aria-label={t("attach")} sx={{ flex: "0 0 auto" }} onClick={() => fileInputRef.current?.click()}>
-          <AttachFileIcon sx={{ fontSize: 18 }} />
+        {/* One options control: attach files + per-chat work modes. Opens upward.
+            Its colour never changes with the active mode (that lives in a tag). */}
+        <IconButton aria-label={t("composerOptions")} sx={{ flex: "0 0 auto" }} onClick={(event: MouseEvent<HTMLElement>) => setModeMenuAnchor(event.currentTarget)}>
+          <TuneRoundedIcon sx={{ fontSize: 18 }} />
         </IconButton>
-        {modes.length > 0 && (
-          <>
-            <IconButton
-              aria-label={t("workMode")}
-              sx={{ flex: "0 0 auto", color: activeModeOption ? (t) => t.palette.status.info.main : undefined }}
-              onClick={(event: MouseEvent<HTMLElement>) => setModeMenuAnchor(event.currentTarget)}
-            >
-              <TuneRoundedIcon sx={{ fontSize: 18 }} />
-            </IconButton>
-            <Menu anchorEl={modeMenuAnchor} open={Boolean(modeMenuAnchor)} onClose={() => setModeMenuAnchor(null)}>
-              {modes.map((mode) => (
-                <MenuItem
-                  key={mode.id}
-                  selected={mode.id === activeMode}
-                  onClick={() => {
-                    setModeMenuAnchor(null);
-                    onModeChange?.(mode.id === activeMode ? "default" : mode.id);
-                  }}
-                >
-                  <Box sx={{ display: "flex", alignItems: "center", gap: 1, minWidth: 150 }}>
-                    <AutoAwesomeRoundedIcon sx={{ fontSize: 16, color: "text.secondary" }} />
-                    <Box component="span" sx={{ flex: 1 }}>{mode.label}</Box>
-                    {mode.id === activeMode && <CheckRoundedIcon sx={{ fontSize: 16, color: (t) => t.palette.status.info.main }} />}
-                  </Box>
-                </MenuItem>
-              ))}
-            </Menu>
-          </>
-        )}
+        <Menu
+          anchorEl={modeMenuAnchor}
+          open={Boolean(modeMenuAnchor)}
+          onClose={() => setModeMenuAnchor(null)}
+          anchorOrigin={{ vertical: "top", horizontal: "left" }}
+          transformOrigin={{ vertical: "bottom", horizontal: "left" }}
+        >
+          <MenuItem
+            onClick={() => {
+              setModeMenuAnchor(null);
+              fileInputRef.current?.click();
+            }}
+            sx={{ gap: 1 }}
+          >
+            <AttachFileIcon sx={{ fontSize: 18, color: "text.secondary" }} />
+            <Box component="span">{t("attach")}</Box>
+          </MenuItem>
+          {modes.length > 0 && <Divider />}
+          {modes.map((mode) => (
+            <MenuItem key={mode.id} onClick={() => onModeChange?.(mode.id === activeMode ? "default" : mode.id)} sx={{ gap: 1 }}>
+              <AutoAwesomeRoundedIcon sx={{ fontSize: 16, color: "text.secondary" }} />
+              <Box component="span" sx={{ flex: 1, minWidth: 130 }}>{mode.label}</Box>
+              <Switch size="small" edge="end" checked={mode.id === activeMode} onChange={() => undefined} tabIndex={-1} sx={{ pointerEvents: "none", ml: 1 }} />
+            </MenuItem>
+          ))}
+        </Menu>
         {/* The input column keeps a fixed single-row height so the composer bar
             never grows. When multiline is needed the same input lifts into an
             overlay (position: absolute) that grows upward over the thread. */}
@@ -611,6 +562,6 @@ export function Composer({
           </Button>
         </Stack>
       </Box>
-    </Stack>
+    </Box>
   );
-}
+});

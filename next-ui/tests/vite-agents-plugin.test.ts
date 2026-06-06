@@ -399,6 +399,11 @@ describe("vite agents plugin", () => {
     ]);
   });
 
+  it("builds Gemini args with newer explicit model choices", () => {
+    expect(buildGeminiRunArgs({ prompt: "hello", model: "gemini-3-pro", reasoning: "default", mode: "default", accessMode: "read-only" })).toContain("gemini-3-pro-preview");
+    expect(buildGeminiRunArgs({ prompt: "hello", model: "flash-lite", reasoning: "default", mode: "default", accessMode: "read-only" })).toContain("gemini-2.5-flash-lite");
+  });
+
   it("builds OpenCode args with a concrete default model, reasoning variant, and no permission bypass", () => {
     expect(buildOpenCodeRunArgs({ prompt: "hello", model: "default", reasoning: "high", mode: "default", accessMode: "read-only" })).toEqual([
       "run",
@@ -412,6 +417,19 @@ describe("vite agents plugin", () => {
       "hello",
     ]);
     expect(buildOpenCodeRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "read-write" })).not.toContain("--dangerously-skip-permissions");
+  });
+
+  it("builds OpenCode args with selected provider/model IDs", () => {
+    expect(buildOpenCodeRunArgs({ prompt: "hello", model: "gpt-5.1-codex", reasoning: "default", mode: "default", accessMode: "read-only" })).toEqual([
+      "run",
+      "--format",
+      "json",
+      "--thinking",
+      "--model",
+      "opencode/gpt-5.1-codex",
+      "hello",
+    ]);
+    expect(buildOpenCodeRunArgs({ prompt: "hello", model: "gemini-3-pro", reasoning: "default", mode: "default", accessMode: "read-only" })).toContain("google/gemini-3-pro-preview");
   });
 
   it("translates Codex JSONL events into normalized run events", () => {

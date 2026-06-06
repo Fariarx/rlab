@@ -66,6 +66,22 @@ const CODEX_REASONING_OPTIONS = [
   { id: "high", label: "High", value: "high" },
   { id: "xhigh", label: "Extra High", value: "xhigh" },
 ] as const;
+const GEMINI_MODEL_OPTIONS = [
+  DEFAULT_OPTION,
+  { id: "gemini-3-pro", label: "Gemini 3 Pro", value: "gemini-3-pro-preview" },
+  { id: "gemini-3-flash", label: "Gemini 3 Flash", value: "gemini-3-flash-preview" },
+  { id: "pro", label: "2.5 Pro", value: "gemini-2.5-pro" },
+  { id: "flash", label: "2.5 Flash", value: "gemini-2.5-flash" },
+  { id: "flash-lite", label: "Flash-Lite", value: "gemini-2.5-flash-lite" },
+] as const;
+const OPENCODE_MODEL_OPTIONS = [
+  { id: DEFAULT_AGENT_OPTION_ID, label: "Default", value: "opencode/deepseek-v4-flash-free" },
+  { id: "gpt-5.2", label: "GPT-5.2", value: "opencode/gpt-5.2" },
+  { id: "gpt-5.1-codex", label: "GPT-5.1 Codex", value: "opencode/gpt-5.1-codex" },
+  { id: "claude-sonnet-4.5", label: "Claude Sonnet 4.5", value: "opencode/claude-sonnet-4-5" },
+  { id: "claude-opus-4.5", label: "Claude Opus 4.5", value: "opencode/claude-opus-4-5" },
+  { id: "gemini-3-pro", label: "Gemini 3 Pro", value: "google/gemini-3-pro-preview" },
+] as const;
 
 export const AGENTS: readonly AgentDef[] = [
   {
@@ -106,11 +122,7 @@ export const AGENTS: readonly AgentDef[] = [
     runAdapter: true,
     short: "GM",
     accent: "#4C8DF6",
-    models: [
-      DEFAULT_OPTION,
-      { id: "flash", label: "Flash", value: "gemini-2.5-flash" },
-      { id: "pro", label: "Pro", value: "gemini-2.5-pro" },
-    ],
+    models: GEMINI_MODEL_OPTIONS,
     reasoning: DEFAULT_ONLY,
     modes: DEFAULT_MODE_OPTIONS,
   },
@@ -123,7 +135,7 @@ export const AGENTS: readonly AgentDef[] = [
     runAdapter: true,
     short: "OC",
     accent: "#8B5CF6",
-    models: [{ id: DEFAULT_AGENT_OPTION_ID, label: "Default", value: "opencode/deepseek-v4-flash-free" }],
+    models: OPENCODE_MODEL_OPTIONS,
     reasoning: CLAUDE_REASONING_OPTIONS,
     modes: DEFAULT_MODE_OPTIONS,
   },

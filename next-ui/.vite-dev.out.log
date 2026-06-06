@@ -8,3 +8,40 @@
   [32m➜[39m  [1mLocal[22m:   [36mhttp://localhost:[1m5187[22m/[39m
   [32m➜[39m  [1mNetwork[22m: [36mhttp://10.8.1.9:[1m5187[22m/[39m
   [32m➜[39m  [1mNetwork[22m: [36mhttp://192.168.3.58:[1m5187[22m/[39m
+[2m17:29:22[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/WorkspacePage.tsx[22m
+[2m17:30:02[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/WorkspacePage.tsx[22m
+[2m17:30:11[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/WorkspacePage.tsx[22m
+[2m17:30:22[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/agent/ConversationList.tsx[22m
+[2m17:30:22[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/components/agent/ConversationList.tsx[22m Could not Fast Refresh ("conversationMatches" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m17:30:22[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/workspace/WorkspacePage.tsx, /src/components/kit/sections/AgentBlocksSection.tsx, /src/components/settings/SettingsDialog.tsx, /src/components/agent/ConversationSearch.tsx[22m
+[2m17:32:12[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/agent/Composer.tsx[22m
+[2m17:32:20[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/agent/Composer.tsx[22m
+[2m17:32:49[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/agent/Composer.tsx[22m
+[2m17:33:12[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/agent/Composer.tsx[22m
+[2m17:33:20[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/agent/Composer.tsx[22m
+[2m17:34:32[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/agent/Composer.tsx[22m
+[2m17:35:11[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/agent/Composer.tsx[22m
+[2m17:35:21[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/agent/Composer.tsx[22m
+[2m17:35:38[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/agent/Composer.tsx[22m
+[2m17:36:02[22m [36m[1m[vite][22m[39m [32msrc/i18n/I18nProvider.tsx changed, restarting server...[39m
+[2m17:36:02[22m [36m[1m[vite][22m[39m server restarted.
+[2m17:36:07[22m [36m[1m[vite][22m[39m [32msrc/i18n/I18nProvider.tsx changed, restarting server...[39m
+[2m17:36:07[22m [36m[1m[vite][22m[39m server restarted.
+[2m17:36:49[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/WorkspacePage.tsx[22m
+[2m17:36:59[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/WorkspacePage.tsx[22m
+[2m17:37:22[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/WorkspacePage.tsx[22m
+[2m17:37:54[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/agent/AgentGlyph.tsx[22m
+[2m17:38:01[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/WorkspacePage.tsx[22m
+[2m17:38:10[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/agent/AgentMonogram.tsx[22m
+[2m17:38:16[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/WorkspacePage.tsx[22m
+[2m17:38:23[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/workspace/WorkspacePage.tsx, /src/components/kit/sections/AgentBlocksSection.tsx, /src/components/settings/SettingsDialog.tsx[22m
+[2m17:38:39[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/WorkspacePage.tsx[22m
+[2m17:38:42[22m [36m[1m[vite][22m[39m [32msrc/components/agent/agents.ts changed, restarting server...[39m
+[2m17:38:42[22m [36m[1m[vite][22m[39m server restarted.
+[2m17:38:50[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/WorkspacePage.tsx[22m
+[2m17:39:12[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/WorkspacePage.tsx[22m
+[2m17:39:22[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/WorkspacePage.tsx[22m
+[2m17:40:22[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/workspace/WorkspacePage.tsx, /src/components/kit/sections/AgentBlocksSection.tsx, /src/components/settings/SettingsDialog.tsx[22m
+[2m17:40:56[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/agent/Composer.tsx[22m
+[2m17:41:03[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/WorkspacePage.tsx[22m
+[2m17:48:32[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/agent/Composer.tsx[22m

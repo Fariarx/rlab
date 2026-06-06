@@ -1,1 +1,148 @@
 [2m17:24:58[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.
+[2m17:32:31[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.
+[2m17:32:50[22m [31m[1m[vite][22m[39m [31mInternal server error: Transform failed with 1 error:
+
+[31m[PARSE_ERROR] [0mExpected `)` but found `EOF`
+     [38;5;246m╭[0m[38;5;246m─[0m[38;5;246m[[0m src/components/agent/Composer.tsx:620:3 [38;5;246m][0m
+     [38;5;246m│[0m
+ [38;5;246m620 │[0m [38;5;249m}[0m
+ [38;5;240m    │[0m   │ 
+ [38;5;240m    │[0m   ╰─ `)` expected
+[38;5;246m─────╯[0m
+[39m
+  Plugin: [35mvite:oxc[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/agent/Composer.tsx[39m
+      at transformWithOxc (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:3344:19)
+      at TransformPluginContext.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:3415:26)
+      at EnvironmentPluginContainer.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30387:51)
+      at async loadAndTransform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24646:26)
+      at async viteTransformMiddleware (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24440:20)
+[2m17:32:50[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22m[vite] Failed to reload /src/components/agent/Composer.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above)
+[2m17:32:50[22m [31m[1m[vite][22m[39m [31mInternal server error: Transform failed with 1 error:
+
+[31m[PARSE_ERROR] [0mExpected `)` but found `EOF`
+     [38;5;246m╭[0m[38;5;246m─[0m[38;5;246m[[0m src/components/agent/Composer.tsx:620:3 [38;5;246m][0m
+     [38;5;246m│[0m
+ [38;5;246m620 │[0m [38;5;249m}[0m
+ [38;5;240m    │[0m   │ 
+ [38;5;240m    │[0m   ╰─ `)` expected
+[38;5;246m─────╯[0m
+[39m
+  Plugin: [35mvite:oxc[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/agent/Composer.tsx[39m
+      at transformWithOxc (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:3344:19)
+      at TransformPluginContext.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:3415:26)
+      at EnvironmentPluginContainer.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30387:51)
+      at async loadAndTransform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24646:26)
+      at async viteTransformMiddleware (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24440:20)
+[2m17:32:50[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22m[vite] Failed to reload /src/components/agent/Composer.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above)
+[2m17:33:12[22m [31m[1m[vite][22m[39m [31mInternal server error: Transform failed with 1 error:
+
+[31m[PARSE_ERROR] [0mExpected `)` but found `EOF`
+     [38;5;246m╭[0m[38;5;246m─[0m[38;5;246m[[0m src/components/agent/Composer.tsx:592:3 [38;5;246m][0m
+     [38;5;246m│[0m
+ [38;5;246m592 │[0m [38;5;249m}[0m
+ [38;5;240m    │[0m   │ 
+ [38;5;240m    │[0m   ╰─ `)` expected
+[38;5;246m─────╯[0m
+[39m
+  Plugin: [35mvite:oxc[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/agent/Composer.tsx[39m
+      at transformWithOxc (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:3344:19)
+      at TransformPluginContext.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:3415:26)
+      at EnvironmentPluginContainer.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30387:51)
+      at async loadAndTransform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24646:26)
+      at async viteTransformMiddleware (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24440:20)
+[2m17:33:12[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22m[vite] Failed to reload /src/components/agent/Composer.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above)
+[2m17:33:12[22m [31m[1m[vite][22m[39m [31mInternal server error: Transform failed with 1 error:
+
+[31m[PARSE_ERROR] [0mExpected `)` but found `EOF`
+     [38;5;246m╭[0m[38;5;246m─[0m[38;5;246m[[0m src/components/agent/Composer.tsx:592:3 [38;5;246m][0m
+     [38;5;246m│[0m
+ [38;5;246m592 │[0m [38;5;249m}[0m
+ [38;5;240m    │[0m   │ 
+ [38;5;240m    │[0m   ╰─ `)` expected
+[38;5;246m─────╯[0m
+[39m
+  Plugin: [35mvite:oxc[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/agent/Composer.tsx[39m
+      at transformWithOxc (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:3344:19)
+      at TransformPluginContext.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:3415:26)
+      at EnvironmentPluginContainer.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30387:51)
+      at async loadAndTransform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24646:26)
+      at async viteTransformMiddleware (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24440:20)
+[2m17:33:12[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22m[vite] Failed to reload /src/components/agent/Composer.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above)
+[2m17:33:20[22m [31m[1m[vite][22m[39m [31mInternal server error: Transform failed with 1 error:
+
+[31m[PARSE_ERROR] [0mExpected `)` but found `EOF`
+     [38;5;246m╭[0m[38;5;246m─[0m[38;5;246m[[0m src/components/agent/Composer.tsx:590:3 [38;5;246m][0m
+     [38;5;246m│[0m
+ [38;5;246m590 │[0m [38;5;249m}[0m
+ [38;5;240m    │[0m   │ 
+ [38;5;240m    │[0m   ╰─ `)` expected
+[38;5;246m─────╯[0m
+[39m
+  Plugin: [35mvite:oxc[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/agent/Composer.tsx[39m
+      at transformWithOxc (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:3344:19)
+      at TransformPluginContext.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:3415:26)
+      at EnvironmentPluginContainer.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30387:51)
+      at async loadAndTransform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24646:26)
+[2m17:33:20[22m [31m[1m[vite][22m[39m [31mInternal server error: Transform failed with 1 error:
+
+[31m[PARSE_ERROR] [0mExpected `)` but found `EOF`
+     [38;5;246m╭[0m[38;5;246m─[0m[38;5;246m[[0m src/components/agent/Composer.tsx:590:3 [38;5;246m][0m
+     [38;5;246m│[0m
+ [38;5;246m590 │[0m [38;5;249m}[0m
+ [38;5;240m    │[0m   │ 
+ [38;5;240m    │[0m   ╰─ `)` expected
+[38;5;246m─────╯[0m
+[39m
+  Plugin: [35mvite:oxc[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/agent/Composer.tsx[39m
+      at transformWithOxc (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:3344:19)
+      at TransformPluginContext.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:3415:26)
+      at EnvironmentPluginContainer.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30387:51)
+      at async loadAndTransform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24646:26)
+[2m17:33:20[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22m[vite] Failed to reload /src/components/agent/Composer.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above)
+[2m17:33:20[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22m[vite] Failed to reload /src/components/agent/Composer.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above)
+[2m17:34:32[22m [31m[1m[vite][22m[39m [31mInternal server error: Transform failed with 1 error:
+
+[31m[PARSE_ERROR] [0mExpected `)` but found `EOF`
+     [38;5;246m╭[0m[38;5;246m─[0m[38;5;246m[[0m src/components/agent/Composer.tsx:566:3 [38;5;246m][0m
+     [38;5;246m│[0m
+ [38;5;246m566 │[0m [38;5;249m}[0m
+ [38;5;240m    │[0m   │ 
+ [38;5;240m    │[0m   ╰─ `)` expected
+[38;5;246m─────╯[0m
+[39m
+  Plugin: [35mvite:oxc[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/agent/Composer.tsx[39m
+      at transformWithOxc (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:3344:19)
+      at TransformPluginContext.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:3415:26)
+      at EnvironmentPluginContainer.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30387:51)
+      at async loadAndTransform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24646:26)
+      at async viteTransformMiddleware (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24440:20)
+[2m17:34:32[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22m[vite] Failed to reload /src/components/agent/Composer.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above)
+[2m17:34:33[22m [31m[1m[vite][22m[39m [31mInternal server error: Transform failed with 1 error:
+
+[31m[PARSE_ERROR] [0mExpected `)` but found `EOF`
+     [38;5;246m╭[0m[38;5;246m─[0m[38;5;246m[[0m src/components/agent/Composer.tsx:566:3 [38;5;246m][0m
+     [38;5;246m│[0m
+ [38;5;246m566 │[0m [38;5;249m}[0m
+ [38;5;240m    │[0m   │ 
+ [38;5;240m    │[0m   ╰─ `)` expected
+[38;5;246m─────╯[0m
+[39m
+  Plugin: [35mvite:oxc[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/agent/Composer.tsx[39m
+      at transformWithOxc (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:3344:19)
+      at TransformPluginContext.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:3415:26)
+      at EnvironmentPluginContainer.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30387:51)
+      at async loadAndTransform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24646:26)
+      at async viteTransformMiddleware (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24440:20)
+[2m17:34:33[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22m[vite] Failed to reload /src/components/agent/Composer.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above)
+[2m17:36:04[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.
+[2m17:36:08[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.
+[2m17:38:38[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.
+[2m17:38:43[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.

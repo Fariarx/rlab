@@ -89,4 +89,18 @@ describe("AgentPicker a11y", () => {
     // ...but the work-mode option ("Plan") is no longer in the picker.
     expect(screen.queryByRole("button", { name: "Plan" })).not.toBeInTheDocument();
   });
+
+  it("exposes concrete Gemini CLI and OpenCode model choices", () => {
+    renderWithTheme(<AgentPicker open value={DEFAULT_PROFILE} onClose={vi.fn()} onSelect={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Выбрать Gemini из CLI" }));
+
+    expect(screen.getByRole("button", { name: "Gemini 3 Pro" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Flash-Lite" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Выбрать OpenCode из CLI" }));
+
+    expect(screen.getByRole("button", { name: "GPT-5.1 Codex" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Claude Sonnet 4.5" })).toBeInTheDocument();
+  });
 });

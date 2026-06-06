@@ -1,6 +1,7 @@
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor } from "@testing-library/react";
+import { createRef } from "react";
 import { describe, expect, it, vi } from "vitest";
-import { Composer } from "../src/components/agent";
+import { Composer, type ComposerHandle } from "../src/components/agent";
 import { renderWithTheme } from "./util/render-with-theme";
 
 describe("Composer", () => {
@@ -62,19 +63,16 @@ describe("Composer", () => {
     expect(input).toHaveValue("Запусти релевантные тесты и сообщи результат. ");
   });
 
-  it("shows a drop hint while dragging files and attaches them on drop", async () => {
-    renderWithTheme(<Composer placeholder="Написать" />);
-    const input = screen.getByPlaceholderText("Написать");
-
-    fireEvent.dragEnter(input, { dataTransfer: { types: ["Files"], files: [] } });
-    expect(screen.getByText("Отпустите файлы, чтобы прикрепить")).toBeInTheDocument();
+  it("attaches files handed in by the parent drop zone", async () => {
+    const ref = createRef<ComposerHandle>();
+    renderWithTheme(<Composer ref={ref} placeholder="Написать" />);
 
     const file = new File(["payload"], "drop.txt", { type: "text/plain" });
-    fireEvent.drop(input, { dataTransfer: { types: ["Files"], files: [file] } });
+    await act(async () => {
+      await ref.current?.addFiles([file]);
+    });
 
     expect(await screen.findByText("drop.txt")).toBeInTheDocument();
-    // The overlay clears once the files are dropped.
-    expect(screen.queryByText("Отпустите файлы, чтобы прикрепить")).not.toBeInTheDocument();
   });
 
   it("dismisses the suggestion popover with Escape without sending", () => {

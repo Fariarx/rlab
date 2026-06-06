@@ -444,7 +444,7 @@ export function ConversationList({
       // `scrollbar-gutter: stable both-edges` reserves equal gutters on both
       // sides so the left/right inset stays even whether or not the scrollbar
       // is showing.
-      sx={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "hidden", scrollbarGutter: "stable both-edges", px: 1.5, pt: 1.5, pb: 1 }}
+      sx={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "hidden", scrollbarGutter: "stable both-edges", px: 0.75, pt: 1.5, pb: 1 }}
     >
       {pinned.length > 0 && (
         <Box sx={{ pb: 0.5 }}>

@@ -1,5 +1,6 @@
 import AddIcon from "@mui/icons-material/Add";
 import AccountTreeIcon from "@mui/icons-material/AccountTree";
+import AttachFileIcon from "@mui/icons-material/AttachFile";
 import ChatBubbleOutlineIcon from "@mui/icons-material/ChatOutlined";
 import CreateNewFolderIcon from "@mui/icons-material/CreateNewFolder";
 import FolderOutlinedIcon from "@mui/icons-material/FolderOutlined";
@@ -24,7 +25,7 @@ import {
   Tooltip,
   Typography,
 } from "@mui/material";
-import { useEffect, useRef, useState } from "react";
+import { type DragEvent, useEffect, useRef, useState } from "react";
 import { I18nProvider, useI18n } from "../../i18n/I18nProvider";
 import { type HashRoute } from "../../lib/use-hash-route";
 import {
@@ -34,6 +35,7 @@ import {
   AgentBadge,
   AgentPicker,
   Composer,
+  type ComposerHandle,
   Conversation,
   ConversationList,
   ConversationSearch,
@@ -41,8 +43,6 @@ import {
   DEFAULT_PROFILE,
   getAgent,
   normalizeAgentProfile,
-  formatCostUsd,
-  formatTokenUsage,
   messageToPlainText,
   type ChatMessage,
   type ConversationStatus,
@@ -53,6 +53,7 @@ import {
   useReloadAgentStatus,
   agentProfileEquals,
 } from "../agent";
+import { dropIn } from "../agent/anim";
 import { SettingsDialog } from "../settings/SettingsDialog";
 import { Button, EmptyState, IconButton, StatusDot, useToast } from "../ui";
 import { CommandPalette, type CommandPaletteItem } from "./CommandPalette";
@@ -159,6 +160,9 @@ export function WorkspacePageView({
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [runKey, setRunKey] = useState(0);
+  const [paneDragDepth, setPaneDragDepth] = useState(0);
+  const paneDragging = paneDragDepth > 0;
+  const composerRef = useRef<ComposerHandle | null>(null);
   const notifiableRuns = useRef(new Set<string>());
   const previousStatuses = useRef(new Map<string, ConversationStatus>());
 
@@ -170,9 +174,6 @@ export function WorkspacePageView({
   const activeCwd = composingNew ? draftProject?.path : selectedCwd;
   const headerTitle = composingNew ? t("newChat") : selected?.title ?? t("noConversation");
   const accessMode = ws.settings.agents.accessMode;
-  const workingDirectoryAccessText = activeCwd
-    ? t(accessMode === "read-write" ? "workingDirectoryWritable" : "workingDirectoryReadOnly", { cwd: activeCwd })
-    : "";
   const mode = ws.settings.appearance.theme;
   const routeKind = route?.kind;
   const routeConversationId = route && (route.kind === "chat" || route.kind === "project") ? route.conversationId : undefined;
@@ -325,6 +326,38 @@ export function WorkspacePageView({
     if (!composingNew && selected) {
       ws.setConversationProfile(ws.selectedId, next);
     }
+  };
+
+  // Files can be dropped anywhere on the chat pane; the whole pane dims and the
+  // dropped files are handed to the active composer.
+  const paneDragHasFiles = (event: DragEvent) => Array.from(event.dataTransfer.types ?? []).includes("Files");
+  const onPaneDragEnter = (event: DragEvent) => {
+    if (!paneDragHasFiles(event)) {
+      return;
+    }
+    event.preventDefault();
+    setPaneDragDepth((depth) => depth + 1);
+  };
+  const onPaneDragOver = (event: DragEvent) => {
+    if (!paneDragHasFiles(event)) {
+      return;
+    }
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+  };
+  const onPaneDragLeave = (event: DragEvent) => {
+    if (!paneDragHasFiles(event)) {
+      return;
+    }
+    setPaneDragDepth((depth) => Math.max(0, depth - 1));
+  };
+  const onPaneDrop = (event: DragEvent) => {
+    if (!paneDragHasFiles(event)) {
+      return;
+    }
+    event.preventDefault();
+    setPaneDragDepth(0);
+    void composerRef.current?.addFiles(Array.from(event.dataTransfer.files));
   };
 
   const handleCreateProject = (input: Parameters<typeof ws.createProject>[0]) => {
@@ -527,7 +560,49 @@ export function WorkspacePageView({
         {sidebar}
       </Drawer>
 
-      <Box sx={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
+      <Box
+        sx={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", position: "relative" }}
+        onDragEnter={onPaneDragEnter}
+        onDragOver={onPaneDragOver}
+        onDragLeave={onPaneDragLeave}
+        onDrop={onPaneDrop}
+      >
+        {paneDragging && (
+          <Box
+            sx={{
+              position: "absolute",
+              inset: 0,
+              zIndex: 30,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 1.25,
+              flexDirection: "column",
+              color: "text.primary",
+              backgroundColor: "rgba(8, 11, 14, 0.66)",
+              backdropFilter: "blur(1px)",
+              animation: `${dropIn} 140ms ease both`,
+              pointerEvents: "none",
+            }}
+          >
+            <Box
+              sx={{
+                display: "flex",
+                alignItems: "center",
+                gap: 1,
+                px: 2.5,
+                py: 1.75,
+                borderRadius: (t) => `${t.custom.radii.lg}px`,
+                border: (t) => `1.5px dashed ${t.custom.borders.strong}`,
+                backgroundColor: (t) => t.custom.surfaces.s2,
+                boxShadow: "0 16px 48px rgba(0, 0, 0, 0.5)",
+              }}
+            >
+              <AttachFileIcon sx={{ fontSize: 20, color: (t) => t.palette.status.info.main }} />
+              <Typography sx={{ fontSize: "0.92rem", fontWeight: 700 }}>{t("dropFilesHint")}</Typography>
+            </Box>
+          </Box>
+        )}
         <Box component="header" sx={{ flex: "0 0 auto", backgroundColor: (t) => t.custom.surfaces.s1 }}>
           <Stack
             direction="row"
@@ -557,21 +632,6 @@ export function WorkspacePageView({
             </Stack>
             <Stack direction="row" spacing={1} sx={{ alignItems: "center", flex: "0 0 auto", "& .MuiIconButton-root": { width: 30, height: 30 } }}>
               {(selected || composingNew) && <AgentBadge profile={profile} onClick={openPicker} compact />}
-              {selected?.costUsd !== undefined && (
-                <Typography sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.72rem", color: (theme) => theme.palette.status.info.main }}>
-                  {formatCostUsd(selected.costUsd)}
-                </Typography>
-              )}
-              {selected?.usage !== undefined && (
-                <Typography sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.72rem", color: "text.secondary" }}>
-                  {formatTokenUsage(selected.usage)}
-                </Typography>
-              )}
-              {activeCwd && (
-                <Typography sx={{ display: { xs: "none", lg: "block" }, fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.7rem", color: (theme) => theme.palette.status.warn.main }}>
-                  {workingDirectoryAccessText}
-                </Typography>
-              )}
               <Tooltip title={t("git")}>
                 <IconButton tone="subtle" aria-label={t("git")} onClick={() => setGitOpen(true)}>
                   <AccountTreeIcon sx={{ fontSize: 17 }} />
@@ -685,6 +745,7 @@ export function WorkspacePageView({
             {composingNew ? (
               <Composer
                 key="new-draft"
+                ref={composerRef}
                 placeholder={t("startPlaceholder")}
                 onSend={(text) => {
                   const id = composingNew.projectId ? ws.newProjectChat(composingNew.projectId, profile) : ws.newChat(profile);
@@ -702,6 +763,7 @@ export function WorkspacePageView({
               />
             ) : (
               <Composer
+                ref={composerRef}
                 placeholder={selected ? t("messagePlaceholder", { title: selected.title }) : t("startPlaceholder")}
                 value={composerDraft.text}
                 attachments={composerDraft.attachments}

@@ -1,13 +1,14 @@
 import { Box } from "@mui/material";
 import { type AgentId, getAgent, withAlpha } from "./agents";
+import { AgentBrandIcon, hasAgentBrandIcon } from "./AgentBrandIcon";
 
 /**
- * AgentMonogram — a per-agent monogram tile tinted with the agent's brand
- * accent. No SVG assets needed; reads clean in both themes. (Distinct from the
- * generic chat `AgentAvatar` sparkle in parts.tsx.)
+ * AgentMonogram — a per-agent identity tile tinted with the agent's brand
+ * accent. Known brands render their SVG mark; the rest use a short monogram.
  */
 export function AgentMonogram({ agent, size = 28 }: { readonly agent: AgentId; readonly size?: number }) {
   const def = getAgent(agent);
+  const hasBrandIcon = hasAgentBrandIcon(agent);
   return (
     <Box
       aria-hidden="true"
@@ -28,7 +29,7 @@ export function AgentMonogram({ agent, size = 28 }: { readonly agent: AgentId; r
         border: `1px solid ${withAlpha(def.accent, 0.32)}`,
       }}
     >
-      {def.short}
+      {hasBrandIcon ? <AgentBrandIcon agent={agent} size={size * 0.62} color={def.accent} /> : def.short}
     </Box>
   );
 }
