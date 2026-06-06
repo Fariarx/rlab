@@ -105,6 +105,22 @@ export interface SuggestedActionsBlock {
 
 export type SuggestedActionIconKey = "arrow-forward" | "copy" | "refresh";
 
+/** A single code-review comment a user attached to a diff line in the Git view. */
+export interface ReviewCommentEntry {
+  readonly id: string;
+  readonly file: string;
+  /** 1-based line number within the rendered diff. */
+  readonly line: number;
+  readonly lineText: string;
+  readonly body: string;
+}
+
+/** A batch of review comments rendered as one collapsible block in the thread. */
+export interface ReviewBlock {
+  readonly kind: "review";
+  readonly comments: readonly ReviewCommentEntry[];
+}
+
 export type AgentBlock =
   | ReasoningBlock
   | TextBlock

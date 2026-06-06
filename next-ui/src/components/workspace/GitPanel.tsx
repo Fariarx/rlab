@@ -8,13 +8,23 @@ import { Alert, Box, Chip, CircularProgress, Collapse, Stack, Tab, Tabs, type Th
 import { type ReactNode, type RefObject, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type I18nApi, useI18n } from "../../i18n/I18nProvider";
 import { type GitFileStatus, type GitStatusPayload } from "../../lib/git-status";
-import { type DiffBlock } from "../agent";
+import { type DiffBlock, type ReviewCommentEntry } from "../agent";
 import { Button, IconButton } from "../ui";
 import { countDiffChanges, type DiffViewerLine, GitDiffLines, gitDiffViewerLinesFromBlock, gitDiffViewerLinesFromUnified } from "./GitDiffViewer";
+
+/** Code-review comment plumbing shared by the diff cards. The file path is bound
+ *  at each card so individual diff lines only deal with (line, text, body). */
+export interface DiffCommentApi {
+  readonly comments: readonly ReviewCommentEntry[];
+  readonly onAddComment: (file: string, line: number, lineText: string, body: string) => void;
+  readonly onUpdateComment: (id: string, body: string) => void;
+  readonly onDeleteComment: (id: string) => void;
+}
 
 interface GitViewProps {
   readonly cwd?: string;
   readonly lastTurnDiffs?: readonly DiffBlock[];
+  readonly review?: DiffCommentApi;
 }
 
 type GitApiErrorPayload = {
@@ -99,10 +109,8 @@ async function commitGit(cwd: string, message: string): Promise<GitStatusPayload
 }
 
 function changedFilesForTab(status: GitStatusPayload | null, tab: "unstaged" | "staged"): readonly GitFileStatus[] {
-  if (!status) {
-    return [];
-  }
-  return tab === "unstaged" ? status.files.filter((file) => file.unstaged) : status.files.filter((file) => file.staged);
+  const files = status?.files ?? [];
+  return tab === "unstaged" ? files.filter((file) => file.unstaged) : files.filter((file) => file.staged);
 }
 
 function tabLabel(label: string, count?: number): string {

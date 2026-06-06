@@ -4,11 +4,8 @@ import AttachFileIcon from "@mui/icons-material/AttachFile";
 import ChatBubbleOutlineIcon from "@mui/icons-material/ChatOutlined";
 import CreateNewFolderIcon from "@mui/icons-material/CreateNewFolder";
 import FolderOutlinedIcon from "@mui/icons-material/FolderOutlined";
-import DarkModeIcon from "@mui/icons-material/DarkMode";
-import LightModeIcon from "@mui/icons-material/LightMode";
 import MenuIcon from "@mui/icons-material/Menu";
 import MenuOpenIcon from "@mui/icons-material/MenuOpen";
-import ReplayIcon from "@mui/icons-material/Replay";
 import RestartAltIcon from "@mui/icons-material/RestartAlt";
 import SearchIcon from "@mui/icons-material/Search";
 import SettingsIcon from "@mui/icons-material/Settings";
@@ -21,8 +18,9 @@ import {
   DialogContentText,
   DialogTitle,
   Drawer,
-  Link,
   Stack,
+  ToggleButton,
+  ToggleButtonGroup,
   Tooltip,
   Typography,
 } from "@mui/material";
@@ -179,6 +177,15 @@ export function WorkspacePageView({
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [view, setView] = useState<"chat" | "git">("chat");
+  // Git mounts on first open and stays mounted thereafter, so it keeps its
+  // scroll/expanded state when switching chats (and never fetches if unused).
+  const [gitMounted, setGitMounted] = useState(false);
+  const showView = (next: "chat" | "git") => {
+    setView(next);
+    if (next === "git") {
+      setGitMounted(true);
+    }
+  };
   const [mentionableFiles, setMentionableFiles] = useState<readonly string[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -631,7 +638,7 @@ export function WorkspacePageView({
       id: "open-git",
       label: t("commandOpenGit"),
       keywords: [t("git"), t("gitStatus")],
-      action: () => setView("git"),
+      action: () => showView("git"),
     },
     {
       id: "toggle-theme",
@@ -835,12 +842,13 @@ export function WorkspacePageView({
                 size="small"
                 exclusive
                 value={view}
-                onChange={(_, next: "chat" | "git" | null) => next && setView(next)}
+                onChange={(_, next: "chat" | "git" | null) => next && showView(next)}
                 aria-label={t("viewSwitcher")}
                 sx={{
                   "& .MuiToggleButton-root": {
+                    height: 30,
                     px: 1.25,
-                    py: 0.5,
+                    py: 0,
                     gap: 0.5,
                     textTransform: "none",
                     fontFamily: (t) => t.custom.fonts.mono,
@@ -899,41 +907,50 @@ export function WorkspacePageView({
               </Alert>
             )}
             </Box>
-            <Box sx={{ flex: 1, minHeight: 0 }}>
-              {composingNew ? (
-                <Stack sx={{ height: "100%", justifyContent: "center", alignItems: "center", px: THREAD_PADDING_X }}>
-                  <EmptyState
-                    icon={<ChatBubbleOutlineIcon />}
-                    title={t("startConversation")}
-                    description={t(accessMode === "unrestricted" ? "messageAgentAccess" : "messageAgentReadOnlyAccess", { title: draftProject?.name ?? t("newChat") })}
+            <Box sx={{ flex: 1, minHeight: 0, position: "relative" }}>
+              {/* Chat and Git are both kept mounted; only the active one is shown,
+                  so the Git view keeps its scroll/expanded state across chat switches. */}
+              <Box sx={{ position: "absolute", inset: 0, display: view === "chat" ? "block" : "none" }}>
+                {composingNew ? (
+                  <Stack sx={{ height: "100%", justifyContent: "center", alignItems: "center", px: THREAD_PADDING_X }}>
+                    <EmptyState
+                      icon={<ChatBubbleOutlineIcon />}
+                      title={t("startConversation")}
+                      description={t(accessMode === "unrestricted" ? "messageAgentAccess" : "messageAgentReadOnlyAccess", { title: draftProject?.name ?? t("newChat") })}
+                    />
+                  </Stack>
+                ) : !selected ? (
+                  <Stack sx={{ height: "100%", justifyContent: "center", alignItems: "center", px: THREAD_PADDING_X }}>
+                    <EmptyState
+                      icon={<ChatBubbleOutlineIcon />}
+                      title={t("noConversationSelected")}
+                      description={t("pickConversation")}
+                      action={<Button variant="contained" onClick={startNewChat}>{t("newChat")}</Button>}
+                    />
+                  </Stack>
+                ) : messages.length === 0 ? (
+                  <Stack sx={{ height: "100%", justifyContent: "center", alignItems: "center", px: THREAD_PADDING_X }}>
+                    <EmptyState
+                      icon={<ChatBubbleOutlineIcon />}
+                      title={t("startConversation")}
+                      description={t(accessMode === "unrestricted" ? "messageAgentAccess" : "messageAgentReadOnlyAccess", { title: selected.title })}
+                    />
+                  </Stack>
+                ) : (
+                  <Conversation
+                    key={`${ws.selectedId}-${runKey}`}
+                    messages={messages}
+                    typing={selected.status === "running" && messages[messages.length - 1]?.role === "user"}
+                    actions={messageActions}
+                    contentMaxWidth={THREAD_MAX_WIDTH}
+                    contentPaddingX={THREAD_PADDING_X}
                   />
-                </Stack>
-              ) : !selected ? (
-                <Stack sx={{ height: "100%", justifyContent: "center", alignItems: "center", px: THREAD_PADDING_X }}>
-                  <EmptyState
-                    icon={<ChatBubbleOutlineIcon />}
-                    title={t("noConversationSelected")}
-                    description={t("pickConversation")}
-                    action={<Button variant="contained" onClick={startNewChat}>{t("newChat")}</Button>}
-                  />
-                </Stack>
-              ) : messages.length === 0 ? (
-                <Stack sx={{ height: "100%", justifyContent: "center", alignItems: "center", px: THREAD_PADDING_X }}>
-                  <EmptyState
-                    icon={<ChatBubbleOutlineIcon />}
-                    title={t("startConversation")}
-                    description={t(accessMode === "unrestricted" ? "messageAgentAccess" : "messageAgentReadOnlyAccess", { title: selected.title })}
-                  />
-                </Stack>
-              ) : (
-                <Conversation
-                  key={`${ws.selectedId}-${runKey}`}
-                  messages={messages}
-                  typing={selected.status === "running" && messages[messages.length - 1]?.role === "user"}
-                  actions={messageActions}
-                  contentMaxWidth={THREAD_MAX_WIDTH}
-                  contentPaddingX={THREAD_PADDING_X}
-                />
+                )}
+              </Box>
+              {gitMounted && (
+                <Box sx={{ position: "absolute", inset: 0, display: view === "git" ? "block" : "none" }}>
+                  <GitView cwd={selectedCwd} lastTurnDiffs={lastTurnDiffs} />
+                </Box>
               )}
             </Box>
           </Box>
@@ -1005,7 +1022,6 @@ export function WorkspacePageView({
         onClose={() => setSearchOpen(false)}
         onSelect={openConversation}
       />
-      <GitPanel open={gitOpen} cwd={selectedCwd} lastTurnDiffs={lastTurnDiffs} onClose={() => setGitOpen(false)} />
       <CommandPalette open={commandPaletteOpen} items={commandItems} onClose={() => setCommandPaletteOpen(false)} />
       <CreateProjectDialog open={projectDialogOpen} defaultProfile={ws.settings.agents.defaultProfile} onClose={() => setProjectDialogOpen(false)} onCreate={handleCreateProject} />
       <SettingsDialog

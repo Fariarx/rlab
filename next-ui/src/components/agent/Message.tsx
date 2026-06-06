@@ -103,6 +103,7 @@ function MessageActionBar({
 
 function UserMessage({ message, delay, actions }: { readonly message: ChatMessage; readonly delay: number; readonly actions?: MessageActionHandlers }) {
   const { text: displayText, attachments } = splitUserContent(message.text ?? "");
+  const reviewBlocks = (message.blocks ?? []).filter((block) => block.kind === "review");
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(displayText);
   const { t } = useI18n();
@@ -181,6 +182,9 @@ function UserMessage({ message, delay, actions }: { readonly message: ChatMessag
               </Box>
             )}
             {attachments.length > 0 && <MessageAttachments names={attachments} />}
+            {reviewBlocks.map((block, index) => (
+              <AgentBlockRenderer key={`review-${index}`} block={block} />
+            ))}
           </Stack>
         )}
         {message.time && (

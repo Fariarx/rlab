@@ -32,6 +32,8 @@ type RunEvent =
   | { type: "error"; text: string }
   | { type: "done"; costUsd?: number; usage?: RunUsage };
 
+const LIVE_BLOCK_FLUSH_MS = 32;
+
 export interface RunConversationResult {
   readonly status: "done" | "error" | "waiting" | "detached";
   readonly snippet: string;
@@ -338,6 +340,7 @@ export async function runConversation(opts: {
   readonly locale: Locale;
   readonly binding?: RunPersistenceBinding;
   readonly signal?: AbortSignal;
+  readonly onAccepted?: () => void;
   readonly onBlocks: (blocks: AgentBlock[]) => void;
 }): Promise<RunConversationResult> {
   let reasoning = "";
@@ -396,19 +399,51 @@ export async function runConversation(opts: {
     return blocks;
   };
 
+  let pendingLiveBlocks: AgentBlock[] | null = null;
+  let liveFlushTimer: ReturnType<typeof setTimeout> | null = null;
+  const clearPendingLiveBlocks = () => {
+    if (liveFlushTimer !== null) {
+      clearTimeout(liveFlushTimer);
+      liveFlushTimer = null;
+    }
+    pendingLiveBlocks = null;
+  };
+  const flushLiveBlocks = () => {
+    if (liveFlushTimer !== null) {
+      clearTimeout(liveFlushTimer);
+      liveFlushTimer = null;
+    }
+    const blocks = pendingLiveBlocks;
+    pendingLiveBlocks = null;
+    if (blocks) {
+      opts.onBlocks(blocks);
+    }
+  };
+  const queueLiveBlocks = () => {
+    pendingLiveBlocks = rebuild();
+    if (liveFlushTimer !== null) {
+      return;
+    }
+    liveFlushTimer = setTimeout(flushLiveBlocks, LIVE_BLOCK_FLUSH_MS);
+  };
+  const emitBlocks = () => {
+    clearPendingLiveBlocks();
+    opts.onBlocks(rebuild());
+  };
+
   const onEvent = (e: RunEvent) => {
     switch (e.type) {
       case "reasoning":
         started = true;
         hasReasoning = true;
         reasoning += e.text;
-        opts.onBlocks(rebuild());
+        queueLiveBlocks();
         break;
       case "text":
         started = true;
         hasText = true;
         text += e.text;
-        opts.onBlocks(rebuild());
+        queueLiveBlocks();
         break;
       case "tool":
         started = true;
@@ -419,10 +454,10 @@ export async function runConversation(opts: {
             existing.summary = e.summary;
             existing.args = e.args;
           } else {
-            tools.push({ id: e.id, name: e.name, summary: e.summary, args: e.args, state: "running" });
+          tools.push({ id: e.id, name: e.name, summary: e.summary, args: e.args, state: "running" });
           }
         }
-        opts.onBlocks(rebuild());
+        emitBlocks();
         break;
       case "tool_result": {
         started = true;
@@ -431,7 +466,7 @@ export async function runConversation(opts: {
           tool.state = e.ok ? "ok" : "error";
           tool.output = e.output;
         }
-        opts.onBlocks(rebuild());
+        emitBlocks();
         break;
       }
       case "diff": {
@@ -443,7 +478,7 @@ export async function runConversation(opts: {
         } else {
           diffs.push(block);
         }
-        opts.onBlocks(rebuild());
+        emitBlocks();
         break;
       }
       case "plan": {
@@ -454,13 +489,13 @@ export async function runConversation(opts: {
         } else {
           plans.push({ id: e.id, steps: e.steps });
         }
-        opts.onBlocks(rebuild());
+        emitBlocks();
         break;
       }
       case "code":
         started = true;
         codes.push({ kind: "code", language: e.language, code: e.code });
-        opts.onBlocks(rebuild());
+        emitBlocks();
         break;
       case "search": {
         started = true;
@@ -472,18 +507,18 @@ export async function runConversation(opts: {
         } else {
           searches.push({ id: e.id, query: e.query, state: e.state, results: e.results ?? [] });
         }
-        opts.onBlocks(rebuild());
+        emitBlocks();
         break;
       }
       case "suggested":
         started = true;
         suggested.push({ kind: "suggested", actions: e.actions });
-        opts.onBlocks(rebuild());
+        emitBlocks();
         break;
       case "approval":
         started = true;
         approvals.push({ id: e.id, title: e.title, detail: e.detail });
-        opts.onBlocks(rebuild());
+        emitBlocks();
         break;
       case "options":
         started = true;
@@ -497,23 +532,23 @@ export async function runConversation(opts: {
             options.push({ id: e.id, prompt: e.prompt, multi: e.multi, options: e.options });
           }
         }
-        opts.onBlocks(rebuild());
+        emitBlocks();
         break;
       case "status":
         started = true;
         if (e.level === "warn" || e.level === "error") {
           statuses.push({ level: e.level, text: e.text });
-          opts.onBlocks(rebuild());
+          emitBlocks();
         }
         break;
       case "error":
         started = true;
         statuses.push({ level: "error", text: e.text });
-        opts.onBlocks(rebuild());
+        emitBlocks();
         break;
       case "start":
         started = true;
-        opts.onBlocks(rebuild());
+        emitBlocks();
         break;
       case "done":
         costUsd = e.costUsd;
@@ -534,6 +569,7 @@ export async function runConversation(opts: {
       onEvent,
       () => {
         accepted = true;
+        opts.onAccepted?.();
       },
       opts.signal,
     );
@@ -548,10 +584,12 @@ export async function runConversation(opts: {
   }
 
   if (detached) {
+    flushLiveBlocks();
     opts.onBlocks([...rebuild(), { kind: "status", level: "info", text: translate(opts.locale, "runDetachedSnippet") }]);
     return { status: "detached", snippet: "" };
   }
 
+  flushLiveBlocks();
   done = true;
   let finalBlocks = rebuild();
   // Always emit a final settled render so a canceled run doesn't leave the

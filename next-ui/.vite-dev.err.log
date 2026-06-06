@@ -202,3 +202,370 @@ Visit https://react.dev/link/error-boundaries to learn more about error boundari
 Consider adding an error boundary to your tree to customize error handling behavior.
 Visit https://react.dev/link/error-boundaries to learn more about error boundaries.
 
+[2m21:38:47[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [31m[Unhandled error] [1mReferenceError[22m: ToggleButtonGroup is not defined
+[39m > WorkspacePageView src/components/workspace/WorkspacePage.tsx:834:15
+    832 |                  </Tooltip>
+    833 |                )}
+    834 |                <ToggleButtonGroup
+        |                 ^
+    835 |                  size="small"
+    836 |                  exclusive
+ > Object.react_stack_bottom_frame node_modules/react-dom/cjs/react-dom-client.development.js:25904:19
+ > renderWithHooks node_modules/react-dom/cjs/react-dom-client.development.js:7662:21
+ > updateFunctionComponent node_modules/react-dom/cjs/react-dom-client.development.js:10166:18
+ > beginWork node_modules/react-dom/cjs/react-dom-client.development.js:11778:17
+ > runWithFiberInDEV node_modules/react-dom/cjs/react-dom-client.development.js:871:29
+ > performUnitOfWork node_modules/react-dom/cjs/react-dom-client.development.js:17641:21
+ > workLoopSync node_modules/react-dom/cjs/react-dom-client.development.js:17469:40
+ > renderRootSync node_modules/react-dom/cjs/react-dom-client.development.js:17450:10
+ > performWorkOnRoot node_modules/react-dom/cjs/react-dom-client.development.js:16583:34
+
+[2m21:38:47[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mAn error occurred in the <WorkspacePageView> component.
+
+Consider adding an error boundary to your tree to customize error handling behavior.
+Visit https://react.dev/link/error-boundaries to learn more about error boundaries.
+
+[2m21:38:55[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [31m[Unhandled error] [1mReferenceError[22m: ToggleButtonGroup is not defined
+[39m > WorkspacePageView src/components/workspace/WorkspacePage.tsx:834:15
+    832 |                  </Tooltip>
+    833 |                )}
+    834 |                <ToggleButtonGroup
+        |                 ^
+    835 |                  size="small"
+    836 |                  exclusive
+ > Object.react_stack_bottom_frame node_modules/react-dom/cjs/react-dom-client.development.js:25904:19
+ > renderWithHooks node_modules/react-dom/cjs/react-dom-client.development.js:7662:21
+ > updateFunctionComponent node_modules/react-dom/cjs/react-dom-client.development.js:10166:18
+ > beginWork node_modules/react-dom/cjs/react-dom-client.development.js:11778:17
+ > runWithFiberInDEV node_modules/react-dom/cjs/react-dom-client.development.js:871:29
+ > performUnitOfWork node_modules/react-dom/cjs/react-dom-client.development.js:17641:21
+ > workLoopSync node_modules/react-dom/cjs/react-dom-client.development.js:17469:40
+ > renderRootSync node_modules/react-dom/cjs/react-dom-client.development.js:17450:10
+ > performWorkOnRoot node_modules/react-dom/cjs/react-dom-client.development.js:16583:34
+
+[2m21:38:55[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mAn error occurred in the <WorkspacePageView> component.
+
+Consider adding an error boundary to your tree to customize error handling behavior.
+Visit https://react.dev/link/error-boundaries to learn more about error boundaries.
+
+[2m21:39:13[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.
+[2m21:39:13[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [31m[Unhandled error] [1mReferenceError[22m: ToggleButtonGroup is not defined
+[39m > WorkspacePageView src/components/workspace/WorkspacePage.tsx:834:15
+    832 |                  </Tooltip>
+    833 |                )}
+    834 |                <ToggleButtonGroup
+        |                 ^
+    835 |                  size="small"
+    836 |                  exclusive
+ > Object.react_stack_bottom_frame node_modules/react-dom/cjs/react-dom-client.development.js:25904:19
+ > renderWithHooks node_modules/react-dom/cjs/react-dom-client.development.js:7662:21
+ > updateFunctionComponent node_modules/react-dom/cjs/react-dom-client.development.js:10166:18
+ > beginWork node_modules/react-dom/cjs/react-dom-client.development.js:11778:17
+ > runWithFiberInDEV node_modules/react-dom/cjs/react-dom-client.development.js:871:29
+ > performUnitOfWork node_modules/react-dom/cjs/react-dom-client.development.js:17641:21
+ > workLoopSync node_modules/react-dom/cjs/react-dom-client.development.js:17469:40
+ > renderRootSync node_modules/react-dom/cjs/react-dom-client.development.js:17450:10
+ > performWorkOnRoot node_modules/react-dom/cjs/react-dom-client.development.js:16583:34
+
+[2m21:39:13[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mAn error occurred in the <WorkspacePageView> component.
+
+Consider adding an error boundary to your tree to customize error handling behavior.
+Visit https://react.dev/link/error-boundaries to learn more about error boundaries.
+
+[2m21:39:15[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.
+[2m21:39:15[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [31m[Unhandled error] [1mReferenceError[22m: ToggleButtonGroup is not defined
+[39m > WorkspacePageView src/components/workspace/WorkspacePage.tsx:834:15
+    832 |                  </Tooltip>
+    833 |                )}
+    834 |                <ToggleButtonGroup
+        |                 ^
+    835 |                  size="small"
+    836 |                  exclusive
+ > Object.react_stack_bottom_frame node_modules/react-dom/cjs/react-dom-client.development.js:25904:19
+ > renderWithHooks node_modules/react-dom/cjs/react-dom-client.development.js:7662:21
+ > updateFunctionComponent node_modules/react-dom/cjs/react-dom-client.development.js:10166:18
+ > beginWork node_modules/react-dom/cjs/react-dom-client.development.js:11778:17
+ > runWithFiberInDEV node_modules/react-dom/cjs/react-dom-client.development.js:871:29
+ > performUnitOfWork node_modules/react-dom/cjs/react-dom-client.development.js:17641:21
+ > workLoopSync node_modules/react-dom/cjs/react-dom-client.development.js:17469:40
+ > renderRootSync node_modules/react-dom/cjs/react-dom-client.development.js:17450:10
+ > performWorkOnRoot node_modules/react-dom/cjs/react-dom-client.development.js:16583:34
+
+[2m21:39:15[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mAn error occurred in the <WorkspacePageView> component.
+
+Consider adding an error boundary to your tree to customize error handling behavior.
+Visit https://react.dev/link/error-boundaries to learn more about error boundaries.
+
+[2m21:39:34[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [31m[Unhandled error] [1mReferenceError[22m: ToggleButtonGroup is not defined
+[39m > WorkspacePageView src/components/workspace/WorkspacePage.tsx:831:15
+    829 |                  </Tooltip>
+    830 |                )}
+    831 |                <ToggleButtonGroup
+        |                 ^
+    832 |                  size="small"
+    833 |                  exclusive
+ > Object.react_stack_bottom_frame node_modules/react-dom/cjs/react-dom-client.development.js:25904:19
+ > renderWithHooks node_modules/react-dom/cjs/react-dom-client.development.js:7662:21
+ > updateFunctionComponent node_modules/react-dom/cjs/react-dom-client.development.js:10166:18
+ > beginWork node_modules/react-dom/cjs/react-dom-client.development.js:11778:17
+ > runWithFiberInDEV node_modules/react-dom/cjs/react-dom-client.development.js:871:29
+ > performUnitOfWork node_modules/react-dom/cjs/react-dom-client.development.js:17641:21
+ > workLoopSync node_modules/react-dom/cjs/react-dom-client.development.js:17469:40
+ > renderRootSync node_modules/react-dom/cjs/react-dom-client.development.js:17450:10
+ > performWorkOnRoot node_modules/react-dom/cjs/react-dom-client.development.js:16583:34
+
+[2m21:39:34[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mAn error occurred in the <WorkspacePageView> component.
+
+Consider adding an error boundary to your tree to customize error handling behavior.
+Visit https://react.dev/link/error-boundaries to learn more about error boundaries.
+
+[2m21:39:51[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.
+[2m21:40:08[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.
+[2m21:40:26[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.
+[2m21:45:22[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.
+[2m21:50:13[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m Pre-transform error: Failed to resolve import "@mui/icons-material/DeleteOutline" from "src/components/workspace/GitDiffViewer.tsx". Does the file exist?
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/GitDiffViewer.tsx[39m:1:30
+[33m  1  |  import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
+     |                                 ^
+  2  |  import EditIcon from "@mui/icons-material/Edit";
+  3  |  import { Box, Stack, Typography } from "@mui/material";[39m
+[2m21:50:13[22m [31m[1m[vite][22m[39m [31mInternal server error: Failed to resolve import "@mui/icons-material/DeleteOutline" from "src/components/workspace/GitDiffViewer.tsx". Does the file exist?[39m
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/GitDiffViewer.tsx[39m:1:30
+[33m  1  |  import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
+     |                                 ^
+  2  |  import EditIcon from "@mui/icons-material/Edit";
+  3  |  import { Box, Stack, Typography } from "@mui/material";[39m
+      at TransformPluginContext._formatLog (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30602:39)
+      at TransformPluginContext.error (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30599:14)
+      at normalizeUrl (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27842:18)
+      at async file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27905:30
+      at async Promise.all (index 0)
+      at async TransformPluginContext.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27873:4)
+      at async EnvironmentPluginContainer.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30387:14)
+      at async loadAndTransform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24646:26)
+[2m21:50:13[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22m[vite] Failed to reload /src/components/workspace/GitDiffViewer.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above)
+[2m21:50:13[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m Pre-transform error: Failed to resolve import "@mui/icons-material/DeleteOutline" from "src/components/workspace/GitDiffViewer.tsx". Does the file exist?
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/GitDiffViewer.tsx[39m:1:30
+[33m  1  |  import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
+     |                                 ^
+  2  |  import EditIcon from "@mui/icons-material/Edit";
+  3  |  import { Box, Stack, Typography } from "@mui/material";[39m
+[2m21:50:13[22m [31m[1m[vite][22m[39m [31mInternal server error: Failed to resolve import "@mui/icons-material/DeleteOutline" from "src/components/workspace/GitDiffViewer.tsx". Does the file exist?[39m
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/GitDiffViewer.tsx[39m:1:30
+[33m  1  |  import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
+     |                                 ^
+  2  |  import EditIcon from "@mui/icons-material/Edit";
+  3  |  import { Box, Stack, Typography } from "@mui/material";[39m
+      at TransformPluginContext._formatLog (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30602:39)
+      at TransformPluginContext.error (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30599:14)
+      at normalizeUrl (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27842:18)
+      at async file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27905:30
+      at async Promise.all (index 0)
+      at async TransformPluginContext.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27873:4)
+      at async EnvironmentPluginContainer.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30387:14)
+      at async loadAndTransform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24646:26)
+[2m21:50:13[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22m[vite] Failed to reload /src/components/workspace/GitDiffViewer.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above)
+[2m21:50:23[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m Pre-transform error: Failed to resolve import "@mui/icons-material/DeleteOutline" from "src/components/workspace/GitDiffViewer.tsx". Does the file exist?
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/GitDiffViewer.tsx[39m:1:30
+[33m  1  |  import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
+     |                                 ^
+  2  |  import EditIcon from "@mui/icons-material/Edit";
+  3  |  import { Box, Stack, Typography } from "@mui/material";[39m
+[2m21:50:23[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m Pre-transform error: Failed to resolve import "@mui/icons-material/DeleteOutline" from "src/components/workspace/GitDiffViewer.tsx". Does the file exist?
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/GitDiffViewer.tsx[39m:1:30
+[33m  1  |  import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
+     |                                 ^
+  2  |  import EditIcon from "@mui/icons-material/Edit";
+  3  |  import { Box, Stack, Typography } from "@mui/material";[39m
+[2m21:50:24[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.
+[2m21:50:24[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m Pre-transform error: Failed to resolve import "@mui/icons-material/DeleteOutline" from "src/components/workspace/GitDiffViewer.tsx". Does the file exist?
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/GitDiffViewer.tsx[39m:1:30
+[33m  1  |  import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
+     |                                 ^
+  2  |  import EditIcon from "@mui/icons-material/Edit";
+  3  |  import { Box, Stack, Typography } from "@mui/material";[39m
+[2m21:50:24[22m [31m[1m[vite][22m[39m [31mInternal server error: Failed to resolve import "@mui/icons-material/DeleteOutline" from "src/components/workspace/GitDiffViewer.tsx". Does the file exist?[39m
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/GitDiffViewer.tsx[39m:1:30
+[33m  1  |  import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
+     |                                 ^
+  2  |  import EditIcon from "@mui/icons-material/Edit";
+  3  |  import { Box, Stack, Typography } from "@mui/material";[39m
+      at TransformPluginContext._formatLog (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30602:39)
+      at TransformPluginContext.error (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30599:14)
+      at normalizeUrl (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27842:18)
+      at async file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27905:30
+      at async Promise.all (index 0)
+      at async TransformPluginContext.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27873:4)
+      at async EnvironmentPluginContainer.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30387:14)
+      at async loadAndTransform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24646:26)
+[2m21:50:24[22m [31m[1m[vite][22m[39m [31mInternal server error: Failed to resolve import "@mui/icons-material/DeleteOutline" from "src/components/workspace/GitDiffViewer.tsx". Does the file exist?[39m
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/GitDiffViewer.tsx[39m:1:30
+[33m  1  |  import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
+     |                                 ^
+  2  |  import EditIcon from "@mui/icons-material/Edit";
+  3  |  import { Box, Stack, Typography } from "@mui/material";[39m
+      at TransformPluginContext._formatLog (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30602:39)
+      at TransformPluginContext.error (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30599:14)
+      at normalizeUrl (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27842:18)
+      at async file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27905:30
+      at async Promise.all (index 0)
+      at async TransformPluginContext.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27873:4)
+      at async EnvironmentPluginContainer.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30387:14)
+      at async loadAndTransform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24646:26)
+      at async viteTransformMiddleware (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24440:20)
+[2m21:50:24[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m Pre-transform error: Failed to resolve import "@mui/icons-material/DeleteOutline" from "src/components/workspace/GitDiffViewer.tsx". Does the file exist?
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/GitDiffViewer.tsx[39m:1:30
+[33m  1  |  import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
+     |                                 ^
+  2  |  import EditIcon from "@mui/icons-material/Edit";
+  3  |  import { Box, Stack, Typography } from "@mui/material";[39m
+[2m21:50:24[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m Pre-transform error: Failed to resolve import "@mui/icons-material/DeleteOutline" from "src/components/workspace/GitDiffViewer.tsx". Does the file exist?
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/GitDiffViewer.tsx[39m:1:30
+[33m  1  |  import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
+     |                                 ^
+  2  |  import EditIcon from "@mui/icons-material/Edit";
+  3  |  import { Box, Stack, Typography } from "@mui/material";[39m
+[2m21:50:32[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m Pre-transform error: Failed to resolve import "@mui/icons-material/DeleteOutline" from "src/components/workspace/GitDiffViewer.tsx". Does the file exist?
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/GitDiffViewer.tsx[39m:1:30
+[33m  1  |  import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
+     |                                 ^
+  2  |  import EditIcon from "@mui/icons-material/Edit";
+  3  |  import { Box, Stack, Typography } from "@mui/material";[39m
+[2m21:50:32[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m Pre-transform error: Failed to resolve import "@mui/icons-material/DeleteOutline" from "src/components/workspace/GitDiffViewer.tsx". Does the file exist?
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/GitDiffViewer.tsx[39m:1:30
+[33m  1  |  import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
+     |                                 ^
+  2  |  import EditIcon from "@mui/icons-material/Edit";
+  3  |  import { Box, Stack, Typography } from "@mui/material";[39m
+[2m21:50:32[22m [31m[1m[vite][22m[39m [31mInternal server error: Failed to resolve import "@mui/icons-material/DeleteOutline" from "src/components/workspace/GitDiffViewer.tsx". Does the file exist?[39m
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/GitDiffViewer.tsx[39m:1:30
+[33m  1  |  import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
+     |                                 ^
+  2  |  import EditIcon from "@mui/icons-material/Edit";
+  3  |  import { Box, Stack, Typography } from "@mui/material";[39m
+      at TransformPluginContext._formatLog (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30602:39)
+      at TransformPluginContext.error (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30599:14)
+      at normalizeUrl (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27842:18)
+      at async file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27905:30
+      at async Promise.all (index 0)
+      at async TransformPluginContext.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27873:4)
+      at async EnvironmentPluginContainer.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30387:14)
+      at async loadAndTransform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24646:26)
+      at async viteTransformMiddleware (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24440:20)
+[2m21:50:32[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m Pre-transform error: Failed to resolve import "@mui/icons-material/DeleteOutline" from "src/components/workspace/GitDiffViewer.tsx". Does the file exist?
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/GitDiffViewer.tsx[39m:1:30
+[33m  1  |  import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
+     |                                 ^
+  2  |  import EditIcon from "@mui/icons-material/Edit";
+  3  |  import { Box, Stack, Typography } from "@mui/material";[39m
+[2m21:50:32[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m Pre-transform error: Failed to resolve import "@mui/icons-material/DeleteOutline" from "src/components/workspace/GitDiffViewer.tsx". Does the file exist?
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/GitDiffViewer.tsx[39m:1:30
+[33m  1  |  import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
+     |                                 ^
+  2  |  import EditIcon from "@mui/icons-material/Edit";
+  3  |  import { Box, Stack, Typography } from "@mui/material";[39m
+[2m21:50:32[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.
+[2m21:50:32[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m Pre-transform error: Failed to resolve import "@mui/icons-material/DeleteOutline" from "src/components/workspace/GitDiffViewer.tsx". Does the file exist?
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/GitDiffViewer.tsx[39m:1:30
+[33m  1  |  import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
+     |                                 ^
+  2  |  import EditIcon from "@mui/icons-material/Edit";
+  3  |  import { Box, Stack, Typography } from "@mui/material";[39m
+[2m21:50:32[22m [31m[1m[vite][22m[39m [31mInternal server error: Failed to resolve import "@mui/icons-material/DeleteOutline" from "src/components/workspace/GitDiffViewer.tsx". Does the file exist?[39m
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/GitDiffViewer.tsx[39m:1:30
+[33m  1  |  import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
+     |                                 ^
+  2  |  import EditIcon from "@mui/icons-material/Edit";
+  3  |  import { Box, Stack, Typography } from "@mui/material";[39m
+      at TransformPluginContext._formatLog (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30602:39)
+      at TransformPluginContext.error (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30599:14)
+      at normalizeUrl (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27842:18)
+      at async file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27905:30
+      at async Promise.all (index 0)
+      at async TransformPluginContext.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27873:4)
+      at async EnvironmentPluginContainer.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30387:14)
+      at async loadAndTransform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24646:26)
+[2m21:50:53[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m Pre-transform error: Failed to resolve import "@mui/icons-material/DeleteOutline" from "src/components/workspace/GitDiffViewer.tsx". Does the file exist?
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/GitDiffViewer.tsx[39m:1:30
+[33m  1  |  import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
+     |                                 ^
+  2  |  import EditIcon from "@mui/icons-material/Edit";
+  3  |  import { Box, Stack, Typography } from "@mui/material";[39m
+[2m21:50:53[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m Pre-transform error: Failed to resolve import "@mui/icons-material/DeleteOutline" from "src/components/workspace/GitDiffViewer.tsx". Does the file exist?
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/GitDiffViewer.tsx[39m:1:30
+[33m  1  |  import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
+     |                                 ^
+  2  |  import EditIcon from "@mui/icons-material/Edit";
+  3  |  import { Box, Stack, Typography } from "@mui/material";[39m
+[2m21:50:53[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m Pre-transform error: Failed to resolve import "@mui/icons-material/DeleteOutline" from "src/components/workspace/GitDiffViewer.tsx". Does the file exist?
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/GitDiffViewer.tsx[39m:1:30
+[33m  1  |  import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
+     |                                 ^
+  2  |  import EditIcon from "@mui/icons-material/Edit";
+  3  |  import { Box, Stack, Typography } from "@mui/material";[39m
+[2m21:50:53[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m Pre-transform error: Failed to resolve import "@mui/icons-material/DeleteOutline" from "src/components/workspace/GitDiffViewer.tsx". Does the file exist?
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/GitDiffViewer.tsx[39m:1:30
+[33m  1  |  import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
+     |                                 ^
+  2  |  import EditIcon from "@mui/icons-material/Edit";
+  3  |  import { Box, Stack, Typography } from "@mui/material";[39m
+[2m21:50:53[22m [31m[1m[vite][22m[39m [31mInternal server error: Failed to resolve import "@mui/icons-material/DeleteOutline" from "src/components/workspace/GitDiffViewer.tsx". Does the file exist?[39m
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/GitDiffViewer.tsx[39m:1:30
+[33m  1  |  import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
+     |                                 ^
+  2  |  import EditIcon from "@mui/icons-material/Edit";
+  3  |  import { Box, Stack, Typography } from "@mui/material";[39m
+      at TransformPluginContext._formatLog (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30602:39)
+      at TransformPluginContext.error (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30599:14)
+      at normalizeUrl (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27842:18)
+      at async file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27905:30
+      at async Promise.all (index 0)
+      at async TransformPluginContext.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27873:4)
+      at async EnvironmentPluginContainer.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30387:14)
+      at async loadAndTransform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24646:26)
+[2m21:50:54[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m Pre-transform error: Failed to resolve import "@mui/icons-material/DeleteOutline" from "src/components/workspace/GitDiffViewer.tsx". Does the file exist?
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/GitDiffViewer.tsx[39m:1:30
+[33m  1  |  import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
+     |                                 ^
+  2  |  import EditIcon from "@mui/icons-material/Edit";
+  3  |  import { Box, Stack, Typography } from "@mui/material";[39m
+[2m21:50:54[22m [31m[1m[vite][22m[39m [31mInternal server error: Failed to resolve import "@mui/icons-material/DeleteOutline" from "src/components/workspace/GitDiffViewer.tsx". Does the file exist?[39m
+  Plugin: [35mvite:import-analysis[39m
+  File: [36mC:/Users/Admin/Git/Workspace/rlab/next-ui/src/components/workspace/GitDiffViewer.tsx[39m:1:30
+[33m  1  |  import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
+     |                                 ^
+  2  |  import EditIcon from "@mui/icons-material/Edit";
+  3  |  import { Box, Stack, Typography } from "@mui/material";[39m
+      at TransformPluginContext._formatLog (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30602:39)
+      at TransformPluginContext.error (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30599:14)
+      at normalizeUrl (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27842:18)
+      at async file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27905:30
+      at async Promise.all (index 0)
+      at async TransformPluginContext.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:27873:4)
+      at async EnvironmentPluginContainer.transform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:30387:14)
+      at async loadAndTransform (file:///C:/Users/Admin/Git/Workspace/rlab/next-ui/node_modules/vite/dist/node/chunks/node.js:24646:26)
+[2m21:50:54[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mSomething has shimmed the React DevTools global hook (__REACT_DEVTOOLS_GLOBAL_HOOK__). Fast Refresh is not compatible with this shim and will be disabled.

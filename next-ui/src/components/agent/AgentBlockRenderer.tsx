@@ -4,6 +4,7 @@ import { DiffCard } from "./DiffCard";
 import { OptionSelect } from "./OptionSelect";
 import { PlanSteps } from "./PlanSteps";
 import { Reasoning } from "./Reasoning";
+import { ReviewCard } from "./ReviewCard";
 import { CodeBlock, Citations, MessageText, StatusNote, SuggestedActions } from "./parts";
 import { type MessageActionHandlers } from "./message-actions";
 import { type AgentBlock } from "./types";
@@ -44,6 +45,8 @@ export function AgentBlockRenderer({
       return <Citations sources={block.sources} />;
     case "suggested":
       return <SuggestedActions actions={block.actions} />;
+    case "review":
+      return <ReviewCard block={block} />;
     default:
       return null;
   }

@@ -20,6 +20,12 @@ function Probe() {
       <button type="button" onClick={() => workspace.sendMessage(workspace.selectedId, "Persist this message")}>
         send
       </button>
+      <button type="button" onClick={() => workspace.updateComposerDraft(workspace.selectedId, { text: "a", attachments: [] })}>
+        draft-a
+      </button>
+      <button type="button" onClick={() => workspace.updateComposerDraft(workspace.selectedId, { text: "ab", attachments: [] })}>
+        draft-ab
+      </button>
       <button type="button" onClick={() => workspace.stopRun(workspace.selectedId)}>
         stop
       </button>
@@ -247,6 +253,34 @@ describe("useWorkspace", () => {
       expect(fetch).toHaveBeenCalledWith("/api/workspace", expect.objectContaining({ method: "PUT" }));
     });
     expect(state.threads["chat-2"].some((message) => message.text === "Persist this message")).toBe(true);
+    expect(localStorageSetItem).not.toHaveBeenCalledWith(expect.stringContaining("rlab-workspace"), expect.any(String));
+  });
+
+  it("coalesces rapid draft changes into one delayed workspace save", async () => {
+    vi.useFakeTimers();
+    render(<Probe />);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByText("chat-2")).toBeInTheDocument();
+    const savesBefore = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace" && init?.method === "PUT").length;
+
+    screen.getByRole("button", { name: "draft-a" }).click();
+    screen.getByRole("button", { name: "draft-ab" }).click();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(249);
+    });
+    expect(vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace" && init?.method === "PUT")).toHaveLength(savesBefore);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+
+    const savesAfter = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace" && init?.method === "PUT");
+    expect(savesAfter).toHaveLength(savesBefore + 1);
+    expect(state.composerDrafts["chat-2"]?.text).toBe("ab");
     expect(localStorageSetItem).not.toHaveBeenCalledWith(expect.stringContaining("rlab-workspace"), expect.any(String));
   });
 
@@ -567,6 +601,61 @@ describe("useWorkspace", () => {
     });
     const workspaceSavesAfterAttachUpdate = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace" && init?.method === "PUT").length;
     expect(workspaceSavesAfterAttachUpdate).toBe(workspaceSavesBeforeAttachUpdate);
+  });
+
+  it("does not save accepted local background run stream updates back through the workspace API", async () => {
+    vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/workspace" && (!init || init.method === "GET")) {
+        return Response.json(state);
+      }
+      if (url === "/api/workspace" && init?.method === "PUT") {
+        state = JSON.parse(String(init.body)) as WorkspaceState;
+        return Response.json(state);
+      }
+      if (url === "/api/runs") {
+        return Response.json(activeRunsPayloadFromState(state));
+      }
+      if (url === "/api/run") {
+        runRequests.push(JSON.parse(String(init?.body ?? "{}")) as {
+          accessMode?: string;
+          agent?: string;
+          agentMessageId?: string;
+          conversationId?: string;
+          prompt?: string;
+          model?: string;
+          reasoning?: string;
+          runId?: string;
+          userMessageId?: string;
+          mode?: string;
+        });
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            activeRunController = controller;
+          },
+        });
+        return new Response(stream, {
+          headers: { "Content-Type": "application/x-ndjson" },
+        });
+      }
+      return new Response("not found", { status: 404 });
+    });
+    render(<Probe />);
+
+    await screen.findByText("chat-2");
+    screen.getByRole("button", { name: "send" }).click();
+    await waitFor(() => {
+      expect(runRequests).toHaveLength(1);
+    });
+    const workspaceSavesBeforeStreamUpdate = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace" && init?.method === "PUT").length;
+
+    activeRunController?.enqueue(new TextEncoder().encode(`${JSON.stringify({ type: "text", text: "server token" })}\n`));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("status")).toHaveTextContent("running");
+    });
+    const workspaceSavesAfterStreamUpdate = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace" && init?.method === "PUT").length;
+    expect(workspaceSavesAfterStreamUpdate).toBe(workspaceSavesBeforeStreamUpdate);
   });
 
   it("immediately syncs a persisted background run after loading workspace state", async () => {

@@ -1,6 +1,6 @@
 import { type IReactionDisposer, makeAutoObservable, reaction, runInAction } from "mobx";
 import { useEffect, useState } from "react";
-import { agentProfileEquals, normalizeAgentProfile, type AgentBlock, type AgentProfile, type ApprovalDecision, type ChatMessage, type ComposerDraft, type ConversationStatus, type ConversationSummary, type Project } from "../agent";
+import { agentProfileEquals, normalizeAgentProfile, type AgentBlock, type AgentProfile, type ApprovalDecision, type ChatMessage, type ComposerDraft, type ConversationStatus, type ConversationSummary, type Project, type ReviewCommentEntry } from "../agent";
 import { translate } from "../../i18n/I18nProvider";
 import { attachRunUpdates, cancelRun, loadActiveRuns, runConversation, type ActiveRunSnapshot, type ActiveRunUpdate, type RunConversationResult } from "./run-agent";
 import { nowLabel, starterThread, truncate } from "./sample-data";
@@ -15,6 +15,7 @@ const nextId = (prefix: string) => `${prefix}-${++idSeq}`;
 interface RunHandle {
   readonly controller: AbortController;
   readonly runId: string;
+  serverOwned: boolean;
   canceled: boolean;
 }
 
@@ -131,6 +132,25 @@ function blocksNeedInput(blocks: readonly AgentBlock[]): boolean {
   });
 }
 
+function blocksHaveLiveOutput(blocks: readonly AgentBlock[]): boolean {
+  return blocks.some((block) => {
+    switch (block.kind) {
+      case "reasoning":
+        return block.active === true;
+      case "text":
+        return block.streaming === true;
+      case "tool":
+      case "command":
+      case "search":
+        return block.state === "running";
+      case "plan":
+        return block.steps.some((step) => step.state === "running");
+      default:
+        return false;
+    }
+  });
+}
+
 function snippetFromBlocks(blocks: readonly AgentBlock[] | undefined, locale: Locale): string {
   const textBlock = [...(blocks ?? [])].reverse().find((block) => block.kind === "text" && block.text.trim().length > 0);
   const snippetSource = textBlock?.kind === "text" ? textBlock.text : translate(locale, "runDoneSnippet");
@@ -216,6 +236,7 @@ export interface Workspace {
   readonly togglePin: (id: string) => void;
   readonly remove: (id: string) => void;
   readonly sendMessage: (id: string, text: string) => void;
+  readonly addReviewComments: (id: string, comments: readonly ReviewCommentEntry[]) => void;
   readonly stopRun: (id: string) => void;
   readonly retryMessage: (id: string, messageId: string) => void;
   readonly editAndResendMessage: (id: string, messageId: string, text: string) => void;
@@ -467,7 +488,7 @@ class WorkspaceStore implements Workspace {
       return;
     }
     const controller = new AbortController();
-    const runHandle: RunHandle = { controller, runId: run.runId, canceled: false };
+    const runHandle: RunHandle = { controller, runId: run.runId, serverOwned: true, canceled: false };
     this.runs.set(run.conversationId, runHandle);
     attachRunUpdates({
       runId: run.runId,
@@ -644,6 +665,19 @@ class WorkspaceStore implements Workspace {
     this.runTurn(id, userMsg);
   }
 
+  /** Appends the batched review comments as a single block to the thread without
+   *  starting an agent run (the user decides when to actually prompt the agent). */
+  addReviewComments(id: string, comments: readonly ReviewCommentEntry[]): void {
+    if (comments.length === 0) {
+      return;
+    }
+    const message: ChatMessage = { id: nextId("u"), role: "user", time: nowLabel(), blocks: [{ kind: "review", comments: [...comments] }] };
+    this.setState((current) => ({
+      ...current,
+      threads: { ...current.threads, [id]: [...(current.threads[id] ?? []), message] },
+    }));
+  }
+
   /** Run (or re-run) the agent for an existing user message in the thread. */
   private runTurn(id: string, userMsg: ChatMessage): void {
     const conv = this.find(id);
@@ -671,6 +705,9 @@ class WorkspaceStore implements Workspace {
         const arr = current.threads[id] ?? [];
         const previousBlocks = arr.find((m) => m.id === aId)?.blocks;
         const mergedBlocks = mergeInputBlockState(blocks, previousBlocks);
+        if (runHandle.serverOwned && !blocksNeedInput(mergedBlocks) && blocksHaveLiveOutput(mergedBlocks)) {
+          this.skipNextSave = true;
+        }
         const message: ChatMessage = { id: aId, role: "agent", time: agentTime, blocks: mergedBlocks };
         const nextState = {
           ...current,
@@ -698,7 +735,7 @@ class WorkspaceStore implements Workspace {
       previous.controller.abort();
     }
     const controller = new AbortController();
-    const runHandle: RunHandle = { controller, runId, canceled: false };
+    const runHandle: RunHandle = { controller, runId, serverOwned: false, canceled: false };
     this.runs.set(id, runHandle);
 
     runConversation({
@@ -716,6 +753,9 @@ class WorkspaceStore implements Workspace {
         agentMessageTime: agentTime,
       },
       signal: controller.signal,
+      onAccepted: () => {
+        runHandle.serverOwned = true;
+      },
       onBlocks: applyBlocks,
     })
       .then((result) => {

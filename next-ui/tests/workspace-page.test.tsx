@@ -688,8 +688,8 @@ describe("WorkspacePage", () => {
         }),
       );
     });
-    // The panel title shows the current branch instead of "Git".
-    expect(await screen.findByRole("heading", { name: "main" })).toBeInTheDocument();
+    // The Git view shows the current branch.
+    expect(await screen.findByText("main")).toBeInTheDocument();
     expect(screen.getAllByText("src/auth.ts").length).toBeGreaterThan(0);
   });
 

@@ -30,8 +30,41 @@ function rawStreamResponse(lines: readonly string[]): Response {
   );
 }
 
+function rawChunkResponse(chunk: string): Response {
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(chunk));
+        controller.close();
+      },
+    }),
+    { headers: { "Content-Type": "application/x-ndjson" } },
+  );
+}
+
+function timedStreamResponse(chunks: readonly { readonly delayMs: number; readonly events: readonly unknown[]; readonly close?: boolean }[]): Response {
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const chunk of chunks) {
+          setTimeout(() => {
+            for (const event of chunk.events) {
+              controller.enqueue(new TextEncoder().encode(`${JSON.stringify(event)}\n`));
+            }
+            if (chunk.close) {
+              controller.close();
+            }
+          }, chunk.delayMs);
+        }
+      },
+    }),
+    { headers: { "Content-Type": "application/x-ndjson" } },
+  );
+}
+
 describe("runConversation", () => {
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
@@ -287,6 +320,71 @@ describe("runConversation", () => {
 
     expect(blocks[0]).toContainEqual({ kind: "reasoning", text: "", active: true });
     expect(blocks.at(-1)).toEqual([{ kind: "text", text: "answer", streaming: false }]);
+  });
+
+  it("coalesces consecutive text deltas from the same stream chunk", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        rawChunkResponse(
+          [
+            JSON.stringify({ type: "text", text: "hel" }),
+            JSON.stringify({ type: "text", text: "lo" }),
+            JSON.stringify({ type: "done" }),
+            "",
+          ].join("\n"),
+        ),
+      ),
+    );
+    const blocks: AgentBlock[][] = [];
+
+    await runConversation({
+      profile: DEFAULT_PROFILE,
+      prompt: "answer",
+      accessMode: "read-only",
+      locale: "ru",
+      onBlocks: (nextBlocks) => blocks.push(nextBlocks),
+    });
+
+    const liveTextBlocks = blocks.flatMap((blockList) => blockList.filter((block) => block.kind === "text" && block.streaming === true));
+    expect(liveTextBlocks).toEqual([{ kind: "text", text: "hello", streaming: true }]);
+    expect(blocks.at(-1)).toEqual([{ kind: "text", text: "hello", streaming: false }]);
+  });
+
+  it("coalesces rapid text chunks into a frame-level live update", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        timedStreamResponse([
+          { delayMs: 1, events: [{ type: "text", text: "hel" }] },
+          { delayMs: 2, events: [{ type: "text", text: "lo" }] },
+          { delayMs: 80, events: [{ type: "done" }], close: true },
+        ]),
+      ),
+    );
+    const blocks: AgentBlock[][] = [];
+
+    const resultPromise = runConversation({
+      profile: DEFAULT_PROFILE,
+      prompt: "answer",
+      accessMode: "read-only",
+      locale: "ru",
+      onBlocks: (nextBlocks) => blocks.push(nextBlocks),
+    });
+
+    await vi.advanceTimersByTimeAsync(2);
+    expect(blocks.flatMap((blockList) => blockList.filter((block) => block.kind === "text" && block.streaming === true))).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(35);
+    expect(blocks.flatMap((blockList) => blockList.filter((block) => block.kind === "text" && block.streaming === true))).toEqual([
+      { kind: "text", text: "hello", streaming: true },
+    ]);
+
+    await vi.advanceTimersByTimeAsync(100);
+    await resultPromise;
+
+    expect(blocks.at(-1)).toEqual([{ kind: "text", text: "hello", streaming: false }]);
   });
 
   it("surfaces malformed run stream lines as explicit errors", async () => {
