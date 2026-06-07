@@ -20,6 +20,13 @@ export default defineConfig({
     url: baseURL,
     reuseExistingServer: !process.env.CI,
     timeout: 180_000,
+    // Seed demo conversations so the workspace smoke test has threads to drive,
+    // and isolate persisted state in a throwaway dir so e2e never touches the
+    // developer's real `.data/` (and stays deterministic in CI).
+    env: {
+      NEXT_UI_DEMO: "1",
+      NEXT_UI_DATA_DIR: ".e2e-data",
+    },
   },
   projects: [
     {

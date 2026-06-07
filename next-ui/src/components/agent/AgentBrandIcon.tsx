@@ -1,5 +1,5 @@
 import { siClaude, siCursor, siGithubcopilot, siGooglegemini, siQwen, type SimpleIcon } from "simple-icons";
-import { type AgentId } from "./agents";
+import type { AgentId } from "./agents";
 
 type SvgFillRule = "evenodd" | "nonzero" | "inherit";
 

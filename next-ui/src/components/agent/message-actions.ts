@@ -1,5 +1,5 @@
 import { normalizeAgentToolOutput } from "../../lib/agent-output";
-import { type AgentBlock, type ApprovalDecision, type ChatMessage } from "./types";
+import type { AgentBlock, ApprovalDecision, ChatMessage } from "./types";
 
 export interface MessageActionHandlers {
   readonly onCopy?: (message: ChatMessage) => void;

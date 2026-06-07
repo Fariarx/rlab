@@ -1,6 +1,6 @@
 import { Stack, Typography } from "@mui/material";
 import { KeyHint, Panel, StatusDot, Tag } from "../../ui";
-import { type StatusKey } from "../../../theme/tokens";
+import type { StatusKey } from "../../../theme/tokens";
 import { KitSectionShell } from "../KitSectionShell";
 
 const statuses: ReadonlyArray<{ readonly key: StatusKey; readonly label: string }> = [

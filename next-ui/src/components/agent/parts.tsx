@@ -11,11 +11,11 @@ import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useI18n } from "../../i18n/I18nProvider";
 import { normalizeExternalUrl } from "../../lib/external-url";
-import { type StatusKey } from "../../theme/tokens";
+import type { StatusKey } from "../../theme/tokens";
 import { useWorkspaceUi } from "../workspace/workspace-ui";
 import { Button, IconButton, Menu, MenuItem, StatusDot } from "../ui";
 import { blink, bounce } from "./anim";
-import { type SuggestedActionIconKey } from "./types";
+import type { SuggestedActionIconKey } from "./types";
 
 const linkSx = {
   color: "primary.main",

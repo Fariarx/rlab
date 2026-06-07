@@ -44,7 +44,6 @@ describe("message actions", () => {
     );
 
     fireEvent.click(screen.getAllByRole("button", { name: "Скопировать сообщение" })[0]);
-    expect(screen.queryByRole("button", { name: "Повторить сообщение" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Изменить и отправить" }));
     fireEvent.change(screen.getByRole("textbox", { name: "Изменить сообщение" }), { target: { value: "Edited prompt" } });
     fireEvent.click(screen.getByRole("button", { name: "Отправить изменённое сообщение" }));
@@ -54,20 +53,23 @@ describe("message actions", () => {
     expect(onEditAndResend).toHaveBeenCalledWith(messages[0], "Edited prompt");
   });
 
-  it("only exposes copy for agent messages", () => {
+  it("exposes copy and retry for agent messages", () => {
+    const onRetry = vi.fn();
     renderWithThemeAndVirtuoso(
       <Conversation
         messages={[messages[1]]}
         actions={{
           onCopy: vi.fn(),
-          onRetry: vi.fn(),
+          onRetry,
           onEditAndResend: vi.fn(),
         }}
       />,
     );
 
     expect(screen.getByRole("button", { name: "Скопировать сообщение" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Повторить сообщение" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Повторить сообщение" }));
+
+    expect(onRetry).toHaveBeenCalledWith(messages[1]);
     expect(screen.queryByRole("button", { name: "Изменить и отправить" })).not.toBeInTheDocument();
   });
 

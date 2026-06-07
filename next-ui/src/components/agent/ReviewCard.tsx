@@ -3,7 +3,7 @@ import RateReviewOutlinedIcon from "@mui/icons-material/RateReviewOutlined";
 import { Box, Collapse, Stack, Typography } from "@mui/material";
 import { useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
-import { type ReviewBlock } from "./types";
+import type { ReviewBlock } from "./types";
 
 /** ReviewCard — a collapsible block summarising the diff-line comments a user
  *  sent to the agent (one block per batch). Collapsed by default. */

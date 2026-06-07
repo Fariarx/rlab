@@ -2425,6 +2425,7 @@ Built-in agents:
         text: "partial",
         hasText: true,
         tools: [],
+        timeline: [{ kind: "reasoning" as const, text: "Still running" }],
         diffs: [],
         plans: [],
         codes: [],

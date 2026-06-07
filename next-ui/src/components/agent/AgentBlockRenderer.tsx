@@ -6,8 +6,8 @@ import { PlanSteps } from "./PlanSteps";
 import { Reasoning } from "./Reasoning";
 import { ReviewCard } from "./ReviewCard";
 import { CodeBlock, Citations, MessageText, StatusNote, SuggestedActions } from "./parts";
-import { type MessageActionHandlers } from "./message-actions";
-import { type AgentBlock } from "./types";
+import type { MessageActionHandlers } from "./message-actions";
+import type { AgentBlock } from "./types";
 
 /** Maps an agent block to its renderer. The single switch keeps the block union
  * exhaustive — adding a kind to types.ts surfaces a missing case here. */

@@ -1,6 +1,6 @@
 import { Box, Stack, Typography } from "@mui/material";
 import { RunIndicator } from "./actions";
-import { type PlanBlock } from "./types";
+import type { PlanBlock } from "./types";
 
 /** PlanSteps — a checklist of the agent's plan with per-step run state. */
 export function PlanSteps({ block }: { readonly block: PlanBlock }) {

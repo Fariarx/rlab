@@ -1,4 +1,4 @@
-import { type ChatMessage } from "../components/agent/types";
+import type { ChatMessage } from "../components/agent/types";
 
 export type ResourceKind = "image" | "link" | "file";
 

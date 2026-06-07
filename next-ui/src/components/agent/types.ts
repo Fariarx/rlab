@@ -1,5 +1,5 @@
-import { type StatusKey } from "../../theme/tokens";
-import { type AgentId, type AgentProfile } from "./agents";
+import type { StatusKey } from "../../theme/tokens";
+import type { AgentId, AgentProfile } from "./agents";
 
 /** Run state shared by tool/command/plan-step style blocks. */
 export type RunState = "pending" | "running" | "ok" | "error";

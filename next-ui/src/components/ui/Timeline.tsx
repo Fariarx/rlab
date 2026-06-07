@@ -1,7 +1,7 @@
 import { Box, Stack, Typography } from "@mui/material";
 import { styled } from "@mui/material/styles";
-import { type ReactNode } from "react";
-import { type StatusKey } from "../../theme/tokens";
+import type { ReactNode } from "react";
+import type { StatusKey } from "../../theme/tokens";
 import { StatusDot } from "./StatusDot";
 
 /**

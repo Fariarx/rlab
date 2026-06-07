@@ -2,13 +2,13 @@ import DescriptionIcon from "@mui/icons-material/Description";
 import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
 import { Box, Collapse, Stack, Typography } from "@mui/material";
 import { useState } from "react";
-import { type DiffBlock } from "./types";
+import type { DiffBlock } from "./types";
 
 const signPrefix = { add: "+", del: "-", ctx: " " } as const;
 
 /** DiffCard — a file edit with +/- counts and a collapsible hunk preview. */
 export function DiffCard({ block }: { readonly block: DiffBlock }) {
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(false);
 
   return (
     <Box

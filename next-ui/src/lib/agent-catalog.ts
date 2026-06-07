@@ -143,17 +143,6 @@ const OPENCODE_MODEL_OPTIONS = [
   { id: "lmstudio-qwen3-30b-a3b-2507", label: "LM Studio Qwen3 30B A3B", value: "lmstudio/qwen/qwen3-30b-a3b-2507" },
   { id: "lmstudio-qwen3-coder-30b", label: "LM Studio Qwen3 Coder 30B", value: "lmstudio/qwen/qwen3-coder-30b" },
 ] as const;
-const QWEN_MODEL_OPTIONS = [
-  DEFAULT_OPTION,
-  { id: "qwen3.6-plus", label: "Qwen3.6 Plus", value: "qwen3.6-plus" },
-  { id: "qwen3.5-plus", label: "Qwen3.5 Plus", value: "qwen3.5-plus" },
-  { id: "qwen3-coder-plus", label: "Qwen3 Coder Plus", value: "qwen3-coder-plus" },
-] as const;
-const CURSOR_MODEL_OPTIONS = [
-  DEFAULT_OPTION,
-  { id: "gpt-5", label: "GPT-5", value: "gpt-5" },
-] as const;
-
 export const AGENTS: readonly AgentDef[] = [
   {
     id: "claude-code",

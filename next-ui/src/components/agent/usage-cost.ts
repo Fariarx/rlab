@@ -1,4 +1,4 @@
-import { type RunUsage } from "./types";
+import type { RunUsage } from "./types";
 
 export function formatCostUsd(costUsd: number): string {
   const precision = costUsd >= 1 ? 2 : 4;

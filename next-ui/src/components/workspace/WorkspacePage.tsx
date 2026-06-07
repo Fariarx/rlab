@@ -29,7 +29,7 @@ import {
 import { type DragEvent, type MouseEvent as ReactMouseEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { I18nProvider, useI18n } from "../../i18n/I18nProvider";
 import { normalizeExternalUrl } from "../../lib/external-url";
-import { type HashRoute } from "../../lib/use-hash-route";
+import type { HashRoute } from "../../lib/use-hash-route";
 import {
   type AgentProfile,
   type ApprovalDecision,
@@ -205,8 +205,6 @@ function conversationHasActiveWork(conversation: ConversationSummary | null, mes
   return Boolean(
     conversation &&
       (conversation.activeRunId ||
-        conversation.status === "running" ||
-        conversation.status === "waiting" ||
         messages.some(messageHasLiveAgentWork)),
   );
 }

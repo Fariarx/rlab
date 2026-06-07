@@ -1,6 +1,6 @@
 import Chip, { type ChipProps } from "@mui/material/Chip";
 import { styled } from "@mui/material/styles";
-import { type StatusKey } from "../../theme/tokens";
+import type { StatusKey } from "../../theme/tokens";
 
 /**
  * Tag — a status-aware Chip. Maps `status` to the kit's status palette (soft

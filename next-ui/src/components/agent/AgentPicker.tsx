@@ -178,7 +178,7 @@ export function AgentPicker({
                   border: (t) => `1px solid ${active ? withAlpha(a.accent, 0.5) : t.custom.borders.subtle}`,
                   backgroundColor: (t) => (active ? withAlpha(a.accent, 0.1) : t.custom.surfaces.s2),
                   transition: "transform 150ms ease, border-color 150ms ease, background-color 150ms ease",
-                  "&:hover": { transform: "translateY(-1px)", borderColor: (t) => withAlpha(a.accent, 0.45) },
+                  "&:hover": { transform: "translateY(-1px)", borderColor: withAlpha(a.accent, 0.45) },
                   "&:focus-visible": {
                     outline: (t) => `2px solid ${t.custom.borders.focus}`,
                     outlineOffset: 2,

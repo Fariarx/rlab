@@ -1,5 +1,5 @@
 import { keyframes, styled } from "@mui/material/styles";
-import { type StatusKey } from "../../theme/tokens";
+import type { StatusKey } from "../../theme/tokens";
 
 /**
  * StatusDot — a small color-coded status indicator. `running` pulses by default.

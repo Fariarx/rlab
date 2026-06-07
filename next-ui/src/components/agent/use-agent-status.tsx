@@ -4,8 +4,6 @@ import { observer } from "mobx-react-lite";
 import { AGENTS, AGENT_STATUS, STATIC_AGENT_CLI_INFO, type AgentCliInfo, type AgentCliMap, type AgentId, type AgentOption, type AgentSystemStatus } from "./agents";
 
 type StatusMap = Partial<Record<AgentId, AgentSystemStatus>>;
-type AgentApiValue = AgentSystemStatus | AgentCliInfo;
-type AgentApiPayload = Partial<Record<AgentId, AgentApiValue>>;
 const AGENT_STATUS_RETRY_MS = 15_000;
 
 interface AgentStatusValue {

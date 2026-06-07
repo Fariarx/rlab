@@ -5,7 +5,7 @@ import { useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import { Button } from "../ui";
 import { StatusNote } from "./parts";
-import { type ApprovalBlock, type ApprovalDecision } from "./types";
+import type { ApprovalBlock, ApprovalDecision } from "./types";
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);

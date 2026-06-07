@@ -1,5 +1,5 @@
 import { Box, Card, Stack, Typography } from "@mui/material";
-import { type ReactNode } from "react";
+import type { ReactNode } from "react";
 
 /**
  * Panel — the standard surface: a bordered card with an optional micro-label

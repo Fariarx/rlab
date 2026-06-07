@@ -1,18 +1,18 @@
-import {
-  type AgentBlock,
-  type AgentProfile,
-  type CodeBlockData,
-  type ConversationStatus,
-  type DiffBlock,
-  type PlanBlock,
-  type RunState,
-  type RunUsage,
-  type SearchBlock,
-  type SuggestedActionsBlock,
+import type {
+  AgentBlock,
+  AgentProfile,
+  CodeBlockData,
+  ConversationStatus,
+  DiffBlock,
+  PlanBlock,
+  RunState,
+  RunUsage,
+  SearchBlock,
+  SuggestedActionsBlock,
 } from "../agent";
 import { translate } from "../../i18n/I18nProvider";
-import { type Locale } from "./app-settings";
-import { type AgentAccessMode } from "./app-settings";
+import type { Locale } from "./app-settings";
+import type { AgentAccessMode } from "./app-settings";
 import { truncate } from "./sample-data";
 
 type RunEvent =
@@ -193,13 +193,14 @@ type RunAttachEvent = { readonly type: "update"; readonly update: ActiveRunUpdat
 
 function readBufferedNdjsonLines(buffer: string, onLine: (line: string) => void): string {
   let nextBuffer = buffer;
-  let nl: number;
-  while ((nl = nextBuffer.indexOf("\n")) >= 0) {
+  let nl = nextBuffer.indexOf("\n");
+  while (nl >= 0) {
     const line = nextBuffer.slice(0, nl).trim();
     nextBuffer = nextBuffer.slice(nl + 1);
     if (line) {
       onLine(line);
     }
+    nl = nextBuffer.indexOf("\n");
   }
   return nextBuffer;
 }
@@ -375,12 +376,15 @@ export async function runConversation(opts: {
   readonly onAccepted?: () => void;
   readonly onBlocks: (blocks: AgentBlock[]) => void;
 }): Promise<RunConversationResult> {
-  let reasoning = "";
   let hasReasoning = false;
   let started = false;
   let text = "";
   let hasText = false;
   const tools: StreamingTool[] = [];
+  // Reasoning segments and tool calls in the order they actually arrived, so the
+  // UI can show them interleaved chronologically instead of grouping all
+  // reasoning before all tools.
+  const timeline: Array<{ kind: "reasoning"; text: string } | { readonly kind: "tool"; readonly tool: StreamingTool }> = [];
   const diffs: DiffBlock[] = [];
   const plans: StreamingPlan[] = [];
   const codes: CodeBlockData[] = [];
@@ -399,16 +403,30 @@ export async function runConversation(opts: {
 
   const rebuild = (): AgentBlock[] => {
     const blocks: AgentBlock[] = [];
-    if (hasReasoning) {
-      blocks.push({ kind: "reasoning", text: reasoning, active: !done, duration: done ? `${Math.max(1, Math.round((performance.now() - start) / 1000))}s` : undefined });
-    } else if (started && !done) {
+    // Reasoning segments and tools interleaved in arrival order (chronological).
+    const firstReasoningIdx = timeline.findIndex((item) => item.kind === "reasoning");
+    let lastReasoningIdx = -1;
+    for (let i = timeline.length - 1; i >= 0; i -= 1) {
+      if (timeline[i].kind === "reasoning") {
+        lastReasoningIdx = i;
+        break;
+      }
+    }
+    const duration = `${Math.max(1, Math.round((performance.now() - start) / 1000))}s`;
+    timeline.forEach((item, idx) => {
+      if (item.kind === "reasoning") {
+        blocks.push({ kind: "reasoning", text: item.text, active: !done && idx === lastReasoningIdx, duration: done && idx === firstReasoningIdx ? duration : undefined });
+      } else {
+        const t = item.tool;
+        blocks.push(toolToDiffBlock(t) ?? { kind: "tool", name: t.name, summary: t.summary, args: t.args, state: t.state, output: t.output });
+      }
+    });
+    // Before any reasoning/tool arrives, show the empty "thinking" placeholder.
+    if (firstReasoningIdx === -1 && started && !done) {
       blocks.push({ kind: "reasoning", text: "", active: true });
     }
     for (const plan of plans) {
       blocks.push({ kind: "plan", steps: plan.steps });
-    }
-    for (const t of tools) {
-      blocks.push(toolToDiffBlock(t) ?? { kind: "tool", name: t.name, summary: t.summary, args: t.args, state: t.state, output: t.output });
     }
     blocks.push(...diffs);
     blocks.push(...codes);
@@ -465,12 +483,18 @@ export async function runConversation(opts: {
 
   const onEvent = (e: RunEvent) => {
     switch (e.type) {
-      case "reasoning":
+      case "reasoning": {
         started = true;
         hasReasoning = true;
-        reasoning += e.text;
+        const last = timeline[timeline.length - 1];
+        if (last && last.kind === "reasoning") {
+          last.text += e.text;
+        } else {
+          timeline.push({ kind: "reasoning", text: e.text });
+        }
         queueLiveBlocks();
         break;
+      }
       case "text":
         started = true;
         hasText = true;
@@ -486,7 +510,9 @@ export async function runConversation(opts: {
             existing.summary = e.summary;
             existing.args = e.args;
           } else {
-          tools.push({ id: e.id, name: e.name, summary: e.summary, args: e.args, state: "running" });
+            const tool: StreamingTool = { id: e.id, name: e.name, summary: e.summary, args: e.args, state: "running" };
+            tools.push(tool);
+            timeline.push({ kind: "tool", tool });
           }
         }
         emitBlocks();

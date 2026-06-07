@@ -1,11 +1,11 @@
 import { type IReactionDisposer, makeAutoObservable, reaction, runInAction } from "mobx";
 import { useEffect, useState } from "react";
-import { agentProfileEquals, normalizeAgentProfile, type AgentBlock, type AgentProfile, type ApprovalDecision, type ChatMessage, type ComposerDraft, type ConversationStatus, type ConversationSummary, type Project, type ReviewCommentEntry } from "../agent";
+import { normalizeAgentProfile, type AgentBlock, type AgentProfile, type ApprovalDecision, type ChatMessage, type ComposerDraft, type ConversationStatus, type ConversationSummary, type Project, type ReviewCommentEntry } from "../agent";
 import { translate } from "../../i18n/I18nProvider";
 import { attachRunUpdates, cancelRun, loadActiveRuns, runConversation, type ActiveRunSnapshot, type ActiveRunUpdate, type RunConversationResult } from "./run-agent";
 import { nowLabel, starterThread, truncate } from "./sample-data";
 import { type AppSettings, type AppSettingsPatch, type Locale, mergeAppSettings } from "./app-settings";
-import { buildInitialWorkspaceState, cloneWorkspaceState, type WorkspaceState } from "./workspace-state";
+import { buildEmptyWorkspaceState, buildInitialWorkspaceState, cloneWorkspaceState, type WorkspaceState } from "./workspace-state";
 
 const WORKSPACE_LOAD_RETRY_MS = 15_000;
 const WORKSPACE_SAVE_DEBOUNCE_MS = 250;
@@ -402,7 +402,9 @@ export interface Workspace {
 }
 
 class WorkspaceStore implements Workspace {
-  state: WorkspaceState = buildInitialWorkspaceState();
+  // Pre-load placeholder (replaced by the server's state). Demo data only in dev
+  // so a production build never flashes sample conversations before hydration.
+  state: WorkspaceState = import.meta.env.DEV ? buildInitialWorkspaceState() : buildEmptyWorkspaceState();
 
   loadError: string | null = null;
 

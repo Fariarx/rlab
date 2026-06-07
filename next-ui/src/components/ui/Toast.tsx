@@ -1,9 +1,9 @@
 import CloseIcon from "@mui/icons-material/Close";
 import { Box, IconButton, Stack } from "@mui/material";
 import { styled } from "@mui/material/styles";
-import { type ReactNode } from "react";
+import type { ReactNode } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
-import { type StatusKey } from "../../theme/tokens";
+import type { StatusKey } from "../../theme/tokens";
 
 /**
  * Toast — the presentational notification card used by ToastProvider. A

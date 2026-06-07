@@ -57,21 +57,19 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "24.x"
+          node-version: "22.x"
           registry-url: "https://registry.npmjs.org"
           cache: npm
+          cache-dependency-path: next-ui/package-lock.json
 
       - name: Install dependencies
-        run: npm ci
-
-      - name: Install web-ui dependencies
-        run: npm ci --prefix web-ui
+        run: npm --prefix next-ui ci
 
       - name: Verify tag matches package version
         id: version
         run: |
           TAG="${{ steps.resolve_tag.outputs.tag }}"
-          PACKAGE_VERSION=$(node -p "require('./package.json').version")
+          PACKAGE_VERSION=$(node -p "require('./next-ui/package.json').version")
           EXPECTED_TAG="v${PACKAGE_VERSION}"
 
           if [ "$TAG" != "$EXPECTED_TAG" ]; then
@@ -81,33 +79,11 @@ jobs:
 
           echo "package_version=$PACKAGE_VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Build and validate package
-        run: npm run prepublishOnly
-        env:
-          POSTHOG_KEY: ${{ secrets.POSTHOG_KEY }}
-          POSTHOG_HOST: ${{ secrets.POSTHOG_HOST }}
-          OTEL_TELEMETRY_ENABLED: ${{ secrets.OTEL_TELEMETRY_ENABLED }}
-          OTEL_LOGS_EXPORTER: otlp
-          OTEL_METRICS_EXPORTER: otlp
-          OTEL_EXPORTER_OTLP_PROTOCOL: ${{ secrets.OTEL_EXPORTER_OTLP_PROTOCOL }}
-          OTEL_EXPORTER_OTLP_ENDPOINT: ${{ secrets.OTEL_EXPORTER_OTLP_ENDPOINT }}
-          OTEL_EXPORTER_OTLP_HEADERS: ${{ secrets.OTEL_EXPORTER_OTLP_HEADERS }}
+      - name: Build
+        run: npm --prefix next-ui run build
 
-      # npm publish re-triggers prepublishOnly as a lifecycle hook, which
-      # rebuilds the web-ui from scratch. Without these env vars, the
-      # rebuild produces a bundle with no PostHog key baked in.
       - name: Publish to npm (OIDC trusted publishing)
-        run: npm publish --access public
-        env:
-          POSTHOG_KEY: ${{ secrets.POSTHOG_KEY }}
-          POSTHOG_HOST: ${{ secrets.POSTHOG_HOST }}
-          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-          OTEL_TELEMETRY_ENABLED: ${{ secrets.OTEL_TELEMETRY_ENABLED }}
-          OTEL_LOGS_EXPORTER: otlp
-          OTEL_METRICS_EXPORTER: otlp
-          OTEL_EXPORTER_OTLP_PROTOCOL: ${{ secrets.OTEL_EXPORTER_OTLP_PROTOCOL }}
-          OTEL_EXPORTER_OTLP_ENDPOINT: ${{ secrets.OTEL_EXPORTER_OTLP_ENDPOINT }}
-          OTEL_EXPORTER_OTLP_HEADERS: ${{ secrets.OTEL_EXPORTER_OTLP_HEADERS }}
+        run: npm --prefix next-ui publish --access public
 
       - name: Extract changelog entry for release
         id: changelog
@@ -139,25 +115,3 @@ jobs:
 
             ${{ steps.compare.outputs.link }}
           prerelease: ${{ contains(steps.resolve_tag.outputs.tag, '-') }}
-
-      - name: Post release to Slack
-        uses: slackapi/slack-github-action@v3.0.1
-        with:
-          method: chat.postMessage
-          token: ${{ secrets.SLACK_RELEASE_BOT_TOKEN }}
-          payload: |
-            channel: "C0APVKGGZFC"
-            text: "Kanban ${{ steps.resolve_tag.outputs.tag }}"
-            blocks:
-              - type: "section"
-                text:
-                  type: "mrkdwn"
-                  text: "*Kanban ${{ steps.resolve_tag.outputs.tag }}*"
-              - type: "section"
-                text:
-                  type: "mrkdwn"
-                  text: ${{ toJSON(steps.changelog.outputs.body) }}
-              - type: "context"
-                elements:
-                  - type: "mrkdwn"
-                    text: "${{ steps.compare.outputs.link }}"

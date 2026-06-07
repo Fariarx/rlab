@@ -1,5 +1,5 @@
 import { Box, Stack, Typography } from "@mui/material";
-import { type ReactNode } from "react";
+import type { ReactNode } from "react";
 
 /**
  * EmptyState — an empty placeholder: a dashed, muted frame with a monospace

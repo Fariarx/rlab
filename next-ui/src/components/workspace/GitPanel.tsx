@@ -9,8 +9,8 @@ import RemoveIcon from "@mui/icons-material/Remove";
 import { Alert, Box, Chip, CircularProgress, Collapse, Stack, Tab, Tabs, type Theme, Tooltip, Typography } from "@mui/material";
 import { type ReactNode, type RefObject, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type I18nApi, useI18n } from "../../i18n/I18nProvider";
-import { type GitFileStatus, type GitStatusPayload } from "../../lib/git-status";
-import { type DiffBlock, type ReviewCommentEntry } from "../agent";
+import type { GitFileStatus, GitStatusPayload } from "../../lib/git-status";
+import type { DiffBlock, ReviewCommentEntry } from "../agent";
 import { Button, EmptyState, IconButton } from "../ui";
 import { countDiffChanges, type DiffViewerLine, GitDiffLines, gitDiffViewerLinesFromBlock, gitDiffViewerLinesFromUnified } from "./GitDiffViewer";
 

@@ -1,4 +1,4 @@
-import { type AgentBlock, type ChatMessage, type ComposerDraft, type ConversationSummary, type Project } from "../components/agent/types";
+import type { AgentBlock, ChatMessage, ComposerDraft, ConversationSummary, Project } from "../components/agent/types";
 import { normalizeAgentProfile } from "./agent-catalog";
 import { cloneAppSettings, defaultAppSettings, type AppSettings } from "./app-settings";
 import { buildInitialThreads, initialChats, initialProjects } from "./workspace-sample-data";
@@ -12,6 +12,8 @@ export interface WorkspaceState {
   readonly settings: AppSettings;
 }
 
+/** The seeded demo workspace (sample conversations/projects). Only used in
+ *  development or behind the demo flag — see {@link isDemoWorkspaceEnabled}. */
 export function buildInitialWorkspaceState(): WorkspaceState {
   return {
     chats: [...initialChats],
@@ -22,6 +24,18 @@ export function buildInitialWorkspaceState(): WorkspaceState {
     threads: buildInitialThreads(),
     composerDrafts: {},
     selectedId: "chat-2",
+    settings: cloneAppSettings(defaultAppSettings),
+  };
+}
+
+/** A clean, empty workspace — the production default (no demo conversations). */
+export function buildEmptyWorkspaceState(): WorkspaceState {
+  return {
+    chats: [],
+    projects: [],
+    threads: {},
+    composerDrafts: {},
+    selectedId: "",
     settings: cloneAppSettings(defaultAppSettings),
   };
 }

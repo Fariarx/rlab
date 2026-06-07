@@ -1,6 +1,6 @@
 import { Box, Stack, Typography } from "@mui/material";
-import { type ReactNode } from "react";
-import { type StatusKey } from "../../theme/tokens";
+import type { ReactNode } from "react";
+import type { StatusKey } from "../../theme/tokens";
 
 /**
  * Metric — a micro-labelled headline number rendered in monospace (the `68%`

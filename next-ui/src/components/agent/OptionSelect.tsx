@@ -5,7 +5,7 @@ import { useI18n } from "../../i18n/I18nProvider";
 import { Button } from "../ui";
 import { pop } from "./anim";
 import { StatusNote } from "./parts";
-import { type OptionsBlock } from "./types";
+import type { OptionsBlock } from "./types";
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);

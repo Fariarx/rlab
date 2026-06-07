@@ -3,17 +3,19 @@ import DescriptionOutlinedIcon from "@mui/icons-material/DescriptionOutlined";
 import EditIcon from "@mui/icons-material/Edit";
 import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
 import PsychologyIcon from "@mui/icons-material/Psychology";
+import RefreshIcon from "@mui/icons-material/Refresh";
 import SendIcon from "@mui/icons-material/Send";
 import CloseIcon from "@mui/icons-material/Close";
-import { Box, Collapse, Stack, Typography } from "@mui/material";
-import { type ChangeEvent, type KeyboardEvent, type ReactNode, useState } from "react";
+import { Box, ButtonBase, Collapse, Stack, Typography } from "@mui/material";
+import { type ChangeEvent, type KeyboardEvent, type ReactNode, useId, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import { Button, IconButton, Tooltip } from "../ui";
 import { AgentBlockRenderer } from "./AgentBlockRenderer";
+import { DiffCard } from "./DiffCard";
 import { rise } from "./anim";
-import { type MessageActionHandlers } from "./message-actions";
+import type { MessageActionHandlers } from "./message-actions";
 import { AgentAvatar, TypingDots, UserAvatar } from "./parts";
-import { type AgentBlock, type ChatMessage } from "./types";
+import type { AgentBlock, ChatMessage, DiffBlock } from "./types";
 import { formatCostUsd, formatTokenUsage } from "./usage-cost";
 
 /**
@@ -86,7 +88,7 @@ function MessageActionBar({
   readonly actions?: MessageActionHandlers;
 }) {
   const { t } = useI18n();
-  if (!actions?.onCopy) {
+  if (!actions?.onCopy && !actions?.onRetry) {
     return null;
   }
 
@@ -97,6 +99,13 @@ function MessageActionBar({
           <ContentCopyIcon sx={{ fontSize: 14 }} />
         </IconButton>
       </Tooltip>
+      {actions?.onRetry && (
+        <Tooltip title={t("retryMessage")}>
+          <IconButton aria-label={t("retryMessage")} onClick={() => actions.onRetry?.(message)} sx={messageActionButtonSx}>
+            <RefreshIcon sx={{ fontSize: 14 }} />
+          </IconButton>
+        </Tooltip>
+      )}
     </Stack>
   );
 }
@@ -128,8 +137,6 @@ function UserMessage({ message, delay, actions }: { readonly message: ChatMessag
               p: 1.5,
               borderRadius: (t) => `${t.custom.radii.lg}px`,
               backgroundColor: (t) => t.custom.surfaces.s2,
-              border: (t) => `1px solid ${t.custom.borders.focus}`,
-              boxShadow: "0 6px 22px rgba(0, 0, 0, 0.32)",
             }}
           >
             <Stack spacing={1.25}>
@@ -156,7 +163,7 @@ function UserMessage({ message, delay, actions }: { readonly message: ChatMessag
                   width: "100%",
                   minHeight: 120,
                   resize: "vertical",
-                  border: (t) => `1px solid ${t.custom.borders.subtle}`,
+                  border: 0,
                   borderRadius: (t) => `${t.custom.radii.md}px`,
                   bgcolor: (t) => t.custom.surfaces.s1,
                   color: "text.primary",
@@ -165,10 +172,7 @@ function UserMessage({ message, delay, actions }: { readonly message: ChatMessag
                   lineHeight: 1.6,
                   p: 1.5,
                   outline: 0,
-                  "&:focus": {
-                    borderColor: (t) => t.custom.borders.focus,
-                    boxShadow: (t) => `0 0 0 1px ${t.custom.borders.focus}`,
-                  },
+                  "&:focus": { outline: 0 },
                 }}
               />
               <Stack direction="row" spacing={1} sx={{ justifyContent: "flex-end", alignItems: "center" }}>
@@ -234,10 +238,33 @@ function UserMessage({ message, delay, actions }: { readonly message: ChatMessag
   );
 }
 
-// The agent's actual reply / things the user must act on stay visible; all the
-// intermediate work (reasoning, tool calls, commands, diffs, searches, plans,
-// code, status, citations) is folded into one collapsed container.
+// The agent's actual reply / things the user must act on stay visible; the
+// intermediate work (reasoning, tool calls, commands, searches, plans, code,
+// status, citations) is folded into one collapsed container. File diffs are
+// pulled out separately and shown under the reply once the turn is done.
 const ANSWER_BLOCK_KINDS: ReadonlySet<AgentBlock["kind"]> = new Set(["text", "options", "approval", "suggested"]);
+const DIFF_KIND: AgentBlock["kind"] = "diff";
+
+/** Whether the agent turn is still producing output (so diffs aren't surfaced
+ *  until the turn settles). */
+function isMessageLive(blocks: readonly AgentBlock[]): boolean {
+  return blocks.some((block) => {
+    switch (block.kind) {
+      case "text":
+        return block.streaming === true;
+      case "reasoning":
+        return block.active === true;
+      case "tool":
+      case "command":
+      case "search":
+        return block.state === "running";
+      case "plan":
+        return block.steps.some((step) => step.state === "running");
+      default:
+        return false;
+    }
+  });
+}
 
 export interface MessageDisplayPrefs {
   readonly showTokens: boolean;
@@ -284,6 +311,7 @@ function AgentUsageMeta({ message, displayPrefs }: { readonly message: ChatMessa
  *  threads stay readable — only the answer and the (collapsed) details show. */
 function AgentDetails({ blocks, actions, autoExpand = false }: { readonly blocks: readonly AgentBlock[]; readonly actions?: MessageActionHandlers; readonly autoExpand?: boolean }) {
   const [open, setOpen] = useState(false);
+  const detailsId = useId();
   const { t } = useI18n();
   const reasoning = blocks.find((block) => block.kind === "reasoning");
   const reasoningDuration = reasoning?.kind === "reasoning" ? reasoning.duration : undefined;
@@ -294,24 +322,46 @@ function AgentDetails({ blocks, actions, autoExpand = false }: { readonly blocks
   // While the agent is actively thinking, follow the auto-expand setting; once
   // it's done, respect the user's manual toggle (collapsed by default).
   const isOpen = expandable && (active ? autoExpand : open);
+  const headerContent = (
+    <>
+      <PsychologyIcon sx={{ fontSize: 16, color: "text.secondary", flex: "0 0 auto" }} />
+      <Typography variant="microLabel" sx={{ color: "text.secondary", flex: 1, minWidth: 0 }}>
+        {reasoningDuration ? t("reasoningThoughtFor", { duration: reasoningDuration }) : t("reasoning")}
+      </Typography>
+      {active && <TypingDots />}
+      {expandable && <KeyboardArrowDownIcon sx={{ fontSize: 18, color: "text.secondary", transition: "transform 180ms ease", transform: isOpen ? "rotate(180deg)" : "none" }} />}
+    </>
+  );
+  const headerSx = {
+    alignItems: "center",
+    display: "flex",
+    gap: 1.25,
+    justifyContent: "flex-start",
+    px: 1.5,
+    py: 1,
+    textAlign: "left",
+    width: "100%",
+  } as const;
 
   return (
     <Box sx={{ borderRadius: (t) => `${t.custom.radii.md}px`, border: (t) => `1px dashed ${t.custom.borders.subtle}`, backgroundColor: (t) => t.custom.surfaces.s1, overflow: "hidden" }}>
-      <Stack
-        direction="row"
-        spacing={1.25}
-        onClick={expandable ? () => setOpen((value) => !value) : undefined}
-        sx={{ alignItems: "center", px: 1.5, py: 1, cursor: expandable ? "pointer" : "default", "&:hover": expandable ? { backgroundColor: (t) => t.custom.surfaces.s3 } : undefined }}
-      >
-        <PsychologyIcon sx={{ fontSize: 16, color: "text.secondary" }} />
-        <Typography variant="microLabel" sx={{ color: "text.secondary", flex: 1, minWidth: 0 }}>
-          {reasoningDuration ? t("reasoningThoughtFor", { duration: reasoningDuration }) : t("reasoning")}
-        </Typography>
-        {active && <TypingDots />}
-        {expandable && <KeyboardArrowDownIcon sx={{ fontSize: 18, color: "text.secondary", transition: "transform 180ms ease", transform: isOpen ? "rotate(180deg)" : "none" }} />}
-      </Stack>
+      {expandable ? (
+        <ButtonBase
+          aria-controls={detailsId}
+          aria-expanded={isOpen}
+          onClick={() => setOpen((value) => !value)}
+          sx={{ ...headerSx, "&:hover": { backgroundColor: (t) => t.custom.surfaces.s3 } }}
+          type="button"
+        >
+          {headerContent}
+        </ButtonBase>
+      ) : (
+        <Stack direction="row" sx={headerSx}>
+          {headerContent}
+        </Stack>
+      )}
       <Collapse in={isOpen} unmountOnExit>
-        <Stack spacing={1.25} sx={{ px: 1.5, py: 1.5, borderTop: (t) => `1px dashed ${t.custom.borders.subtle}` }}>
+        <Stack id={detailsId} spacing={1.25} sx={{ px: 1.5, py: 1.5, borderTop: (t) => `1px dashed ${t.custom.borders.subtle}` }}>
           {blocks.map((block, index) =>
             block.kind === "reasoning" ? (
               <Typography
@@ -340,8 +390,10 @@ const DEFAULT_DISPLAY_PREFS: MessageDisplayPrefs = { showTokens: true, showCost:
 function AgentMessage({ message, delay, actions, displayPrefs = DEFAULT_DISPLAY_PREFS }: { readonly message: ChatMessage; readonly delay: number; readonly actions?: MessageActionHandlers; readonly displayPrefs?: MessageDisplayPrefs }) {
   const { t } = useI18n();
   const blocks = message.blocks ?? [];
-  const detailBlocks = blocks.filter((block) => !ANSWER_BLOCK_KINDS.has(block.kind));
+  const diffBlocks = blocks.filter((block): block is DiffBlock => block.kind === DIFF_KIND);
+  const detailBlocks = blocks.filter((block) => !ANSWER_BLOCK_KINDS.has(block.kind) && block.kind !== DIFF_KIND);
   const answerBlocks = blocks.filter((block) => ANSWER_BLOCK_KINDS.has(block.kind));
+  const live = isMessageLive(blocks);
   return (
     <Stack direction="row" spacing={1.25} sx={{ alignItems: "flex-start", ...rise(delay), ...revealActionsOnHover }}>
       <AgentAvatar />
@@ -375,7 +427,18 @@ function AgentMessage({ message, delay, actions, displayPrefs = DEFAULT_DISPLAY_
             </Box>
           ))}
         </Stack>
-        <MessageActionBar message={message} actions={actions ? { onCopy: actions.onCopy } : undefined} />
+        {/* File changes from the turn: shown under the reply once the agent is
+            done (not folded into the reasoning container), above the copy action. */}
+        {!live && diffBlocks.length > 0 && (
+          <Stack spacing={1} sx={{ mt: 1.25 }}>
+            {diffBlocks.map((block, index) => (
+              <Box key={`diff-${index}`} sx={rise(delay + 260 + index * 90)}>
+                <DiffCard block={block} />
+              </Box>
+            ))}
+          </Stack>
+        )}
+        <MessageActionBar message={message} actions={actions ? { onCopy: actions.onCopy, onRetry: actions.onRetry } : undefined} />
       </Box>
     </Stack>
   );

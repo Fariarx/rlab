@@ -11,7 +11,7 @@ import { Box, InputBase, Menu, MenuItem, Stack, Switch, type SxProps, type Theme
 import { type ChangeEvent, type ClipboardEvent, forwardRef, type KeyboardEvent, type MouseEvent, type ReactNode, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import { Button, IconButton, KeyHint } from "../ui";
-import { type ComposerAttachmentDraft, type ComposerDraft } from "./types";
+import type { ComposerAttachmentDraft, ComposerDraft } from "./types";
 
 /** Pastes longer than this become a text-file attachment instead of flooding the input. */
 const PASTE_AS_FILE_CHARS = 1500;

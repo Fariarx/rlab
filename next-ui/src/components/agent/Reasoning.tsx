@@ -6,7 +6,7 @@ import { useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import { shimmer } from "./anim";
 import { TypingDots } from "./parts";
-import { type ReasoningBlock } from "./types";
+import type { ReasoningBlock } from "./types";
 
 const ShimmerText = styled("span")(({ theme }) => ({
   fontFamily: theme.custom.fonts.mono,

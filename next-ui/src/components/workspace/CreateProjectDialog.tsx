@@ -3,7 +3,7 @@ import { Alert, Dialog, DialogActions, DialogContent, DialogTitle, Stack, TextFi
 import { useEffect, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import { Button } from "../ui";
-import { type CreateProjectInput } from "./use-workspace";
+import type { CreateProjectInput } from "./use-workspace";
 
 interface CreateProjectDialogProps {
   readonly open: boolean;

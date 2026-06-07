@@ -35,7 +35,7 @@ describe("package scripts", () => {
 
   it("keeps production browser smoke tests scoped away from Vitest unit tests", () => {
     const config = join(process.cwd(), "playwright.config.ts");
-    const spec = join(process.cwd(), "tests", "e2e", "web-ui-smoke.spec.ts");
+    const spec = join(process.cwd(), "tests", "e2e", "api-and-kit-smoke.spec.ts");
 
     expect(existsSync(config)).toBe(true);
     expect(existsSync(spec)).toBe(true);

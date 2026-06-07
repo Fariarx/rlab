@@ -2,7 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { appendFileSync, chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { homedir, tmpdir } from "node:os";
-import { basename, delimiter, dirname, join } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { query, type CanUseTool, type EffortLevel, type Options as ClaudeQueryOptions, type PermissionResult } from "@anthropic-ai/claude-agent-sdk";
@@ -18,7 +18,7 @@ import {
   type AgentAccessMode,
   type Locale,
 } from "./src/lib/app-settings";
-import { buildInitialWorkspaceState, cloneWorkspaceState, type WorkspaceState } from "./src/lib/workspace-state";
+import { buildEmptyWorkspaceState, buildInitialWorkspaceState, cloneWorkspaceState, type WorkspaceState } from "./src/lib/workspace-state";
 import {
   agentProfileEquals,
   claudeAgentNameFromMode,
@@ -47,7 +47,7 @@ import {
   type SearchBlock,
   type SuggestedActionsBlock,
 } from "./src/components/agent/types";
-import { pickDirectoryPathFromSystemDialog } from "../src/server/directory-picker";
+import { pickDirectoryPathFromSystemDialog } from "./src/server/directory-picker";
 
 export { parseGitStatusPorcelain } from "./src/lib/git-status";
 
@@ -61,7 +61,12 @@ export { parseGitStatusPorcelain } from "./src/lib/git-status";
 type AgentStatus = "available" | "running" | "needs-setup" | "unavailable" | "unsupported";
 
 const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url));
-const WORKSPACE_STATE_DIR = join(PLUGIN_DIR, ".data");
+// Persisted workspace state lives under `.data/` next to the plugin by default.
+// `NEXT_UI_DATA_DIR` relocates it — useful when running the prod server as a
+// service (point it at a writable data volume) and for isolating e2e runs.
+const WORKSPACE_STATE_DIR = process.env.NEXT_UI_DATA_DIR
+  ? (isAbsolute(process.env.NEXT_UI_DATA_DIR) ? process.env.NEXT_UI_DATA_DIR : resolve(process.cwd(), process.env.NEXT_UI_DATA_DIR))
+  : join(PLUGIN_DIR, ".data");
 const WORKSPACE_STATE_FILE = join(WORKSPACE_STATE_DIR, "workspace-state.json");
 const WORKSPACE_STATE_LOCK_FILE = join(WORKSPACE_STATE_DIR, "workspace-state.lock");
 const RUN_AUDIT_FILE = join(WORKSPACE_STATE_DIR, "run-audit.ndjson");
@@ -1763,9 +1768,16 @@ export function cancelBackgroundRunRequestState(state: WorkspaceState, runId: st
   };
 }
 
+/** Demo conversations are seeded only in development or with NEXT_UI_DEMO=1; a
+ *  production server starts with a clean, empty workspace. */
+function isDemoWorkspaceEnabled(): boolean {
+  return process.env.NEXT_UI_DEMO === "1" || process.env.NODE_ENV === "development";
+}
+
 function readWorkspaceState(): WorkspaceState {
   if (!existsSync(WORKSPACE_STATE_FILE)) {
-    const initial = normalizeSeedProjectPaths(buildInitialWorkspaceState());
+    const seed = isDemoWorkspaceEnabled() ? buildInitialWorkspaceState() : buildEmptyWorkspaceState();
+    const initial = normalizeSeedProjectPaths(seed);
     writeWorkspaceState(initial);
     return initial;
   }
@@ -3417,6 +3429,9 @@ interface BackgroundRunAccumulator {
   text: string;
   hasText: boolean;
   readonly tools: StreamingTool[];
+  // Reasoning segments and tool calls in arrival order, so they can be rendered
+  // interleaved chronologically rather than all-reasoning-then-all-tools.
+  readonly timeline: Array<{ kind: "reasoning"; text: string } | { readonly kind: "tool"; readonly tool: StreamingTool }>;
   readonly diffs: DiffBlock[];
   readonly plans: StreamingPlan[];
   readonly codes: CodeBlockData[];
@@ -4495,6 +4510,7 @@ function createBackgroundAccumulator(): BackgroundRunAccumulator {
     text: "",
     hasText: false,
     tools: [],
+    timeline: [],
     diffs: [],
     plans: [],
     codes: [],
@@ -4515,21 +4531,30 @@ function backgroundBlocks(accumulator: BackgroundRunAccumulator): AgentBlock[] {
   const codes = accumulator.codes ?? [];
   const searches = accumulator.searches ?? [];
   const suggested = accumulator.suggested ?? [];
-  if (accumulator.hasReasoning) {
-    blocks.push({
-      kind: "reasoning",
-      text: accumulator.reasoning,
-      active: !accumulator.done,
-      duration: accumulator.done ? `${Math.max(1, Math.round((Date.now() - accumulator.start) / 1000))}s` : undefined,
-    });
-  } else if (accumulator.started && !accumulator.done) {
+  // Reasoning segments and tools interleaved in arrival order (chronological).
+  const timeline = accumulator.timeline ?? [];
+  const firstReasoningIdx = timeline.findIndex((item) => item.kind === "reasoning");
+  let lastReasoningIdx = -1;
+  for (let i = timeline.length - 1; i >= 0; i -= 1) {
+    if (timeline[i].kind === "reasoning") {
+      lastReasoningIdx = i;
+      break;
+    }
+  }
+  const reasoningDuration = `${Math.max(1, Math.round((Date.now() - accumulator.start) / 1000))}s`;
+  timeline.forEach((item, idx) => {
+    if (item.kind === "reasoning") {
+      blocks.push({ kind: "reasoning", text: item.text, active: !accumulator.done && idx === lastReasoningIdx, duration: accumulator.done && idx === firstReasoningIdx ? reasoningDuration : undefined });
+    } else {
+      const tool = item.tool;
+      blocks.push(toolToDiffBlock(tool) ?? { kind: "tool", name: tool.name, summary: tool.summary, args: tool.args, state: tool.state, output: tool.output });
+    }
+  });
+  if (firstReasoningIdx === -1 && accumulator.started && !accumulator.done) {
     blocks.push({ kind: "reasoning", text: "", active: true });
   }
   for (const plan of plans) {
     blocks.push({ kind: "plan", steps: plan.steps });
-  }
-  for (const tool of accumulator.tools) {
-    blocks.push(toolToDiffBlock(tool) ?? { kind: "tool", name: tool.name, summary: tool.summary, args: tool.args, state: tool.state, output: tool.output });
   }
   blocks.push(...diffs);
   blocks.push(...codes);
@@ -4867,11 +4892,18 @@ function accumulateBackgroundRunEvent(accumulator: BackgroundRunAccumulator, eve
     case "start":
       accumulator.started = true;
       break;
-    case "reasoning":
+    case "reasoning": {
       accumulator.started = true;
       accumulator.hasReasoning = true;
       accumulator.reasoning += event.text;
+      const last = accumulator.timeline[accumulator.timeline.length - 1];
+      if (last && last.kind === "reasoning") {
+        last.text += event.text;
+      } else {
+        accumulator.timeline.push({ kind: "reasoning", text: event.text });
+      }
       break;
+    }
     case "text":
       accumulator.started = true;
       accumulator.hasText = true;
@@ -4885,7 +4917,9 @@ function accumulateBackgroundRunEvent(accumulator: BackgroundRunAccumulator, eve
         existing.summary = event.summary;
         existing.args = event.args;
       } else {
-        accumulator.tools.push({ id: event.id, name: event.name, summary: event.summary, args: event.args, state: "running" });
+        const tool: StreamingTool = { id: event.id, name: event.name, summary: event.summary, args: event.args, state: "running" };
+        accumulator.tools.push(tool);
+        accumulator.timeline.push({ kind: "tool", tool });
       }
       break;
     }

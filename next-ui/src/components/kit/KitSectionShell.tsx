@@ -1,5 +1,5 @@
 import { Box, Stack, Typography } from "@mui/material";
-import { type ReactNode } from "react";
+import type { ReactNode } from "react";
 
 /**
  * KitSectionShell — shared frame for every showcase section: a micro-label

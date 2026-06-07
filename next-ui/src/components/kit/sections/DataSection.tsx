@@ -1,6 +1,6 @@
 import { Box, CircularProgress, LinearProgress, Skeleton, Stack, Typography } from "@mui/material";
 import { DataTable, Panel, StatusDot, Tag, Timeline, type DataColumn } from "../../ui";
-import { type StatusKey } from "../../../theme/tokens";
+import type { StatusKey } from "../../../theme/tokens";
 import { KitSectionShell } from "../KitSectionShell";
 
 interface AgentRow {

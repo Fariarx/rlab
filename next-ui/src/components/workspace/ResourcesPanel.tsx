@@ -6,7 +6,7 @@ import { Box, Stack, Typography } from "@mui/material";
 import { useMemo, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import { type ConversationResource, collectResources } from "../../lib/conversation-resources";
-import { type ChatMessage } from "../agent";
+import type { ChatMessage } from "../agent";
 import { EmptyState } from "../ui";
 import { ImageLightbox } from "./ImageLightbox";
 import { useWorkspaceUi } from "./workspace-ui";

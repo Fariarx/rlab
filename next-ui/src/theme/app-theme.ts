@@ -1,6 +1,6 @@
 import { createTheme, type Theme } from "@mui/material/styles";
 import { checkboxIcons } from "../components/ui/checkbox-icons";
-import { type DensityMode, type ThemeMode } from "../components/workspace/app-settings";
+import type { DensityMode, ThemeMode } from "../components/workspace/app-settings";
 import { dark, fonts, highContrast, light, microLabel, type ModeTokens, radii } from "./tokens";
 
 /**

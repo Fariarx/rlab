@@ -4,9 +4,9 @@ import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import { useI18n } from "../../i18n/I18nProvider";
 import { type MessageDisplayPrefs, Message } from "./Message";
 import { rise } from "./anim";
-import { type MessageActionHandlers } from "./message-actions";
+import type { MessageActionHandlers } from "./message-actions";
 import { AgentAvatar, TypingDots } from "./parts";
-import { type ChatMessage } from "./types";
+import type { ChatMessage } from "./types";
 
 function hasLiveAgentBlock(message: ChatMessage): boolean {
   if (message.role !== "agent") {
@@ -22,6 +22,9 @@ function hasLiveAgentBlock(message: ChatMessage): boolean {
       }
       if (block.kind === "tool" || block.kind === "command" || block.kind === "search") {
         return block.state === "running";
+      }
+      if (block.kind === "plan") {
+        return block.steps.some((step) => step.state === "running");
       }
       return false;
     }),

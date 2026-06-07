@@ -4,7 +4,7 @@ import { Box, Stack, type SxProps, type Theme, Typography } from "@mui/material"
 import { Highlight, type PrismTheme } from "prism-react-renderer";
 import { useMemo, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
-import { type DiffBlock, type ReviewCommentEntry } from "../agent";
+import type { DiffBlock, ReviewCommentEntry } from "../agent";
 import { Button, IconButton } from "../ui";
 
 type DiffViewerLineKind = "add" | "del" | "ctx" | "meta";

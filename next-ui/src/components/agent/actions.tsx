@@ -10,7 +10,7 @@ import { useI18n } from "../../i18n/I18nProvider";
 import { normalizeAgentToolOutput } from "../../lib/agent-output";
 import { StatusDot } from "../ui";
 import { MessageLink } from "./parts";
-import { type CommandBlock, type RunState, type SearchBlock, type ToolBlock } from "./types";
+import type { CommandBlock, RunState, SearchBlock, ToolBlock } from "./types";
 
 /* ------------------------------ Run indicator ------------------------------- */
 

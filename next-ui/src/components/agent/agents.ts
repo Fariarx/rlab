@@ -1,5 +1,5 @@
-import { type StatusKey } from "../../theme/tokens";
-import { type AgentSystemStatus } from "../../lib/agent-catalog";
+import type { StatusKey } from "../../theme/tokens";
+import type { AgentSystemStatus } from "../../lib/agent-catalog";
 
 export {
   AGENTS,

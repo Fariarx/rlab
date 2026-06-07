@@ -6,7 +6,7 @@ import VpnKeyOutlinedIcon from "@mui/icons-material/VpnKeyOutlined";
 import { Alert, Box, Dialog, Divider, Popover, Radio, Stack, Switch, Tab, Tabs, TextField, ToggleButton, ToggleButtonGroup, Tooltip, Typography } from "@mui/material";
 import { type ReactNode, useEffect, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
-import { type AgentAccessMode, type AppSettings, type AppSettingsPatch, type DensityMode, type Locale, type ThemeMode } from "../workspace/app-settings";
+import type { AgentAccessMode, AppSettings, AppSettingsPatch, DensityMode, Locale, ThemeMode } from "../workspace/app-settings";
 import {
   AGENTS,
   type AgentDef,

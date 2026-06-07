@@ -1,4 +1,4 @@
-import { type ChatMessage, type ConversationSummary, type Project } from "../components/agent/types";
+import type { ChatMessage, ConversationSummary, Project } from "../components/agent/types";
 
 /** The detailed sample thread (flaky-test investigation). */
 const flakyThread: readonly ChatMessage[] = [
