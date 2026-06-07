@@ -22,6 +22,8 @@ function browserSnapshot(overrides: Partial<{
   readonly activeTabId: string;
   readonly url: string;
   readonly title: string;
+  readonly freshness: "synced" | "dirty" | "blocked" | "syncing" | "error";
+  readonly freshnessReason: string;
   readonly screenshot: string;
   readonly viewport: { readonly width: number; readonly height: number };
   readonly updatedAt: string;
@@ -46,6 +48,8 @@ function browserSnapshot(overrides: Partial<{
     tabs: overrides.tabs ?? [{ id: activeTabId, url, title, active: true }],
     url,
     title,
+    freshness: overrides.freshness ?? "synced",
+    ...(overrides.freshnessReason ? { freshnessReason: overrides.freshnessReason } : {}),
     screenshot: overrides.screenshot ?? "data:image/png;base64,iVBORw0KGgo=",
     viewport: overrides.viewport ?? { width: 800, height: 600 },
     updatedAt: overrides.updatedAt ?? "2026-06-07T09:00:00.000Z",
@@ -294,6 +298,53 @@ describe("BrowserPreview", () => {
     expect(await screen.findByTestId("browser-preview-activity")).toHaveTextContent("Click");
     expect(screen.getByTestId("browser-preview-activity")).toHaveTextContent("x=160 y=120");
     expect(screen.getByTestId("browser-preview-action-marker")).toBeInTheDocument();
+  });
+
+  it("shows dirty mirror freshness from the backend instead of claiming full sync", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json(browserSnapshot({ url: "http://localhost:3000/form", title: "Form", freshness: "dirty", freshnessReason: "iframe input" })),
+      ),
+    );
+
+    renderWithTheme(<BrowserPreview sessionId="test-session" active />);
+
+    expect(await screen.findByLabelText("Playwright: страница изменена пользователем")).toBeInTheDocument();
+    expect(screen.getByText("Страница изменена пользователем")).toBeInTheDocument();
+  });
+
+  it("marks the mirror dirty when the user edits same-origin iframe content", async () => {
+    const fetchMock = vi.fn(async (url: string | URL | Request) => {
+      const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+      if (path === "/api/browser/dirty") {
+        return Response.json(browserSnapshot({ url: "http://localhost:3000/form", freshness: "dirty", freshnessReason: "iframe input" }));
+      }
+      return Response.json(browserSnapshot({ url: "http://localhost:3000/form", title: "Form", freshness: "synced" }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderWithTheme(<BrowserPreview sessionId="test-session" active />);
+
+    expect(await screen.findByLabelText("Playwright: синхронизировано")).toBeInTheDocument();
+    const frame = screen.getByTitle("Живой просмотр страницы") as HTMLIFrameElement;
+    const frameDocument = frame.contentDocument;
+    if (!frameDocument) {
+      throw new Error("iframe document is unavailable");
+    }
+    frameDocument.open();
+    frameDocument.write(`<!doctype html><body><input id="field" /></body>`);
+    frameDocument.close();
+    fireEvent.load(frame);
+    const input = frameDocument.querySelector("#field");
+    if (!input) {
+      throw new Error("iframe fixture did not render");
+    }
+
+    fireEvent.input(input);
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/browser/dirty", expect.objectContaining({ method: "POST" })));
+    await waitFor(() => expect(screen.getByLabelText("Playwright: страница изменена пользователем")).toBeInTheDocument());
   });
 
   it("hydrates existing agent browser state when the preview tab opens", async () => {

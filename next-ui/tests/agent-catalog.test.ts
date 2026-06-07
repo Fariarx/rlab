@@ -19,19 +19,13 @@ describe("agent catalog", () => {
     expect(resolveAgentReasoningValue("codex", "xhigh")).toBe("xhigh");
   });
 
-  it("exposes practical work modes separately from models and reasoning", () => {
-    expect(getAgent("claude-code").modes.map((option) => option.id)).toEqual(["default", "plan", "auto-edit"]);
-    expect(resolveAgentModeValue("claude-code", "auto-edit")).toBe("acceptEdits");
-
-    expect(getAgent("codex").modes.map((option) => option.id)).toEqual(["default", "plan", "review"]);
-    expect(resolveAgentModeValue("codex", "plan")).toBe("plan");
-    expect(resolveAgentModeValue("codex", "review")).toBe("review");
-
-    expect(getAgent("gemini").modes.map((option) => option.id)).toEqual(["default", "plan"]);
-    expect(resolveAgentModeValue("gemini", "plan")).toBe("plan");
-
-    expect(getAgent("opencode").modes.map((option) => option.id)).toEqual(["default", "build", "plan", "explore", "general", "summary"]);
-    expect(resolveAgentModeValue("opencode", "explore")).toBe("explore");
+  it("no longer exposes per-message work modes (agents run on access mode only)", () => {
+    for (const agent of ["claude-code", "codex", "gemini", "opencode"] as const) {
+      expect(getAgent(agent).modes.map((option) => option.id)).toEqual(["default"]);
+    }
+    // Removed modes normalize away — no stale value resolves.
+    expect(resolveAgentModeValue("codex", "review")).toBeUndefined();
+    expect(resolveAgentModeValue("opencode", "explore")).toBeUndefined();
   });
 
   it("only exposes the four currently supported visible agents", () => {

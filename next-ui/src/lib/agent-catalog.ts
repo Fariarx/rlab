@@ -60,29 +60,9 @@ export const DEFAULT_AGENT_OPTION_ID = "default";
 const DEFAULT_OPTION: AgentOption = { id: DEFAULT_AGENT_OPTION_ID, label: "Default" };
 const DEFAULT_ONLY = [DEFAULT_OPTION] as const;
 export const CLAUDE_AGENT_MODE_PREFIX = "claude-agent:";
-// Permission-level modes (Auto, Bypass Permissions) are intentionally omitted —
-// filesystem access is governed by the next-ui access mode (read-only vs
-// unrestricted), not a per-message work mode.
-const CLAUDE_MODE_OPTIONS = [
-  DEFAULT_OPTION,
-  { id: "plan", label: "Plan", value: "plan" },
-  { id: "auto-edit", label: "Auto Edit", value: "acceptEdits" },
-] as const;
-const CODEX_MODE_OPTIONS = [DEFAULT_OPTION, { id: "plan", label: "Plan", value: "plan" }, { id: "review", label: "Review", value: "review" }] as const;
-// Permission-level modes (Auto Edit, YOLO) are omitted — filesystem access is
-// governed by the next-ui access mode (read-only vs unrestricted).
-const GEMINI_MODE_OPTIONS = [
-  DEFAULT_OPTION,
-  { id: "plan", label: "Plan", value: "plan" },
-] as const;
-const OPENCODE_MODE_OPTIONS = [
-  DEFAULT_OPTION,
-  { id: "build", label: "Build", value: "build" },
-  { id: "plan", label: "Plan", value: "plan" },
-  { id: "explore", label: "Explore", value: "explore" },
-  { id: "general", label: "General", value: "general" },
-  { id: "summary", label: "Summary", value: "summary" },
-] as const;
+// Per-message work modes were removed — filesystem access is governed solely by
+// the next-ui access mode (read-only vs unrestricted). Every agent now exposes
+// only the "default" work mode.
 const OPENCODE_INTERNAL_AGENT_IDS = new Set(["title", "compaction"]);
 const CLAUDE_INTERNAL_AGENT_IDS = new Set(["statusline-setup"]);
 const CLAUDE_REASONING_OPTIONS = [
@@ -127,7 +107,6 @@ const OPENCODE_MODEL_OPTIONS = [
   { id: DEFAULT_AGENT_OPTION_ID, label: "Default", value: "opencode/deepseek-v4-flash-free" },
   { id: "opencode-big-pickle", label: "OpenCode Big Pickle", value: "opencode/big-pickle" },
   { id: "opencode-mimo-v2.5-free", label: "Mimo v2.5 Free", value: "opencode/mimo-v2.5-free" },
-  { id: "opencode-minimax-m3-free", label: "MiniMax M3 Free", value: "opencode/minimax-m3-free" },
   { id: "opencode-nemotron-3-ultra-free", label: "Nemotron 3 Ultra Free", value: "opencode/nemotron-3-ultra-free" },
   { id: "anthropic-claude-opus-4-8", label: "Claude Opus 4.8", value: "anthropic/claude-opus-4-8" },
   { id: "anthropic-claude-opus-4-8-fast", label: "Claude Opus 4.8 Fast", value: "anthropic/claude-opus-4-8-fast" },
@@ -154,7 +133,7 @@ export const AGENTS: readonly AgentDef[] = [
     accent: "#D2A24C",
     models: CLAUDE_MODEL_OPTIONS,
     reasoning: CLAUDE_REASONING_OPTIONS,
-    modes: CLAUDE_MODE_OPTIONS,
+    modes: DEFAULT_ONLY,
   },
   {
     id: "codex",
@@ -169,10 +148,10 @@ export const AGENTS: readonly AgentDef[] = [
       { id: "gpt-5.5", label: "GPT-5.5", value: "gpt-5.5" },
       { id: "gpt-5.4", label: "GPT-5.4", value: "gpt-5.4" },
       { id: "gpt-5.4-mini", label: "GPT-5.4 Mini", value: "gpt-5.4-mini" },
-      { id: "gpt-5.3-codex-spark", label: "GPT-5.3 Codex Spark", value: "gpt-5.3-codex-spark" },
+      { id: "gpt-5.3-codex", label: "GPT-5.3 Codex", value: "gpt-5.3-codex" },
     ],
     reasoning: CODEX_REASONING_OPTIONS,
-    modes: CODEX_MODE_OPTIONS,
+    modes: DEFAULT_ONLY,
   },
   {
     id: "gemini",
@@ -184,7 +163,7 @@ export const AGENTS: readonly AgentDef[] = [
     accent: "#4C8DF6",
     models: GEMINI_MODEL_OPTIONS,
     reasoning: DEFAULT_ONLY,
-    modes: GEMINI_MODE_OPTIONS,
+    modes: DEFAULT_ONLY,
   },
   {
     id: "opencode",
@@ -196,7 +175,7 @@ export const AGENTS: readonly AgentDef[] = [
     accent: "#8B5CF6",
     models: OPENCODE_MODEL_OPTIONS,
     reasoning: CLAUDE_REASONING_OPTIONS,
-    modes: OPENCODE_MODE_OPTIONS,
+    modes: DEFAULT_ONLY,
   },
 ];
 

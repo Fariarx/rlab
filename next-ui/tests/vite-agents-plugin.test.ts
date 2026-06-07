@@ -34,6 +34,7 @@ import {
   parseRunInputPayload,
   parseAttachmentUploadPayload,
   parseBrowserActionPayload,
+  parseBrowserDirtyPayload,
   parseBrowserSessionPayload,
   parseBrowserSyncPayload,
   parseAgentConfigPayload,
@@ -705,32 +706,10 @@ Built-in agents:
     ]);
   });
 
-  it("builds Codex review mode through the real review subcommand", () => {
-    expect(buildCodexRunArgs({ prompt: "review auth changes", model: "gpt-5.5", reasoning: "high", mode: "review", accessMode: "read-only" })).toEqual([
-      "exec",
-      "review",
-      "--json",
-      "--skip-git-repo-check",
-      "--model",
-      "gpt-5.5",
-      "-c",
-      'model_reasoning_effort="high"',
-      "review auth changes",
-    ]);
-  });
-
-  it("builds Codex plan mode as a read-only planning run", () => {
-    const args = buildCodexRunArgs({ prompt: "fix flaky auth tests", model: "default", reasoning: "default", mode: "plan", accessMode: "unrestricted" });
-
-    expect(args.slice(0, 5)).toEqual(["exec", "--json", "--sandbox", "read-only", "--skip-git-repo-check"]);
-    expect(args).not.toContain("--dangerously-bypass-approvals-and-sandbox");
-    expect(args.at(-1)).toContain("Plan mode is active.");
-    expect(args.at(-1)).toContain("fix flaky auth tests");
-  });
-
   it("maps agent access mode into CLI safety flags", () => {
     expect(buildClaudeRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" })).toContain("--dangerously-skip-permissions");
-    expect(buildClaudeRunArgs({ prompt: "hello", model: "opus", reasoning: "max", mode: "plan", accessMode: "unrestricted" })).toEqual([
+    // Read-only access maps to Claude's plan permission mode.
+    expect(buildClaudeRunArgs({ prompt: "hello", model: "opus", reasoning: "max", mode: "default", accessMode: "read-only" })).toEqual([
       "-p",
       "hello",
       "--output-format",
@@ -781,8 +760,8 @@ Built-in agents:
     expect(buildGeminiRunArgs({ prompt: "hello", model: "gemini-2.5-flash-lite", reasoning: "default", mode: "default", accessMode: "read-only" })).toContain("gemini-2.5-flash-lite");
   });
 
-  it("maps Gemini work modes into real approval modes", () => {
-    // Unrestricted + default -> yolo (the agent's "do anything" approval mode).
+  it("maps access mode into real Gemini approval modes", () => {
+    // Unrestricted -> yolo (the agent's "do anything" approval mode).
     expect(buildGeminiRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" })).toEqual([
       "--prompt",
       "hello",
@@ -792,16 +771,18 @@ Built-in agents:
       "yolo",
       "--skip-trust",
     ]);
-    expect(buildGeminiRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "plan", accessMode: "unrestricted" })).toContain("plan");
+    // Read-only -> plan (hard-enforced read-only at the tool layer).
     expect(buildGeminiRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "read-only" })).toContain("plan");
   });
 
-  it("builds OpenCode args with a concrete default model, reasoning variant, and no permission bypass", () => {
+  it("builds OpenCode read-only args with the plan agent, default model, and reasoning variant", () => {
     expect(buildOpenCodeRunArgs({ prompt: "hello", model: "default", reasoning: "high", mode: "default", accessMode: "read-only" })).toEqual([
       "run",
       "--format",
       "json",
       "--thinking",
+      "--agent",
+      "plan",
       "--model",
       "opencode/deepseek-v4-flash-free",
       "--variant",
@@ -817,6 +798,8 @@ Built-in agents:
       "--format",
       "json",
       "--thinking",
+      "--agent",
+      "plan",
       "--model",
       "anthropic/claude-opus-4-7",
       "hello",
@@ -828,14 +811,23 @@ Built-in agents:
     expect(buildOpenCodeRunArgs({ prompt: "hello", model: "anthropic/claude-custom-lab", reasoning: "default", mode: "default", accessMode: "read-only" })).toContain("anthropic/claude-custom-lab");
   });
 
-  it("maps OpenCode work modes into the real agent flag", () => {
-    expect(buildOpenCodeRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "explore", accessMode: "read-only" })).toEqual([
+  it("does not bypass permissions for OpenCode read-only runs", () => {
+    expect(buildOpenCodeRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "read-only" })).not.toContain("--dangerously-skip-permissions");
+    expect(buildOpenCodeRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" })).not.toContain("--agent");
+  });
+
+  it("normalizes away removed work modes (no per-mode agent flag)", () => {
+    // Work modes were removed; a stale `explore` mode normalizes to default and
+    // read-only still uses the plan agent, never a per-mode `--agent explore`.
+    const args = buildOpenCodeRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "explore", accessMode: "read-only" });
+    expect(args).not.toContain("explore");
+    expect(args).toEqual([
       "run",
       "--format",
       "json",
       "--thinking",
       "--agent",
-      "explore",
+      "plan",
       "--model",
       "opencode/deepseek-v4-flash-free",
       "hello",
@@ -1769,7 +1761,66 @@ Built-in agents:
       type: "eval",
       script: "document.activeElement?.tagName",
     });
+    expect(parseBrowserActionPayload(JSON.stringify({ sessionId: "c-jwt", type: "navigate", url: " http://localhost:3000/form " }))).toEqual({
+      sessionId: "c-jwt",
+      type: "navigate",
+      url: "http://localhost:3000/form",
+    });
+    expect(parseBrowserActionPayload(JSON.stringify({ sessionId: "c-jwt", type: "go-back" }))).toEqual({ sessionId: "c-jwt", type: "go-back" });
+    expect(parseBrowserActionPayload(JSON.stringify({ sessionId: "c-jwt", type: "go-forward" }))).toEqual({ sessionId: "c-jwt", type: "go-forward" });
+    expect(parseBrowserActionPayload(JSON.stringify({ sessionId: "c-jwt", type: "fill", text: "hello", target: { label: "Search" } }))).toEqual({
+      sessionId: "c-jwt",
+      type: "fill",
+      text: "hello",
+      target: { label: "Search" },
+    });
+    expect(parseBrowserActionPayload(JSON.stringify({ sessionId: "c-jwt", type: "clear", target: { selector: "input[name=q]" } }))).toEqual({
+      sessionId: "c-jwt",
+      type: "clear",
+      target: { selector: "input[name=q]" },
+    });
+    expect(parseBrowserActionPayload(JSON.stringify({ sessionId: "c-jwt", type: "check", target: { role: "checkbox", name: "Remember" } }))).toEqual({
+      sessionId: "c-jwt",
+      type: "check",
+      target: { role: "checkbox", name: "Remember" },
+    });
+    expect(parseBrowserActionPayload(JSON.stringify({ sessionId: "c-jwt", type: "uncheck", target: { label: "Remember" } }))).toEqual({
+      sessionId: "c-jwt",
+      type: "uncheck",
+      target: { label: "Remember" },
+    });
+    expect(parseBrowserActionPayload(JSON.stringify({ sessionId: "c-jwt", type: "select", target: { label: "Country" }, value: "jp" }))).toEqual({
+      sessionId: "c-jwt",
+      type: "select",
+      target: { label: "Country" },
+      value: "jp",
+    });
+    expect(parseBrowserActionPayload(JSON.stringify({ sessionId: "c-jwt", type: "select", target: { label: "Country" }, label: "Japan" }))).toEqual({
+      sessionId: "c-jwt",
+      type: "select",
+      target: { label: "Country" },
+      label: "Japan",
+    });
+    expect(parseBrowserActionPayload(JSON.stringify({ sessionId: "c-jwt", type: "wait-for", target: { selector: "#ready" }, state: "visible" }))).toEqual({
+      sessionId: "c-jwt",
+      type: "wait-for",
+      target: { selector: "#ready" },
+      state: "visible",
+    });
+    expect(parseBrowserActionPayload(JSON.stringify({ sessionId: "c-jwt", type: "wait-for", urlIncludes: "/done" }))).toEqual({
+      sessionId: "c-jwt",
+      type: "wait-for",
+      urlIncludes: "/done",
+    });
+    expect(parseBrowserActionPayload(JSON.stringify({ sessionId: "c-jwt", type: "hover", target: { text: "Menu" } }))).toEqual({
+      sessionId: "c-jwt",
+      type: "hover",
+      target: { text: "Menu" },
+    });
     expect(() => parseBrowserActionPayload(JSON.stringify({ sessionId: "c-jwt", type: "click" }))).toThrow("Browser click target or x and y are required.");
+    expect(() => parseBrowserActionPayload(JSON.stringify({ sessionId: "c-jwt", type: "fill", text: "hello" }))).toThrow("Browser fill target is required.");
+    expect(() => parseBrowserActionPayload(JSON.stringify({ sessionId: "c-jwt", type: "select", target: { label: "Country" } }))).toThrow("Browser select value or label is required.");
+    expect(() => parseBrowserActionPayload(JSON.stringify({ sessionId: "c-jwt", type: "wait-for" }))).toThrow("Browser wait-for target or urlIncludes is required.");
     expect(() => parseBrowserActionPayload(JSON.stringify({ sessionId: "c-jwt", type: "eval", script: "" }))).toThrow("Browser eval script is required.");
     expect(() => parseBrowserActionPayload(JSON.stringify({ sessionId: "c-jwt", type: "eval", script: "x".repeat(8001) }))).toThrow("Browser eval script must be 8000 characters or less.");
     expect(() => parseBrowserActionPayload(JSON.stringify({ sessionId: "c-jwt", type: "click", target: { selector: "#one", text: "Two" } }))).toThrow("Browser action target must include exactly one locator.");
@@ -1780,6 +1831,15 @@ Built-in agents:
       sessionStorage: { step: "2" },
     });
     expect(() => parseBrowserSyncPayload(JSON.stringify({ sessionId: "c-jwt", url: "http://localhost:3000", localStorage: { theme: true } }))).toThrow("Browser storage values must be strings.");
+    expect(parseBrowserDirtyPayload(JSON.stringify({ sessionId: "c-jwt", reason: "iframe input", url: " http://localhost:3000/form " }))).toEqual({
+      sessionId: "c-jwt",
+      reason: "iframe input",
+      url: "http://localhost:3000/form",
+    });
+    expect(parseBrowserDirtyPayload(JSON.stringify({ sessionId: "c-jwt", reason: "cross-origin iframe" }))).toEqual({
+      sessionId: "c-jwt",
+      reason: "cross-origin iframe",
+    });
   });
 
   it("builds structured browser action failures with short target-oriented timeout errors", () => {
@@ -2559,7 +2619,7 @@ Built-in agents:
 
     expect(
       buildClaudeSdkOptions(
-        { agent: "claude-code", model: "opus", reasoning: "max", mode: "plan", prompt: "hello", accessMode: "unrestricted" },
+        { agent: "claude-code", model: "opus", reasoning: "max", mode: "default", prompt: "hello", accessMode: "read-only" },
         "C:/repo",
         controller,
         canUseTool,

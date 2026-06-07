@@ -41,7 +41,6 @@ import {
   Conversation,
   ConversationList,
   ConversationSearch,
-  conversationStatusKey,
   DEFAULT_PROFILE,
   type DiffBlock,
   getAgent,
@@ -62,7 +61,7 @@ import {
 } from "../agent";
 import { dropIn } from "../agent/anim";
 import { SettingsDialog } from "../settings/SettingsDialog";
-import { Button, EmptyState, IconButton, StatusDot, useToast } from "../ui";
+import { Button, EmptyState, IconButton, useToast } from "../ui";
 import { CommandPalette, type CommandPaletteItem } from "./CommandPalette";
 import { CreateProjectDialog } from "./CreateProjectDialog";
 import { BrowserPreview } from "./BrowserPreview";
@@ -261,7 +260,7 @@ export function WorkspacePageView({
   readonly route?: HashRoute;
   readonly onNavigate?: (route: HashRoute) => void;
 }) {
-  const { t, conversationStatus } = useI18n();
+  const { t } = useI18n();
   const { toast } = useToast();
   const statusOf = useAgentStatus();
   const cliInfoOf = useAgentCliInfo();
@@ -609,10 +608,8 @@ export function WorkspacePageView({
     }
   };
 
-  // Work mode is toggled per chat from the composer (not the agent picker).
-  const supportedModes = liveModesOrCatalog(getAgent(profile.agent).modes, cliInfoOf(profile.agent)?.modes)
-    .filter((mode) => mode.id !== "default")
-    .map((mode) => ({ id: mode.id, label: mode.label }));
+  // Per-chat work modes were removed; agents run purely on the access mode.
+  const supportedModes: readonly { readonly id: string; readonly label: string }[] = [];
   const handleModeChange = (modeId: string) => {
     const next = normalizeAgentProfile({ ...profile, mode: modeId });
     setProfile(next);
@@ -1016,9 +1013,6 @@ export function WorkspacePageView({
               >
                 <MenuIcon sx={{ fontSize: 20 }} />
               </IconButton>
-              {selected && (
-                <StatusDot status={conversationStatusKey[selected.status]} label={conversationStatus(selected.status)} pulse={selected.status === "running"} />
-              )}
               <Box sx={{ minWidth: 0 }}>
                 <Typography noWrap sx={{ fontFamily: (t) => t.custom.fonts.mono, fontWeight: 700, fontSize: "0.9rem" }}>
                   {headerTitle}

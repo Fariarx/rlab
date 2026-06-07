@@ -26,5 +26,8 @@
     "lint": "npm --prefix next-ui run lint",
     "test": "npm --prefix next-ui run test",
     "test:e2e": "npm --prefix next-ui run test:e2e"
+  },
+  "devDependencies": {
+    "@openai/codex": "^0.137.0"
   }
 }

@@ -9,18 +9,22 @@ import SendIcon from "@mui/icons-material/Send";
 import { Alert, Box, Button, CircularProgress, IconButton, InputBase, Stack, TextField, ToggleButton, ToggleButtonGroup, Tooltip, Typography } from "@mui/material";
 import { type FormEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactElement, useEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
-import { EmptyState, useToast } from "../ui";
+import { EmptyState, StatusDot, useToast } from "../ui";
 
 interface BrowserViewport {
   readonly width: number;
   readonly height: number;
 }
 
+type BrowserPreviewFreshness = "synced" | "dirty" | "blocked" | "syncing" | "error";
+
 interface BrowserSnapshot {
   readonly sessionId: string;
   readonly activeTabId: string;
   readonly tabs: readonly BrowserTab[];
   readonly latestEvent?: BrowserActivityEvent;
+  readonly freshness: BrowserPreviewFreshness;
+  readonly freshnessReason?: string;
   readonly url: string;
   readonly title: string;
   readonly screenshot?: string;
@@ -42,9 +46,19 @@ type BrowserActivityEventType =
   | "tab.closed"
   | "navigation.started"
   | "navigation.done"
+  | "action.navigate"
+  | "action.go-back"
+  | "action.go-forward"
   | "action.refresh"
   | "action.scroll"
   | "action.click"
+  | "action.fill"
+  | "action.clear"
+  | "action.check"
+  | "action.uncheck"
+  | "action.select"
+  | "action.wait-for"
+  | "action.hover"
   | "action.type"
   | "action.press"
   | "action.eval"
@@ -127,13 +141,18 @@ interface BrowserSyncRequest {
   readonly sessionStorage?: Record<string, string>;
 }
 
+interface BrowserSyncRequestResult {
+  readonly request: BrowserSyncRequest;
+  readonly blockedReason?: string;
+}
+
 interface FrameHistoryState {
   readonly entries: readonly string[];
   readonly index: number;
 }
 
 type PreviewMode = "interact" | "annotate" | "component";
-type MirrorStatus = "idle" | "syncing" | "synced" | "error";
+type MirrorStatus = "idle" | BrowserPreviewFreshness;
 type EventStreamStatus = "idle" | "connected" | "error";
 
 const tooltippedControlSx = { display: "inline-flex", flex: "0 0 auto" } as const;
@@ -209,9 +228,19 @@ function isBrowserActivityEventType(value: unknown): value is BrowserActivityEve
     value === "tab.closed" ||
     value === "navigation.started" ||
     value === "navigation.done" ||
+    value === "action.navigate" ||
+    value === "action.go-back" ||
+    value === "action.go-forward" ||
     value === "action.refresh" ||
     value === "action.scroll" ||
     value === "action.click" ||
+    value === "action.fill" ||
+    value === "action.clear" ||
+    value === "action.check" ||
+    value === "action.uncheck" ||
+    value === "action.select" ||
+    value === "action.wait-for" ||
+    value === "action.hover" ||
     value === "action.type" ||
     value === "action.press" ||
     value === "action.eval" ||
@@ -220,6 +249,10 @@ function isBrowserActivityEventType(value: unknown): value is BrowserActivityEve
     value === "page.error" ||
     value === "network.failed"
   );
+}
+
+function isBrowserPreviewFreshness(value: unknown): value is BrowserPreviewFreshness {
+  return value === "synced" || value === "dirty" || value === "blocked" || value === "syncing" || value === "error";
 }
 
 function isBrowserActivityEvent(value: unknown): value is BrowserActivityEvent {
@@ -252,6 +285,8 @@ function isBrowserSnapshot(value: unknown): value is BrowserSnapshot {
     Array.isArray(value.tabs) &&
     value.tabs.every(isBrowserTab) &&
     (value.latestEvent === undefined || isBrowserActivityEvent(value.latestEvent)) &&
+    isBrowserPreviewFreshness(value.freshness) &&
+    (value.freshnessReason === undefined || typeof value.freshnessReason === "string") &&
     typeof value.url === "string" &&
     typeof value.title === "string" &&
     (value.screenshot === undefined || typeof value.screenshot === "string") &&
@@ -351,24 +386,37 @@ function viewportFromElement(element: HTMLElement, snapshotViewport: BrowserView
   return { width: Math.max(Math.round(bounds.width), 1), height: Math.max(Math.round(bounds.height), 1) };
 }
 
-function browserSyncRequest(frame: HTMLIFrameElement | null, sessionId: string, targetUrl: string): BrowserSyncRequest {
+function readableFrameUrl(frame: HTMLIFrameElement | null): string | null {
   if (!frame?.contentWindow) {
-    return { sessionId, url: targetUrl };
+    return null;
+  }
+  try {
+    return normalizeBrowserPreviewUrl(frame.contentWindow.location.href);
+  } catch {
+    return null;
+  }
+}
+
+function browserSyncRequest(frame: HTMLIFrameElement | null, sessionId: string, targetUrl: string): BrowserSyncRequestResult {
+  if (!frame?.contentWindow) {
+    return { request: { sessionId, url: targetUrl } };
   }
   try {
     const frameWindow = frame.contentWindow;
     const currentUrl = normalizeBrowserPreviewUrl(frameWindow.location.href);
     if (currentUrl !== targetUrl) {
-      return { sessionId, url: targetUrl };
+      return { request: { sessionId, url: targetUrl } };
     }
     return {
-      sessionId,
-      url: currentUrl,
-      localStorage: storageToRecord(frameWindow.localStorage),
-      sessionStorage: storageToRecord(frameWindow.sessionStorage),
+      request: {
+        sessionId,
+        url: currentUrl,
+        localStorage: storageToRecord(frameWindow.localStorage),
+        sessionStorage: storageToRecord(frameWindow.sessionStorage),
+      },
     };
   } catch {
-    return { sessionId, url: targetUrl };
+    return { request: { sessionId, url: targetUrl }, blockedReason: "cross-origin iframe" };
   }
 }
 
@@ -581,6 +629,26 @@ function tabHost(url: string): string {
   }
 }
 
+function mirrorStatusDotStatus(status: MirrorStatus): "running" | "ok" | "warn" | "error" | "idle" {
+  if (status === "syncing") {
+    return "running";
+  }
+  if (status === "synced") {
+    return "ok";
+  }
+  if (status === "dirty" || status === "blocked") {
+    return "warn";
+  }
+  if (status === "error") {
+    return "error";
+  }
+  return "idle";
+}
+
+function mirrorStatusDotPulse(status: MirrorStatus): boolean {
+  return status === "syncing" || status === "dirty" || status === "blocked" || status === "error";
+}
+
 /** A tab favicon with a graceful globe fallback (offline / blocked / blank). */
 function PreviewTabFavicon({ url }: { readonly url: string }) {
   const [failed, setFailed] = useState(false);
@@ -622,11 +690,14 @@ function dispatchLiveInput(element: Element, text: string): boolean {
   if (tagName === "input" || tagName === "textarea") {
     const input = element as HTMLInputElement | HTMLTextAreaElement;
     input.focus();
-    const start = input.selectionStart ?? input.value.length;
-    const end = input.selectionEnd ?? start;
+    const canSelectText = input instanceof view.HTMLTextAreaElement || ["email", "password", "search", "tel", "text", "url"].includes((input as HTMLInputElement).type);
+    const start = canSelectText ? input.selectionStart ?? input.value.length : input.value.length;
+    const end = canSelectText ? input.selectionEnd ?? start : start;
     input.value = `${input.value.slice(0, start)}${text}${input.value.slice(end)}`;
     const nextPosition = start + text.length;
-    input.setSelectionRange(nextPosition, nextPosition);
+    if (canSelectText) {
+      input.setSelectionRange(nextPosition, nextPosition);
+    }
     input.dispatchEvent(new view.InputEvent("input", { bubbles: true, inputType: "insertText", data: text }));
     input.dispatchEvent(new view.Event("change", { bubbles: true }));
     return true;
@@ -639,6 +710,75 @@ function dispatchLiveInput(element: Element, text: string): boolean {
     return true;
   }
   return false;
+}
+
+function dispatchLiveFill(element: Element, text: string): boolean {
+  const document = element.ownerDocument;
+  const view = document.defaultView;
+  if (!view) {
+    return false;
+  }
+  const tagName = element.tagName.toLowerCase();
+  if (tagName === "input" || tagName === "textarea") {
+    const input = element as HTMLInputElement | HTMLTextAreaElement;
+    input.focus();
+    input.value = text;
+    const canSelectText = input instanceof view.HTMLTextAreaElement || ["email", "password", "search", "tel", "text", "url"].includes((input as HTMLInputElement).type);
+    if (canSelectText) {
+      input.setSelectionRange(text.length, text.length);
+    }
+    input.dispatchEvent(new view.InputEvent("input", { bubbles: true, inputType: "insertReplacementText", data: text }));
+    input.dispatchEvent(new view.Event("change", { bubbles: true }));
+    return true;
+  }
+  const editable = element as HTMLElement;
+  if (editable.isContentEditable) {
+    editable.focus();
+    editable.textContent = text;
+    editable.dispatchEvent(new view.InputEvent("input", { bubbles: true, inputType: "insertReplacementText", data: text }));
+    return true;
+  }
+  return false;
+}
+
+function dispatchLiveCheck(element: Element, checked: boolean): boolean {
+  const view = element.ownerDocument.defaultView;
+  if (!view || !(element instanceof view.HTMLInputElement) || (element.type !== "checkbox" && element.type !== "radio")) {
+    return false;
+  }
+  element.focus();
+  element.checked = checked;
+  element.dispatchEvent(new view.Event("input", { bubbles: true }));
+  element.dispatchEvent(new view.Event("change", { bubbles: true }));
+  return true;
+}
+
+function dispatchLiveSelect(element: Element, optionText: string): boolean {
+  const view = element.ownerDocument.defaultView;
+  if (!view || !(element instanceof view.HTMLSelectElement)) {
+    return false;
+  }
+  const option = Array.from(element.options).find((item) => item.value === optionText || item.label === optionText || normalizedLiveText(item.textContent) === optionText);
+  if (!option) {
+    return false;
+  }
+  element.focus();
+  element.value = option.value;
+  element.dispatchEvent(new view.Event("input", { bubbles: true }));
+  element.dispatchEvent(new view.Event("change", { bubbles: true }));
+  return true;
+}
+
+function dispatchLiveHover(element: Element): boolean {
+  const view = element.ownerDocument.defaultView;
+  if (!view) {
+    return false;
+  }
+  const rect = element.getBoundingClientRect();
+  const mouseInit: MouseEventInit = { bubbles: true, cancelable: true, view, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+  element.dispatchEvent(new view.MouseEvent("mouseover", mouseInit));
+  element.dispatchEvent(new view.MouseEvent("mousemove", mouseInit));
+  return true;
 }
 
 function normalizedLiveText(value: string | null | undefined): string {
@@ -830,6 +970,30 @@ function replayBrowserActivityEvent(frame: HTMLIFrameElement | null, event: Brow
     const target = event.target ? resolveLiveTarget(document, event.target) : event.selector ? document.querySelector(event.selector) : document.activeElement;
     return target ? dispatchLiveInput(target, event.text) : false;
   }
+  if (event.type === "action.fill" && event.target && typeof event.text === "string") {
+    const target = resolveLiveTarget(document, event.target);
+    return target ? dispatchLiveFill(target, event.text) : false;
+  }
+  if (event.type === "action.clear" && event.target) {
+    const target = resolveLiveTarget(document, event.target);
+    return target ? dispatchLiveFill(target, "") : false;
+  }
+  if (event.type === "action.check" && event.target) {
+    const target = resolveLiveTarget(document, event.target);
+    return target ? dispatchLiveCheck(target, true) : false;
+  }
+  if (event.type === "action.uncheck" && event.target) {
+    const target = resolveLiveTarget(document, event.target);
+    return target ? dispatchLiveCheck(target, false) : false;
+  }
+  if (event.type === "action.select" && event.target && typeof event.text === "string") {
+    const target = resolveLiveTarget(document, event.target);
+    return target ? dispatchLiveSelect(target, event.text) : false;
+  }
+  if (event.type === "action.hover" && event.target) {
+    const target = resolveLiveTarget(document, event.target);
+    return target ? dispatchLiveHover(target) : false;
+  }
   if (event.type === "action.press" && typeof event.key === "string") {
     let keyDocument = document;
     if (event.target) {
@@ -855,13 +1019,27 @@ function replayBrowserActivityEvent(frame: HTMLIFrameElement | null, event: Brow
 }
 
 function isReplayableBrowserActivityEvent(event: BrowserActivityEvent): boolean {
-  return event.type === "action.click" || event.type === "action.scroll" || event.type === "action.type" || event.type === "action.press" || event.type === "action.eval";
+  return (
+    event.type === "action.click" ||
+    event.type === "action.scroll" ||
+    event.type === "action.fill" ||
+    event.type === "action.clear" ||
+    event.type === "action.check" ||
+    event.type === "action.uncheck" ||
+    event.type === "action.select" ||
+    event.type === "action.hover" ||
+    event.type === "action.type" ||
+    event.type === "action.press" ||
+    event.type === "action.eval"
+  );
 }
 
 export function BrowserPreview({ sessionId, active, onSendAnnotation, bottomInset = 0, openRequest }: BrowserPreviewProps) {
   const { t } = useI18n();
   const { toast } = useToast();
   const frameRef = useRef<HTMLIFrameElement | null>(null);
+  const frameListenerCleanupRef = useRef<(() => void) | null>(null);
+  const suppressFrameDirtyUntilRef = useRef(0);
   const [url, setUrl] = useState("");
   const [liveUrl, setLiveUrl] = useState<string | null>(null);
   const liveUrlRef = useRef<string | null>(null);
@@ -917,16 +1095,35 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, bottomInse
   const canGoBack = frameHistory.index > 0;
   const canGoForward = frameHistory.index >= 0 && frameHistory.index < frameHistory.entries.length - 1;
   const latestPointEvent = [...activityEvents].reverse().find((event) => event.type === "action.click" && event.point);
+  const crossOriginBlocked = mirrorStatus === "blocked" && snapshot?.freshnessReason?.toLowerCase().includes("cross-origin");
   const mirrorStatusText =
-    mirrorStatus === "syncing" ? t("browserPreviewMirrorSyncing") : mirrorStatus === "synced" ? t("browserPreviewMirrorSynced") : t("browserPreviewLiveOnly");
+    mirrorStatus === "syncing"
+      ? t("browserPreviewMirrorSyncing")
+      : mirrorStatus === "synced"
+        ? t("browserPreviewMirrorSynced")
+        : mirrorStatus === "dirty"
+          ? t("browserPreviewMirrorDirty")
+          : crossOriginBlocked
+            ? t("browserPreviewMirrorCrossOrigin")
+            : mirrorStatus === "blocked"
+              ? t("browserPreviewMirrorBlocked")
+              : mirrorStatus === "error"
+                ? t("browserPreviewMirrorError")
+                : t("browserPreviewLiveOnly");
   const playwrightStatusLabel =
     mirrorStatus === "syncing"
       ? t("browserPreviewPlaywrightStatusSyncing")
       : mirrorStatus === "synced"
         ? t("browserPreviewPlaywrightStatusSynced")
-        : mirrorStatus === "error"
-          ? t("browserPreviewPlaywrightStatusError")
-          : t("browserPreviewPlaywrightStatusIdle");
+        : mirrorStatus === "dirty"
+          ? t("browserPreviewPlaywrightStatusDirty")
+          : crossOriginBlocked
+            ? t("browserPreviewPlaywrightStatusCrossOrigin")
+            : mirrorStatus === "blocked"
+              ? t("browserPreviewPlaywrightStatusBlocked")
+              : mirrorStatus === "error"
+                ? t("browserPreviewPlaywrightStatusError")
+                : t("browserPreviewPlaywrightStatusIdle");
 
   const adoptBrowserUrl = (nextUrl: string) => {
     const normalizedUrl = normalizeBrowserPreviewUrl(nextUrl);
@@ -968,10 +1165,16 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, bottomInse
     };
   }, [active, browserInstalled]);
 
-  const applySnapshot = (next: BrowserSnapshot) => {
+  const applySnapshot = (next: BrowserSnapshot, options?: { readonly preserveLocalStale?: boolean }) => {
     setSnapshot(next);
     setTabs(next.tabs);
     setActiveTabId(next.activeTabId);
+    setMirrorStatus((current) => {
+      if (options?.preserveLocalStale && next.freshness === "synced" && (current === "dirty" || current === "blocked")) {
+        return current;
+      }
+      return next.freshness;
+    });
     const latestEvent = next.latestEvent;
     if (latestEvent) {
       setActivityEvents((current) => appendBrowserActivityEvent(current, latestEvent));
@@ -988,11 +1191,10 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, bottomInse
         if (canceled || next === null) {
           return;
         }
-        applySnapshot(next);
+        applySnapshot(next, { preserveLocalStale: true });
         if (!userLiveNavigationStartedRef.current) {
           adoptBrowserUrl(next.url);
         }
-        setMirrorStatus("synced");
         setError(null);
       })
       .catch((operationError: unknown) => {
@@ -1040,6 +1242,7 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, bottomInse
         // missing DOM APIs; treat any failure as "blocked" without tearing the
         // event stream down.
         let replayed = false;
+        suppressFrameDirtyUntilRef.current = Date.now() + 500;
         try {
           replayed = replayBrowserActivityEvent(frameRef.current, parsed);
         } catch {
@@ -1069,7 +1272,7 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, bottomInse
         void loadBrowserState(sessionId, t("browserPreviewInvalidResponse"))
           .then((next) => {
             if (alive && next) {
-              applySnapshot(next);
+              applySnapshot(next, { preserveLocalStale: true });
             }
           })
           .catch(() => undefined);
@@ -1088,20 +1291,108 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, bottomInse
     };
   }, [active, sessionId]);
 
-  const syncMirror = async (targetUrl: string) => {
-    setMirrorStatus("syncing");
-    setError(null);
+  const markMirrorDirty = async (reason: string, dirtyUrl?: string) => {
+    const blocked = reason.toLowerCase().includes("cross-origin") || reason.toLowerCase().includes("storage blocked");
+    setMirrorStatus(blocked ? "blocked" : "dirty");
     try {
-      const next = await postBrowserSnapshot("/api/browser/sync", browserSyncRequest(frameRef.current, sessionId, targetUrl), t("browserPreviewInvalidResponse"));
+      const body = dirtyUrl ? { sessionId, reason, url: dirtyUrl } : { sessionId, reason };
+      const next = await postBrowserSnapshot("/api/browser/dirty", body, t("browserPreviewInvalidResponse"));
       applySnapshot(next);
-      setMirrorStatus("synced");
-      setLiveReplayBlocked(false);
     } catch (operationError) {
       const message = operationError instanceof Error ? operationError.message : String(operationError);
       setMirrorStatus("error");
       setError(t("browserPreviewOpenError", { error: message }));
     }
   };
+
+  const syncMirror = async (targetUrl: string) => {
+    setMirrorStatus("syncing");
+    setError(null);
+    try {
+      const syncRequest = browserSyncRequest(frameRef.current, sessionId, targetUrl);
+      const next = await postBrowserSnapshot("/api/browser/sync", syncRequest.request, t("browserPreviewInvalidResponse"));
+      applySnapshot(next);
+      setLiveReplayBlocked(false);
+      if (syncRequest.blockedReason) {
+        void markMirrorDirty(syncRequest.blockedReason, syncRequest.request.url);
+      }
+    } catch (operationError) {
+      const message = operationError instanceof Error ? operationError.message : String(operationError);
+      setMirrorStatus("error");
+      setError(t("browserPreviewOpenError", { error: message }));
+    }
+  };
+
+  const detachFrameListeners = () => {
+    frameListenerCleanupRef.current?.();
+    frameListenerCleanupRef.current = null;
+  };
+
+  const markDirtyFromFrame = (reason: string) => {
+    if (Date.now() < suppressFrameDirtyUntilRef.current) {
+      return;
+    }
+    const currentUrl = readableFrameUrl(frameRef.current) ?? liveUrlRef.current ?? undefined;
+    void markMirrorDirty(reason, currentUrl);
+  };
+
+  const attachFrameDirtyListeners = (frame: HTMLIFrameElement) => {
+    detachFrameListeners();
+    const frameWindow = frame.contentWindow;
+    if (!frameWindow) {
+      return;
+    }
+    try {
+      const frameDocument = frameWindow.document;
+      const dirtyEvents: ReadonlyArray<readonly [Document | Window, keyof DocumentEventMap | keyof WindowEventMap, string]> = [
+        [frameDocument, "click", "iframe click"],
+        [frameDocument, "input", "iframe input"],
+        [frameDocument, "submit", "iframe submit"],
+        [frameWindow, "scroll", "iframe scroll"],
+        [frameWindow, "popstate", "iframe history"],
+        [frameWindow, "hashchange", "iframe hashchange"],
+      ];
+      const cleanups = dirtyEvents.map(([target, eventName, reason]) => {
+        const listener = () => markDirtyFromFrame(reason);
+        target.addEventListener(eventName, listener, true);
+        return () => target.removeEventListener(eventName, listener, true);
+      });
+      frameListenerCleanupRef.current = () => {
+        for (const cleanup of cleanups) {
+          cleanup();
+        }
+      };
+    } catch {
+      void markMirrorDirty("cross-origin iframe", liveUrlRef.current ?? undefined);
+    }
+  };
+
+  const handleFrameLoad = () => {
+    const frame = frameRef.current;
+    if (!frame) {
+      return;
+    }
+    const currentUrl = readableFrameUrl(frame);
+    if (!currentUrl) {
+      detachFrameListeners();
+      void markMirrorDirty("cross-origin iframe", liveUrlRef.current ?? undefined);
+      return;
+    }
+    attachFrameDirtyListeners(frame);
+    if (currentUrl !== browserPreviewDefaultUrl && liveUrlRef.current && liveUrlRef.current !== currentUrl) {
+      liveUrlRef.current = currentUrl;
+      setLiveUrl(currentUrl);
+      setUrl(currentUrl === browserPreviewDefaultUrl ? "" : currentUrl);
+      setFrameHistory((current) => pushFrameHistory(current, currentUrl));
+      void markMirrorDirty("iframe navigation", currentUrl);
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      detachFrameListeners();
+    };
+  }, []);
 
   const openTarget = (rawUrl: string) => {
     try {
@@ -1216,7 +1507,6 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, bottomInse
       setUrl(tab.url === browserPreviewDefaultUrl ? "" : tab.url);
       setFrameHistory((current) => pushFrameHistory(current, tab.url));
       setFrameKey((current) => current + 1);
-      setMirrorStatus("synced");
       setLiveReplayBlocked(false);
       setError(null);
       clearSelection();
@@ -1398,65 +1688,60 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, bottomInse
             "& input": { height: "100%", boxSizing: "border-box", textAlign: "center", p: 0 },
           }}
         />
-        <Tooltip title={playwrightStatusLabel} enterDelay={0} arrow>
+        {controlTooltip(
+          t("browserPreviewOpen"),
+          <IconButton data-testid="browser-preview-open-button" aria-label={t("browserPreviewOpen")} type="submit" size="small" disabled={mirrorSyncing}>
+            {mirrorSyncing ? <CircularProgress color="inherit" size={18} /> : <OpenInBrowserIcon fontSize="small" />}
+          </IconButton>,
+        )}
+        <Tooltip title={`${t("browserPreviewSyncMirror")} · ${playwrightStatusLabel}`} enterDelay={0} arrow>
           <Box
-            component="span"
-            role="status"
-            aria-label={playwrightStatusLabel}
+            component="button"
+            type="button"
+            data-testid="browser-preview-sync-button"
+            aria-label={`${t("browserPreviewSyncMirror")}: ${playwrightStatusLabel}`}
+            aria-disabled={mirrorSyncing || !liveUrl ? "true" : undefined}
+            onClick={(event) => {
+              event.preventDefault();
+              if (mirrorSyncing || !liveUrl) {
+                return;
+              }
+              void syncMirror(liveUrl);
+            }}
             sx={{
               flex: "0 0 auto",
               position: "relative",
               display: "inline-flex",
               alignItems: "center",
-              gap: 0.55,
+              gap: 0.45,
               height: 24,
               px: 0.75,
               borderRadius: 999,
               border: (theme) => `1px solid ${theme.custom.borders.subtle}`,
               backgroundColor: (theme) => theme.custom.surfaces.s1,
               color: "text.secondary",
+              cursor: mirrorSyncing || !liveUrl ? "default" : "pointer",
               fontFamily: (theme) => theme.custom.fonts.mono,
               fontSize: "0.68rem",
-              fontWeight: 800,
+              fontWeight: 900,
               letterSpacing: 0,
               lineHeight: 1,
+              opacity: mirrorSyncing || !liveUrl ? 0.72 : 1,
+              outline: 0,
+              "&:hover": {
+                borderColor: mirrorSyncing || !liveUrl ? undefined : (theme) => theme.custom.borders.strong,
+                backgroundColor: mirrorSyncing || !liveUrl ? undefined : (theme) => theme.custom.surfaces.s2,
+              },
+              "&:focus-visible": {
+                boxShadow: (theme) => `0 0 0 2px ${theme.palette.primary.main}`,
+              },
             }}
           >
-            <Box
-              component="span"
-              aria-hidden="true"
-              sx={{
-                width: 7,
-                height: 7,
-                borderRadius: "50%",
-                backgroundColor: (theme) =>
-                  mirrorStatus === "syncing"
-                    ? theme.palette.status.running.main
-                    : mirrorStatus === "synced"
-                      ? theme.palette.status.ok.main
-                      : mirrorStatus === "error"
-                        ? theme.palette.status.error.main
-                        : theme.palette.status.idle.main,
-                boxShadow: (theme) =>
-                  mirrorStatus === "syncing"
-                    ? `0 0 0 3px ${theme.palette.status.running.soft}`
-                    : mirrorStatus === "error"
-                      ? `0 0 0 3px ${theme.palette.status.error.soft}`
-                      : "none",
-              }}
-            />
-            PW
-            <Box
-              component="span"
-              aria-hidden="true"
-              sx={{
-                width: 1,
-                height: 12,
-                mx: 0.1,
-                backgroundColor: (theme) => theme.custom.borders.subtle,
-              }}
-            />
-            <Box component="span" aria-hidden="true" sx={{ color: eventStreamStatus === "error" ? "error.main" : "text.secondary" }}>
+            <StatusDot status={mirrorStatusDotStatus(mirrorStatus)} label={playwrightStatusLabel} size="sm" pulse={mirrorStatusDotPulse(mirrorStatus)} />
+            <Box component="span" aria-hidden="true" sx={{ color: "text.primary", fontWeight: 900 }}>
+              pw
+            </Box>
+            <Box component="span" aria-hidden="true" sx={{ color: eventStreamStatus === "error" ? "error.main" : "text.secondary", fontWeight: 900 }}>
               {eventStreamStatus === "connected" ? t("browserPreviewEventsLiveShort") : eventStreamStatus === "error" ? t("browserPreviewEventsErrorShort") : t("browserPreviewEventsIdleShort")}
             </Box>
             <Box component="span" sx={visuallyHiddenSx}>
@@ -1464,20 +1749,6 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, bottomInse
             </Box>
           </Box>
         </Tooltip>
-        {controlTooltip(
-          t("browserPreviewOpen"),
-          <IconButton data-testid="browser-preview-open-button" aria-label={t("browserPreviewOpen")} type="submit" size="small" disabled={mirrorSyncing}>
-            {mirrorSyncing ? <CircularProgress color="inherit" size={18} /> : <OpenInBrowserIcon fontSize="small" />}
-          </IconButton>,
-        )}
-        {liveUrl && (
-          controlTooltip(
-            t("browserPreviewSyncMirror"),
-            <IconButton data-testid="browser-preview-sync-button" aria-label={t("browserPreviewSyncMirror")} size="small" disabled={mirrorSyncing} onClick={() => void syncMirror(liveUrl)}>
-              <RefreshIcon fontSize="small" />
-            </IconButton>,
-          )
-        )}
         <ToggleButtonGroup
           exclusive
           size="small"
@@ -1618,6 +1889,7 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, bottomInse
                 ref={frameRef}
                 src={liveUrl}
                 title={t("browserPreviewLiveFrameTitle")}
+                onLoad={handleFrameLoad}
                 sx={{ display: "block", width: "100%", height: "100%", border: 0, pointerEvents: mode === "interact" ? "auto" : "none" }}
               />
               {mode === "annotate" && (

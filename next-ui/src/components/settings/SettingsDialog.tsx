@@ -18,7 +18,6 @@ import {
   agentStatusKey,
   defaultProfileForAgent,
   normalizeAgentProfile,
-  useAgentCliInfo,
   useAgentStatus,
   useReloadAgentStatus,
 } from "../agent";
@@ -67,21 +66,6 @@ function ProfileToggleRow({
       <TagSelect value={value} options={options} onSelect={onSelect} ariaLabel={ariaLabel} />
     </Box>
   );
-}
-
-function liveModesOrCatalog(catalogOptions: readonly AgentOption[], liveOptions: readonly AgentOption[] | undefined): readonly AgentOption[] {
-  if (!liveOptions?.length) {
-    return catalogOptions;
-  }
-  const seen = new Set(catalogOptions.map((option) => option.id));
-  const merged = [...catalogOptions];
-  for (const option of liveOptions) {
-    if (!seen.has(option.id)) {
-      seen.add(option.id);
-      merged.push(option);
-    }
-  }
-  return merged;
 }
 
 interface AgentConfigInfo {
@@ -240,7 +224,6 @@ function AgentsSection({
   readonly onDefaultProfileChange: (profile: AgentProfile) => void;
 }) {
   const statusOf = useAgentStatus();
-  const cliInfoOf = useAgentCliInfo();
   const reloadAgentStatus = useReloadAgentStatus();
   const { t, agentStatus } = useI18n();
   const [config, setConfig] = useState<AgentConfigResponse>({ agents: {} });
@@ -488,13 +471,6 @@ function AgentsSection({
                   options={a.reasoning}
                   value={defaultProfile.reasoning}
                   onSelect={(reasoning) => selectDefaultProfileOption(a.id, { reasoning })}
-                />
-                <ProfileToggleRow
-                  label={t("defaultWorkMode")}
-                  ariaLabel={t("defaultWorkModeFor", { agent: a.name })}
-                  options={liveModesOrCatalog(a.modes, cliInfoOf(a.id)?.modes)}
-                  value={defaultProfile.mode}
-                  onSelect={(mode) => selectDefaultProfileOption(a.id, { mode })}
                 />
               </Stack>
             )}

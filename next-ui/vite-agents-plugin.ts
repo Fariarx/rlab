@@ -632,7 +632,14 @@ export interface BrowserStorageSnapshot {
 
 export interface BrowserSyncPayload extends BrowserSessionPayload, BrowserStorageSnapshot {}
 
+export interface BrowserDirtyPayload {
+  readonly sessionId: string;
+  readonly reason: string;
+  readonly url?: string;
+}
+
 type BrowserActionRole = Parameters<Page["getByRole"]>[0];
+type BrowserWaitForState = "visible" | "hidden" | "attached" | "detached";
 
 interface BrowserActionFrameTarget {
   readonly framePath?: readonly string[];
@@ -645,9 +652,19 @@ export type BrowserActionTarget =
   | (BrowserActionFrameTarget & { readonly label: string });
 
 export type BrowserActionPayload =
+  | { readonly sessionId: string; readonly tabId?: string; readonly type: "navigate"; readonly url: string }
+  | { readonly sessionId: string; readonly tabId?: string; readonly type: "go-back" }
+  | { readonly sessionId: string; readonly tabId?: string; readonly type: "go-forward" }
   | { readonly sessionId: string; readonly tabId?: string; readonly type: "refresh" }
   | { readonly sessionId: string; readonly tabId?: string; readonly type: "scroll"; readonly deltaY: number; readonly target?: BrowserActionTarget }
   | ({ readonly sessionId: string; readonly tabId?: string; readonly type: "click" } & ({ readonly x: number; readonly y: number } | { readonly target: BrowserActionTarget }))
+  | { readonly sessionId: string; readonly tabId?: string; readonly type: "fill"; readonly text: string; readonly target: BrowserActionTarget }
+  | { readonly sessionId: string; readonly tabId?: string; readonly type: "clear"; readonly target: BrowserActionTarget }
+  | { readonly sessionId: string; readonly tabId?: string; readonly type: "check"; readonly target: BrowserActionTarget }
+  | { readonly sessionId: string; readonly tabId?: string; readonly type: "uncheck"; readonly target: BrowserActionTarget }
+  | ({ readonly sessionId: string; readonly tabId?: string; readonly type: "select"; readonly target: BrowserActionTarget } & ({ readonly value: string } | { readonly label: string }))
+  | ({ readonly sessionId: string; readonly tabId?: string; readonly type: "wait-for" } & ({ readonly target: BrowserActionTarget; readonly state: BrowserWaitForState } | { readonly urlIncludes: string }))
+  | { readonly sessionId: string; readonly tabId?: string; readonly type: "hover"; readonly target: BrowserActionTarget }
   | { readonly sessionId: string; readonly tabId?: string; readonly type: "type"; readonly text: string; readonly selector?: string; readonly target?: BrowserActionTarget }
   | { readonly sessionId: string; readonly tabId?: string; readonly type: "press"; readonly key: string; readonly target?: BrowserActionTarget }
   | { readonly sessionId: string; readonly tabId?: string; readonly type: "eval"; readonly script: string }
@@ -667,9 +684,19 @@ export type BrowserPreviewEventType =
   | "tab.closed"
   | "navigation.started"
   | "navigation.done"
+  | "action.navigate"
+  | "action.go-back"
+  | "action.go-forward"
   | "action.refresh"
   | "action.scroll"
   | "action.click"
+  | "action.fill"
+  | "action.clear"
+  | "action.check"
+  | "action.uncheck"
+  | "action.select"
+  | "action.wait-for"
+  | "action.hover"
   | "action.type"
   | "action.press"
   | "action.eval"
@@ -697,6 +724,8 @@ export interface BrowserPreviewEvent {
   readonly at: string;
 }
 
+export type BrowserPreviewFreshness = "synced" | "dirty" | "blocked" | "syncing" | "error";
+
 export interface BrowserPreviewActionResult {
   readonly ok: boolean;
   readonly action: BrowserActionPayload["type"];
@@ -719,6 +748,8 @@ export interface BrowserPreviewSnapshot {
   readonly activeTabId: string;
   readonly tabs: readonly BrowserPreviewTab[];
   readonly latestEvent?: BrowserPreviewEvent;
+  readonly freshness: BrowserPreviewFreshness;
+  readonly freshnessReason?: string;
   readonly url: string;
   readonly title: string;
   readonly screenshot: string;
@@ -734,6 +765,8 @@ export interface BrowserPreviewState {
   readonly activeTabId: string;
   readonly tabs: readonly BrowserPreviewTab[];
   readonly latestEvent?: BrowserPreviewEvent;
+  readonly freshness: BrowserPreviewFreshness;
+  readonly freshnessReason?: string;
   readonly url: string;
   readonly title: string;
   readonly domTargets: readonly BrowserPreviewDomTarget[];
@@ -752,10 +785,15 @@ export interface BrowserPreviewDomTarget {
   readonly role?: string;
   readonly label?: string;
   readonly text: string;
+  readonly href?: string;
+  readonly testId?: string;
+  readonly ariaName?: string;
   readonly editable?: boolean;
   readonly disabled?: boolean;
   readonly visible?: boolean;
   readonly value?: string;
+  readonly checked?: boolean;
+  readonly selectedOptions?: readonly string[];
   readonly placeholder?: string;
   readonly ordinal?: number;
   readonly bounds: {
@@ -778,6 +816,9 @@ interface BrowserPreviewSession {
   nextTabId: number;
   nextEventId: number;
   lastActiveAt: number;
+  freshness: BrowserPreviewFreshness;
+  freshnessReason?: string;
+  dirtyUrl?: string;
 }
 
 const BROWSER_PREVIEW_VIEWPORT = { width: 1280, height: 720 } as const;
@@ -873,6 +914,20 @@ export function parseBrowserSyncPayload(body: string): BrowserSyncPayload {
   };
 }
 
+export function parseBrowserDirtyPayload(body: string): BrowserDirtyPayload {
+  const parsed = parseJsonObjectPayload(body, "Invalid browser dirty payload.");
+  const reason = optionalNonEmptyString(parsed.reason);
+  if (!reason) {
+    throw new Error("Browser dirty reason is required.");
+  }
+  const url = parsed.url === undefined ? undefined : normalizeBrowserPreviewUrl(parsed.url);
+  return {
+    sessionId: normalizeBrowserPreviewSessionId(parsed.sessionId),
+    reason,
+    ...(url ? { url } : {}),
+  };
+}
+
 function optionalNonEmptyString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
@@ -924,6 +979,22 @@ function parseBrowserActionTarget(value: unknown): BrowserActionTarget | undefin
   throw new Error("Browser action target must include exactly one locator.");
 }
 
+function requireBrowserActionTarget(value: unknown, message: string): BrowserActionTarget {
+  const target = parseBrowserActionTarget(value);
+  if (!target) {
+    throw new Error(message);
+  }
+  return target;
+}
+
+function parseBrowserWaitForState(value: unknown): BrowserWaitForState {
+  const state = optionalNonEmptyString(value) ?? "visible";
+  if (state === "visible" || state === "hidden" || state === "attached" || state === "detached") {
+    return state;
+  }
+  throw new Error("Browser wait-for state must be visible, hidden, attached, or detached.");
+}
+
 export function parseBrowserActionPayload(body: string): BrowserActionPayload {
   const parsed = parseJsonObjectPayload(body, "Invalid browser action payload.");
   const type = typeof parsed.type === "string" ? parsed.type.trim() : "";
@@ -931,6 +1002,15 @@ export function parseBrowserActionPayload(body: string): BrowserActionPayload {
   const tabId = optionalBrowserPreviewTabId(parsed.tabId);
   if (!type) {
     throw new Error("Browser action type is required.");
+  }
+  if (type === "navigate") {
+    return { sessionId, tabId, type: "navigate", url: normalizeBrowserPreviewUrl(parsed.url) };
+  }
+  if (type === "go-back") {
+    return { sessionId, tabId, type: "go-back" };
+  }
+  if (type === "go-forward") {
+    return { sessionId, tabId, type: "go-forward" };
   }
   if (type === "refresh") {
     return { sessionId, tabId, type: "refresh" };
@@ -957,6 +1037,53 @@ export function parseBrowserActionPayload(body: string): BrowserActionPayload {
       throw new Error("Browser click target or x and y are required.");
     }
     return { sessionId, tabId, type: "click", x, y };
+  }
+  if (type === "fill") {
+    if (typeof parsed.text !== "string") {
+      throw new Error("Browser fill text is required.");
+    }
+    return { sessionId, tabId, type: "fill", text: parsed.text, target: requireBrowserActionTarget(parsed.target, "Browser fill target is required.") };
+  }
+  if (type === "clear") {
+    return { sessionId, tabId, type: "clear", target: requireBrowserActionTarget(parsed.target, "Browser clear target is required.") };
+  }
+  if (type === "check") {
+    return { sessionId, tabId, type: "check", target: requireBrowserActionTarget(parsed.target, "Browser check target is required.") };
+  }
+  if (type === "uncheck") {
+    return { sessionId, tabId, type: "uncheck", target: requireBrowserActionTarget(parsed.target, "Browser uncheck target is required.") };
+  }
+  if (type === "select") {
+    const target = requireBrowserActionTarget(parsed.target, "Browser select target is required.");
+    const value = optionalNonEmptyString(parsed.value);
+    const label = optionalNonEmptyString(parsed.label);
+    if (value && label) {
+      throw new Error("Browser select must use either value or label.");
+    }
+    if (value) {
+      return { sessionId, tabId, type: "select", target, value };
+    }
+    if (label) {
+      return { sessionId, tabId, type: "select", target, label };
+    }
+    throw new Error("Browser select value or label is required.");
+  }
+  if (type === "wait-for") {
+    const target = parseBrowserActionTarget(parsed.target);
+    const urlIncludes = optionalNonEmptyString(parsed.urlIncludes);
+    if (target && urlIncludes) {
+      throw new Error("Browser wait-for must use either target or urlIncludes.");
+    }
+    if (target) {
+      return { sessionId, tabId, type: "wait-for", target, state: parseBrowserWaitForState(parsed.state) };
+    }
+    if (urlIncludes) {
+      return { sessionId, tabId, type: "wait-for", urlIncludes };
+    }
+    throw new Error("Browser wait-for target or urlIncludes is required.");
+  }
+  if (type === "hover") {
+    return { sessionId, tabId, type: "hover", target: requireBrowserActionTarget(parsed.target, "Browser hover target is required.") };
   }
   if (type === "type") {
     if (typeof parsed.text !== "string" || parsed.text.length === 0) {
@@ -1000,11 +1127,13 @@ export function parseBrowserActionPayload(body: string): BrowserActionPayload {
 const browserPreviewBadRequestMessages = new Set([
   "Invalid browser session payload.",
   "Invalid browser sync payload.",
+  "Invalid browser dirty payload.",
   "Invalid browser action payload.",
   "Browser session id is required.",
   "Browser session id must contain only letters, numbers, dots, colons, underscores, and dashes.",
   "Browser tab id must be a non-empty string.",
   "Browser tab id is required.",
+  "Browser dirty reason is required.",
   "Browser URL is required.",
   "Browser URL must be an absolute http(s) URL or about:blank.",
   "Browser storage payload must be an object.",
@@ -1018,6 +1147,18 @@ const browserPreviewBadRequestMessages = new Set([
   "Browser action target must include exactly one locator.",
   "Browser action framePath must be an array of selectors.",
   "Browser action framePath selectors must be non-empty strings.",
+  "Browser fill text is required.",
+  "Browser fill target is required.",
+  "Browser clear target is required.",
+  "Browser check target is required.",
+  "Browser uncheck target is required.",
+  "Browser select target is required.",
+  "Browser select must use either value or label.",
+  "Browser select value or label is required.",
+  "Browser wait-for state must be visible, hidden, attached, or detached.",
+  "Browser wait-for must use either target or urlIncludes.",
+  "Browser wait-for target or urlIncludes is required.",
+  "Browser hover target is required.",
   "Browser type text is required.",
   "Browser type target must be provided only once.",
   "Browser key is required.",
@@ -1170,6 +1311,7 @@ async function ensureBrowserPreviewSession(sessionId: string): Promise<BrowserPr
     nextTabId: 1,
     nextEventId: 1,
     lastActiveAt: Date.now(),
+    freshness: "synced",
   };
   context.on("page", (page) => {
     const tabId = registerBrowserPreviewPage(session, page);
@@ -1403,6 +1545,12 @@ async function browserPreviewDomTargetsForFrame(frame: Frame, framePath: readonl
         element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement
           ? clip(element.value, 120)
           : undefined;
+      const href = element instanceof HTMLAnchorElement ? clip(element.href, 240) : undefined;
+      const testId = clip(element.getAttribute("data-testid") ?? element.getAttribute("data-test") ?? "", 120) || undefined;
+      const ariaName = clip(element.getAttribute("aria-label") ?? "", 120) || undefined;
+      const checked = element instanceof HTMLInputElement && (element.type === "checkbox" || element.type === "radio") ? element.checked : undefined;
+      const selectedOptions =
+        element instanceof HTMLSelectElement ? Array.from(element.selectedOptions).map((option) => clip(option.value || option.label || option.textContent || "", 120)) : undefined;
       targets.push({
         ...(currentFramePath.length > 0 ? { framePath: currentFramePath } : {}),
         selector: selectorFor(element),
@@ -1410,10 +1558,15 @@ async function browserPreviewDomTargetsForFrame(frame: Frame, framePath: readonl
         role: element.getAttribute("role") ?? implicitRoleFor(element),
         label: labelFor(element),
         text: clip(element.textContent ?? "", 120),
+        ...(href ? { href } : {}),
+        ...(testId ? { testId } : {}),
+        ...(ariaName ? { ariaName } : {}),
         editable,
         disabled,
         visible: true,
-        ...(value ? { value } : {}),
+        ...(value !== undefined ? { value } : {}),
+        ...(checked !== undefined ? { checked } : {}),
+        ...(selectedOptions ? { selectedOptions } : {}),
         ...(placeholder ? { placeholder } : {}),
         bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
       });
@@ -1446,6 +1599,8 @@ async function browserPreviewSnapshot(session: BrowserPreviewSession, tabId?: st
     activeTabId,
     tabs: await browserPreviewTabs(session),
     latestEvent: session.events.at(-1),
+    freshness: session.freshness,
+    ...(session.freshnessReason ? { freshnessReason: session.freshnessReason } : {}),
     url: page.url(),
     title: await browserPreviewPageTitle(page),
     screenshot: `data:image/png;base64,${screenshot.toString("base64")}`,
@@ -1464,6 +1619,8 @@ async function browserPreviewState(session: BrowserPreviewSession, tabId?: strin
     activeTabId,
     tabs: await browserPreviewTabs(session),
     latestEvent: session.events.at(-1),
+    freshness: session.freshness,
+    ...(session.freshnessReason ? { freshnessReason: session.freshnessReason } : {}),
     url: page.url(),
     title: await browserPreviewPageTitle(page),
     domTargets: await browserPreviewDomTargets(page),
@@ -1471,6 +1628,30 @@ async function browserPreviewState(session: BrowserPreviewSession, tabId?: strin
     viewport,
     updatedAt: new Date().toISOString(),
   };
+}
+
+function markBrowserPreviewFreshness(session: BrowserPreviewSession, freshness: BrowserPreviewFreshness, reason?: string, dirtyUrl?: string): void {
+  session.freshness = freshness;
+  if (reason) {
+    session.freshnessReason = reason;
+  } else {
+    delete session.freshnessReason;
+  }
+  if (dirtyUrl) {
+    session.dirtyUrl = dirtyUrl;
+  } else {
+    delete session.dirtyUrl;
+  }
+}
+
+function markBrowserPreviewSynced(session: BrowserPreviewSession): void {
+  markBrowserPreviewFreshness(session, "synced");
+}
+
+function markBrowserPreviewDirty(session: BrowserPreviewSession, payload: BrowserDirtyPayload): void {
+  const lowerReason = payload.reason.toLowerCase();
+  const freshness: BrowserPreviewFreshness = lowerReason.includes("cross-origin") || lowerReason.includes("storage blocked") ? "blocked" : "dirty";
+  markBrowserPreviewFreshness(session, freshness, payload.reason, payload.url);
 }
 
 async function navigateBrowserPreview(session: BrowserPreviewSession, page: Page, url: string): Promise<void> {
@@ -2191,6 +2372,7 @@ function handleBrowserSession(req: IncomingMessage, res: ServerResponse): void {
         const session = await ensureBrowserPreviewSession(payload.sessionId);
         const page = browserPreviewPageFor(session);
         await navigateBrowserPreview(session, page, payload.url);
+        markBrowserPreviewSynced(session);
         sendJson(res, 200, await browserPreviewSnapshot(session));
       } catch (error) {
         sendJson(res, browserPreviewErrorStatus(error), { error: errorMessage(error) });
@@ -2208,6 +2390,7 @@ function handleBrowserSync(req: IncomingMessage, res: ServerResponse): void {
         const page = browserPreviewPageFor(session);
         await navigateBrowserPreview(session, page, payload.url);
         await applyBrowserStorageSnapshot(page, payload);
+        markBrowserPreviewSynced(session);
         sendJson(res, 200, await browserPreviewSnapshot(session));
       } catch (error) {
         sendJson(res, browserPreviewErrorStatus(error), { error: errorMessage(error) });
@@ -2225,6 +2408,26 @@ function handleBrowserBridgeSync(req: IncomingMessage, res: ServerResponse): voi
         const page = browserPreviewPageFor(session);
         await navigateBrowserPreview(session, page, payload.url);
         await applyBrowserStorageSnapshot(page, payload);
+        markBrowserPreviewSynced(session);
+        sendJson(res, 200, await browserPreviewState(session));
+      } catch (error) {
+        sendJson(res, browserPreviewErrorStatus(error), { error: errorMessage(error) });
+      }
+    })();
+  });
+}
+
+function handleBrowserDirty(req: IncomingMessage, res: ServerResponse): void {
+  readJsonBody(req, res, (body) => {
+    void (async () => {
+      try {
+        const payload = parseBrowserDirtyPayload(body);
+        const session = currentBrowserPreviewSession(payload.sessionId);
+        if (!session) {
+          sendJson(res, 404, { error: "No browser preview session is active." });
+          return;
+        }
+        markBrowserPreviewDirty(session, payload);
         sendJson(res, 200, await browserPreviewState(session));
       } catch (error) {
         sendJson(res, browserPreviewErrorStatus(error), { error: errorMessage(error) });
@@ -2268,6 +2471,12 @@ function browserActionTargetSelector(target: BrowserActionTarget | undefined): s
 function browserActionPayloadTargetDescription(action: BrowserActionPayload): string | undefined {
   if ("target" in action && action.target) {
     return browserActionTargetDescription(action.target);
+  }
+  if (action.type === "navigate") {
+    return `url=${action.url}`;
+  }
+  if (action.type === "wait-for" && "urlIncludes" in action) {
+    return `urlIncludes=${action.urlIncludes}`;
   }
   if (action.type === "type" && action.selector) {
     return `selector=${action.selector}`;
@@ -2426,7 +2635,19 @@ async function applyBrowserAction(action: BrowserActionPayload): Promise<{ reado
   }
   const page = browserPreviewPageFor(session, action.tabId);
   const tabId = session.pageIds.get(page) ?? session.activeTabId;
-  if (action.type === "refresh") {
+  if (action.type === "navigate") {
+    emitBrowserPreviewEvent(session, { tabId, type: "action.navigate", label: "Navigate", detail: action.url, url: action.url });
+    await navigateBrowserPreview(session, page, action.url);
+    markBrowserPreviewSynced(session);
+  } else if (action.type === "go-back") {
+    emitBrowserPreviewEvent(session, { tabId, type: "action.go-back", label: "Back" });
+    await page.goBack({ waitUntil: "domcontentloaded", timeout: BROWSER_ACTION_TIMEOUT_MS });
+    emitBrowserPreviewEvent(session, { tabId, type: "navigation.done", label: "Back finished", url: page.url(), title: await browserPreviewPageTitle(page) });
+  } else if (action.type === "go-forward") {
+    emitBrowserPreviewEvent(session, { tabId, type: "action.go-forward", label: "Forward" });
+    await page.goForward({ waitUntil: "domcontentloaded", timeout: BROWSER_ACTION_TIMEOUT_MS });
+    emitBrowserPreviewEvent(session, { tabId, type: "navigation.done", label: "Forward finished", url: page.url(), title: await browserPreviewPageTitle(page) });
+  } else if (action.type === "refresh") {
     emitBrowserPreviewEvent(session, { tabId, type: "action.refresh", label: "Refresh" });
     await page.reload({ waitUntil: "domcontentloaded", timeout: BROWSER_ACTION_TIMEOUT_MS });
   } else if (action.type === "scroll") {
@@ -2469,6 +2690,101 @@ async function applyBrowserAction(action: BrowserActionPayload): Promise<{ reado
       emitBrowserPreviewEvent(session, { tabId, type: "action.click", label: "Click", detail: `x=${action.x} y=${action.y}`, point: { x: action.x, y: action.y } });
       await page.mouse.click(action.x, action.y);
     }
+  } else if (action.type === "fill") {
+    const locator = browserActionLocator(page, action.target);
+    emitBrowserPreviewEvent(session, {
+      tabId,
+      type: "action.fill",
+      label: "Fill",
+      detail: `${browserActionTargetDescription(action.target)} · ${action.text}`,
+      target: action.target,
+      selector: browserActionTargetSelector(action.target),
+      text: action.text,
+    });
+    await locator.fill(action.text, { timeout: BROWSER_ACTION_TIMEOUT_MS });
+  } else if (action.type === "clear") {
+    const locator = browserActionLocator(page, action.target);
+    emitBrowserPreviewEvent(session, {
+      tabId,
+      type: "action.clear",
+      label: "Clear",
+      detail: browserActionTargetDescription(action.target),
+      target: action.target,
+      selector: browserActionTargetSelector(action.target),
+    });
+    await locator.fill("", { timeout: BROWSER_ACTION_TIMEOUT_MS });
+  } else if (action.type === "check") {
+    const locator = browserActionLocator(page, action.target);
+    emitBrowserPreviewEvent(session, {
+      tabId,
+      type: "action.check",
+      label: "Check",
+      detail: browserActionTargetDescription(action.target),
+      target: action.target,
+      selector: browserActionTargetSelector(action.target),
+    });
+    await locator.check({ timeout: BROWSER_ACTION_TIMEOUT_MS });
+  } else if (action.type === "uncheck") {
+    const locator = browserActionLocator(page, action.target);
+    emitBrowserPreviewEvent(session, {
+      tabId,
+      type: "action.uncheck",
+      label: "Uncheck",
+      detail: browserActionTargetDescription(action.target),
+      target: action.target,
+      selector: browserActionTargetSelector(action.target),
+    });
+    await locator.uncheck({ timeout: BROWSER_ACTION_TIMEOUT_MS });
+  } else if (action.type === "select") {
+    const locator = browserActionLocator(page, action.target);
+    const option = "value" in action ? action.value : action.label;
+    emitBrowserPreviewEvent(session, {
+      tabId,
+      type: "action.select",
+      label: "Select",
+      detail: `${browserActionTargetDescription(action.target)} · ${option}`,
+      target: action.target,
+      selector: browserActionTargetSelector(action.target),
+      text: option,
+    });
+    if ("value" in action) {
+      await locator.selectOption(action.value, { timeout: BROWSER_ACTION_TIMEOUT_MS });
+    } else {
+      await locator.selectOption({ label: action.label }, { timeout: BROWSER_ACTION_TIMEOUT_MS });
+    }
+  } else if (action.type === "wait-for") {
+    if ("target" in action) {
+      const locator = browserActionLocator(page, action.target);
+      emitBrowserPreviewEvent(session, {
+        tabId,
+        type: "action.wait-for",
+        label: "Wait for target",
+        detail: `${browserActionTargetDescription(action.target)} · ${action.state}`,
+        target: action.target,
+        selector: browserActionTargetSelector(action.target),
+      });
+      await locator.waitFor({ state: action.state, timeout: BROWSER_ACTION_TIMEOUT_MS });
+    } else {
+      emitBrowserPreviewEvent(session, {
+        tabId,
+        type: "action.wait-for",
+        label: "Wait for URL",
+        detail: `urlIncludes=${action.urlIncludes}`,
+      });
+      await page.waitForURL((url) => url.href.includes(action.urlIncludes), { timeout: BROWSER_ACTION_TIMEOUT_MS });
+    }
+  } else if (action.type === "hover") {
+    const locator = browserActionLocator(page, action.target);
+    emitBrowserPreviewEvent(session, {
+      tabId,
+      type: "action.hover",
+      label: "Hover",
+      detail: browserActionTargetDescription(action.target),
+      target: action.target,
+      selector: browserActionTargetSelector(action.target),
+      point: await browserActionPoint(locator),
+    });
+    await locator.hover({ timeout: BROWSER_ACTION_TIMEOUT_MS });
   } else if (action.type === "type") {
     const target = browserActionTargetForKeyboard(action);
     emitBrowserPreviewEvent(session, {
@@ -2516,6 +2832,51 @@ async function applyBrowserAction(action: BrowserActionPayload): Promise<{ reado
   return { session, tabId, actionResult: await browserPreviewActionSuccessResult(page, action) };
 }
 
+function emitBrowserPreviewActionFailure(session: BrowserPreviewSession, action: BrowserActionPayload, tabId: string, actionResult: BrowserPreviewActionResult): void {
+  emitBrowserPreviewEvent(session, {
+    tabId,
+    type: "action.failed",
+    label: "Action failed",
+    detail: actionResult.target ? `${actionResult.target} · ${actionResult.error ?? ""}` : actionResult.error,
+    target: "target" in action ? action.target : undefined,
+    selector: "target" in action ? browserActionTargetSelector(action.target) : undefined,
+    text: actionResult.error,
+  });
+}
+
+async function staleBrowserPreviewActionResult(
+  session: BrowserPreviewSession,
+  action: BrowserActionPayload,
+  tabId: string,
+  message: string,
+): Promise<{ readonly session: BrowserPreviewSession; readonly tabId: string; readonly actionResult: BrowserPreviewActionResult }> {
+  const actionResult = browserPreviewActionFailureResult(action, new Error(message));
+  emitBrowserPreviewActionFailure(session, action, tabId, actionResult);
+  return { session, tabId, actionResult };
+}
+
+async function applyBrowserBridgeAction(action: BrowserActionPayload): Promise<{ readonly session: BrowserPreviewSession; readonly tabId?: string; readonly actionResult?: BrowserPreviewActionResult }> {
+  const session = await ensureBrowserPreviewSession(action.sessionId);
+  if (action.type === "select-tab") {
+    return applyBrowserAction(action);
+  }
+  const page = browserPreviewPageFor(session, action.tabId);
+  const tabId = session.pageIds.get(page) ?? session.activeTabId;
+  if (session.freshness === "dirty") {
+    if (!session.dirtyUrl) {
+      return staleBrowserPreviewActionResult(session, action, tabId, "Preview mirror is stale; manual sync required.");
+    }
+    markBrowserPreviewFreshness(session, "syncing", session.freshnessReason, session.dirtyUrl);
+    await navigateBrowserPreview(session, page, session.dirtyUrl);
+    markBrowserPreviewSynced(session);
+  } else if (session.freshness === "blocked" || session.freshness === "error") {
+    return staleBrowserPreviewActionResult(session, action, tabId, "Preview mirror is stale; manual sync required.");
+  } else if (session.freshness === "syncing") {
+    return staleBrowserPreviewActionResult(session, action, tabId, "Preview mirror is syncing; retry after sync finishes.");
+  }
+  return applyBrowserAction(action);
+}
+
 function handleBrowserBridgeAction(req: IncomingMessage, res: ServerResponse): void {
   readJsonBody(req, res, (body) => {
     void (async () => {
@@ -2527,7 +2888,7 @@ function handleBrowserBridgeAction(req: IncomingMessage, res: ServerResponse): v
         return;
       }
       try {
-        const result = await applyBrowserAction(action);
+        const result = await applyBrowserBridgeAction(action);
         sendJson(res, 200, await browserPreviewState(result.session, result.tabId, result.actionResult));
       } catch (error) {
         const session = currentBrowserPreviewSession(action.sessionId);
@@ -2537,15 +2898,7 @@ function handleBrowserBridgeAction(req: IncomingMessage, res: ServerResponse): v
         }
         const tabId = action.tabId && session.pages.has(action.tabId) ? action.tabId : session.activeTabId;
         const actionResult = browserPreviewActionFailureResult(action, error);
-        emitBrowserPreviewEvent(session, {
-          tabId,
-          type: "action.failed",
-          label: "Action failed",
-          detail: actionResult.target ? `${actionResult.target} · ${actionResult.error ?? ""}` : actionResult.error,
-          target: "target" in action ? action.target : undefined,
-          selector: "target" in action ? browserActionTargetSelector(action.target) : undefined,
-          text: actionResult.error,
-        });
+        emitBrowserPreviewActionFailure(session, action, tabId, actionResult);
         sendJson(res, 200, await browserPreviewState(session, tabId, actionResult));
       }
     })();
@@ -3362,9 +3715,8 @@ interface RunArgsRequest {
   readonly accessMode?: AgentAccessMode;
 }
 
-// The in-app Preview tab (and its /api/browser/bridge/* endpoints) is a
-// human-facing tool only. It is intentionally never advertised to the agent as a
-// usable browser bridge — the agent's prompt is left untouched.
+// The in-app Preview tab is native iframe UI for the user; the /bridge endpoints
+// expose the Playwright mirror to agents with a dirty-aware freshness contract.
 
 export interface BackgroundRunBinding {
   readonly conversationId: string;
@@ -3471,6 +3823,38 @@ const CODEX_PLAN_PROMPT_PREFIX = [
   "Inspect the workspace as needed, then respond with a concise implementation plan.",
   "",
 ].join("\n");
+
+function browserBridgeOrigin(req: IncomingMessage): string {
+  const host = typeof req.headers.host === "string" && req.headers.host.trim().length > 0 ? req.headers.host.trim() : "localhost:5187";
+  const forwardedProto = typeof req.headers["x-forwarded-proto"] === "string" ? req.headers["x-forwarded-proto"].split(",")[0]?.trim() : "";
+  const protocol = forwardedProto === "https" ? "https" : "http";
+  return `${protocol}://${host}`;
+}
+
+function browserBridgePromptAppendix(sessionId: string, origin: string): string {
+  return [
+    "",
+    "<browser-preview-bridge>",
+    "The app's Preview tab is a native iframe for the user and a Playwright mirror for you. Use the bridge only when the task asks you to inspect or operate the in-app browser.",
+    `Base URL: ${origin}`,
+    `sessionId: ${sessionId}`,
+    `Snapshot: GET ${origin}/api/browser/bridge/snapshot?sessionId=${encodeURIComponent(sessionId)}`,
+    `Action: POST ${origin}/api/browser/bridge/action with JSON {"sessionId":"${sessionId}","type":"..."}.`,
+    "Always read snapshot.domTargets first and choose typed actions from DOM targets before coordinates.",
+    "Freshness contract: snapshot.freshness is synced, dirty, blocked, syncing, or error. If an action returns actionResult.ok=false, read actionResult.error and refresh the snapshot. Do not treat bridge failures as permission denials.",
+    "If actionResult.error says the preview mirror is stale or manual sync is required, stop browser actions and ask the user to sync Preview.",
+    "Preferred action order: fill, check, uncheck, select, click, press, scroll, wait-for. Use type only to append text. Use x/y coordinates only for canvas or custom widgets without a DOM target.",
+    "Tabs: use snapshot.activeTabId and snapshot.tabs. Use select-tab before intentionally working in a non-active tab; include tabId only for that explicit tab.",
+    "Supported actions: navigate, go-back, go-forward, refresh, scroll, click, fill, clear, check, uncheck, select, wait-for, hover, type, press, eval, select-tab.",
+    "Example fill: {\"sessionId\":\"...\",\"type\":\"fill\",\"target\":{\"selector\":\"textarea\"},\"text\":\"hello\"}.",
+    "Example wait: {\"sessionId\":\"...\",\"type\":\"wait-for\",\"target\":{\"role\":\"button\",\"name\":\"Save\"},\"state\":\"visible\"}.",
+    "</browser-preview-bridge>",
+  ].join("\n");
+}
+
+function appendBrowserBridgePrompt(prompt: string, binding: BackgroundRunBinding | null, origin: string): string {
+  return binding ? `${prompt}${browserBridgePromptAppendix(binding.conversationId, origin)}` : prompt;
+}
 
 function profileForArgs(agent: AgentProfile["agent"], request: RunArgsRequest): AgentProfile {
   return normalizeAgentProfile(
@@ -3641,6 +4025,9 @@ export function buildClaudeSdkOptions(request: RunRequest, cwd: string, abortCon
     allowedTools: [...CLAUDE_SAFE_READ_TOOLS],
     canUseTool,
     cwd,
+    // Stream partial messages so the chat renders token-by-token; without this the
+    // SDK only emits complete turns and the UI updates in one jump per turn.
+    includePartialMessages: true,
     permissionMode: claudePermissionModeForRequest(request),
     systemPrompt: { type: "preset", preset: "claude_code", append: CLAUDE_CHAT_UI_SYSTEM_PROMPT },
     tools: claudeToolsForRequest(request),
@@ -3793,10 +4180,11 @@ export function buildOpenCodeRunArgs(request: RunArgsRequest): string[] {
   const args = ["run", "--format", "json", "--thinking"];
   if ((request.accessMode ?? "read-only") === "unrestricted") {
     args.push("--dangerously-skip-permissions");
-  }
-  const mode = modeForProfile(profile);
-  if (mode) {
-    args.push("--agent", mode);
+  } else {
+    // Read-only: opencode's default `build` agent auto-allows edits/bash, so force
+    // the built-in `plan` agent, which denies file writes. (bash isn't fully
+    // gated by opencode here, but this is the safe known-good restriction.)
+    args.push("--agent", "plan");
   }
   const model = modelForProfile(profile);
   if (model) {
@@ -5476,8 +5864,8 @@ function runUsageFromRecord(value: unknown): RunUsage | undefined {
     inputTokens: firstNumber(value, ["inputTokens", "input_tokens", "promptTokens", "prompt_tokens", "input"]),
     outputTokens: firstNumber(value, ["outputTokens", "output_tokens", "completionTokens", "completion_tokens", "output"]),
     reasoningTokens: firstNumber(value, ["reasoningTokens", "reasoning_tokens", "thoughtsTokenCount", "thoughts_token_count", "reasoning"]),
-    cacheReadTokens: firstNumber(value, ["cacheReadTokens", "cache_read_tokens", "cachedTokens", "cached_tokens"]) ?? firstNumber(cache, ["read"]),
-    cacheWriteTokens: firstNumber(value, ["cacheWriteTokens", "cache_write_tokens"]) ?? firstNumber(cache, ["write"]),
+    cacheReadTokens: firstNumber(value, ["cacheReadTokens", "cache_read_tokens", "cache_read_input_tokens", "cachedTokens", "cached_tokens", "cached_input_tokens", "cached"]) ?? firstNumber(cache, ["read"]),
+    cacheWriteTokens: firstNumber(value, ["cacheWriteTokens", "cache_write_tokens", "cache_creation_input_tokens"]) ?? firstNumber(cache, ["write"]),
   });
 }
 
@@ -5570,6 +5958,50 @@ function codexSemanticItemEvents(eventType: unknown, item: Record<string, unknow
   if (type === "plan" || type === "plan_update" || type === "todo" || type === "todo_update") {
     const event = planEventFromUnknown(id, item);
     return event ? [event] : [];
+  }
+  // Codex agent reasoning (thinking) — render as a reasoning block.
+  if (type === "reasoning") {
+    const text = firstString(item, ["text", "content", "reasoning", "summary"]);
+    return text ? [{ type: "reasoning", text }] : [];
+  }
+  // Codex's plan tracker arrives as `todo_list` with {text, completed} items.
+  if (type === "todo_list") {
+    const rawItems = Array.isArray(item.items) ? item.items : Array.isArray(item.todos) ? item.todos : [];
+    const steps = rawItems
+      .filter(isRecord)
+      .map((todo) => ({ label: firstString(todo, ["text", "content", "title", "label", "step"]) ?? "", state: (todo.completed === true ? "ok" : "pending") as RunState }))
+      .filter((step) => step.label.length > 0);
+    return steps.length > 0 ? [{ type: "plan", id, steps }] : [];
+  }
+  // File edits arrive as {changes:[{path, kind}]} without inline diff content.
+  if (type === "file_change") {
+    const changes = Array.isArray(item.changes) ? item.changes.filter(isRecord) : [];
+    const files = changes
+      .map((change) => firstString(change, ["path", "file", "file_path"]))
+      .filter((path): path is string => typeof path === "string" && path.length > 0);
+    if (files.length === 0) {
+      return [];
+    }
+    return [{ type: "tool", id: id ?? `file-change-${files[0]}`, name: "Edit", summary: files.length === 1 ? files[0] : `${files.length} files changed` }];
+  }
+  // MCP tool calls — surface the call and its result generically.
+  if (type === "mcp_tool_call") {
+    const toolName = firstString(item, ["tool", "name"]) ?? "mcp";
+    const server = firstString(item, ["server"]);
+    const callId = id ?? `mcp-${toolName}`;
+    const events: RunEvent[] = [{ type: "tool", id: callId, name: server ? `${server}/${toolName}` : toolName }];
+    if (eventType === "item.completed") {
+      const status = String(item.status ?? "").toLowerCase();
+      const ok = status !== "failed" && status !== "error";
+      const result = item.result ?? item.output;
+      events.push({ type: "tool_result", id: callId, ok, output: typeof result === "string" ? result : result === undefined ? "" : JSON.stringify(result) });
+    }
+    return events;
+  }
+  // Non-fatal error items carry a message we should surface, not drop.
+  if (type === "error") {
+    const text = firstString(item, ["message", "error", "text"]);
+    return text ? [{ type: "error", text }] : [];
   }
   const state: RunState =
     eventType === "item.completed" ? (String(item.status ?? "").toLowerCase() === "failed" || String(item.status ?? "").toLowerCase() === "error" ? "error" : "ok") : "running";
@@ -6413,9 +6845,11 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
     }
 
     const request: RunRequest = { agent, model, reasoning, mode, prompt, accessMode };
-    // The Preview tab is human-facing only; the agent prompt is never augmented
-    // with browser-bridge instructions.
-    const executionRequest = request;
+    const origin = browserBridgeOrigin(req);
+    const executionRequest: RunRequest = {
+      ...request,
+      prompt: appendBrowserBridgePrompt(request.prompt, binding, origin),
+    };
     if (binding) {
       accumulator = startPersistedBackgroundRun(binding, request);
     }
@@ -6461,11 +6895,15 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
       return;
     }
     const config = readAgentSecretConfig();
-    // The agent never receives Preview/browser-bridge coordinates (no prompt
-    // appendix and no RLAB_BROWSER_* env vars) — Preview is human-facing only.
     const runEnv = {
       ...process.env,
       ...config.env,
+      ...(binding
+        ? {
+            RLAB_BROWSER_BASE_URL: origin,
+            RLAB_BROWSER_SESSION_ID: binding.conversationId,
+          }
+        : {}),
     };
     const detect = DETECT[agent];
     if (spec.env && detect && !hasConfiguredAgentAuth(detect, config, runEnv)) {
@@ -6615,7 +7053,9 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
         notifyBackgroundRunUpdate(binding, true);
         backgroundRunHandles.delete(binding.runId);
       }
-      sendDone();
+      // Flush the buffered terminal `done` (it carries usage/cost) on normal exit;
+      // a bare sendDone() here dropped token/cost stats for codex & gemini.
+      sendFinalDone();
       sender.end();
     });
 
@@ -6649,6 +7089,14 @@ function attach(server: ViteDevServer | PreviewServer): void {
       return;
     }
     handleBrowserSync(req, res);
+  });
+  server.middlewares.use("/api/browser/dirty", (req, res) => {
+    if (req.method !== "POST") {
+      res.statusCode = 405;
+      res.end();
+      return;
+    }
+    handleBrowserDirty(req, res);
   });
   server.middlewares.use("/api/browser/action", (req, res) => {
     if (req.method !== "POST") {
