@@ -6,7 +6,7 @@ import { basename, delimiter, dirname, join } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { query, type CanUseTool, type EffortLevel, type Options as ClaudeQueryOptions, type PermissionResult } from "@anthropic-ai/claude-agent-sdk";
-import { chromium, type Browser, type BrowserContext, type ConsoleMessage, type Locator, type Page, type Request as PlaywrightRequest } from "playwright";
+import { chromium, type Browser, type BrowserContext, type ConsoleMessage, type Frame, type FrameLocator, type Locator, type Page, type Request as PlaywrightRequest } from "playwright";
 import type { Plugin, ViteDevServer, PreviewServer } from "vite";
 import { parseGitStatusPorcelain, parseNumstatTotals } from "./src/lib/git-status";
 import { normalizeAgentToolOutput } from "./src/lib/agent-output";
@@ -69,6 +69,9 @@ const ATTACHMENTS_DIR = join(WORKSPACE_STATE_DIR, "attachments");
 const AMP_READ_ONLY_SETTINGS_FILE = join(WORKSPACE_STATE_DIR, "amp-read-only-settings.json");
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 export const MAX_JSON_BODY_BYTES = 40 * 1024 * 1024;
+export const JSON_CONTENT_TYPE = "application/json; charset=utf-8";
+export const BROWSER_ACTION_TIMEOUT_MS = 5000;
+const BROWSER_EVAL_SCRIPT_MAX_CHARS = 8000;
 const AGENT_CONFIG_FILE = join(WORKSPACE_STATE_DIR, "agent-config.json");
 
 interface Detect {
@@ -603,11 +606,15 @@ export interface BrowserSyncPayload extends BrowserSessionPayload, BrowserStorag
 
 type BrowserActionRole = Parameters<Page["getByRole"]>[0];
 
+interface BrowserActionFrameTarget {
+  readonly framePath?: readonly string[];
+}
+
 export type BrowserActionTarget =
-  | { readonly selector: string }
-  | { readonly role: BrowserActionRole; readonly name?: string }
-  | { readonly text: string }
-  | { readonly label: string };
+  | (BrowserActionFrameTarget & { readonly selector: string })
+  | (BrowserActionFrameTarget & { readonly role: BrowserActionRole; readonly name?: string })
+  | (BrowserActionFrameTarget & { readonly text: string })
+  | (BrowserActionFrameTarget & { readonly label: string });
 
 export type BrowserActionPayload =
   | { readonly sessionId: string; readonly tabId?: string; readonly type: "refresh" }
@@ -615,6 +622,7 @@ export type BrowserActionPayload =
   | ({ readonly sessionId: string; readonly tabId?: string; readonly type: "click" } & ({ readonly x: number; readonly y: number } | { readonly target: BrowserActionTarget }))
   | { readonly sessionId: string; readonly tabId?: string; readonly type: "type"; readonly text: string; readonly selector?: string; readonly target?: BrowserActionTarget }
   | { readonly sessionId: string; readonly tabId?: string; readonly type: "press"; readonly key: string; readonly target?: BrowserActionTarget }
+  | { readonly sessionId: string; readonly tabId?: string; readonly type: "eval"; readonly script: string }
   | { readonly sessionId: string; readonly tabId: string; readonly type: "select-tab" };
 
 export interface BrowserPreviewTab {
@@ -636,6 +644,8 @@ export type BrowserPreviewEventType =
   | "action.click"
   | "action.type"
   | "action.press"
+  | "action.eval"
+  | "action.failed"
   | "console.error"
   | "page.error"
   | "network.failed";
@@ -655,7 +665,25 @@ export interface BrowserPreviewEvent {
   readonly selector?: string;
   readonly text?: string;
   readonly key?: string;
+  readonly script?: string;
   readonly at: string;
+}
+
+export interface BrowserPreviewActionResult {
+  readonly ok: boolean;
+  readonly action: BrowserActionPayload["type"];
+  readonly target?: string;
+  readonly value?: unknown;
+  readonly text?: string;
+  readonly error?: string;
+  readonly activeElement?: BrowserPreviewActiveElement;
+}
+
+export interface BrowserPreviewActiveElement {
+  readonly tag: string;
+  readonly role?: string;
+  readonly label?: string;
+  readonly text: string;
 }
 
 export interface BrowserPreviewSnapshot {
@@ -681,6 +709,7 @@ export interface BrowserPreviewState {
   readonly url: string;
   readonly title: string;
   readonly domTargets: readonly BrowserPreviewDomTarget[];
+  readonly actionResult?: BrowserPreviewActionResult;
   readonly viewport: {
     readonly width: number;
     readonly height: number;
@@ -689,11 +718,18 @@ export interface BrowserPreviewState {
 }
 
 export interface BrowserPreviewDomTarget {
+  readonly framePath?: readonly string[];
   readonly selector: string;
   readonly tag: string;
   readonly role?: string;
   readonly label?: string;
   readonly text: string;
+  readonly editable?: boolean;
+  readonly disabled?: boolean;
+  readonly visible?: boolean;
+  readonly value?: string;
+  readonly placeholder?: string;
+  readonly ordinal?: number;
   readonly bounds: {
     readonly x: number;
     readonly y: number;
@@ -798,6 +834,20 @@ function optionalNonEmptyString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
 
+function optionalBrowserActionFramePath(value: unknown): readonly string[] | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(value)) {
+    throw new Error("Browser action framePath must be an array of selectors.");
+  }
+  const framePath = value.map((item) => (typeof item === "string" ? item.trim() : ""));
+  if (framePath.some((item) => item.length === 0)) {
+    throw new Error("Browser action framePath selectors must be non-empty strings.");
+  }
+  return framePath;
+}
+
 function parseBrowserActionTarget(value: unknown): BrowserActionTarget | undefined {
   if (value === undefined) {
     return undefined;
@@ -809,22 +859,24 @@ function parseBrowserActionTarget(value: unknown): BrowserActionTarget | undefin
   const role = optionalNonEmptyString(value.role);
   const text = optionalNonEmptyString(value.text);
   const label = optionalNonEmptyString(value.label);
+  const framePath = optionalBrowserActionFramePath(value.framePath);
+  const frameTarget = framePath ? { framePath } : {};
   const locatorCount = [selector, role, text, label].filter((item) => item !== undefined).length;
   if (locatorCount !== 1) {
     throw new Error("Browser action target must include exactly one locator.");
   }
   if (selector) {
-    return { selector };
+    return { ...frameTarget, selector };
   }
   if (role) {
     const name = optionalNonEmptyString(value.name);
-    return name ? { role: role as BrowserActionRole, name } : { role: role as BrowserActionRole };
+    return name ? { ...frameTarget, role: role as BrowserActionRole, name } : { ...frameTarget, role: role as BrowserActionRole };
   }
   if (text) {
-    return { text };
+    return { ...frameTarget, text };
   }
   if (label) {
-    return { label };
+    return { ...frameTarget, label };
   }
   throw new Error("Browser action target must include exactly one locator.");
 }
@@ -884,6 +936,15 @@ export function parseBrowserActionPayload(body: string): BrowserActionPayload {
     const target = parseBrowserActionTarget(parsed.target);
     return target ? { sessionId, tabId, type: "press", key: parsed.key.trim(), target } : { sessionId, tabId, type: "press", key: parsed.key.trim() };
   }
+  if (type === "eval") {
+    if (typeof parsed.script !== "string" || parsed.script.trim().length === 0) {
+      throw new Error("Browser eval script is required.");
+    }
+    if (parsed.script.length > BROWSER_EVAL_SCRIPT_MAX_CHARS) {
+      throw new Error(`Browser eval script must be ${BROWSER_EVAL_SCRIPT_MAX_CHARS} characters or less.`);
+    }
+    return { sessionId, tabId, type: "eval", script: parsed.script };
+  }
   if (type === "select-tab") {
     if (!tabId) {
       throw new Error("Browser tab id is required.");
@@ -908,8 +969,17 @@ const browserPreviewBadRequestMessages = new Set([
   "Browser action type is required.",
   "Browser scroll deltaY is required.",
   "Browser click x and y are required.",
+  "Browser click target or x and y are required.",
+  "Browser click must use either target or x and y.",
+  "Browser action target must be an object.",
+  "Browser action target must include exactly one locator.",
+  "Browser action framePath must be an array of selectors.",
+  "Browser action framePath selectors must be non-empty strings.",
   "Browser type text is required.",
+  "Browser type target must be provided only once.",
   "Browser key is required.",
+  "Browser eval script is required.",
+  `Browser eval script must be ${BROWSER_EVAL_SCRIPT_MAX_CHARS} characters or less.`,
 ]);
 
 function browserPreviewErrorStatus(error: unknown): 400 | 500 {
@@ -1086,12 +1156,80 @@ async function browserPreviewTabs(session: BrowserPreviewSession): Promise<reado
   return tabs;
 }
 
-async function browserPreviewDomTargets(page: Page): Promise<readonly BrowserPreviewDomTarget[]> {
-  if (page.url() === "about:blank") {
+function browserPreviewDomTargetPriority(target: BrowserPreviewDomTarget): number {
+  const tag = target.tag.toLowerCase();
+  const role = target.role?.toLowerCase() ?? "";
+  if (tag === "input" || tag === "textarea" || tag === "select" || role === "textbox" || role === "searchbox" || role === "combobox") {
+    return 0;
+  }
+  if (tag === "button" || tag === "a" || role === "button" || role === "link" || role === "menuitem" || role === "option") {
+    return 1;
+  }
+  if (role.length > 0 || target.label !== undefined) {
+    return 2;
+  }
+  return 3;
+}
+
+export function prioritizeBrowserPreviewDomTargets(targets: readonly BrowserPreviewDomTarget[], limit = 80): readonly BrowserPreviewDomTarget[] {
+  return targets
+    .map((target, index) => ({ target, index, priority: browserPreviewDomTargetPriority(target) }))
+    .sort((a, b) => a.priority - b.priority || a.index - b.index)
+    .slice(0, limit)
+    .map((entry) => entry.target);
+}
+
+async function browserPreviewFrameElementSelector(frame: Frame): Promise<string> {
+  const frameElement = await frame.frameElement();
+  return frameElement.evaluate((node): string => {
+    const element = node as Element;
+    const quoteAttribute = (name: string, value: string) => `[${name}="${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"]`;
+    const escapeIdent = (value: string) => {
+      if (globalThis.CSS?.escape) {
+        return globalThis.CSS.escape(value);
+      }
+      return value.replace(/[^a-zA-Z0-9_-]/g, (char) => `\\${char}`);
+    };
+    if (element.id) {
+      return `#${escapeIdent(element.id)}`;
+    }
+    const testId = element.getAttribute("data-testid") ?? element.getAttribute("data-test");
+    if (testId) {
+      return quoteAttribute(element.hasAttribute("data-testid") ? "data-testid" : "data-test", testId);
+    }
+    const name = element.getAttribute("name");
+    if (name) {
+      return `${element.tagName.toLowerCase()}${quoteAttribute("name", name)}`;
+    }
+    const title = element.getAttribute("title");
+    if (title) {
+      return `${element.tagName.toLowerCase()}${quoteAttribute("title", title)}`;
+    }
+    const parent = element.parentElement;
+    if (!parent) {
+      return element.tagName.toLowerCase();
+    }
+    const sameTagSiblings = Array.from(parent.children).filter((child) => child.tagName === element.tagName);
+    const index = sameTagSiblings.indexOf(element) + 1;
+    return sameTagSiblings.length > 1 ? `${element.tagName.toLowerCase()}:nth-of-type(${index})` : element.tagName.toLowerCase();
+  });
+}
+
+async function browserPreviewFramePath(frame: Frame): Promise<readonly string[]> {
+  const path: string[] = [];
+  let current: Frame | null = frame;
+  while (current?.parentFrame()) {
+    path.unshift(await browserPreviewFrameElementSelector(current));
+    current = current.parentFrame();
+  }
+  return path;
+}
+
+async function browserPreviewDomTargetsForFrame(frame: Frame, framePath: readonly string[]): Promise<readonly BrowserPreviewDomTarget[]> {
+  if (frame.url() === "about:blank") {
     return [];
   }
-  return page.evaluate(() => {
-    const maxTargets = 80;
+  return frame.evaluate((currentFramePath): BrowserPreviewDomTarget[] => {
     const clip = (value: string, maxLength: number) => {
       const clipped = value.replace(/\s+/g, " ").trim();
       return clipped.length > maxLength ? `${clipped.slice(0, maxLength - 1)}…` : clipped;
@@ -1189,6 +1327,8 @@ async function browserPreviewDomTargets(page: Page): Promise<readonly BrowserPre
           "input",
           "textarea",
           "select",
+          "iframe",
+          "frame",
           "summary",
           "[role]",
           "[tabindex]",
@@ -1206,20 +1346,47 @@ async function browserPreviewDomTargets(page: Page): Promise<readonly BrowserPre
       if (rect.width <= 0 || rect.height <= 0 || style.display === "none" || style.visibility === "hidden" || style.pointerEvents === "none") {
         continue;
       }
+      const disabled = element instanceof HTMLButtonElement || element instanceof HTMLInputElement || element instanceof HTMLSelectElement || element instanceof HTMLTextAreaElement ? element.disabled : element.getAttribute("aria-disabled") === "true";
+      const editable =
+        element instanceof HTMLTextAreaElement ||
+        element instanceof HTMLSelectElement ||
+        (element instanceof HTMLInputElement && element.type !== "button" && element.type !== "submit" && element.type !== "reset" && element.type !== "checkbox" && element.type !== "radio") ||
+        (element instanceof HTMLElement && element.isContentEditable);
+      const placeholder = element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement ? clip(element.placeholder, 120) : undefined;
+      const value =
+        element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement
+          ? clip(element.value, 120)
+          : undefined;
       targets.push({
+        ...(currentFramePath.length > 0 ? { framePath: currentFramePath } : {}),
         selector: selectorFor(element),
         tag: element.tagName.toLowerCase(),
         role: element.getAttribute("role") ?? implicitRoleFor(element),
         label: labelFor(element),
         text: clip(element.textContent ?? "", 120),
+        editable,
+        disabled,
+        visible: true,
+        ...(value ? { value } : {}),
+        ...(placeholder ? { placeholder } : {}),
         bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
       });
-      if (targets.length >= maxTargets) {
-        break;
-      }
     }
     return targets;
-  });
+  }, framePath);
+}
+
+async function browserPreviewDomTargets(page: Page): Promise<readonly BrowserPreviewDomTarget[]> {
+  if (page.url() === "about:blank") {
+    return [];
+  }
+  const targets: BrowserPreviewDomTarget[] = [];
+  for (const frame of page.frames()) {
+    const framePath = frame === page.mainFrame() ? [] : await browserPreviewFramePath(frame);
+    targets.push(...(await browserPreviewDomTargetsForFrame(frame, framePath)));
+  }
+  const orderedTargets = targets.map((target, index) => (target.ordinal === undefined ? { ...target, ordinal: index } : target));
+  return prioritizeBrowserPreviewDomTargets(orderedTargets);
 }
 
 async function browserPreviewSnapshot(session: BrowserPreviewSession, tabId?: string): Promise<BrowserPreviewSnapshot> {
@@ -1241,7 +1408,7 @@ async function browserPreviewSnapshot(session: BrowserPreviewSession, tabId?: st
   };
 }
 
-async function browserPreviewState(session: BrowserPreviewSession, tabId?: string): Promise<BrowserPreviewState> {
+async function browserPreviewState(session: BrowserPreviewSession, tabId?: string, actionResult?: BrowserPreviewActionResult): Promise<BrowserPreviewState> {
   const page = browserPreviewPageFor(session, tabId);
   const activeTabId = session.pageIds.get(page) ?? session.activeTabId;
   session.activeTabId = activeTabId;
@@ -1254,6 +1421,7 @@ async function browserPreviewState(session: BrowserPreviewSession, tabId?: strin
     url: page.url(),
     title: await browserPreviewPageTitle(page),
     domTargets: await browserPreviewDomTargets(page),
+    ...(actionResult ? { actionResult } : {}),
     viewport,
     updatedAt: new Date().toISOString(),
   };
@@ -1613,9 +1781,39 @@ function readWorkspaceState(): WorkspaceState {
   throw new Error(`${WORKSPACE_STATE_FILE} does not contain a valid workspace state.`);
 }
 
+let atomicJsonWriteSeq = 0;
+
+function atomicJsonTempFile(file: string): string {
+  atomicJsonWriteSeq += 1;
+  return `${file}.${process.pid}.${Date.now()}.${atomicJsonWriteSeq}.tmp`;
+}
+
+function storageReplaceSleepSync(delayMs: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);
+}
+
+function isRetryableStorageReplaceError(error: unknown): boolean {
+  return isRecord(error) && (error.code === "EPERM" || error.code === "EACCES" || error.code === "EBUSY");
+}
+
+function replaceStorageFile(tempFile: string, file: string): void {
+  const delays = [20, 50, 100, 200] as const;
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      renameSync(tempFile, file);
+      return;
+    } catch (error) {
+      if (attempt >= delays.length || !isRetryableStorageReplaceError(error)) {
+        throw error;
+      }
+      storageReplaceSleepSync(delays[attempt]);
+    }
+  }
+}
+
 export function writeJsonFileAtomic(file: string, value: unknown, mode?: number): void {
   mkdirSync(dirname(file), { recursive: true });
-  const tempFile = `${file}.tmp`;
+  const tempFile = atomicJsonTempFile(file);
   if (existsSync(file)) {
     copyFileSync(file, `${file}.bak`);
   }
@@ -1624,7 +1822,7 @@ export function writeJsonFileAtomic(file: string, value: unknown, mode?: number)
     if (mode !== undefined) {
       chmodSync(tempFile, mode);
     }
-    renameSync(tempFile, file);
+    replaceStorageFile(tempFile, file);
     if (mode !== undefined) {
       chmodSync(file, mode);
     }
@@ -1743,7 +1941,7 @@ function normalizeSeedProjectPaths(state: WorkspaceState): WorkspaceState {
 
 function sendJson(res: ServerResponse, statusCode: number, payload: unknown): void {
   res.statusCode = statusCode;
-  res.setHeader("Content-Type", "application/json");
+  res.setHeader("Content-Type", JSON_CONTENT_TYPE);
   res.setHeader("Cache-Control", "no-store");
   res.end(JSON.stringify(payload));
 }
@@ -1993,33 +2191,58 @@ function handleBrowserAction(req: IncomingMessage, res: ServerResponse): void {
 }
 
 function browserActionTargetDescription(target: BrowserActionTarget): string {
+  const framePath = target.framePath?.length ? `framePath=${target.framePath.join(" > ")} ` : "";
   if ("selector" in target) {
-    return target.selector;
+    return `${framePath}selector=${target.selector}`;
   }
   if ("role" in target) {
-    return target.name ? `role=${target.role} name=${target.name}` : `role=${target.role}`;
+    return target.name ? `${framePath}role=${target.role} name=${target.name}` : `${framePath}role=${target.role}`;
   }
   if ("text" in target) {
-    return `text=${target.text}`;
+    return `${framePath}text=${target.text}`;
   }
-  return `label=${target.label}`;
+  return `${framePath}label=${target.label}`;
 }
 
 function browserActionTargetSelector(target: BrowserActionTarget | undefined): string | undefined {
   return target && "selector" in target ? target.selector : undefined;
 }
 
+function browserActionPayloadTargetDescription(action: BrowserActionPayload): string | undefined {
+  if ("target" in action && action.target) {
+    return browserActionTargetDescription(action.target);
+  }
+  if (action.type === "type" && action.selector) {
+    return `selector=${action.selector}`;
+  }
+  if (action.type === "click" && "x" in action) {
+    return `point=x${action.x},y${action.y}`;
+  }
+  return undefined;
+}
+
+type BrowserActionLocatorScope = Pick<Page | FrameLocator, "locator" | "getByRole" | "getByText" | "getByLabel" | "frameLocator">;
+
+function browserActionLocatorScope(page: Page, target: BrowserActionTarget): BrowserActionLocatorScope {
+  let scope: BrowserActionLocatorScope = page;
+  for (const frameSelector of target.framePath ?? []) {
+    scope = scope.frameLocator(frameSelector);
+  }
+  return scope;
+}
+
 function browserActionLocator(page: Page, target: BrowserActionTarget): Locator {
+  const scope = browserActionLocatorScope(page, target);
   if ("selector" in target) {
-    return page.locator(target.selector).first();
+    return scope.locator(target.selector).first();
   }
   if ("role" in target) {
-    return target.name ? page.getByRole(target.role, { name: target.name, exact: true }).first() : page.getByRole(target.role).first();
+    return target.name ? scope.getByRole(target.role, { name: target.name, exact: true }).first() : scope.getByRole(target.role).first();
   }
   if ("text" in target) {
-    return page.getByText(target.text, { exact: true }).first();
+    return scope.getByText(target.text, { exact: true }).first();
   }
-  return page.getByLabel(target.label, { exact: true }).first();
+  return scope.getByLabel(target.label, { exact: true }).first();
 }
 
 function browserActionTargetForKeyboard(action: Extract<BrowserActionPayload, { readonly type: "type" | "press" }>): BrowserActionTarget | undefined {
@@ -2033,6 +2256,7 @@ function browserActionTargetForKeyboard(action: Extract<BrowserActionPayload, { 
 }
 
 async function browserActionPoint(locator: Locator): Promise<{ readonly x: number; readonly y: number } | undefined> {
+  await locator.waitFor({ state: "visible", timeout: BROWSER_ACTION_TIMEOUT_MS });
   const box = await locator.boundingBox();
   if (!box) {
     return undefined;
@@ -2040,19 +2264,108 @@ async function browserActionPoint(locator: Locator): Promise<{ readonly x: numbe
   return { x: Math.round(box.x + box.width / 2), y: Math.round(box.y + box.height / 2) };
 }
 
-async function applyBrowserAction(action: BrowserActionPayload): Promise<{ readonly session: BrowserPreviewSession; readonly tabId?: string }> {
+export function browserPreviewActionFailureResult(action: BrowserActionPayload, error: unknown): BrowserPreviewActionResult {
+  const target = browserActionPayloadTargetDescription(action);
+  const rawError = errorMessage(error);
+  const isTimeout = /timeout|timed out/i.test(rawError);
+  return {
+    ok: false,
+    action: action.type,
+    ...(target ? { target } : {}),
+    error: isTimeout && target ? `Target not found within ${BROWSER_ACTION_TIMEOUT_MS}ms: ${target}` : rawError,
+  };
+}
+
+async function browserPreviewActiveElement(page: Page): Promise<BrowserPreviewActiveElement | undefined> {
+  if (page.url() === "about:blank") {
+    return undefined;
+  }
+  return page.evaluate((): BrowserPreviewActiveElement | undefined => {
+    const element = document.activeElement;
+    if (!element) {
+      return undefined;
+    }
+    const clip = (value: string) => {
+      const normalized = value.replace(/\s+/g, " ").trim();
+      return normalized.length > 240 ? `${normalized.slice(0, 239)}…` : normalized;
+    };
+    return {
+      tag: element.tagName.toLowerCase(),
+      role: element.getAttribute("role") ?? undefined,
+      label: element.getAttribute("aria-label") ?? undefined,
+      text: clip(element.textContent ?? ""),
+    };
+  });
+}
+
+async function browserPreviewActionSuccessResult(page: Page, action: BrowserActionPayload, value?: unknown): Promise<BrowserPreviewActionResult> {
+  const text = value === undefined ? undefined : clip(value, 1000);
+  const target = browserActionPayloadTargetDescription(action);
+  return {
+    ok: true,
+    action: action.type,
+    ...(target ? { target } : {}),
+    ...(value === undefined ? {} : { value }),
+    ...(text === undefined ? {} : { text }),
+    ...(action.type === "select-tab" ? {} : { activeElement: await browserPreviewActiveElement(page) }),
+  };
+}
+
+async function evaluateBrowserPreviewScript(page: Page, script: string): Promise<unknown> {
+  const evaluation = page.evaluate(async (source): Promise<unknown> => {
+    const simplify = (value: unknown, depth: number): unknown => {
+      if (value === null || value === undefined || typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+        return value;
+      }
+      if (typeof value === "bigint" || typeof value === "symbol" || typeof value === "function") {
+        return String(value);
+      }
+      if (value instanceof Element) {
+        return {
+          tag: value.tagName.toLowerCase(),
+          id: value.id || undefined,
+          role: value.getAttribute("role") ?? undefined,
+          label: value.getAttribute("aria-label") ?? undefined,
+          text: value.textContent?.replace(/\s+/g, " ").trim().slice(0, 240) ?? "",
+        };
+      }
+      if (depth <= 0) {
+        return Array.isArray(value) ? `[array:${value.length}]` : "[object]";
+      }
+      if (Array.isArray(value)) {
+        return value.slice(0, 40).map((item) => simplify(item, depth - 1));
+      }
+      if (typeof value === "object") {
+        const output: Record<string, unknown> = {};
+        for (const [key, item] of Object.entries(value as Record<string, unknown>).slice(0, 40)) {
+          output[key] = simplify(item, depth - 1);
+        }
+        return output;
+      }
+      return String(value);
+    };
+    const raw: unknown = (0, eval)(source);
+    return simplify(await Promise.resolve(raw), 4);
+  }, script);
+  const timeout = new Promise<never>((_, reject) => {
+    setTimeout(() => reject(new Error(`Browser eval timed out after ${BROWSER_ACTION_TIMEOUT_MS}ms.`)), BROWSER_ACTION_TIMEOUT_MS);
+  });
+  return Promise.race([evaluation, timeout]);
+}
+
+async function applyBrowserAction(action: BrowserActionPayload): Promise<{ readonly session: BrowserPreviewSession; readonly tabId?: string; readonly actionResult?: BrowserPreviewActionResult }> {
   const session = await ensureBrowserPreviewSession(action.sessionId);
   if (action.type === "select-tab") {
-    browserPreviewPageFor(session, action.tabId);
+    const selectedPage = browserPreviewPageFor(session, action.tabId);
     session.activeTabId = action.tabId;
     emitBrowserPreviewEvent(session, { tabId: action.tabId, type: "tab.selected", label: "Tab selected" });
-    return { session, tabId: action.tabId };
+    return { session, tabId: action.tabId, actionResult: await browserPreviewActionSuccessResult(selectedPage, action) };
   }
   const page = browserPreviewPageFor(session, action.tabId);
   const tabId = session.pageIds.get(page) ?? session.activeTabId;
   if (action.type === "refresh") {
     emitBrowserPreviewEvent(session, { tabId, type: "action.refresh", label: "Refresh" });
-    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.reload({ waitUntil: "domcontentloaded", timeout: BROWSER_ACTION_TIMEOUT_MS });
   } else if (action.type === "scroll") {
     if (action.target) {
       const locator = browserActionLocator(page, action.target);
@@ -2065,6 +2378,7 @@ async function applyBrowserAction(action: BrowserActionPayload): Promise<{ reado
         target: action.target,
         selector: browserActionTargetSelector(action.target),
       });
+      await locator.waitFor({ state: "visible", timeout: BROWSER_ACTION_TIMEOUT_MS });
       await locator.evaluate((element, deltaY) => {
         if (!(element instanceof HTMLElement)) {
           throw new Error("Browser scroll target must be an HTMLElement.");
@@ -2087,7 +2401,7 @@ async function applyBrowserAction(action: BrowserActionPayload): Promise<{ reado
         selector: browserActionTargetSelector(action.target),
         point: await browserActionPoint(locator),
       });
-      await locator.click();
+      await locator.click({ timeout: BROWSER_ACTION_TIMEOUT_MS });
     } else {
       emitBrowserPreviewEvent(session, { tabId, type: "action.click", label: "Click", detail: `x=${action.x} y=${action.y}`, point: { x: action.x, y: action.y } });
       await page.mouse.click(action.x, action.y);
@@ -2104,10 +2418,10 @@ async function applyBrowserAction(action: BrowserActionPayload): Promise<{ reado
       text: action.text,
     });
     if (target) {
-      await browserActionLocator(page, target).click();
+      await browserActionLocator(page, target).click({ timeout: BROWSER_ACTION_TIMEOUT_MS });
     }
     await page.keyboard.type(action.text);
-  } else {
+  } else if (action.type === "press") {
     const target = browserActionTargetForKeyboard(action);
     emitBrowserPreviewEvent(session, {
       tabId,
@@ -2119,23 +2433,57 @@ async function applyBrowserAction(action: BrowserActionPayload): Promise<{ reado
       key: action.key,
     });
     if (target) {
-      await browserActionLocator(page, target).press(action.key);
+      await browserActionLocator(page, target).press(action.key, { timeout: BROWSER_ACTION_TIMEOUT_MS });
     } else {
       await page.keyboard.press(action.key);
     }
+  } else if (action.type === "eval") {
+    const value = await evaluateBrowserPreviewScript(page, action.script);
+    const resultText = clip(value, 1000);
+    emitBrowserPreviewEvent(session, {
+      tabId,
+      type: "action.eval",
+      label: "Eval",
+      detail: resultText || clip(action.script, 120),
+      script: action.script,
+      text: resultText,
+    });
+    return { session, tabId, actionResult: await browserPreviewActionSuccessResult(page, action, value) };
   }
-  return { session };
+  return { session, tabId, actionResult: await browserPreviewActionSuccessResult(page, action) };
 }
 
 function handleBrowserBridgeAction(req: IncomingMessage, res: ServerResponse): void {
   readJsonBody(req, res, (body) => {
     void (async () => {
+      let action: BrowserActionPayload;
       try {
-        const action = parseBrowserActionPayload(body);
-        const result = await applyBrowserAction(action);
-        sendJson(res, 200, await browserPreviewState(result.session, result.tabId));
+        action = parseBrowserActionPayload(body);
       } catch (error) {
         sendJson(res, browserPreviewErrorStatus(error), { error: errorMessage(error) });
+        return;
+      }
+      try {
+        const result = await applyBrowserAction(action);
+        sendJson(res, 200, await browserPreviewState(result.session, result.tabId, result.actionResult));
+      } catch (error) {
+        const session = currentBrowserPreviewSession(action.sessionId);
+        if (!session) {
+          sendJson(res, browserPreviewErrorStatus(error), { error: errorMessage(error) });
+          return;
+        }
+        const tabId = action.tabId && session.pages.has(action.tabId) ? action.tabId : session.activeTabId;
+        const actionResult = browserPreviewActionFailureResult(action, error);
+        emitBrowserPreviewEvent(session, {
+          tabId,
+          type: "action.failed",
+          label: "Action failed",
+          detail: actionResult.target ? `${actionResult.target} · ${actionResult.error ?? ""}` : actionResult.error,
+          target: "target" in action ? action.target : undefined,
+          selector: "target" in action ? browserActionTargetSelector(action.target) : undefined,
+          text: actionResult.error,
+        });
+        sendJson(res, 200, await browserPreviewState(session, tabId, actionResult));
       }
     })();
   });
@@ -2864,20 +3212,30 @@ export function browserBridgePromptAppendix(context: BrowserBridgeContext): stri
   const roleClickPayload = JSON.stringify({ sessionId: context.sessionId, type: "click", target: { role: "button", name: "Save" } });
   const typePayload = JSON.stringify({ sessionId: context.sessionId, type: "type", target: { label: "Search" }, text: "hello" });
   const pressPayload = JSON.stringify({ sessionId: context.sessionId, type: "press", target: { role: "textbox", name: "Search" }, key: "Enter" });
-  const scrollPayload = JSON.stringify({ sessionId: context.sessionId, type: "scroll", target: { selector: "main" }, deltaY: 600 });
+  const frameClickPayload = JSON.stringify({ sessionId: context.sessionId, type: "click", target: { framePath: ["iframe[data-testid=preview-frame]"], selector: "[data-testid=submit]" } });
+  const selectTabPayload = JSON.stringify({ sessionId: context.sessionId, tabId: "tab-2", type: "select-tab" });
+  const scrollPayload = JSON.stringify({ sessionId: context.sessionId, type: "scroll", deltaY: 600 });
+  const evalPayload = JSON.stringify({ sessionId: context.sessionId, type: "eval", script: "document.activeElement?.tagName" });
   return [
     "",
     "<browser-preview-bridge>",
     `The user can observe browser work for this run in the app Preview tab. Use sessionId '${context.sessionId}' when browser interaction is useful.`,
+    "Supported bridge actions: sync, snapshot, click, type, press, scroll, refresh, select-tab, eval.",
     `Open or sync a page: POST ${context.baseUrl}/api/browser/bridge/sync with JSON ${sessionPayload}`,
     `Read current state and available DOM targets: GET ${context.baseUrl}/api/browser/bridge/snapshot?sessionId=${encodeURIComponent(context.sessionId)}`,
+    "Snapshot includes snapshot.activeTabId and snapshot.tabs. Each tab has id, url, title, and active. Use activeTabId by default; pass tabId only when intentionally working in another tab.",
+    `Select another preview tab before acting: POST ${context.baseUrl}/api/browser/bridge/action with JSON ${selectTabPayload}`,
     "Do not write bridge snapshots or responses to disk. Do not use -OutFile, temp files, shell redirection, tee, or other file writes for bridge calls. Use in-memory or stdout HTTP calls only, including in read-only access mode.",
-    `Prefer DOM targets from snapshot.domTargets over coordinates. Target can be {selector}, {role,name}, {text}, or {label}.`,
+    "On Windows PowerShell, build JSON with ConvertTo-Json -Depth 8 and call Invoke-RestMethod with -ContentType 'application/json; charset=utf-8'. Do not use curl -H/-d because curl may be an Invoke-WebRequest alias.",
+    "The bridge action response includes actionResult for every action. If actionResult.ok is false, inspect actionResult.error/target and retry with a better DOM target instead of assuming a permission denial.",
+    `Prefer DOM targets from snapshot.domTargets over coordinates. Target can be {selector}, {role,name}, {text}, or {label}; nested iframe targets include framePath and must be sent back unchanged.`,
     `Click by selector: POST ${context.baseUrl}/api/browser/bridge/action with JSON ${clickPayload}`,
     `Click by role/name: POST ${context.baseUrl}/api/browser/bridge/action with JSON ${roleClickPayload}`,
+    `Click inside an iframe: POST ${context.baseUrl}/api/browser/bridge/action with JSON ${frameClickPayload}`,
     `Type by label: POST ${context.baseUrl}/api/browser/bridge/action with JSON ${typePayload}`,
     `Press by role/name: POST ${context.baseUrl}/api/browser/bridge/action with JSON ${pressPayload}`,
-    `Scroll a container by selector: POST ${context.baseUrl}/api/browser/bridge/action with JSON ${scrollPayload}`,
+    `Scroll the page: POST ${context.baseUrl}/api/browser/bridge/action with JSON ${scrollPayload}`,
+    `Eval action: POST ${context.baseUrl}/api/browser/bridge/action with JSON ${evalPayload}. Eval runs only in the active preview tab, is limited to ${BROWSER_EVAL_SCRIPT_MAX_CHARS} characters, times out quickly, and returns compact actionResult JSON; use it for focused DOM inspection or deliberate page-side scripts.`,
     "Coordinates are only for canvas-like targets that cannot be addressed through DOM. These bridge endpoints return compact JSON without screenshots. All bridge actions are visible to the user as live Preview activity.",
     "</browser-preview-bridge>",
   ].join("\n");

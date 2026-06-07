@@ -46,11 +46,21 @@ type BrowserActivityEventType =
   | "action.click"
   | "action.type"
   | "action.press"
+  | "action.eval"
+  | "action.failed"
   | "console.error"
   | "page.error"
   | "network.failed";
 
-type BrowserActionTarget = { readonly selector: string } | { readonly role: string; readonly name?: string } | { readonly text: string } | { readonly label: string };
+interface BrowserActionFrameTarget {
+  readonly framePath?: readonly string[];
+}
+
+type BrowserActionTarget =
+  | (BrowserActionFrameTarget & { readonly selector: string })
+  | (BrowserActionFrameTarget & { readonly role: string; readonly name?: string })
+  | (BrowserActionFrameTarget & { readonly text: string })
+  | (BrowserActionFrameTarget & { readonly label: string });
 
 interface BrowserActivityEvent {
   readonly id: number;
@@ -67,6 +77,7 @@ interface BrowserActivityEvent {
   readonly selector?: string;
   readonly text?: string;
   readonly key?: string;
+  readonly script?: string;
   readonly at: string;
 }
 
@@ -166,11 +177,14 @@ function isBrowserActionTarget(value: unknown): value is BrowserActionTarget {
   if (!isRecord(value)) {
     return false;
   }
+  const framePath =
+    value.framePath === undefined ||
+    (Array.isArray(value.framePath) && value.framePath.every((item) => typeof item === "string" && item.trim().length > 0));
   const selector = typeof value.selector === "string" && value.selector.trim().length > 0;
   const role = typeof value.role === "string" && value.role.trim().length > 0;
   const text = typeof value.text === "string" && value.text.trim().length > 0;
   const label = typeof value.label === "string" && value.label.trim().length > 0;
-  return [selector, role, text, label].filter(Boolean).length === 1 && (value.name === undefined || typeof value.name === "string");
+  return framePath && [selector, role, text, label].filter(Boolean).length === 1 && (value.name === undefined || typeof value.name === "string");
 }
 
 function isBrowserTab(value: unknown): value is BrowserTab {
@@ -196,6 +210,8 @@ function isBrowserActivityEventType(value: unknown): value is BrowserActivityEve
     value === "action.click" ||
     value === "action.type" ||
     value === "action.press" ||
+    value === "action.eval" ||
+    value === "action.failed" ||
     value === "console.error" ||
     value === "page.error" ||
     value === "network.failed"
@@ -219,6 +235,7 @@ function isBrowserActivityEvent(value: unknown): value is BrowserActivityEvent {
     (value.selector === undefined || typeof value.selector === "string") &&
     (value.text === undefined || typeof value.text === "string") &&
     (value.key === undefined || typeof value.key === "string") &&
+    (value.script === undefined || typeof value.script === "string") &&
     typeof value.at === "string"
   );
 }
@@ -642,7 +659,32 @@ function liveElementName(element: Element): string {
   return normalizedLiveText(element.textContent) || normalizedLiveText(element.getAttribute("title"));
 }
 
-function resolveLiveTarget(document: Document, target: BrowserActionTarget): Element | null {
+function liveTargetDocument(rootDocument: Document, target: BrowserActionTarget): Document | null {
+  let document = rootDocument;
+  for (const frameSelector of target.framePath ?? []) {
+    const frame = document.querySelector(frameSelector);
+    const view = document.defaultView;
+    if (!view || !(frame instanceof view.HTMLIFrameElement)) {
+      return null;
+    }
+    try {
+      const nextDocument = frame.contentDocument ?? frame.contentWindow?.document ?? null;
+      if (!nextDocument) {
+        return null;
+      }
+      document = nextDocument;
+    } catch {
+      return null;
+    }
+  }
+  return document;
+}
+
+function resolveLiveTarget(rootDocument: Document, target: BrowserActionTarget): Element | null {
+  const document = liveTargetDocument(rootDocument, target);
+  if (!document) {
+    return null;
+  }
   if ("selector" in target) {
     return document.querySelector(target.selector);
   }
@@ -739,7 +781,8 @@ function replayBrowserActivityEvent(frame: HTMLIFrameElement | null, event: Brow
   if (event.type === "action.scroll" && typeof event.deltaY === "number") {
     if (event.target) {
       const target = resolveLiveTarget(document, event.target);
-      if (!target || !(target instanceof view.HTMLElement)) {
+      const targetView = target?.ownerDocument.defaultView;
+      if (!target || !targetView || !(target instanceof targetView.HTMLElement)) {
         return false;
       }
       target.scrollBy({ top: event.deltaY, left: 0, behavior: "auto" });
@@ -753,22 +796,29 @@ function replayBrowserActivityEvent(frame: HTMLIFrameElement | null, event: Brow
     return target ? dispatchLiveInput(target, event.text) : false;
   }
   if (event.type === "action.press" && typeof event.key === "string") {
+    let keyDocument = document;
     if (event.target) {
       const target = resolveLiveTarget(document, event.target);
       if (!target) {
         return false;
       }
-      if (target instanceof view.HTMLElement) {
+      keyDocument = target.ownerDocument;
+      const targetView = target.ownerDocument.defaultView;
+      if (targetView && target instanceof targetView.HTMLElement) {
         target.focus();
       }
     }
-    return dispatchLiveKey(document, event.key);
+    return dispatchLiveKey(keyDocument, event.key);
+  }
+  if (event.type === "action.eval" && typeof event.script === "string") {
+    view.eval(event.script);
+    return true;
   }
   return true;
 }
 
 function isReplayableBrowserActivityEvent(event: BrowserActivityEvent): boolean {
-  return event.type === "action.click" || event.type === "action.scroll" || event.type === "action.type" || event.type === "action.press";
+  return event.type === "action.click" || event.type === "action.scroll" || event.type === "action.type" || event.type === "action.press" || event.type === "action.eval";
 }
 
 export function BrowserPreview({ sessionId, active, onSendAnnotation, bottomInset = 0 }: BrowserPreviewProps) {
@@ -1128,19 +1178,19 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, bottomInse
       >
         {controlTooltip(
           t("browserPreviewBack"),
-          <IconButton aria-label={t("browserPreviewBack")} size="small" disabled={!canGoBack} onClick={() => navigateFrameHistory("back")}>
+          <IconButton data-testid="browser-preview-back-button" aria-label={t("browserPreviewBack")} size="small" disabled={!canGoBack} onClick={() => navigateFrameHistory("back")}>
             <ArrowBackIcon fontSize="small" />
           </IconButton>,
         )}
         {controlTooltip(
           t("browserPreviewForward"),
-          <IconButton aria-label={t("browserPreviewForward")} size="small" disabled={!canGoForward} onClick={() => navigateFrameHistory("forward")}>
+          <IconButton data-testid="browser-preview-forward-button" aria-label={t("browserPreviewForward")} size="small" disabled={!canGoForward} onClick={() => navigateFrameHistory("forward")}>
             <ArrowForwardIcon fontSize="small" />
           </IconButton>,
         )}
         {controlTooltip(
           t("browserPreviewRefresh"),
-          <IconButton aria-label={t("browserPreviewRefresh")} size="small" disabled={!liveUrl || mirrorSyncing} onClick={refreshLivePreview}>
+          <IconButton data-testid="browser-preview-refresh-button" aria-label={t("browserPreviewRefresh")} size="small" disabled={!liveUrl || mirrorSyncing} onClick={refreshLivePreview}>
             <RefreshIcon fontSize="small" />
           </IconButton>,
         )}
@@ -1148,7 +1198,7 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, bottomInse
           value={url}
           onChange={(event) => setUrl(event.target.value)}
           placeholder={browserPreviewDefaultUrl}
-          inputProps={{ "aria-label": t("browserPreviewUrlLabel") }}
+          inputProps={{ "aria-label": t("browserPreviewUrlLabel"), "data-testid": "browser-preview-url-input" }}
           sx={{
             flex: "1 1 auto",
             minWidth: 80,
@@ -1234,14 +1284,14 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, bottomInse
         </Tooltip>
         {controlTooltip(
           t("browserPreviewOpen"),
-          <IconButton aria-label={t("browserPreviewOpen")} type="submit" size="small" disabled={mirrorSyncing}>
+          <IconButton data-testid="browser-preview-open-button" aria-label={t("browserPreviewOpen")} type="submit" size="small" disabled={mirrorSyncing}>
             {mirrorSyncing ? <CircularProgress color="inherit" size={18} /> : <OpenInBrowserIcon fontSize="small" />}
           </IconButton>,
         )}
         {liveUrl && (
           controlTooltip(
             t("browserPreviewSyncMirror"),
-            <IconButton aria-label={t("browserPreviewSyncMirror")} size="small" disabled={mirrorSyncing} onClick={() => void syncMirror(liveUrl)}>
+            <IconButton data-testid="browser-preview-sync-button" aria-label={t("browserPreviewSyncMirror")} size="small" disabled={mirrorSyncing} onClick={() => void syncMirror(liveUrl)}>
               <RefreshIcon fontSize="small" />
             </IconButton>,
           )
@@ -1260,19 +1310,19 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, bottomInse
         >
           {controlTooltip(
             t("browserPreviewInteractMode"),
-            <ToggleButton value="interact" aria-label={t("browserPreviewInteractMode")}>
+            <ToggleButton data-testid="browser-preview-mode-interact" value="interact" aria-label={t("browserPreviewInteractMode")}>
               <OpenInBrowserIcon sx={{ fontSize: 16 }} />
             </ToggleButton>,
           )}
           {controlTooltip(
             t("browserPreviewAnnotateMode"),
-            <ToggleButton value="annotate" aria-label={t("browserPreviewAnnotateMode")}>
+            <ToggleButton data-testid="browser-preview-mode-annotate" value="annotate" aria-label={t("browserPreviewAnnotateMode")}>
               <RateReviewIcon sx={{ fontSize: 16 }} />
             </ToggleButton>,
           )}
           {controlTooltip(
             t("browserPreviewComponentMode"),
-            <ToggleButton value="component" aria-label={t("browserPreviewComponentMode")}>
+            <ToggleButton data-testid="browser-preview-mode-component" value="component" aria-label={t("browserPreviewComponentMode")}>
               <AdsClickIcon sx={{ fontSize: 16 }} />
             </ToggleButton>,
           )}

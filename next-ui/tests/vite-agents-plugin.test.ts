@@ -28,6 +28,8 @@ import {
   activeBackgroundRunSnapshotsFromHandles,
   applyBrowserStorageSnapshot,
   appendRunAuditEvent,
+  BROWSER_ACTION_TIMEOUT_MS,
+  browserPreviewActionFailureResult,
   parseRunApprovalPayload,
   parseRunCancelPayload,
   parseRunInputPayload,
@@ -57,10 +59,12 @@ import {
   reconcileStaleBackgroundRuns,
   hasGeminiStoredAuthAt,
   installCommandForAgent,
+  JSON_CONTENT_TYPE,
   parseCodexModelsOutput,
   parseClaudeAgentsOutput,
   parseOpenCodeAgentsOutput,
   parseOpenCodeModelsOutput,
+  prioritizeBrowserPreviewDomTargets,
   resolveAgentInstallLaunch,
   resolveBinOnPath,
   resolveLaunchCommand,
@@ -109,6 +113,21 @@ describe("vite agents plugin", () => {
       expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ version: 2 });
       expect(JSON.parse(readFileSync(`${file}.bak`, "utf8"))).toEqual({ version: 1 });
       expect(existsSync(`${file}.tmp`)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not depend on a fixed atomic temp path during storage writes", () => {
+    const dir = mkdtempSync(join(tmpdir(), "rlab-atomic-json-temp-"));
+    try {
+      const file = join(dir, "state.json");
+      mkdirSync(`${file}.tmp`);
+
+      writeJsonFileAtomic(file, { version: 1 });
+
+      expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ version: 1 });
+      expect(statSync(`${file}.tmp`).isDirectory()).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1229,6 +1248,16 @@ Built-in agents:
     expect(prompt).toContain("Do not write bridge snapshots or responses to disk.");
     expect(prompt).toContain("Do not use -OutFile");
     expect(prompt).toContain("Use in-memory or stdout HTTP calls only");
+    expect(prompt).toContain("Supported bridge actions: sync, snapshot, click, type, press, scroll, refresh, select-tab, eval.");
+    expect(prompt).toContain("snapshot.activeTabId");
+    expect(prompt).toContain("snapshot.tabs");
+    expect(prompt).toContain('"type":"select-tab"');
+    expect(prompt).toContain("Eval action");
+    expect(prompt).not.toContain('selector":"main"');
+  });
+
+  it("uses an explicit UTF-8 JSON content type for bridge-friendly clients", () => {
+    expect(JSON_CONTENT_TYPE).toBe("application/json; charset=utf-8");
   });
 
   it("translates single-question events from OpenCode into option blocks", () => {
@@ -1673,6 +1702,11 @@ Built-in agents:
       type: "click",
       target: { selector: "[data-testid=save]" },
     });
+    expect(parseBrowserActionPayload(JSON.stringify({ sessionId: "c-jwt", type: "click", target: { framePath: ["iframe[data-testid=preview-frame]"], selector: "[data-testid=save]" } }))).toEqual({
+      sessionId: "c-jwt",
+      type: "click",
+      target: { framePath: ["iframe[data-testid=preview-frame]"], selector: "[data-testid=save]" },
+    });
     expect(parseBrowserActionPayload(JSON.stringify({ sessionId: "c-jwt", type: "scroll", deltaY: 400, target: { role: "main", name: "Content" } }))).toEqual({
       sessionId: "c-jwt",
       type: "scroll",
@@ -1693,7 +1727,14 @@ Built-in agents:
     });
     expect(parseBrowserActionPayload(JSON.stringify({ sessionId: "c-jwt", type: "type", selector: "input[name=q]", text: "hello" }))).toEqual({ sessionId: "c-jwt", type: "type", selector: "input[name=q]", text: "hello" });
     expect(parseBrowserActionPayload(JSON.stringify({ sessionId: "c-jwt", type: "press", key: "Enter" }))).toEqual({ sessionId: "c-jwt", type: "press", key: "Enter" });
+    expect(parseBrowserActionPayload(JSON.stringify({ sessionId: "c-jwt", type: "eval", script: "document.activeElement?.tagName" }))).toEqual({
+      sessionId: "c-jwt",
+      type: "eval",
+      script: "document.activeElement?.tagName",
+    });
     expect(() => parseBrowserActionPayload(JSON.stringify({ sessionId: "c-jwt", type: "click" }))).toThrow("Browser click target or x and y are required.");
+    expect(() => parseBrowserActionPayload(JSON.stringify({ sessionId: "c-jwt", type: "eval", script: "" }))).toThrow("Browser eval script is required.");
+    expect(() => parseBrowserActionPayload(JSON.stringify({ sessionId: "c-jwt", type: "eval", script: "x".repeat(8001) }))).toThrow("Browser eval script must be 8000 characters or less.");
     expect(() => parseBrowserActionPayload(JSON.stringify({ sessionId: "c-jwt", type: "click", target: { selector: "#one", text: "Two" } }))).toThrow("Browser action target must include exactly one locator.");
     expect(parseBrowserSyncPayload(JSON.stringify({ sessionId: "c-jwt", url: " http://localhost:3000 ", localStorage: { theme: "dark" }, sessionStorage: { step: "2" } }))).toEqual({
       sessionId: "c-jwt",
@@ -1702,6 +1743,47 @@ Built-in agents:
       sessionStorage: { step: "2" },
     });
     expect(() => parseBrowserSyncPayload(JSON.stringify({ sessionId: "c-jwt", url: "http://localhost:3000", localStorage: { theme: true } }))).toThrow("Browser storage values must be strings.");
+  });
+
+  it("builds structured browser action failures with short target-oriented timeout errors", () => {
+    expect(BROWSER_ACTION_TIMEOUT_MS).toBeLessThanOrEqual(5000);
+    const action = parseBrowserActionPayload(JSON.stringify({ sessionId: "c-jwt", type: "click", target: { selector: "#missing" } }));
+
+    expect(browserPreviewActionFailureResult(action, new Error("locator.click: Timeout 30000ms exceeded."))).toEqual({
+      ok: false,
+      action: "click",
+      target: "selector=#missing",
+      error: "Target not found within 5000ms: selector=#missing",
+    });
+  });
+
+  it("prioritizes editable browser preview DOM targets before sidebar controls", () => {
+    const sidebarButtons = Array.from({ length: 90 }, (_, index) => ({
+      selector: `button[data-index="${index}"]`,
+      tag: "button",
+      role: "button",
+      text: `Sidebar ${index}`,
+      bounds: { x: 0, y: index * 10, width: 100, height: 20 },
+    }));
+    const composer = {
+      selector: "[data-testid=\"composer-input\"]",
+      tag: "textarea",
+      role: "textbox",
+      label: "Написать",
+      editable: true,
+      disabled: false,
+      visible: true,
+      placeholder: "Написать",
+      ordinal: 90,
+      text: "",
+      bounds: { x: 320, y: 680, width: 700, height: 40 },
+    };
+
+    const targets = prioritizeBrowserPreviewDomTargets([...sidebarButtons, composer], 80);
+
+    expect(targets).toHaveLength(80);
+    expect(targets[0]).toMatchObject({ selector: "[data-testid=\"composer-input\"]", role: "textbox", editable: true, disabled: false, visible: true, placeholder: "Написать", ordinal: 90 });
+    expect(targets.some((target) => target.selector === "[data-testid=\"composer-input\"]")).toBe(true);
   });
 
   it("does not apply browser storage to about:blank preview documents", async () => {

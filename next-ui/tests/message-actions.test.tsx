@@ -27,7 +27,7 @@ describe("message actions", () => {
     expect(messageToPlainText(message)).not.toContain(rawOutput);
   });
 
-  it("exposes copy, retry, and edit controls for user messages", () => {
+  it("exposes copy and edit controls for user messages without duplicate resend", () => {
     const onCopy = vi.fn();
     const onRetry = vi.fn();
     const onEditAndResend = vi.fn();
@@ -44,13 +44,13 @@ describe("message actions", () => {
     );
 
     fireEvent.click(screen.getAllByRole("button", { name: "Скопировать сообщение" })[0]);
-    fireEvent.click(screen.getByRole("button", { name: "Повторить сообщение" }));
+    expect(screen.queryByRole("button", { name: "Повторить сообщение" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Изменить и отправить" }));
     fireEvent.change(screen.getByRole("textbox", { name: "Изменить сообщение" }), { target: { value: "Edited prompt" } });
     fireEvent.click(screen.getByRole("button", { name: "Отправить изменённое сообщение" }));
 
     expect(onCopy).toHaveBeenCalledWith(messages[0]);
-    expect(onRetry).toHaveBeenCalledWith(messages[0]);
+    expect(onRetry).not.toHaveBeenCalled();
     expect(onEditAndResend).toHaveBeenCalledWith(messages[0], "Edited prompt");
   });
 

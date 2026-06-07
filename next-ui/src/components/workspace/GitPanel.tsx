@@ -32,6 +32,12 @@ interface GitViewProps {
   readonly onUnstagedStatsChange?: (stats: { readonly additions: number; readonly deletions: number }) => void;
   /** Extra bottom space (px) reserved for the composer's floating tags row. */
   readonly bottomInset?: number;
+  /** External "open in Git" target: the file path to focus and expand. */
+  readonly focusPath?: string;
+  /** Bumped on each focus request so re-selecting the same file re-scrolls. */
+  readonly focusNonce?: number;
+  /** Bumped to force a fresh `git status` fetch (e.g. after a revert). */
+  readonly reloadSignal?: number;
 }
 
 type GitApiErrorPayload = {
@@ -149,6 +155,7 @@ function DiffFileCard({
   onAddComment,
   onUpdateComment,
   onDeleteComment,
+  focusSignal = 0,
   t,
 }: {
   readonly path: string;
@@ -162,6 +169,9 @@ function DiffFileCard({
   readonly onAddComment?: (line: number, lineText: string, body: string) => void;
   readonly onUpdateComment?: (id: string, body: string) => void;
   readonly onDeleteComment?: (id: string) => void;
+  /** Increments when this card is the target of an external "open in Git" jump;
+   *  each new value expands the card and scrolls it into view. */
+  readonly focusSignal?: number;
   readonly t: I18nApi["t"];
 }) {
   const lineCount = lines?.length ?? 0;
@@ -171,6 +181,7 @@ function DiffFileCard({
   const [touched, setTouched] = useState(false);
   const [stuck, setStuck] = useState(false);
   const sentinelRef = useRef<HTMLDivElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
 
   // Auto-open small diffs once their content has loaded; leave large/gigantic
   // collapsed unless the user opens them.
@@ -180,6 +191,18 @@ function DiffFileCard({
     }
     setOpen(true);
   }, [lines, lineCount, touched]);
+
+  // External "open in Git" jump: expand this card and bring it into view.
+  useEffect(() => {
+    if (focusSignal <= 0) {
+      return;
+    }
+    setTouched(true);
+    setOpen(true);
+    onFirstOpen?.();
+    const frame = requestAnimationFrame(() => rootRef.current?.scrollIntoView({ block: "start", behavior: "smooth" }));
+    return () => cancelAnimationFrame(frame);
+  }, [focusSignal]);
 
   // While the header is pinned (its sentinel scrolled out of the panel top) it
   // drops its rounded corners so it sits flush against the panel.
@@ -200,6 +223,7 @@ function DiffFileCard({
 
   return (
     <Box
+      ref={rootRef}
       sx={{
         borderRadius: radius,
         border: (theme) => `1px solid ${theme.custom.borders.subtle}`,
@@ -294,6 +318,7 @@ function GitFileDiffCard({
   autoLoad,
   scrollRef,
   review,
+  focusSignal = 0,
   t,
 }: {
   readonly cwd: string;
@@ -303,6 +328,7 @@ function GitFileDiffCard({
   readonly autoLoad: boolean;
   readonly scrollRef?: RefObject<HTMLDivElement | null>;
   readonly review?: DiffCommentApi;
+  readonly focusSignal?: number;
   readonly t: I18nApi["t"];
 }) {
   const [lines, setLines] = useState<readonly DiffViewerLine[] | null>(null);
@@ -344,12 +370,13 @@ function GitFileDiffCard({
       onAddComment={review ? (line, lineText, body) => review.onAddComment(file.gitPath, line, lineText, body) : undefined}
       onUpdateComment={review?.onUpdateComment}
       onDeleteComment={review?.onDeleteComment}
+      focusSignal={focusSignal}
       t={t}
     />
   );
 }
 
-export function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnstagedStatsChange, bottomInset = 0 }: GitViewProps) {
+export function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnstagedStatsChange, bottomInset = 0, focusPath, focusNonce = 0, reloadSignal = 0 }: GitViewProps) {
   const { t } = useI18n();
   const [status, setStatus] = useState<GitStatusPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -358,6 +385,8 @@ export function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnst
   const [activeTab, setActiveTab] = useState<GitPanelTab>("unstaged");
   const [actionLoading, setActionLoading] = useState(false);
   const [commitMessage, setCommitMessage] = useState("");
+  // The focused file plus a tick so re-selecting the same path re-scrolls.
+  const [focused, setFocused] = useState<{ readonly path: string; readonly tick: number }>({ path: "", tick: 0 });
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -392,11 +421,30 @@ export function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnst
     return () => {
       alive = false;
     };
-  }, [cwd, reloadKey, t]);
+  }, [cwd, reloadKey, reloadSignal, t]);
 
   const unstagedFiles = useMemo(() => changedFilesForTab(status, "unstaged"), [status]);
   const stagedFiles = useMemo(() => changedFilesForTab(status, "staged"), [status]);
   const hasStagedFiles = stagedFiles.length > 0;
+
+  // Handle an external "open in Git" jump: switch to the tab that holds the file
+  // and remember it so the matching card expands and scrolls into view. Re-runs
+  // when status arrives so a focus requested before load still lands.
+  useEffect(() => {
+    if (!focusNonce || !focusPath) {
+      return;
+    }
+    if (stagedFiles.some((file) => file.gitPath === focusPath)) {
+      setActiveTab("staged");
+    } else if (lastTurnDiffs.some((block) => block.file === focusPath)) {
+      setActiveTab("last-turn");
+    } else {
+      setActiveTab("unstaged");
+    }
+    setFocused({ path: focusPath, tick: focusNonce });
+  }, [focusNonce, focusPath, unstagedFiles, stagedFiles, lastTurnDiffs]);
+
+  const focusSignalFor = (path: string) => (focused.path === path ? focused.tick : 0);
 
   // Report the unstaged line totals up for the header Git-tab badge.
   const unstagedAdditions = status?.unstagedAdditions ?? 0;
@@ -527,6 +575,7 @@ export function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnst
                         autoLoad={active && unstagedFiles.length <= EAGER_DIFF_LIMIT}
                         scrollRef={scrollRef}
                         review={review}
+                        focusSignal={focusSignalFor(file.gitPath)}
                         t={t}
                         action={
                           <Tooltip title={t("gitStage")}>
@@ -557,6 +606,7 @@ export function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnst
                         autoLoad={active && stagedFiles.length <= EAGER_DIFF_LIMIT}
                         scrollRef={scrollRef}
                         review={review}
+                        focusSignal={focusSignalFor(file.gitPath)}
                         t={t}
                         action={
                           <Tooltip title={t("gitUnstage")}>
@@ -590,7 +640,7 @@ export function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnst
                 ) : (
                   <Stack spacing={1.25}>
                     {lastTurnDiffs.map((block) => (
-                      <DiffFileCard key={block.file} path={block.file} lines={gitDiffViewerLinesFromBlock(block)} scrollRef={scrollRef} t={t} />
+                      <DiffFileCard key={block.file} path={block.file} lines={gitDiffViewerLinesFromBlock(block)} scrollRef={scrollRef} focusSignal={focusSignalFor(block.file)} t={t} />
                     ))}
                   </Stack>
                 ))}

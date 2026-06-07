@@ -917,7 +917,7 @@ export function WorkspacePageView({
                 )}
               </Box>
             </Stack>
-            <Stack direction="row" spacing={0.5} sx={{ alignItems: "center", flex: "0 0 auto", "& .MuiIconButton-root": { width: 30, height: 30 } }}>
+            <Stack direction="row" spacing={0.75} sx={{ alignItems: "center", flex: "0 0 auto", "& .MuiIconButton-root": { width: 30, height: 30 } }}>
               {(selected || composingNew) && <AgentBadge profile={profile} onClick={openPicker} compact />}
               {selected?.status === "error" && (
                 <Tooltip title={t("retryRun")}>

@@ -118,6 +118,14 @@ describe("BrowserPreview", () => {
     expect(screen.getByTestId("browser-preview-frame-shell")).toHaveStyle({ minHeight: "250px", overflow: "hidden" });
     expect(screen.getByLabelText("URL для просмотра")).toHaveValue("");
     expect(screen.getByLabelText("URL для просмотра").parentElement).toHaveStyle({ height: "30px", maxHeight: "30px" });
+    expect(screen.getByTestId("browser-preview-url-input")).toBe(screen.getByLabelText("URL для просмотра"));
+    expect(screen.getByTestId("browser-preview-back-button")).toBe(screen.getByRole("button", { name: "Назад" }));
+    expect(screen.getByTestId("browser-preview-forward-button")).toBe(screen.getByRole("button", { name: "Вперёд" }));
+    expect(screen.getByTestId("browser-preview-refresh-button")).toBe(screen.getByRole("button", { name: "Обновить" }));
+    expect(screen.getByTestId("browser-preview-open-button")).toBe(screen.getByRole("button", { name: "Открыть" }));
+    expect(screen.getByTestId("browser-preview-mode-interact")).toBe(screen.getByRole("button", { name: "Взаимодействие" }));
+    expect(screen.getByTestId("browser-preview-mode-annotate")).toBe(screen.getByRole("button", { name: "Аннотация" }));
+    expect(screen.getByTestId("browser-preview-mode-component")).toBe(screen.getByRole("button", { name: "Компонент" }));
   });
 
   it("navigates back and forward inside the iframe history stack without touching the parent page history", async () => {
@@ -269,7 +277,7 @@ describe("BrowserPreview", () => {
     expect(screen.getByLabelText("URL для просмотра")).toHaveValue("http://localhost:3000/agent");
   });
 
-  it("replays live agent click, type, and scroll actions into accessible iframe content", async () => {
+  it("replays live agent click, type, scroll, and eval actions into accessible iframe content", async () => {
     MockEventSource.instances = [];
     vi.stubGlobal("EventSource", MockEventSource);
     vi.stubGlobal("fetch", vi.fn(async () => Response.json(browserSnapshot({ url: "http://localhost:3000/", title: "Local app" }))));
@@ -289,16 +297,30 @@ describe("BrowserPreview", () => {
       throw new Error("iframe document is unavailable");
     }
     frameDocument.open();
-    frameDocument.write(`<!doctype html><body><button id="clicker">Click</button><input id="typed" /></body>`);
+    frameDocument.write(`<!doctype html><body><button id="clicker">Click</button><input id="typed" /><iframe id="child-frame"></iframe></body>`);
     frameDocument.close();
     const clicker = frameDocument.querySelector("#clicker");
     const typed = frameDocument.querySelector("#typed") as HTMLInputElement | null;
-    if (!clicker || !typed) {
+    const childFrame = frameDocument.querySelector("#child-frame") as HTMLIFrameElement | null;
+    const childDocument = childFrame?.contentDocument ?? null;
+    if (!clicker || !typed || !childFrame || !childDocument) {
       throw new Error("iframe fixture did not render");
     }
+    childDocument.open();
+    childDocument.write(`<!doctype html><body><button id="framed-clicker">Framed</button><input id="framed-typed" /></body>`);
+    childDocument.close();
+    const framedClicker = childDocument.querySelector("#framed-clicker");
+    const framedTyped = childDocument.querySelector("#framed-typed") as HTMLInputElement | null;
+    if (!framedClicker || !framedTyped) {
+      throw new Error("nested iframe fixture did not render");
+    }
     let clicks = 0;
+    let framedClicks = 0;
     clicker.addEventListener("click", () => {
       clicks += 1;
+    });
+    framedClicker.addEventListener("click", () => {
+      framedClicks += 1;
     });
     frameDocument.elementFromPoint = vi.fn(() => clicker);
     const scrollBy = vi.fn();
@@ -335,10 +357,44 @@ describe("BrowserPreview", () => {
       deltaY: 450,
       at: "2026-06-07T09:00:04.000Z",
     });
+    MockEventSource.instances[0]?.emitBrowser({
+      id: 11,
+      sessionId: "test-session",
+      tabId: "tab-1",
+      type: "action.eval",
+      label: "Eval",
+      detail: "document.body.dataset.agentEval = \"done\"",
+      script: "document.body.dataset.agentEval = \"done\"",
+      at: "2026-06-07T09:00:05.000Z",
+    });
+    MockEventSource.instances[0]?.emitBrowser({
+      id: 12,
+      sessionId: "test-session",
+      tabId: "tab-1",
+      type: "action.click",
+      label: "Click",
+      detail: "#framed-clicker",
+      target: { framePath: ["#child-frame"], selector: "#framed-clicker" },
+      at: "2026-06-07T09:00:06.000Z",
+    });
+    MockEventSource.instances[0]?.emitBrowser({
+      id: 13,
+      sessionId: "test-session",
+      tabId: "tab-1",
+      type: "action.type",
+      label: "Type",
+      detail: "#framed-typed · nested",
+      target: { framePath: ["#child-frame"], selector: "#framed-typed" },
+      text: "nested",
+      at: "2026-06-07T09:00:07.000Z",
+    });
 
     await waitFor(() => expect(clicks).toBe(1));
+    await waitFor(() => expect(framedClicks).toBe(1));
     expect(typed.value).toBe("ok");
+    expect(framedTyped.value).toBe("nested");
     expect(scrollBy).toHaveBeenCalledWith({ top: 450, left: 0, behavior: "auto" });
+    expect(frameDocument.body.dataset.agentEval).toBe("done");
   });
 
   it("sends viewport annotations from the live iframe surface to the agent", async () => {

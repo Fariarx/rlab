@@ -536,6 +536,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       >
         <input
           ref={fileInputRef}
+          data-testid="composer-file-input"
           aria-label={t("chooseFiles")}
           multiple
           type="file"
@@ -544,7 +545,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         />
         {/* One options control: attach files + per-chat work modes. Opens upward.
             Its colour never changes with the active mode (that lives in a tag). */}
-        <IconButton aria-label={t("composerOptions")} sx={{ flex: "0 0 auto" }} onClick={(event: MouseEvent<HTMLElement>) => setModeMenuAnchor(event.currentTarget)}>
+        <IconButton data-testid="composer-options-button" aria-label={t("composerOptions")} sx={{ flex: "0 0 auto" }} onClick={(event: MouseEvent<HTMLElement>) => setModeMenuAnchor(event.currentTarget)}>
           <TuneRoundedIcon sx={{ fontSize: 18 }} />
         </IconButton>
         <Menu
@@ -621,6 +622,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             onKeyDown={handleKeyDown}
             onPaste={handlePaste}
             placeholder={placeholder}
+            inputProps={{ "aria-label": placeholder, "data-testid": "composer-input" }}
             multiline
             minRows={1}
             maxRows={expanded ? 8 : 1}
@@ -647,7 +649,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         </Box>
         <Stack direction="row" spacing={1} sx={{ alignItems: "center", flex: "0 0 auto" }}>
           {running ? (
-            <IconButton aria-label={t("stopRun")} tone="danger" onClick={onStop}>
+            <IconButton data-testid="composer-stop-button" aria-label={t("stopRun")} tone="danger" onClick={onStop}>
               <StopCircleIcon sx={{ fontSize: 19 }} />
             </IconButton>
           ) : (
@@ -661,6 +663,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             disabled={!canSend}
             sx={{ minWidth: 0, px: 1.25, py: 1, borderRadius: (t) => `${t.custom.radii.md}px` }}
             aria-label={sendLabel}
+            data-testid="composer-send-button"
           >
             <SendIcon sx={{ fontSize: 18 }} />
           </Button>

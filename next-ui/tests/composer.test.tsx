@@ -5,6 +5,15 @@ import { Composer, type ComposerHandle } from "../src/components/agent";
 import { renderWithTheme } from "./util/render-with-theme";
 
 describe("Composer", () => {
+  it("exposes stable DOM targets for browser bridge agents", () => {
+    renderWithTheme(<Composer placeholder="Написать" />);
+
+    expect(screen.getByTestId("composer-input")).toBe(screen.getByPlaceholderText("Написать"));
+    expect(screen.getByTestId("composer-file-input")).toBe(screen.getByLabelText("Выбрать файлы"));
+    expect(screen.getByTestId("composer-options-button")).toBe(screen.getByRole("button", { name: "Опции" }));
+    expect(screen.getByTestId("composer-send-button")).toBe(screen.getByRole("button", { name: "Отправить" }));
+  });
+
   it("sends selected text attachments with the prompt", async () => {
     const onSend = vi.fn();
     renderWithTheme(<Composer placeholder="Написать" onSend={onSend} />);

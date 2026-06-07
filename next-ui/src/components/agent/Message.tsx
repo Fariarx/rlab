@@ -3,7 +3,6 @@ import DescriptionOutlinedIcon from "@mui/icons-material/DescriptionOutlined";
 import EditIcon from "@mui/icons-material/Edit";
 import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
 import PsychologyIcon from "@mui/icons-material/Psychology";
-import ReplayIcon from "@mui/icons-material/Replay";
 import SendIcon from "@mui/icons-material/Send";
 import CloseIcon from "@mui/icons-material/Close";
 import { Box, Collapse, Stack, Typography } from "@mui/material";
@@ -199,13 +198,6 @@ function UserMessage({ message, delay, actions }: { readonly message: ChatMessag
               <Tooltip title={t("copy")}>
                 <IconButton aria-label={t("copyMessage")} onClick={() => actions.onCopy?.(message)} sx={messageActionButtonSx}>
                   <ContentCopyIcon sx={{ fontSize: 14 }} />
-                </IconButton>
-              </Tooltip>
-            )}
-            {actions?.onRetry && (
-              <Tooltip title={t("retry")}>
-                <IconButton aria-label={t("retryMessage")} onClick={() => actions.onRetry?.(message)} sx={messageActionButtonSx}>
-                  <ReplayIcon sx={{ fontSize: 14 }} />
                 </IconButton>
               </Tooltip>
             )}
