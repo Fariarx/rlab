@@ -2,9 +2,10 @@ import CloseIcon from "@mui/icons-material/Close";
 import ContrastIcon from "@mui/icons-material/Contrast";
 import DarkModeIcon from "@mui/icons-material/DarkMode";
 import LightModeIcon from "@mui/icons-material/LightMode";
+import OpenInBrowserIcon from "@mui/icons-material/OpenInBrowser";
 import VpnKeyOutlinedIcon from "@mui/icons-material/VpnKeyOutlined";
 import { Alert, Box, Dialog, Divider, Popover, Radio, Stack, Switch, Tab, Tabs, TextField, ToggleButton, ToggleButtonGroup, Tooltip, Typography } from "@mui/material";
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import type { AgentAccessMode, AppSettings, AppSettingsPatch, DensityMode, Locale, ThemeMode } from "../workspace/app-settings";
 import {
@@ -94,7 +95,7 @@ interface AgentConfigResponse {
 
 type AgentOperationNotice =
   | {
-      readonly type: "install-started";
+      readonly type: "install-completed";
       readonly agent: string;
       readonly command: string;
     }
@@ -144,6 +145,87 @@ async function readResponseError(response: Response, fallback: string): Promise<
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** Install/repair the Playwright Chromium that powers the in-app Preview tab. */
+function BrowserPreviewSetupRow() {
+  const { t } = useI18n();
+  const [installed, setInstalled] = useState<boolean | null>(null);
+  const [installing, setInstalling] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const refreshStatus = useCallback(async () => {
+    try {
+      const response = await fetch("/api/health");
+      const payload = (await response.json()) as unknown;
+      setInstalled(isRecord(payload) && isRecord(payload.browser) ? payload.browser.installed === true : false);
+    } catch {
+      setInstalled(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshStatus();
+  }, [refreshStatus]);
+
+  const installBrowser = () => {
+    setInstalling(true);
+    setError(null);
+    void (async () => {
+      try {
+        const response = await fetch("/api/playwright-install", { method: "POST" });
+        if (!response.ok) {
+          throw new Error(await readResponseError(response, `Playwright install failed (${response.status})`));
+        }
+        setInstalled(true);
+      } catch (err) {
+        setError(errorMessage(err));
+      } finally {
+        setInstalling(false);
+      }
+    })();
+  };
+
+  const ready = installed === true;
+  const statusLabel = installed === null ? t("browserPreviewChecking") : ready ? t("browserPreviewInstalled") : t("browserPreviewNotInstalled");
+
+  return (
+    <Stack
+      spacing={1}
+      sx={{
+        p: 1.25,
+        borderRadius: (theme) => `${theme.custom.radii.md}px`,
+        border: (theme) => `1px solid ${theme.custom.borders.subtle}`,
+        backgroundColor: (theme) => theme.custom.surfaces.s2,
+      }}
+    >
+      <Stack direction="row" spacing={1.5} sx={{ alignItems: "center" }}>
+        <Box sx={{ display: "flex", color: "text.secondary", flex: "0 0 auto" }}>
+          <OpenInBrowserIcon sx={{ fontSize: 26 }} />
+        </Box>
+        <Box sx={{ flex: 1, minWidth: 0 }}>
+          <Typography noWrap sx={{ fontSize: "0.85rem", fontWeight: 600, color: "text.primary" }}>
+            {t("browserPreviewSetupTitle")}
+          </Typography>
+          <Stack direction="row" spacing={0.75} sx={{ alignItems: "center" }}>
+            <StatusDot status={ready ? "ok" : "idle"} label={statusLabel} size="sm" pulse={false} />
+            <Typography noWrap sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.7rem", color: "text.secondary" }}>
+              {statusLabel}
+            </Typography>
+          </Stack>
+        </Box>
+        {!ready && (
+          <Button variant="subtle" size="small" aria-label={t("installBrowserPreview")} disabled={installing || installed === null} onClick={installBrowser}>
+            {installing ? t("installingBrowserPreview") : t("install")}
+          </Button>
+        )}
+      </Stack>
+      <Typography variant="body2" sx={{ color: "text.secondary" }}>
+        {t("browserPreviewSetupDescription")}
+      </Typography>
+      {error && <Alert severity="error">{t("browserPreviewInstallFailed", { error })}</Alert>}
+    </Stack>
+  );
 }
 
 function AgentsSection({
@@ -254,7 +336,7 @@ function AgentsSection({
         if (!isRecord(payload) || typeof payload.command !== "string" || !payload.command.trim()) {
           throw new Error("Agent install response did not include command.");
         }
-        setOperationNotice({ type: "install-started", agent: agent.name, command: payload.command });
+        setOperationNotice({ type: "install-completed", agent: agent.name, command: payload.command });
         reloadAgentStatus();
       } catch (error) {
         setOperationNotice({ type: "install-failed", agent: agent.name, error: errorMessage(error) });
@@ -273,8 +355,8 @@ function AgentsSection({
   };
 
   const operationMessage =
-    operationNotice?.type === "install-started"
-      ? t("agentInstallStarted", { agent: operationNotice.agent, command: operationNotice.command })
+    operationNotice?.type === "install-completed"
+      ? t("agentInstallCompleted", { agent: operationNotice.agent, command: operationNotice.command })
       : operationNotice?.type === "install-failed"
         ? t("agentInstallFailed", { agent: operationNotice.agent, error: operationNotice.error })
         : operationNotice?.type === "api-key-save-failed"
@@ -320,7 +402,7 @@ function AgentsSection({
         </Alert>
       )}
       {operationMessage && (
-        <Alert severity={operationNotice?.type === "install-started" ? "info" : operationNotice?.type === "api-key-saved" ? "success" : "error"}>
+        <Alert severity={operationNotice?.type === "install-completed" || operationNotice?.type === "api-key-saved" ? "success" : "error"}>
           {operationMessage}
         </Alert>
       )}
@@ -419,6 +501,8 @@ function AgentsSection({
           </Stack>
         );
       })}
+
+      <BrowserPreviewSetupRow />
 
       <Popover
         open={Boolean(keyPopover)}

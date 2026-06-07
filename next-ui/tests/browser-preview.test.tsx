@@ -95,6 +95,32 @@ describe("BrowserPreview", () => {
     expect(screen.getByText("Зеркало агента синхронизируется...")).toBeInTheDocument();
   });
 
+  it("offers to install the Playwright browser when it is missing instead of a broken surface", async () => {
+    const fetchMock = vi.fn(async (url: string | URL | Request) => {
+      const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+      if (path === "/api/health") {
+        return Response.json({ storage: { ok: true }, agents: { visible: [] }, browser: { installed: false } });
+      }
+      if (path === "/api/playwright-install") {
+        return Response.json({ ok: true, command: "npx playwright install chromium" });
+      }
+      return Response.json(browserSnapshot());
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderWithTheme(<BrowserPreview sessionId="test-session" active />);
+
+    // The browser bar is replaced by an install CTA — the tab stays usable.
+    expect(await screen.findByText("Браузер для Просмотра не установлен")).toBeInTheDocument();
+    expect(screen.queryByTestId("browser-preview-browser-bar")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Установить браузер для Просмотра" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith("/api/playwright-install", expect.objectContaining({ method: "POST" }));
+    });
+  });
+
   it("keeps the live frame inside a compact browser chrome with a 250px minimum surface", async () => {
     vi.stubGlobal(
       "fetch",

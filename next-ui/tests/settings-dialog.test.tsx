@@ -61,7 +61,7 @@ describe("SettingsDialog agent configuration", () => {
     });
   });
 
-  it("starts a concrete install request for unavailable agents", async () => {
+  it("reports a completed install request for unavailable agents", async () => {
     const fetch = vi.fn(async (url: string | URL | Request) => {
       const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
       if (path === "/api/agent-config") {
@@ -94,7 +94,7 @@ describe("SettingsDialog agent configuration", () => {
         }),
       );
     });
-    expect(await screen.findByText("Установка OpenCode запущена: npm install -g opencode-ai")).toBeInTheDocument();
+    expect(await screen.findByText("OpenCode установлен: npm install -g opencode-ai")).toBeInTheDocument();
   });
 
   it("shows a retryable agent config API error", async () => {

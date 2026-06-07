@@ -882,6 +882,11 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, bottomInse
   const [componentSelection, setComponentSelection] = useState<BrowserComponentSelection | null>(null);
   const [selectionViewport, setSelectionViewport] = useState<BrowserViewport | null>(null);
   const [comment, setComment] = useState("");
+  // Preview is powered by Playwright's Chromium. Track whether the browser binary
+  // is installed so we can show an install CTA instead of a broken browser bar.
+  const [browserInstalled, setBrowserInstalled] = useState<boolean | null>(null);
+  const [installingBrowser, setInstallingBrowser] = useState(false);
+  const [installBrowserError, setInstallBrowserError] = useState<string | null>(null);
   const viewport = selectionViewport ?? snapshot?.viewport;
   const selectionReady = liveUrl !== null && selection !== null && selection.width >= 4 && selection.height >= 4;
   const committedSelectionReady = selectionReady && dragStart === null;
@@ -938,6 +943,30 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, bottomInse
   useEffect(() => {
     liveUrlRef.current = liveUrl;
   }, [liveUrl]);
+
+  useEffect(() => {
+    if (!active || browserInstalled !== null) {
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const response = await fetch("/api/health");
+        const payload = (await response.json()) as unknown;
+        // Only flip to a definitive state when /api/health reports a real boolean;
+        // an unrecognized shape leaves the tab in its normal (optimistic) mode.
+        const installed = isRecord(payload) && isRecord(payload.browser) && typeof payload.browser.installed === "boolean" ? payload.browser.installed : null;
+        if (!cancelled && installed !== null) {
+          setBrowserInstalled(installed);
+        }
+      } catch {
+        // Leave the tab usable; a real navigation will surface any backend error.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [active, browserInstalled]);
 
   const applySnapshot = (next: BrowserSnapshot) => {
     setSnapshot(next);
@@ -1244,6 +1273,62 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, bottomInse
       setError(t("browserPreviewComponentPickError", { error: message }));
     }
   };
+
+  const installPreviewBrowser = () => {
+    setInstallingBrowser(true);
+    setInstallBrowserError(null);
+    void (async () => {
+      try {
+        const response = await fetch("/api/playwright-install", { method: "POST" });
+        if (!response.ok) {
+          const payload = (await response.json().catch(() => null)) as unknown;
+          throw new Error(payloadError(payload, `Playwright install failed (${response.status})`));
+        }
+        setBrowserInstalled(true);
+      } catch (err) {
+        setInstallBrowserError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setInstallingBrowser(false);
+      }
+    })();
+  };
+
+  // Without Playwright's Chromium the Preview can't launch — keep the tab usable
+  // by offering an install action instead of a broken browser surface.
+  if (active && browserInstalled === false) {
+    return (
+      <Box
+        sx={{
+          height: "100%",
+          minHeight: 0,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          px: 3,
+          backgroundColor: (theme) => theme.custom.surfaces.s1,
+          pb: bottomInset > 0 ? `${bottomInset}px` : 0,
+        }}
+      >
+        <EmptyState
+          icon={<OpenInBrowserIcon />}
+          title={t("browserPreviewMissingTitle")}
+          description={t("browserPreviewMissingDescription")}
+          action={
+            <Stack spacing={1} sx={{ alignItems: "center" }}>
+              <Button variant="contained" size="small" disabled={installingBrowser} onClick={installPreviewBrowser}>
+                {installingBrowser ? t("installingBrowserPreview") : t("installBrowserPreview")}
+              </Button>
+              {installBrowserError && (
+                <Typography sx={{ fontSize: "0.72rem", maxWidth: 360, textAlign: "center", color: (theme) => theme.palette.status.error.main }}>
+                  {t("browserPreviewInstallFailed", { error: installBrowserError })}
+                </Typography>
+              )}
+            </Stack>
+          }
+        />
+      </Box>
+    );
+  }
 
   return (
     <Box

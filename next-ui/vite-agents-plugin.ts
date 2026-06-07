@@ -117,6 +117,25 @@ const INSTALL_COMMANDS: Partial<Record<string, readonly string[]>> = {
   opencode: ["npm", "install", "-g", "opencode-ai@latest"],
 };
 
+// The in-app Preview tab uses Playwright's Chromium. Only the browser binary is
+// installed on demand (the `playwright` package itself is always a dependency).
+const PLAYWRIGHT_INSTALL_COMMAND = ["npx", "playwright", "install", "chromium"] as const;
+
+function playwrightBrowserExecutablePath(): string | null {
+  try {
+    const path = chromium.executablePath();
+    return typeof path === "string" && path.length > 0 ? path : null;
+  } catch {
+    return null;
+  }
+}
+
+/** True when Playwright's Chromium binary is present so the Preview tab can launch. */
+export function isPlaywrightBrowserInstalled(): boolean {
+  const path = playwrightBrowserExecutablePath();
+  return path != null && existsSync(path);
+}
+
 export function visibleAgentDetectionIds(): readonly string[] {
   return Object.keys(DETECT);
 }
@@ -291,16 +310,20 @@ export function resolveLaunchCommand(resolvedBin: string, args: readonly string[
   return { command: process.env.ComSpec ?? "cmd.exe", args: ["/d", "/s", "/c", windowsCommandLine(resolvedBin, args)] };
 }
 
-export function resolveAgentInstallLaunch(agent: string, pathValue = process.env.PATH ?? "", platform: NodeJS.Platform = process.platform): { readonly command: string; readonly args: readonly string[]; readonly displayCommand: string } | null {
-  const installCommand = installCommandForAgent(agent);
-  if (!installCommand) {
-    return null;
-  }
+export function resolveInstallLaunch(installCommand: readonly string[], pathValue = process.env.PATH ?? "", platform: NodeJS.Platform = process.platform): { readonly command: string; readonly args: readonly string[]; readonly displayCommand: string } | null {
   const resolvedBin = resolveBinOnPath(installCommand[0], pathValue, platform);
   if (!resolvedBin) {
     return null;
   }
   return { ...resolveLaunchCommand(resolvedBin, installCommand.slice(1), platform), displayCommand: installCommand.join(" ") };
+}
+
+export function resolveAgentInstallLaunch(agent: string, pathValue = process.env.PATH ?? "", platform: NodeJS.Platform = process.platform): { readonly command: string; readonly args: readonly string[]; readonly displayCommand: string } | null {
+  const installCommand = installCommandForAgent(agent);
+  if (!installCommand) {
+    return null;
+  }
+  return resolveInstallLaunch(installCommand, pathValue, platform);
 }
 
 function spawnResolvedBin(resolvedBin: string, args: readonly string[], options: NonNullable<Parameters<typeof spawn>[2]>): ReturnType<typeof spawn> {
@@ -1889,7 +1912,9 @@ function writeWorkspaceState(state: WorkspaceState): void {
 export function storageHealthSnapshot(): {
   readonly storage: { readonly ok: boolean; readonly stateFile: string; readonly lockFile: string; readonly backupFile: string; readonly error?: string };
   readonly agents: { readonly visible: readonly string[] };
+  readonly browser: { readonly installed: boolean };
 } {
+  const browser = { installed: isPlaywrightBrowserInstalled() };
   try {
     mkdirSync(WORKSPACE_STATE_DIR, { recursive: true });
     if (existsSync(WORKSPACE_STATE_FILE)) {
@@ -1903,6 +1928,7 @@ export function storageHealthSnapshot(): {
         backupFile: `${WORKSPACE_STATE_FILE}.bak`,
       },
       agents: { visible: visibleAgentDetectionIds() },
+      browser,
     };
   } catch (error) {
     return {
@@ -1914,6 +1940,7 @@ export function storageHealthSnapshot(): {
         error: errorMessage(error),
       },
       agents: { visible: visibleAgentDetectionIds() },
+      browser,
     };
   }
 }
@@ -2725,6 +2752,41 @@ function handleAgentConfig(req: IncomingMessage, res: ServerResponse): void {
   res.end();
 }
 
+// Run an install command to completion and only respond once we know whether it
+// actually succeeded — so the UI can report real success/failure and refresh
+// agent/browser status afterwards (rather than reporting a fire-and-forget spawn).
+function runInstallToCompletion(launch: { readonly command: string; readonly args: readonly string[]; readonly displayCommand: string }, res: ServerResponse, extra: Record<string, unknown> = {}): void {
+  let responded = false;
+  const respond = (status: number, payload: unknown) => {
+    if (responded) {
+      return;
+    }
+    responded = true;
+    sendJson(res, status, payload);
+  };
+  let stderrTail = "";
+  const child = spawn(launch.command, [...launch.args], {
+    cwd: process.cwd(),
+    env: process.env,
+    shell: false,
+    stdio: ["ignore", "ignore", "pipe"],
+    windowsHide: true,
+  });
+  child.stderr?.on("data", (chunk: Buffer) => {
+    stderrTail = `${stderrTail}${chunk.toString("utf8")}`.slice(-4000);
+  });
+  child.on("error", (error) => {
+    respond(500, { error: error.message, command: launch.displayCommand, ...extra });
+  });
+  child.on("close", (code) => {
+    if (code === 0) {
+      respond(200, { ok: true, command: launch.displayCommand, ...extra });
+      return;
+    }
+    respond(500, { error: stderrTail.trim() || `Install command exited with code ${code ?? "unknown"}.`, command: launch.displayCommand, ...extra });
+  });
+}
+
 function handleAgentInstall(req: IncomingMessage, res: ServerResponse): void {
   readJsonBody(req, res, (body) => {
     try {
@@ -2739,31 +2801,24 @@ function handleAgentInstall(req: IncomingMessage, res: ServerResponse): void {
         sendJson(res, 500, { error: `Install executable ${command[0]} was not found on PATH.` });
         return;
       }
-      let responded = false;
-      const respond = (status: number, payload: unknown) => {
-        if (responded) {
-          return;
-        }
-        responded = true;
-        sendJson(res, status, payload);
-      };
-      const child = spawn(launch.command, launch.args, {
-        cwd: process.cwd(),
-        env: process.env,
-        shell: false,
-        stdio: ["ignore", "ignore", "ignore"],
-        windowsHide: true,
-      });
-      child.on("error", (error) => {
-        respond(500, { error: error.message });
-      });
-      child.on("spawn", () => {
-        respond(202, { ok: true, agent, command: launch.displayCommand });
-      });
+      runInstallToCompletion(launch, res, { agent });
     } catch (error) {
       sendJson(res, agentInstallErrorStatus(error), { error: errorMessage(error) });
     }
   });
+}
+
+function handlePlaywrightInstall(_req: IncomingMessage, res: ServerResponse): void {
+  if (isPlaywrightBrowserInstalled()) {
+    sendJson(res, 200, { ok: true, alreadyInstalled: true, command: PLAYWRIGHT_INSTALL_COMMAND.join(" ") });
+    return;
+  }
+  const launch = resolveInstallLaunch([...PLAYWRIGHT_INSTALL_COMMAND]);
+  if (!launch) {
+    sendJson(res, 500, { error: `Install executable ${PLAYWRIGHT_INSTALL_COMMAND[0]} was not found on PATH.` });
+    return;
+  }
+  runInstallToCompletion(launch, res, { installed: true });
 }
 
 function handleRunApproval(req: IncomingMessage, res: ServerResponse): void {
@@ -3307,60 +3362,9 @@ interface RunArgsRequest {
   readonly accessMode?: AgentAccessMode;
 }
 
-interface BrowserBridgeContext {
-  readonly sessionId: string;
-  readonly baseUrl: string;
-}
-
-function browserBridgeBaseUrlFromRequest(req: IncomingMessage): string {
-  const host = typeof req.headers.host === "string" ? req.headers.host.trim() : "";
-  if (!host) {
-    throw new Error("Browser bridge host is unavailable.");
-  }
-  return `http://${host}`;
-}
-
-export function browserBridgePromptAppendix(context: BrowserBridgeContext): string {
-  const sessionPayload = JSON.stringify({ sessionId: context.sessionId, url: "http://localhost:3000/" });
-  const clickPayload = JSON.stringify({ sessionId: context.sessionId, type: "click", target: { selector: "[data-testid=submit]" } });
-  const roleClickPayload = JSON.stringify({ sessionId: context.sessionId, type: "click", target: { role: "button", name: "Save" } });
-  const typePayload = JSON.stringify({ sessionId: context.sessionId, type: "type", target: { label: "Search" }, text: "hello" });
-  const pressPayload = JSON.stringify({ sessionId: context.sessionId, type: "press", target: { role: "textbox", name: "Search" }, key: "Enter" });
-  const frameClickPayload = JSON.stringify({ sessionId: context.sessionId, type: "click", target: { framePath: ["iframe[data-testid=preview-frame]"], selector: "[data-testid=submit]" } });
-  const selectTabPayload = JSON.stringify({ sessionId: context.sessionId, tabId: "tab-2", type: "select-tab" });
-  const scrollPayload = JSON.stringify({ sessionId: context.sessionId, type: "scroll", deltaY: 600 });
-  const evalPayload = JSON.stringify({ sessionId: context.sessionId, type: "eval", script: "document.activeElement?.tagName" });
-  return [
-    "",
-    "<browser-preview-bridge>",
-    `The user can observe browser work for this run in the app Preview tab. Use sessionId '${context.sessionId}' when browser interaction is useful.`,
-    "Supported bridge actions: sync, snapshot, click, type, press, scroll, refresh, select-tab, eval.",
-    `Open or sync a page: POST ${context.baseUrl}/api/browser/bridge/sync with JSON ${sessionPayload}`,
-    `Read current state and available DOM targets: GET ${context.baseUrl}/api/browser/bridge/snapshot?sessionId=${encodeURIComponent(context.sessionId)}`,
-    "Snapshot includes snapshot.activeTabId and snapshot.tabs. Each tab has id, url, title, and active. Use activeTabId by default; pass tabId only when intentionally working in another tab.",
-    `Select another preview tab before acting: POST ${context.baseUrl}/api/browser/bridge/action with JSON ${selectTabPayload}`,
-    "Do not write bridge snapshots or responses to disk. Do not use -OutFile, temp files, shell redirection, tee, or other file writes for bridge calls. Use in-memory or stdout HTTP calls only, including in read-only access mode.",
-    "On Windows PowerShell, build JSON with ConvertTo-Json -Depth 8 and call Invoke-RestMethod with -ContentType 'application/json; charset=utf-8'. Do not use curl -H/-d because curl may be an Invoke-WebRequest alias.",
-    "The bridge action response includes actionResult for every action. If actionResult.ok is false, inspect actionResult.error/target and retry with a better DOM target instead of assuming a permission denial.",
-    `Prefer DOM targets from snapshot.domTargets over coordinates. Target can be {selector}, {role,name}, {text}, or {label}; nested iframe targets include framePath and must be sent back unchanged.`,
-    `Click by selector: POST ${context.baseUrl}/api/browser/bridge/action with JSON ${clickPayload}`,
-    `Click by role/name: POST ${context.baseUrl}/api/browser/bridge/action with JSON ${roleClickPayload}`,
-    `Click inside an iframe: POST ${context.baseUrl}/api/browser/bridge/action with JSON ${frameClickPayload}`,
-    `Type by label: POST ${context.baseUrl}/api/browser/bridge/action with JSON ${typePayload}`,
-    `Press by role/name: POST ${context.baseUrl}/api/browser/bridge/action with JSON ${pressPayload}`,
-    `Scroll the page: POST ${context.baseUrl}/api/browser/bridge/action with JSON ${scrollPayload}`,
-    `Eval action: POST ${context.baseUrl}/api/browser/bridge/action with JSON ${evalPayload}. Eval runs only in the active preview tab, is limited to ${BROWSER_EVAL_SCRIPT_MAX_CHARS} characters, times out quickly, and returns compact actionResult JSON; use it for focused DOM inspection or deliberate page-side scripts.`,
-    "Coordinates are only for canvas-like targets that cannot be addressed through DOM. These bridge endpoints return compact JSON without screenshots. All bridge actions are visible to the user as live Preview activity.",
-    "</browser-preview-bridge>",
-  ].join("\n");
-}
-
-function runRequestWithBrowserBridge(request: RunRequest, context: BrowserBridgeContext | null): RunRequest {
-  if (!context) {
-    return request;
-  }
-  return { ...request, prompt: `${request.prompt}${browserBridgePromptAppendix(context)}` };
-}
+// The in-app Preview tab (and its /api/browser/bridge/* endpoints) is a
+// human-facing tool only. It is intentionally never advertised to the agent as a
+// usable browser bridge — the agent's prompt is left untouched.
 
 export interface BackgroundRunBinding {
   readonly conversationId: string;
@@ -6409,18 +6413,9 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
     }
 
     const request: RunRequest = { agent, model, reasoning, mode, prompt, accessMode };
-    let browserBridgeContext: BrowserBridgeContext | null = null;
-    if (binding) {
-      try {
-        browserBridgeContext = { sessionId: binding.conversationId, baseUrl: browserBridgeBaseUrlFromRequest(req) };
-      } catch (error) {
-        send({ type: "error", text: errorMessage(error) });
-        sendDone();
-        sender.end();
-        return;
-      }
-    }
-    const executionRequest = runRequestWithBrowserBridge(request, browserBridgeContext);
+    // The Preview tab is human-facing only; the agent prompt is never augmented
+    // with browser-bridge instructions.
+    const executionRequest = request;
     if (binding) {
       accumulator = startPersistedBackgroundRun(binding, request);
     }
@@ -6466,15 +6461,11 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
       return;
     }
     const config = readAgentSecretConfig();
+    // The agent never receives Preview/browser-bridge coordinates (no prompt
+    // appendix and no RLAB_BROWSER_* env vars) — Preview is human-facing only.
     const runEnv = {
       ...process.env,
       ...config.env,
-      ...(browserBridgeContext
-        ? {
-            RLAB_BROWSER_BRIDGE_URL: browserBridgeContext.baseUrl,
-            RLAB_BROWSER_SESSION_ID: browserBridgeContext.sessionId,
-          }
-        : {}),
     };
     const detect = DETECT[agent];
     if (spec.env && detect && !hasConfiguredAgentAuth(detect, config, runEnv)) {
@@ -6516,9 +6507,6 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
       send({ type: "status", level: "info", text: `cwd · ${cwd}` });
     }
     send({ type: "status", level: "info", text: `access · ${accessMode}` });
-    if (browserBridgeContext) {
-      send({ type: "status", level: "info", text: `browser · ${browserBridgeContext.sessionId}` });
-    }
     try {
       appendRunAuditEvent(RUN_AUDIT_FILE, {
         type: "run_started",
@@ -6724,6 +6712,14 @@ function attach(server: ViteDevServer | PreviewServer): void {
       return;
     }
     handleAgentInstall(req, res);
+  });
+  server.middlewares.use("/api/playwright-install", (req, res) => {
+    if (req.method !== "POST") {
+      res.statusCode = 405;
+      res.end();
+      return;
+    }
+    handlePlaywrightInstall(req, res);
   });
   server.middlewares.use("/api/folder-picker", (req, res) => {
     if (req.method !== "POST") {

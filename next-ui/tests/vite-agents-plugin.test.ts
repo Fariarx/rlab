@@ -10,7 +10,6 @@ import {
   attachmentUploadErrorStatus,
   buildClaudeRunArgs,
   buildClaudeSdkOptions,
-  browserBridgePromptAppendix,
   buildCodexRunArgs,
   buildGeminiRunArgs,
   buildGitCommitArgs,
@@ -1292,20 +1291,6 @@ Built-in agents:
         output: "CLI permission gate denied this tool call before execution. No approval or rejection was recorded in the app.",
       },
     ]);
-  });
-
-  it("keeps browser bridge snapshot instructions read-only compatible", () => {
-    const prompt = browserBridgePromptAppendix({ sessionId: "c-jwt", baseUrl: "http://localhost:5187" });
-
-    expect(prompt).toContain("Do not write bridge snapshots or responses to disk.");
-    expect(prompt).toContain("Do not use -OutFile");
-    expect(prompt).toContain("Use in-memory or stdout HTTP calls only");
-    expect(prompt).toContain("Supported bridge actions: sync, snapshot, click, type, press, scroll, refresh, select-tab, eval.");
-    expect(prompt).toContain("snapshot.activeTabId");
-    expect(prompt).toContain("snapshot.tabs");
-    expect(prompt).toContain('"type":"select-tab"');
-    expect(prompt).toContain("Eval action");
-    expect(prompt).not.toContain('selector":"main"');
   });
 
   it("uses an explicit UTF-8 JSON content type for bridge-friendly clients", () => {
