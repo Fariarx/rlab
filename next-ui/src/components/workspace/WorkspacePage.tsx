@@ -1076,7 +1076,7 @@ export function WorkspacePageView({
                 />
               </Box>
               <Box sx={{ position: "absolute", inset: 0, display: view === "preview" ? "block" : "none" }}>
-                <BrowserPreview active={view === "preview"} onSendAnnotation={selected ? sendBrowserAnnotation : undefined} />
+                {selected ? <BrowserPreview sessionId={selected.id} active={view === "preview"} onSendAnnotation={sendBrowserAnnotation} /> : null}
               </Box>
               {/* Keyed by folder so each project's terminal keeps its own scrollback. */}
               {showTerminal && (

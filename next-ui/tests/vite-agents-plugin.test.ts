@@ -10,6 +10,7 @@ import {
   attachmentUploadErrorStatus,
   buildClaudeRunArgs,
   buildClaudeSdkOptions,
+  browserBridgePromptAppendix,
   buildCodexRunArgs,
   buildGeminiRunArgs,
   buildGitCommitArgs,
@@ -1160,6 +1161,76 @@ Built-in agents:
     ]);
   });
 
+  it("clarifies CLI permission denials without attributing them to an app user rejection", () => {
+    const codexTranslate = createCodexStreamTranslator();
+
+    expect(
+      codexTranslate(
+        JSON.stringify({
+          type: "item.completed",
+          item: {
+            id: "cmd-permission",
+            type: "command_execution",
+            command: "Invoke-RestMethod -Uri http://localhost:5187/api/browser/bridge/snapshot?sessionId=c-jwt -OutFile /tmp/snap.json",
+            status: "failed",
+            exit_code: 1,
+            aggregated_output: "The user rejected permission to use this specific tool call.",
+          },
+        }),
+      ),
+    ).toEqual([
+      {
+        type: "tool_result",
+        id: "cmd-permission",
+        ok: false,
+        output: "CLI permission gate denied this tool call before execution. No approval or rejection was recorded in the app.",
+      },
+    ]);
+
+    const openCodeTranslate = createOpenCodeStreamTranslator();
+    expect(
+      openCodeTranslate(
+        JSON.stringify({
+          type: "sdk_event",
+          event: {
+            type: "tool.execute.after",
+            properties: {
+              tool: "bash",
+              callID: "opencode-permission",
+              input: { command: "Invoke-RestMethod -OutFile /tmp/snap.json" },
+              output: "The user rejected permission to use this specific tool call.",
+              status: "failed",
+            },
+          },
+        }),
+      ),
+    ).toEqual([
+      {
+        type: "tool",
+        id: "opencode-permission",
+        name: "bash",
+        summary: "Invoke-RestMethod -OutFile /tmp/snap.json",
+        args: {
+          command: "Invoke-RestMethod -OutFile /tmp/snap.json",
+        },
+      },
+      {
+        type: "tool_result",
+        id: "opencode-permission",
+        ok: false,
+        output: "CLI permission gate denied this tool call before execution. No approval or rejection was recorded in the app.",
+      },
+    ]);
+  });
+
+  it("keeps browser bridge snapshot instructions read-only compatible", () => {
+    const prompt = browserBridgePromptAppendix({ sessionId: "c-jwt", baseUrl: "http://localhost:5187" });
+
+    expect(prompt).toContain("Do not write bridge snapshots or responses to disk.");
+    expect(prompt).toContain("Do not use -OutFile");
+    expect(prompt).toContain("Use in-memory or stdout HTTP calls only");
+  });
+
   it("translates single-question events from OpenCode into option blocks", () => {
     const translate = createOpenCodeStreamTranslator();
 
@@ -1590,17 +1661,47 @@ Built-in agents:
   });
 
   it("validates browser preview payloads without guessing URLs or actions", () => {
-    expect(parseBrowserSessionPayload(JSON.stringify({ url: " http://localhost:3000 " }))).toEqual({ url: "http://localhost:3000/" });
-    expect(() => parseBrowserSessionPayload(JSON.stringify({ url: "localhost:3000" }))).toThrow("Browser URL must be an absolute http(s) URL or about:blank.");
-    expect(parseBrowserActionPayload(JSON.stringify({ type: "scroll", deltaY: 400 }))).toEqual({ type: "scroll", deltaY: 400 });
-    expect(parseBrowserActionPayload(JSON.stringify({ type: "refresh" }))).toEqual({ type: "refresh" });
-    expect(() => parseBrowserActionPayload(JSON.stringify({ type: "click" }))).toThrow("Unsupported browser action 'click'.");
-    expect(parseBrowserSyncPayload(JSON.stringify({ url: " http://localhost:3000 ", localStorage: { theme: "dark" }, sessionStorage: { step: "2" } }))).toEqual({
+    expect(parseBrowserSessionPayload(JSON.stringify({ sessionId: " c-jwt ", url: " http://localhost:3000 " }))).toEqual({ sessionId: "c-jwt", url: "http://localhost:3000/" });
+    expect(() => parseBrowserSessionPayload(JSON.stringify({ sessionId: "c-jwt", url: "localhost:3000" }))).toThrow("Browser URL must be an absolute http(s) URL or about:blank.");
+    expect(() => parseBrowserSessionPayload(JSON.stringify({ url: "http://localhost:3000" }))).toThrow("Browser session id is required.");
+    expect(parseBrowserActionPayload(JSON.stringify({ sessionId: "c-jwt", type: "scroll", deltaY: 400 }))).toEqual({ sessionId: "c-jwt", type: "scroll", deltaY: 400 });
+    expect(parseBrowserActionPayload(JSON.stringify({ sessionId: "c-jwt", type: "refresh" }))).toEqual({ sessionId: "c-jwt", type: "refresh" });
+    expect(parseBrowserActionPayload(JSON.stringify({ sessionId: "c-jwt", tabId: "tab-2", type: "select-tab" }))).toEqual({ sessionId: "c-jwt", tabId: "tab-2", type: "select-tab" });
+    expect(parseBrowserActionPayload(JSON.stringify({ sessionId: "c-jwt", type: "click", x: 12, y: 34 }))).toEqual({ sessionId: "c-jwt", type: "click", x: 12, y: 34 });
+    expect(parseBrowserActionPayload(JSON.stringify({ sessionId: "c-jwt", type: "click", target: { selector: "[data-testid=save]" } }))).toEqual({
+      sessionId: "c-jwt",
+      type: "click",
+      target: { selector: "[data-testid=save]" },
+    });
+    expect(parseBrowserActionPayload(JSON.stringify({ sessionId: "c-jwt", type: "scroll", deltaY: 400, target: { role: "main", name: "Content" } }))).toEqual({
+      sessionId: "c-jwt",
+      type: "scroll",
+      deltaY: 400,
+      target: { role: "main", name: "Content" },
+    });
+    expect(parseBrowserActionPayload(JSON.stringify({ sessionId: "c-jwt", type: "press", key: "Enter", target: { text: "Search" } }))).toEqual({
+      sessionId: "c-jwt",
+      type: "press",
+      key: "Enter",
+      target: { text: "Search" },
+    });
+    expect(parseBrowserActionPayload(JSON.stringify({ sessionId: "c-jwt", type: "type", text: "hello", target: { label: "Search" } }))).toEqual({
+      sessionId: "c-jwt",
+      type: "type",
+      text: "hello",
+      target: { label: "Search" },
+    });
+    expect(parseBrowserActionPayload(JSON.stringify({ sessionId: "c-jwt", type: "type", selector: "input[name=q]", text: "hello" }))).toEqual({ sessionId: "c-jwt", type: "type", selector: "input[name=q]", text: "hello" });
+    expect(parseBrowserActionPayload(JSON.stringify({ sessionId: "c-jwt", type: "press", key: "Enter" }))).toEqual({ sessionId: "c-jwt", type: "press", key: "Enter" });
+    expect(() => parseBrowserActionPayload(JSON.stringify({ sessionId: "c-jwt", type: "click" }))).toThrow("Browser click target or x and y are required.");
+    expect(() => parseBrowserActionPayload(JSON.stringify({ sessionId: "c-jwt", type: "click", target: { selector: "#one", text: "Two" } }))).toThrow("Browser action target must include exactly one locator.");
+    expect(parseBrowserSyncPayload(JSON.stringify({ sessionId: "c-jwt", url: " http://localhost:3000 ", localStorage: { theme: "dark" }, sessionStorage: { step: "2" } }))).toEqual({
+      sessionId: "c-jwt",
       url: "http://localhost:3000/",
       localStorage: { theme: "dark" },
       sessionStorage: { step: "2" },
     });
-    expect(() => parseBrowserSyncPayload(JSON.stringify({ url: "http://localhost:3000", localStorage: { theme: true } }))).toThrow("Browser storage values must be strings.");
+    expect(() => parseBrowserSyncPayload(JSON.stringify({ sessionId: "c-jwt", url: "http://localhost:3000", localStorage: { theme: true } }))).toThrow("Browser storage values must be strings.");
   });
 
   it("does not apply browser storage to about:blank preview documents", async () => {

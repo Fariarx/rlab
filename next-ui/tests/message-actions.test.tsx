@@ -1,6 +1,6 @@
 import { fireEvent, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import { ApprovalRequest, Conversation, type ChatMessage } from "../src/components/agent";
+import { AgentBlockRenderer, ApprovalRequest, Conversation, messageToPlainText, type ChatMessage } from "../src/components/agent";
 import { renderWithTheme } from "./util/render-with-theme";
 import { renderWithThemeAndVirtuoso } from "./util/render-with-virtuoso";
 
@@ -10,6 +10,23 @@ const messages: ChatMessage[] = [
 ];
 
 describe("message actions", () => {
+  it("clarifies persisted CLI permission denials in tool output and copied text", () => {
+    const rawOutput = "The user rejected permission to use this specific tool call.";
+    const displayOutput = "CLI permission gate denied this tool call before execution. No approval or rejection was recorded in the app.";
+    const message: ChatMessage = {
+      id: "a-permission",
+      role: "agent",
+      blocks: [{ kind: "tool", name: "Command", state: "error", output: rawOutput }],
+    };
+
+    renderWithTheme(<AgentBlockRenderer block={message.blocks?.[0] ?? { kind: "text", text: "" }} />);
+
+    expect(screen.getByText(displayOutput)).toBeInTheDocument();
+    expect(screen.queryByText(rawOutput)).not.toBeInTheDocument();
+    expect(messageToPlainText(message)).toContain(displayOutput);
+    expect(messageToPlainText(message)).not.toContain(rawOutput);
+  });
+
   it("exposes copy, retry, and edit controls for user messages", () => {
     const onCopy = vi.fn();
     const onRetry = vi.fn();

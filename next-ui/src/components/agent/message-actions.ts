@@ -1,3 +1,4 @@
+import { normalizeAgentToolOutput } from "../../lib/agent-output";
 import { type AgentBlock, type ApprovalDecision, type ChatMessage } from "./types";
 
 export interface MessageActionHandlers {
@@ -24,9 +25,9 @@ function blockToPlainText(block: AgentBlock): string {
     case "code":
       return block.code;
     case "command":
-      return [block.command, block.output].filter(Boolean).join("\n");
+      return [block.command, block.output ? normalizeAgentToolOutput(block.output) : undefined].filter(Boolean).join("\n");
     case "tool":
-      return [block.name, block.summary, block.output].filter(Boolean).join("\n");
+      return [block.name, block.summary, block.output ? normalizeAgentToolOutput(block.output) : undefined].filter(Boolean).join("\n");
     case "diff":
       return `${block.file}\n${block.lines.map((line) => `${line.type}: ${line.text}`).join("\n")}`;
     case "search":

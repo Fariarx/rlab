@@ -17,11 +17,76 @@ function storageFromRecord(items: Record<string, string>): Storage {
   };
 }
 
+function browserSnapshot(overrides: Partial<{
+  readonly sessionId: string;
+  readonly activeTabId: string;
+  readonly url: string;
+  readonly title: string;
+  readonly screenshot: string;
+  readonly viewport: { readonly width: number; readonly height: number };
+  readonly updatedAt: string;
+  readonly tabs: ReadonlyArray<{ readonly id: string; readonly url: string; readonly title: string; readonly active: boolean }>;
+  readonly latestEvent: {
+    readonly id: number;
+    readonly sessionId: string;
+    readonly tabId: string;
+    readonly type: "action.click";
+    readonly label: string;
+    readonly detail?: string;
+    readonly point?: { readonly x: number; readonly y: number };
+    readonly at: string;
+  };
+}> = {}) {
+  const url = overrides.url ?? "about:blank";
+  const title = overrides.title ?? "";
+  const activeTabId = overrides.activeTabId ?? "tab-1";
+  return {
+    sessionId: overrides.sessionId ?? "test-session",
+    activeTabId,
+    tabs: overrides.tabs ?? [{ id: activeTabId, url, title, active: true }],
+    url,
+    title,
+    screenshot: overrides.screenshot ?? "data:image/png;base64,iVBORw0KGgo=",
+    viewport: overrides.viewport ?? { width: 800, height: 600 },
+    updatedAt: overrides.updatedAt ?? "2026-06-07T09:00:00.000Z",
+    ...(overrides.latestEvent ? { latestEvent: overrides.latestEvent } : {}),
+  };
+}
+
+class MockEventSource {
+  static instances: MockEventSource[] = [];
+  readonly url: string | URL;
+  readonly close = vi.fn();
+  private readonly listeners = new Map<string, Set<EventListener>>();
+
+  constructor(url: string | URL) {
+    this.url = url;
+    MockEventSource.instances.push(this);
+  }
+
+  addEventListener(type: string, listener: EventListener): void {
+    const listeners = this.listeners.get(type) ?? new Set<EventListener>();
+    listeners.add(listener);
+    this.listeners.set(type, listeners);
+  }
+
+  removeEventListener(type: string, listener: EventListener): void {
+    this.listeners.get(type)?.delete(listener);
+  }
+
+  emitBrowser(data: unknown): void {
+    const event = new MessageEvent("browser", { data: JSON.stringify(data) });
+    for (const listener of this.listeners.get("browser") ?? []) {
+      listener(event);
+    }
+  }
+}
+
 describe("BrowserPreview", () => {
   it("opens a live iframe immediately while the agent mirror syncs in the background", async () => {
     vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>(() => undefined)));
 
-    renderWithTheme(<BrowserPreview active />);
+    renderWithTheme(<BrowserPreview sessionId="test-session" active />);
 
     fireEvent.change(screen.getByLabelText("URL для просмотра"), { target: { value: "http://localhost:3000/" } });
     fireEvent.click(screen.getByRole("button", { name: "Открыть" }));
@@ -34,18 +99,11 @@ describe("BrowserPreview", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () =>
-        Response.json({
-          sessionId: "browser-default",
-          url: "about:blank",
-          title: "",
-          screenshot: "data:image/png;base64,iVBORw0KGgo=",
-          viewport: { width: 800, height: 600 },
-          updatedAt: "2026-06-07T09:00:00.000Z",
-        }),
+        Response.json(browserSnapshot()),
       ),
     );
 
-    renderWithTheme(<BrowserPreview active />);
+    renderWithTheme(<BrowserPreview sessionId="test-session" active />);
 
     expect(screen.getByLabelText("URL для просмотра")).toHaveValue("");
     expect(screen.getByPlaceholderText("about:blank")).toBe(screen.getByLabelText("URL для просмотра"));
@@ -68,18 +126,11 @@ describe("BrowserPreview", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () =>
-        Response.json({
-          sessionId: "browser-default",
-          url: "http://localhost:3000/",
-          title: "Local app",
-          screenshot: "data:image/png;base64,iVBORw0KGgo=",
-          viewport: { width: 800, height: 600 },
-          updatedAt: "2026-06-07T09:00:00.000Z",
-        }),
+        Response.json(browserSnapshot({ url: "http://localhost:3000/", title: "Local app" })),
       ),
     );
 
-    renderWithTheme(<BrowserPreview active />);
+    renderWithTheme(<BrowserPreview sessionId="test-session" active />);
 
     fireEvent.change(screen.getByLabelText("URL для просмотра"), { target: { value: "http://localhost:3000/one" } });
     fireEvent.click(screen.getByRole("button", { name: "Открыть" }));
@@ -102,18 +153,11 @@ describe("BrowserPreview", () => {
 
   it("does not send stale iframe storage while opening a different preview URL", async () => {
     const fetchMock = vi.fn<typeof fetch>(async () =>
-      Response.json({
-        sessionId: "browser-default",
-        url: "about:blank",
-        title: "",
-        screenshot: "data:image/png;base64,iVBORw0KGgo=",
-        viewport: { width: 800, height: 600 },
-        updatedAt: "2026-06-07T09:00:00.000Z",
-      }),
+      Response.json(browserSnapshot()),
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    renderWithTheme(<BrowserPreview active />);
+    renderWithTheme(<BrowserPreview sessionId="test-session" active />);
 
     fireEvent.click(screen.getByRole("button", { name: "Открыть" }));
     await screen.findByLabelText("Playwright: синхронизировано");
@@ -129,8 +173,172 @@ describe("BrowserPreview", () => {
     fireEvent.change(screen.getByLabelText("URL для просмотра"), { target: { value: "http://localhost:5187/#/new-preview" } });
     fireEvent.click(screen.getByRole("button", { name: "Открыть" }));
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
-    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({ url: "http://localhost:5187/#/new-preview" });
+    await waitFor(() => expect(fetchMock.mock.calls.filter((call) => call[1]?.method === "POST")).toHaveLength(2));
+    const postCalls = fetchMock.mock.calls.filter((call) => call[1]?.method === "POST");
+    expect(JSON.parse(String(postCalls[1]?.[1]?.body))).toEqual({
+      sessionId: "test-session",
+      url: "http://localhost:5187/#/new-preview",
+    });
+  });
+
+  it("renders Playwright tabs and selects a server tab without using parent history", async () => {
+    const firstTabs = [
+      { id: "tab-1", url: "http://localhost:3000/one", title: "One", active: true },
+      { id: "tab-2", url: "http://localhost:3000/two", title: "Two", active: false },
+    ];
+    const secondTabs = [
+      { id: "tab-1", url: "http://localhost:3000/one", title: "One", active: false },
+      { id: "tab-2", url: "http://localhost:3000/two", title: "Two", active: true },
+    ];
+    const fetchMock = vi.fn<typeof fetch>(async (_url, init) => {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { readonly type?: string };
+      if (body.type === "select-tab") {
+        return Response.json(browserSnapshot({ activeTabId: "tab-2", url: "http://localhost:3000/two", title: "Two", tabs: secondTabs }));
+      }
+      return Response.json(browserSnapshot({ activeTabId: "tab-1", url: "http://localhost:3000/one", title: "One", tabs: firstTabs }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderWithTheme(<BrowserPreview sessionId="test-session" active />);
+
+    fireEvent.change(screen.getByLabelText("URL для просмотра"), { target: { value: "http://localhost:3000/one" } });
+    fireEvent.click(screen.getByRole("button", { name: "Открыть" }));
+
+    expect(await screen.findByRole("tab", { name: "One" })).toHaveAttribute("aria-selected", "true");
+    fireEvent.click(screen.getByRole("tab", { name: "Two" }));
+
+    await waitFor(() => {
+      expect(JSON.parse(String(fetchMock.mock.calls.at(-1)?.[1]?.body))).toEqual({ sessionId: "test-session", tabId: "tab-2", type: "select-tab" });
+    });
+    expect(screen.getByTitle("Живой просмотр страницы")).toHaveAttribute("src", "http://localhost:3000/two");
+    expect(screen.getByRole("tab", { name: "Two" })).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("shows live browser activity events and the last agent click marker", async () => {
+    MockEventSource.instances = [];
+    vi.stubGlobal("EventSource", MockEventSource);
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json(browserSnapshot({ url: "http://localhost:3000/", title: "Local app" }))));
+
+    renderWithTheme(<BrowserPreview sessionId="test-session" active />);
+
+    fireEvent.change(screen.getByLabelText("URL для просмотра"), { target: { value: "http://localhost:3000/" } });
+    fireEvent.click(screen.getByRole("button", { name: "Открыть" }));
+    await screen.findByLabelText("Playwright: синхронизировано");
+
+    expect(String(MockEventSource.instances[0]?.url)).toBe("/api/browser/events?sessionId=test-session");
+    MockEventSource.instances[0]?.emitBrowser({
+      id: 7,
+      sessionId: "test-session",
+      tabId: "tab-1",
+      type: "action.click",
+      label: "Click",
+      detail: "x=160 y=120",
+      point: { x: 160, y: 120 },
+      at: "2026-06-07T09:00:01.000Z",
+    });
+
+    expect(await screen.findByTestId("browser-preview-activity")).toHaveTextContent("Click");
+    expect(screen.getByTestId("browser-preview-activity")).toHaveTextContent("x=160 y=120");
+    expect(screen.getByTestId("browser-preview-action-marker")).toBeInTheDocument();
+  });
+
+  it("hydrates existing agent browser state when the preview tab opens", async () => {
+    const state = browserSnapshot({
+      url: "http://localhost:3000/agent",
+      title: "Agent page",
+      latestEvent: {
+        id: 21,
+        sessionId: "test-session",
+        tabId: "tab-1",
+        type: "action.click",
+        label: "Click",
+        detail: "x=555 y=222",
+        point: { x: 555, y: 222 },
+        at: "2026-06-07T12:41:32.174Z",
+      },
+    });
+    const { screenshot: _screenshot, ...bridgeState } = state;
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json(bridgeState)));
+
+    renderWithTheme(<BrowserPreview sessionId="test-session" active />);
+
+    expect(await screen.findByTestId("browser-preview-activity")).toHaveTextContent("Click");
+    expect(screen.getByTestId("browser-preview-activity")).toHaveTextContent("x=555 y=222");
+    expect(screen.getByTestId("browser-preview-action-marker")).toBeInTheDocument();
+    expect(screen.getByTitle("Живой просмотр страницы")).toHaveAttribute("src", "http://localhost:3000/agent");
+    expect(screen.getByLabelText("URL для просмотра")).toHaveValue("http://localhost:3000/agent");
+  });
+
+  it("replays live agent click, type, and scroll actions into accessible iframe content", async () => {
+    MockEventSource.instances = [];
+    vi.stubGlobal("EventSource", MockEventSource);
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json(browserSnapshot({ url: "http://localhost:3000/", title: "Local app" }))));
+
+    renderWithTheme(<BrowserPreview sessionId="test-session" active />);
+
+    fireEvent.change(screen.getByLabelText("URL для просмотра"), { target: { value: "http://localhost:3000/" } });
+    fireEvent.click(screen.getByRole("button", { name: "Открыть" }));
+    await screen.findByLabelText("Playwright: синхронизировано");
+
+    const frame = screen.getByTitle("Живой просмотр страницы") as HTMLIFrameElement;
+    const frameDocument = frame.contentDocument;
+    const frameWindow = frame.contentWindow;
+    expect(frameDocument).not.toBeNull();
+    expect(frameWindow).not.toBeNull();
+    if (!frameDocument || !frameWindow) {
+      throw new Error("iframe document is unavailable");
+    }
+    frameDocument.open();
+    frameDocument.write(`<!doctype html><body><button id="clicker">Click</button><input id="typed" /></body>`);
+    frameDocument.close();
+    const clicker = frameDocument.querySelector("#clicker");
+    const typed = frameDocument.querySelector("#typed") as HTMLInputElement | null;
+    if (!clicker || !typed) {
+      throw new Error("iframe fixture did not render");
+    }
+    let clicks = 0;
+    clicker.addEventListener("click", () => {
+      clicks += 1;
+    });
+    frameDocument.elementFromPoint = vi.fn(() => clicker);
+    const scrollBy = vi.fn();
+    Object.defineProperty(frameWindow, "scrollBy", { configurable: true, value: scrollBy });
+
+    MockEventSource.instances[0]?.emitBrowser({
+      id: 8,
+      sessionId: "test-session",
+      tabId: "tab-1",
+      type: "action.click",
+      label: "Click",
+      detail: "#clicker",
+      target: { selector: "#clicker" },
+      at: "2026-06-07T09:00:02.000Z",
+    });
+    MockEventSource.instances[0]?.emitBrowser({
+      id: 9,
+      sessionId: "test-session",
+      tabId: "tab-1",
+      type: "action.type",
+      label: "Type",
+      detail: "#typed · ok",
+      selector: "#typed",
+      text: "ok",
+      at: "2026-06-07T09:00:03.000Z",
+    });
+    MockEventSource.instances[0]?.emitBrowser({
+      id: 10,
+      sessionId: "test-session",
+      tabId: "tab-1",
+      type: "action.scroll",
+      label: "Scroll",
+      detail: "deltaY=450",
+      deltaY: 450,
+      at: "2026-06-07T09:00:04.000Z",
+    });
+
+    await waitFor(() => expect(clicks).toBe(1));
+    expect(typed.value).toBe("ok");
+    expect(scrollBy).toHaveBeenCalledWith({ top: 450, left: 0, behavior: "auto" });
   });
 
   it("sends viewport annotations from the live iframe surface to the agent", async () => {
@@ -138,18 +346,11 @@ describe("BrowserPreview", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () =>
-        Response.json({
-          sessionId: "browser-default",
-          url: "http://localhost:3000/",
-          title: "Local app",
-          screenshot: "data:image/png;base64,iVBORw0KGgo=",
-          viewport: { width: 800, height: 600 },
-          updatedAt: "2026-06-07T09:00:00.000Z",
-        }),
+        Response.json(browserSnapshot({ url: "http://localhost:3000/", title: "Local app" })),
       ),
     );
 
-    renderWithTheme(<BrowserPreview active onSendAnnotation={onSendAnnotation} />);
+    renderWithTheme(<BrowserPreview sessionId="test-session" active onSendAnnotation={onSendAnnotation} />);
 
     fireEvent.change(screen.getByLabelText("URL для просмотра"), { target: { value: "http://localhost:3000/" } });
     fireEvent.click(screen.getByRole("button", { name: "Открыть" }));
@@ -184,18 +385,11 @@ describe("BrowserPreview", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () =>
-        Response.json({
-          sessionId: "browser-default",
-          url: "http://localhost:3000/",
-          title: "Local app",
-          screenshot: "data:image/png;base64,iVBORw0KGgo=",
-          viewport: { width: 800, height: 600 },
-          updatedAt: "2026-06-07T09:00:00.000Z",
-        }),
+        Response.json(browserSnapshot({ url: "http://localhost:3000/", title: "Local app" })),
       ),
     );
 
-    renderWithTheme(<BrowserPreview active onSendAnnotation={vi.fn()} />);
+    renderWithTheme(<BrowserPreview sessionId="test-session" active onSendAnnotation={vi.fn()} />);
 
     fireEvent.change(screen.getByLabelText("URL для просмотра"), { target: { value: "http://localhost:3000/" } });
     fireEvent.click(screen.getByRole("button", { name: "Открыть" }));
@@ -230,18 +424,11 @@ describe("BrowserPreview", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () =>
-        Response.json({
-          sessionId: "browser-default",
-          url: "http://localhost:3000/",
-          title: "Local app",
-          screenshot: "data:image/png;base64,iVBORw0KGgo=",
-          viewport: { width: 800, height: 600 },
-          updatedAt: "2026-06-07T09:00:00.000Z",
-        }),
+        Response.json(browserSnapshot({ url: "http://localhost:3000/", title: "Local app" })),
       ),
     );
 
-    renderWithTheme(<BrowserPreview active onSendAnnotation={vi.fn()} />);
+    renderWithTheme(<BrowserPreview sessionId="test-session" active onSendAnnotation={vi.fn()} />);
 
     fireEvent.change(screen.getByLabelText("URL для просмотра"), { target: { value: "http://localhost:3000/" } });
     fireEvent.click(screen.getByRole("button", { name: "Открыть" }));
@@ -276,18 +463,11 @@ describe("BrowserPreview", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () =>
-        Response.json({
-          sessionId: "browser-default",
-          url: "http://localhost:3000/",
-          title: "Local app",
-          screenshot: "data:image/png;base64,iVBORw0KGgo=",
-          viewport: { width: 800, height: 600 },
-          updatedAt: "2026-06-07T09:00:00.000Z",
-        }),
+        Response.json(browserSnapshot({ url: "http://localhost:3000/", title: "Local app" })),
       ),
     );
 
-    renderWithTheme(<BrowserPreview active onSendAnnotation={vi.fn()} />);
+    renderWithTheme(<BrowserPreview sessionId="test-session" active onSendAnnotation={vi.fn()} />);
 
     fireEvent.change(screen.getByLabelText("URL для просмотра"), { target: { value: "http://localhost:3000/" } });
     fireEvent.click(screen.getByRole("button", { name: "Открыть" }));
@@ -322,18 +502,11 @@ describe("BrowserPreview", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () =>
-        Response.json({
-          sessionId: "browser-default",
-          url: "http://localhost:3000/",
-          title: "Local app",
-          screenshot: "data:image/png;base64,iVBORw0KGgo=",
-          viewport: { width: 800, height: 600 },
-          updatedAt: "2026-06-07T09:00:00.000Z",
-        }),
+        Response.json(browserSnapshot({ url: "http://localhost:3000/", title: "Local app" })),
       ),
     );
 
-    renderWithTheme(<BrowserPreview active onSendAnnotation={onSendAnnotation} />);
+    renderWithTheme(<BrowserPreview sessionId="test-session" active onSendAnnotation={onSendAnnotation} />);
 
     fireEvent.change(screen.getByLabelText("URL для просмотра"), { target: { value: "http://localhost:3000/" } });
     fireEvent.click(screen.getByRole("button", { name: "Открыть" }));

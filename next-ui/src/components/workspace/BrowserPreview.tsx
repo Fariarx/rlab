@@ -6,7 +6,7 @@ import RateReviewIcon from "@mui/icons-material/RateReview";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import SendIcon from "@mui/icons-material/Send";
 import { Alert, Box, Button, CircularProgress, IconButton, InputBase, Stack, TextField, ToggleButton, ToggleButtonGroup, Tooltip, Typography } from "@mui/material";
-import { type FormEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactElement, useMemo, useRef, useState } from "react";
+import { type FormEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactElement, useEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import { EmptyState, useToast } from "../ui";
 
@@ -17,11 +17,57 @@ interface BrowserViewport {
 
 interface BrowserSnapshot {
   readonly sessionId: string;
+  readonly activeTabId: string;
+  readonly tabs: readonly BrowserTab[];
+  readonly latestEvent?: BrowserActivityEvent;
   readonly url: string;
   readonly title: string;
-  readonly screenshot: string;
+  readonly screenshot?: string;
   readonly viewport: BrowserViewport;
   readonly updatedAt: string;
+}
+
+interface BrowserTab {
+  readonly id: string;
+  readonly url: string;
+  readonly title: string;
+  readonly active: boolean;
+}
+
+type BrowserActivityEventType =
+  | "session.created"
+  | "tab.created"
+  | "tab.selected"
+  | "tab.closed"
+  | "navigation.started"
+  | "navigation.done"
+  | "action.refresh"
+  | "action.scroll"
+  | "action.click"
+  | "action.type"
+  | "action.press"
+  | "console.error"
+  | "page.error"
+  | "network.failed";
+
+type BrowserActionTarget = { readonly selector: string } | { readonly role: string; readonly name?: string } | { readonly text: string } | { readonly label: string };
+
+interface BrowserActivityEvent {
+  readonly id: number;
+  readonly sessionId: string;
+  readonly tabId: string;
+  readonly type: BrowserActivityEventType;
+  readonly label: string;
+  readonly detail?: string;
+  readonly url?: string;
+  readonly title?: string;
+  readonly point?: BrowserPoint;
+  readonly deltaY?: number;
+  readonly target?: BrowserActionTarget;
+  readonly selector?: string;
+  readonly text?: string;
+  readonly key?: string;
+  readonly at: string;
 }
 
 interface BrowserPoint {
@@ -53,12 +99,14 @@ interface BrowserSelectionPanel {
 }
 
 interface BrowserPreviewProps {
+  readonly sessionId: string;
   readonly active: boolean;
   readonly onSendAnnotation?: (message: string) => void;
   readonly bottomInset?: number;
 }
 
 interface BrowserSyncRequest {
+  readonly sessionId: string;
   readonly url: string;
   readonly localStorage?: Record<string, string>;
   readonly sessionStorage?: Record<string, string>;
@@ -71,6 +119,7 @@ interface FrameHistoryState {
 
 type PreviewMode = "interact" | "annotate" | "component";
 type MirrorStatus = "idle" | "syncing" | "synced" | "error";
+type EventStreamStatus = "idle" | "connected" | "error";
 
 const tooltippedControlSx = { display: "inline-flex", flex: "0 0 auto" } as const;
 const annotationPanelGap = 8;
@@ -109,13 +158,82 @@ function isBrowserViewport(value: unknown): value is BrowserViewport {
   return isRecord(value) && typeof value.width === "number" && typeof value.height === "number";
 }
 
+function isBrowserPoint(value: unknown): value is BrowserPoint {
+  return isRecord(value) && typeof value.x === "number" && typeof value.y === "number";
+}
+
+function isBrowserActionTarget(value: unknown): value is BrowserActionTarget {
+  if (!isRecord(value)) {
+    return false;
+  }
+  const selector = typeof value.selector === "string" && value.selector.trim().length > 0;
+  const role = typeof value.role === "string" && value.role.trim().length > 0;
+  const text = typeof value.text === "string" && value.text.trim().length > 0;
+  const label = typeof value.label === "string" && value.label.trim().length > 0;
+  return [selector, role, text, label].filter(Boolean).length === 1 && (value.name === undefined || typeof value.name === "string");
+}
+
+function isBrowserTab(value: unknown): value is BrowserTab {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    typeof value.url === "string" &&
+    typeof value.title === "string" &&
+    typeof value.active === "boolean"
+  );
+}
+
+function isBrowserActivityEventType(value: unknown): value is BrowserActivityEventType {
+  return (
+    value === "session.created" ||
+    value === "tab.created" ||
+    value === "tab.selected" ||
+    value === "tab.closed" ||
+    value === "navigation.started" ||
+    value === "navigation.done" ||
+    value === "action.refresh" ||
+    value === "action.scroll" ||
+    value === "action.click" ||
+    value === "action.type" ||
+    value === "action.press" ||
+    value === "console.error" ||
+    value === "page.error" ||
+    value === "network.failed"
+  );
+}
+
+function isBrowserActivityEvent(value: unknown): value is BrowserActivityEvent {
+  return (
+    isRecord(value) &&
+    typeof value.id === "number" &&
+    typeof value.sessionId === "string" &&
+    typeof value.tabId === "string" &&
+    isBrowserActivityEventType(value.type) &&
+    typeof value.label === "string" &&
+    (value.detail === undefined || typeof value.detail === "string") &&
+    (value.url === undefined || typeof value.url === "string") &&
+    (value.title === undefined || typeof value.title === "string") &&
+    (value.point === undefined || isBrowserPoint(value.point)) &&
+    (value.deltaY === undefined || typeof value.deltaY === "number") &&
+    (value.target === undefined || isBrowserActionTarget(value.target)) &&
+    (value.selector === undefined || typeof value.selector === "string") &&
+    (value.text === undefined || typeof value.text === "string") &&
+    (value.key === undefined || typeof value.key === "string") &&
+    typeof value.at === "string"
+  );
+}
+
 function isBrowserSnapshot(value: unknown): value is BrowserSnapshot {
   return (
     isRecord(value) &&
     typeof value.sessionId === "string" &&
+    typeof value.activeTabId === "string" &&
+    Array.isArray(value.tabs) &&
+    value.tabs.every(isBrowserTab) &&
+    (value.latestEvent === undefined || isBrowserActivityEvent(value.latestEvent)) &&
     typeof value.url === "string" &&
     typeof value.title === "string" &&
-    typeof value.screenshot === "string" &&
+    (value.screenshot === undefined || typeof value.screenshot === "string") &&
     isBrowserViewport(value.viewport) &&
     typeof value.updatedAt === "string"
   );
@@ -139,6 +257,21 @@ async function postBrowserSnapshot(endpoint: string, body: object, invalidRespon
   const payload = await readJsonResponse(response);
   if (!response.ok) {
     throw new Error(payloadError(payload, `HTTP ${response.status}`));
+  }
+  if (!isBrowserSnapshot(payload)) {
+    throw new Error(invalidResponseMessage);
+  }
+  return payload;
+}
+
+async function loadBrowserState(sessionId: string, invalidResponseMessage: string): Promise<BrowserSnapshot | null> {
+  const response = await fetch(`/api/browser/bridge/snapshot?sessionId=${encodeURIComponent(sessionId)}`, { method: "GET", cache: "no-store" });
+  if (response.status === 404) {
+    return null;
+  }
+  const payload = await readJsonResponse(response);
+  if (!response.ok) {
+    throw new Error(payloadError(payload, invalidResponseMessage));
   }
   if (!isBrowserSnapshot(payload)) {
     throw new Error(invalidResponseMessage);
@@ -197,23 +330,24 @@ function viewportFromElement(element: HTMLElement, snapshotViewport: BrowserView
   return { width: Math.max(Math.round(bounds.width), 1), height: Math.max(Math.round(bounds.height), 1) };
 }
 
-function browserSyncRequest(frame: HTMLIFrameElement | null, targetUrl: string): BrowserSyncRequest {
+function browserSyncRequest(frame: HTMLIFrameElement | null, sessionId: string, targetUrl: string): BrowserSyncRequest {
   if (!frame?.contentWindow) {
-    return { url: targetUrl };
+    return { sessionId, url: targetUrl };
   }
   try {
     const frameWindow = frame.contentWindow;
     const currentUrl = normalizeBrowserPreviewUrl(frameWindow.location.href);
     if (currentUrl !== targetUrl) {
-      return { url: targetUrl };
+      return { sessionId, url: targetUrl };
     }
     return {
+      sessionId,
       url: currentUrl,
       localStorage: storageToRecord(frameWindow.localStorage),
       sessionStorage: storageToRecord(frameWindow.sessionStorage),
     };
   } catch {
-    return { url: targetUrl };
+    return { sessionId, url: targetUrl };
   }
 }
 
@@ -383,16 +517,276 @@ function buildComponentAnnotationMessage(target: { readonly url: string; readonl
   ].join("\n");
 }
 
-export function BrowserPreview({ active, onSendAnnotation, bottomInset = 0 }: BrowserPreviewProps) {
+function appendBrowserActivityEvent(events: readonly BrowserActivityEvent[], event: BrowserActivityEvent): readonly BrowserActivityEvent[] {
+  const withoutDuplicate = events.filter((item) => item.id !== event.id);
+  return [...withoutDuplicate, event].sort((a, b) => a.id - b.id).slice(-8);
+}
+
+function browserEventTone(type: BrowserActivityEventType): "info" | "success" | "warning" | "error" {
+  if (type === "console.error" || type === "page.error" || type === "network.failed") {
+    return "error";
+  }
+  if (type === "navigation.done" || type === "tab.selected") {
+    return "success";
+  }
+  if (type === "navigation.started") {
+    return "warning";
+  }
+  return "info";
+}
+
+function browserTabLabel(tab: BrowserTab): string {
+  if (tab.title.trim()) {
+    return tab.title.trim();
+  }
+  if (tab.url === "about:blank") {
+    return "about:blank";
+  }
+  try {
+    return new URL(tab.url).host;
+  } catch {
+    return tab.url;
+  }
+}
+
+function liveFrameDocument(frame: HTMLIFrameElement | null): Document | null {
+  if (!frame?.contentWindow) {
+    return null;
+  }
+  try {
+    return frame.contentWindow.document;
+  } catch {
+    return null;
+  }
+}
+
+function dispatchLiveInput(element: Element, text: string): boolean {
+  const document = element.ownerDocument;
+  const view = document.defaultView;
+  if (!view) {
+    return false;
+  }
+  const tagName = element.tagName.toLowerCase();
+  if (tagName === "input" || tagName === "textarea") {
+    const input = element as HTMLInputElement | HTMLTextAreaElement;
+    input.focus();
+    const start = input.selectionStart ?? input.value.length;
+    const end = input.selectionEnd ?? start;
+    input.value = `${input.value.slice(0, start)}${text}${input.value.slice(end)}`;
+    const nextPosition = start + text.length;
+    input.setSelectionRange(nextPosition, nextPosition);
+    input.dispatchEvent(new view.InputEvent("input", { bubbles: true, inputType: "insertText", data: text }));
+    input.dispatchEvent(new view.Event("change", { bubbles: true }));
+    return true;
+  }
+  const editable = element as HTMLElement;
+  if (editable.isContentEditable) {
+    editable.focus();
+    editable.textContent = `${editable.textContent ?? ""}${text}`;
+    editable.dispatchEvent(new view.InputEvent("input", { bubbles: true, inputType: "insertText", data: text }));
+    return true;
+  }
+  return false;
+}
+
+function normalizedLiveText(value: string | null | undefined): string {
+  return (value ?? "").replace(/\s+/g, " ").trim();
+}
+
+function implicitLiveRole(element: Element): string | null {
+  const tagName = element.tagName.toLowerCase();
+  if (tagName === "button") {
+    return "button";
+  }
+  if (tagName === "a" && element.hasAttribute("href")) {
+    return "link";
+  }
+  if (tagName === "textarea") {
+    return "textbox";
+  }
+  if (tagName === "select") {
+    return "combobox";
+  }
+  if (tagName === "input") {
+    const input = element as HTMLInputElement;
+    if (input.type === "checkbox" || input.type === "radio") {
+      return input.type;
+    }
+    if (input.type === "button" || input.type === "submit" || input.type === "reset") {
+      return "button";
+    }
+    return "textbox";
+  }
+  return null;
+}
+
+function liveElementName(element: Element): string {
+  const ariaLabel = normalizedLiveText(element.getAttribute("aria-label"));
+  if (ariaLabel) {
+    return ariaLabel;
+  }
+  const tagName = element.tagName.toLowerCase();
+  if (tagName === "input" || tagName === "textarea" || tagName === "select") {
+    const control = element as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
+    const label = normalizedLiveText(Array.from(control.labels ?? []).map((item) => item.textContent ?? "").join(" "));
+    if (label) {
+      return label;
+    }
+    if ("placeholder" in control) {
+      const placeholder = normalizedLiveText(String(control.placeholder ?? ""));
+      if (placeholder) {
+        return placeholder;
+      }
+    }
+  }
+  return normalizedLiveText(element.textContent) || normalizedLiveText(element.getAttribute("title"));
+}
+
+function resolveLiveTarget(document: Document, target: BrowserActionTarget): Element | null {
+  if ("selector" in target) {
+    return document.querySelector(target.selector);
+  }
+  const candidates = Array.from(document.querySelectorAll("a[href],button,input,textarea,select,summary,[role],[tabindex],[aria-label],[contenteditable=true]"));
+  if ("role" in target) {
+    return (
+      candidates.find((element) => {
+        const role = element.getAttribute("role") ?? implicitLiveRole(element);
+        if (role !== target.role) {
+          return false;
+        }
+        return target.name ? liveElementName(element) === target.name : true;
+      }) ?? null
+    );
+  }
+  if ("text" in target) {
+    return candidates.find((element) => normalizedLiveText(element.textContent) === target.text) ?? null;
+  }
+  return candidates.find((element) => liveElementName(element) === target.label) ?? null;
+}
+
+function dispatchLiveClickOnElement(element: Element): boolean {
+  const document = element.ownerDocument;
+  const view = document.defaultView;
+  if (!view) {
+    return false;
+  }
+  const rect = element.getBoundingClientRect();
+  const x = Math.max(0, rect.x + rect.width / 2);
+  const y = Math.max(0, rect.y + rect.height / 2);
+  const mouseInit: MouseEventInit = { bubbles: true, cancelable: true, view, clientX: x, clientY: y, button: 0 };
+  element.dispatchEvent(new view.MouseEvent("pointerdown", mouseInit));
+  element.dispatchEvent(new view.MouseEvent("mousedown", mouseInit));
+  if (element instanceof view.HTMLElement) {
+    element.focus();
+  }
+  element.dispatchEvent(new view.MouseEvent("pointerup", mouseInit));
+  element.dispatchEvent(new view.MouseEvent("mouseup", mouseInit));
+  element.dispatchEvent(new view.MouseEvent("click", mouseInit));
+  return true;
+}
+
+function dispatchLiveClick(document: Document, point: BrowserPoint): boolean {
+  const view = document.defaultView;
+  if (!view) {
+    return false;
+  }
+  const x = Math.max(0, point.x);
+  const y = Math.max(0, point.y);
+  const target = document.elementFromPoint(x, y);
+  if (!target) {
+    return false;
+  }
+  const mouseInit: MouseEventInit = { bubbles: true, cancelable: true, view, clientX: x, clientY: y, button: 0 };
+  target.dispatchEvent(new view.MouseEvent("pointerdown", mouseInit));
+  target.dispatchEvent(new view.MouseEvent("mousedown", mouseInit));
+  if (target instanceof view.HTMLElement) {
+    target.focus();
+  }
+  target.dispatchEvent(new view.MouseEvent("pointerup", mouseInit));
+  target.dispatchEvent(new view.MouseEvent("mouseup", mouseInit));
+  target.dispatchEvent(new view.MouseEvent("click", mouseInit));
+  return true;
+}
+
+function dispatchLiveKey(document: Document, key: string): boolean {
+  const view = document.defaultView;
+  const target = document.activeElement ?? document.body;
+  if (!view || !target) {
+    return false;
+  }
+  const keyboardInit: KeyboardEventInit = { bubbles: true, cancelable: true, key };
+  target.dispatchEvent(new view.KeyboardEvent("keydown", keyboardInit));
+  target.dispatchEvent(new view.KeyboardEvent("keyup", keyboardInit));
+  return true;
+}
+
+function replayBrowserActivityEvent(frame: HTMLIFrameElement | null, event: BrowserActivityEvent): boolean {
+  const document = liveFrameDocument(frame);
+  if (!document) {
+    return false;
+  }
+  const view = document.defaultView;
+  if (!view) {
+    return false;
+  }
+  if (event.type === "action.click" && event.target) {
+    const target = resolveLiveTarget(document, event.target);
+    return target ? dispatchLiveClickOnElement(target) : false;
+  }
+  if (event.type === "action.click" && event.point) {
+    return dispatchLiveClick(document, event.point);
+  }
+  if (event.type === "action.scroll" && typeof event.deltaY === "number") {
+    if (event.target) {
+      const target = resolveLiveTarget(document, event.target);
+      if (!target || !(target instanceof view.HTMLElement)) {
+        return false;
+      }
+      target.scrollBy({ top: event.deltaY, left: 0, behavior: "auto" });
+      return true;
+    }
+    view.scrollBy({ top: event.deltaY, left: 0, behavior: "auto" });
+    return true;
+  }
+  if (event.type === "action.type" && typeof event.text === "string") {
+    const target = event.target ? resolveLiveTarget(document, event.target) : event.selector ? document.querySelector(event.selector) : document.activeElement;
+    return target ? dispatchLiveInput(target, event.text) : false;
+  }
+  if (event.type === "action.press" && typeof event.key === "string") {
+    if (event.target) {
+      const target = resolveLiveTarget(document, event.target);
+      if (!target) {
+        return false;
+      }
+      if (target instanceof view.HTMLElement) {
+        target.focus();
+      }
+    }
+    return dispatchLiveKey(document, event.key);
+  }
+  return true;
+}
+
+function isReplayableBrowserActivityEvent(event: BrowserActivityEvent): boolean {
+  return event.type === "action.click" || event.type === "action.scroll" || event.type === "action.type" || event.type === "action.press";
+}
+
+export function BrowserPreview({ sessionId, active, onSendAnnotation, bottomInset = 0 }: BrowserPreviewProps) {
   const { t } = useI18n();
   const { toast } = useToast();
   const frameRef = useRef<HTMLIFrameElement | null>(null);
   const [url, setUrl] = useState("");
   const [liveUrl, setLiveUrl] = useState<string | null>(null);
+  const liveUrlRef = useRef<string | null>(null);
   const [frameKey, setFrameKey] = useState(0);
   const [mode, setMode] = useState<PreviewMode>("interact");
   const [snapshot, setSnapshot] = useState<BrowserSnapshot | null>(null);
+  const [tabs, setTabs] = useState<readonly BrowserTab[]>([]);
+  const [activeTabId, setActiveTabId] = useState<string | null>(null);
+  const [activityEvents, setActivityEvents] = useState<readonly BrowserActivityEvent[]>([]);
+  const [eventStreamStatus, setEventStreamStatus] = useState<EventStreamStatus>("idle");
   const [error, setError] = useState<string | null>(null);
+  const [liveReplayBlocked, setLiveReplayBlocked] = useState(false);
   const [mirrorStatus, setMirrorStatus] = useState<MirrorStatus>("idle");
   const [frameHistory, setFrameHistory] = useState<FrameHistoryState>({ entries: [], index: -1 });
   const [dragStart, setDragStart] = useState<BrowserPoint | null>(null);
@@ -429,6 +823,7 @@ export function BrowserPreview({ active, onSendAnnotation, bottomInset = 0 }: Br
   const mirrorSyncing = mirrorStatus === "syncing";
   const canGoBack = frameHistory.index > 0;
   const canGoForward = frameHistory.index >= 0 && frameHistory.index < frameHistory.entries.length - 1;
+  const latestPointEvent = [...activityEvents].reverse().find((event) => event.type === "action.click" && event.point);
   const mirrorStatusText =
     mirrorStatus === "syncing" ? t("browserPreviewMirrorSyncing") : mirrorStatus === "synced" ? t("browserPreviewMirrorSynced") : t("browserPreviewLiveOnly");
   const playwrightStatusLabel =
@@ -440,13 +835,112 @@ export function BrowserPreview({ active, onSendAnnotation, bottomInset = 0 }: Br
           ? t("browserPreviewPlaywrightStatusError")
           : t("browserPreviewPlaywrightStatusIdle");
 
+  const adoptBrowserUrl = (nextUrl: string) => {
+    const normalizedUrl = normalizeBrowserPreviewUrl(nextUrl);
+    setUrl(normalizedUrl === browserPreviewDefaultUrl ? "" : normalizedUrl);
+    if (liveUrlRef.current === normalizedUrl) {
+      return;
+    }
+    liveUrlRef.current = normalizedUrl;
+    setLiveUrl(normalizedUrl);
+    setFrameHistory((current) => pushFrameHistory(current, normalizedUrl));
+    setFrameKey((current) => current + 1);
+  };
+
+  useEffect(() => {
+    liveUrlRef.current = liveUrl;
+  }, [liveUrl]);
+
+  const applySnapshot = (next: BrowserSnapshot) => {
+    setSnapshot(next);
+    setTabs(next.tabs);
+    setActiveTabId(next.activeTabId);
+    const latestEvent = next.latestEvent;
+    if (latestEvent) {
+      setActivityEvents((current) => appendBrowserActivityEvent(current, latestEvent));
+    }
+  };
+
+  useEffect(() => {
+    if (!active) {
+      return;
+    }
+    let canceled = false;
+    void loadBrowserState(sessionId, t("browserPreviewInvalidResponse"))
+      .then((next) => {
+        if (canceled || next === null || !next.latestEvent) {
+          return;
+        }
+        applySnapshot(next);
+        adoptBrowserUrl(next.url);
+        setMirrorStatus("synced");
+        setError(null);
+      })
+      .catch((operationError: unknown) => {
+        if (canceled) {
+          return;
+        }
+        const message = operationError instanceof Error ? operationError.message : String(operationError);
+        setMirrorStatus("error");
+        setError(t("browserPreviewOpenError", { error: message }));
+      });
+    return () => {
+      canceled = true;
+    };
+  }, [active, sessionId, t]);
+
+  useEffect(() => {
+    if (!active || typeof EventSource === "undefined") {
+      setEventStreamStatus("idle");
+      return;
+    }
+    const source = new EventSource(`/api/browser/events?sessionId=${encodeURIComponent(sessionId)}`);
+    setEventStreamStatus("connected");
+    const handleBrowserEvent = (event: Event) => {
+      const message = event as MessageEvent<string>;
+      try {
+        const parsed = JSON.parse(message.data) as unknown;
+        if (isBrowserActivityEvent(parsed) && parsed.sessionId === sessionId) {
+          setActivityEvents((current) => appendBrowserActivityEvent(current, parsed));
+          if (isReplayableBrowserActivityEvent(parsed)) {
+            setLiveReplayBlocked(!replayBrowserActivityEvent(frameRef.current, parsed));
+          }
+          if (parsed.url && (parsed.type === "navigation.started" || parsed.type === "navigation.done" || parsed.type === "tab.selected")) {
+            setLiveReplayBlocked(false);
+            adoptBrowserUrl(parsed.url);
+          }
+          if (parsed.url || parsed.title) {
+            setSnapshot((current) =>
+              current
+                ? {
+                    ...current,
+                    url: parsed.url ?? current.url,
+                    title: parsed.title ?? current.title,
+                  }
+                : current,
+            );
+          }
+        }
+      } catch {
+        setEventStreamStatus("error");
+      }
+    };
+    source.addEventListener("browser", handleBrowserEvent);
+    source.onerror = () => setEventStreamStatus("error");
+    return () => {
+      source.removeEventListener("browser", handleBrowserEvent);
+      source.close();
+    };
+  }, [active, sessionId]);
+
   const syncMirror = async (targetUrl: string) => {
     setMirrorStatus("syncing");
     setError(null);
     try {
-      const next = await postBrowserSnapshot("/api/browser/sync", browserSyncRequest(frameRef.current, targetUrl), t("browserPreviewInvalidResponse"));
-      setSnapshot(next);
+      const next = await postBrowserSnapshot("/api/browser/sync", browserSyncRequest(frameRef.current, sessionId, targetUrl), t("browserPreviewInvalidResponse"));
+      applySnapshot(next);
       setMirrorStatus("synced");
+      setLiveReplayBlocked(false);
     } catch (operationError) {
       const message = operationError instanceof Error ? operationError.message : String(operationError);
       setMirrorStatus("error");
@@ -458,11 +952,15 @@ export function BrowserPreview({ active, onSendAnnotation, bottomInset = 0 }: Br
     event.preventDefault();
     try {
       const normalizedUrl = normalizeBrowserPreviewUrl(url);
+      liveUrlRef.current = normalizedUrl;
       setLiveUrl(normalizedUrl);
       setUrl(normalizedUrl === browserPreviewDefaultUrl ? "" : normalizedUrl);
       setFrameKey((current) => current + 1);
       setFrameHistory((current) => pushFrameHistory(current, normalizedUrl));
+      setTabs([]);
+      setActiveTabId(null);
       setMode("interact");
+      setLiveReplayBlocked(false);
       clearSelection();
       void syncMirror(normalizedUrl);
     } catch (validationError) {
@@ -486,12 +984,14 @@ export function BrowserPreview({ active, onSendAnnotation, bottomInset = 0 }: Br
       return;
     }
     setFrameHistory({ entries: frameHistory.entries, index: nextIndex });
+    liveUrlRef.current = nextUrl;
     setLiveUrl(nextUrl);
     setUrl(nextUrl === browserPreviewDefaultUrl ? "" : nextUrl);
     setFrameKey((current) => current + 1);
     setError(null);
-    setMirrorStatus("idle");
-    clearSelection();
+      setMirrorStatus("idle");
+      setLiveReplayBlocked(false);
+      clearSelection();
   };
 
   const clearSelection = () => {
@@ -525,6 +1025,29 @@ export function BrowserPreview({ active, onSendAnnotation, bottomInset = 0 }: Br
     }
     clearSelection();
     toast({ message: t("browserPreviewAnnotationSent"), severity: "success", duration: 2500 });
+  };
+
+  const selectMirrorTab = async (tab: BrowserTab) => {
+    try {
+      const next = await postBrowserSnapshot(
+        "/api/browser/action",
+        { sessionId, tabId: tab.id, type: "select-tab" },
+        t("browserPreviewInvalidResponse"),
+      );
+      applySnapshot(next);
+      liveUrlRef.current = tab.url;
+      setLiveUrl(tab.url);
+      setUrl(tab.url === browserPreviewDefaultUrl ? "" : tab.url);
+      setFrameHistory((current) => pushFrameHistory(current, tab.url));
+      setFrameKey((current) => current + 1);
+      setMirrorStatus("synced");
+      setLiveReplayBlocked(false);
+      setError(null);
+      clearSelection();
+    } catch (operationError) {
+      const message = operationError instanceof Error ? operationError.message : String(operationError);
+      setError(t("browserPreviewOpenError", { error: message }));
+    }
   };
 
   const startSelection = (event: ReactPointerEvent<HTMLElement>) => {
@@ -691,6 +1214,19 @@ export function BrowserPreview({ active, onSendAnnotation, bottomInset = 0 }: Br
               }}
             />
             PW
+            <Box
+              component="span"
+              aria-hidden="true"
+              sx={{
+                width: 1,
+                height: 12,
+                mx: 0.1,
+                backgroundColor: (theme) => theme.custom.borders.subtle,
+              }}
+            />
+            <Box component="span" aria-hidden="true" sx={{ color: eventStreamStatus === "error" ? "error.main" : "text.secondary" }}>
+              {eventStreamStatus === "connected" ? t("browserPreviewEventsLiveShort") : eventStreamStatus === "error" ? t("browserPreviewEventsErrorShort") : t("browserPreviewEventsIdleShort")}
+            </Box>
             <Box component="span" sx={visuallyHiddenSx}>
               {mirrorStatusText}
             </Box>
@@ -743,9 +1279,58 @@ export function BrowserPreview({ active, onSendAnnotation, bottomInset = 0 }: Br
         </ToggleButtonGroup>
       </Box>
 
+      {tabs.length > 1 && (
+        <Box
+          role="tablist"
+          aria-label={t("browserPreviewTabsLabel")}
+          sx={{
+            flex: "0 0 auto",
+            display: "flex",
+            alignItems: "center",
+            gap: 0.5,
+            px: 1,
+            py: 0.5,
+            overflowX: "auto",
+            borderBottom: (theme) => `1px solid ${theme.custom.borders.subtle}`,
+            backgroundColor: (theme) => theme.custom.surfaces.s1,
+          }}
+        >
+          {tabs.map((tab) => (
+            <Button
+              key={tab.id}
+              role="tab"
+              aria-selected={tab.id === activeTabId}
+              variant={tab.id === activeTabId ? "contained" : "outlined"}
+              size="small"
+              onClick={() => void selectMirrorTab(tab)}
+              sx={{
+                minWidth: 0,
+                maxWidth: 220,
+                height: 26,
+                px: 1,
+                textTransform: "none",
+                fontFamily: (theme) => theme.custom.fonts.mono,
+                fontSize: "0.68rem",
+                justifyContent: "flex-start",
+                overflow: "hidden",
+                whiteSpace: "nowrap",
+                textOverflow: "ellipsis",
+              }}
+            >
+              {browserTabLabel(tab)}
+            </Button>
+          ))}
+        </Box>
+      )}
+
       {error && (
         <Alert severity="error" sx={{ flex: "0 0 auto", m: 1 }}>
           {error}
+        </Alert>
+      )}
+      {liveReplayBlocked && (
+        <Alert severity="warning" sx={{ flex: "0 0 auto", m: 1 }}>
+          {t("browserPreviewReplayBlocked")}
         </Alert>
       )}
 
@@ -818,6 +1403,112 @@ export function BrowserPreview({ active, onSendAnnotation, bottomInset = 0 }: Br
                     pointerEvents: "none",
                   }}
                 />
+              )}
+              {latestPointEvent?.point && snapshot?.viewport && (
+                <Box
+                  data-testid="browser-preview-action-marker"
+                  sx={{
+                    position: "absolute",
+                    zIndex: 3,
+                    left: `${(latestPointEvent.point.x / snapshot.viewport.width) * 100}%`,
+                    top: `${(latestPointEvent.point.y / snapshot.viewport.height) * 100}%`,
+                    width: 18,
+                    height: 18,
+                    borderRadius: "50%",
+                    border: (theme) => `2px solid ${theme.palette.status.running.main}`,
+                    backgroundColor: (theme) => theme.palette.status.running.soft,
+                    boxShadow: (theme) => `0 0 0 5px ${theme.palette.status.running.soft}`,
+                    transform: "translate(-50%, -50%)",
+                    pointerEvents: "none",
+                  }}
+                />
+              )}
+              {activityEvents.length > 0 && (
+                <Box
+                  data-testid="browser-preview-activity"
+                  aria-label={t("browserPreviewActivityLabel")}
+                  sx={{
+                    position: "absolute",
+                    right: 10,
+                    bottom: 10,
+                    zIndex: 3,
+                    width: "min(380px, calc(100% - 20px))",
+                    maxHeight: 150,
+                    overflow: "hidden",
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 0.5,
+                    p: 0.75,
+                    borderRadius: 1,
+                    border: (theme) => `1px solid ${theme.custom.borders.subtle}`,
+                    backgroundColor: (theme) => theme.custom.surfaces.s2,
+                    boxShadow: "0 4px 12px rgba(0, 0, 0, 0.14)",
+                    pointerEvents: "none",
+                  }}
+                >
+                  <Typography
+                    sx={{
+                      fontFamily: (theme) => theme.custom.fonts.mono,
+                      fontSize: "0.66rem",
+                      fontWeight: 800,
+                      color: "text.secondary",
+                      textTransform: "uppercase",
+                    }}
+                  >
+                    {t("browserPreviewActivityTitle")}
+                  </Typography>
+                  {[...activityEvents].reverse().slice(0, 4).map((event) => {
+                    const tone = browserEventTone(event.type);
+                    return (
+                      <Box
+                        key={event.id}
+                        sx={{
+                          minWidth: 0,
+                          display: "grid",
+                          gridTemplateColumns: "8px minmax(0, 1fr)",
+                          alignItems: "baseline",
+                          columnGap: 0.75,
+                        }}
+                      >
+                        <Box
+                          component="span"
+                          aria-hidden="true"
+                          sx={{
+                            width: 7,
+                            height: 7,
+                            borderRadius: "50%",
+                            backgroundColor: (theme) =>
+                              tone === "error"
+                                ? theme.palette.status.error.main
+                                : tone === "warning"
+                                  ? theme.palette.status.running.main
+                                  : tone === "success"
+                                    ? theme.palette.status.ok.main
+                                    : theme.palette.status.info.main,
+                          }}
+                        />
+                        <Typography
+                          noWrap
+                          title={event.detail ? `${event.label}: ${event.detail}` : event.label}
+                          sx={{
+                            minWidth: 0,
+                            fontFamily: (theme) => theme.custom.fonts.mono,
+                            fontSize: "0.72rem",
+                            color: "text.primary",
+                          }}
+                        >
+                          {event.label}
+                          {event.detail ? (
+                            <Box component="span" sx={{ color: "text.secondary" }}>
+                              {" · "}
+                              {event.detail}
+                            </Box>
+                          ) : null}
+                        </Typography>
+                      </Box>
+                    );
+                  })}
+                </Box>
               )}
             </Box>
             {panelState && panelPosition && (

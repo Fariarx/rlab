@@ -7,6 +7,7 @@ import TerminalIcon from "@mui/icons-material/Terminal";
 import { Box, CircularProgress, Collapse, Link, Stack, Typography } from "@mui/material";
 import { type ReactNode, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
+import { normalizeAgentToolOutput } from "../../lib/agent-output";
 import { StatusDot } from "../ui";
 import { type CommandBlock, type RunState, type SearchBlock, type ToolBlock } from "./types";
 
@@ -130,7 +131,8 @@ const outputSx = {
 export function ToolCall({ block }: { readonly block: ToolBlock }) {
   const { t } = useI18n();
   const hasArgs = block.args != null && Object.keys(block.args).length > 0;
-  const hasOutput = typeof block.output === "string" && block.output.length > 0;
+  const output = typeof block.output === "string" ? normalizeAgentToolOutput(block.output) : "";
+  const hasOutput = output.length > 0;
   const hasContent = hasArgs || hasOutput;
 
   return (
@@ -168,7 +170,7 @@ export function ToolCall({ block }: { readonly block: ToolBlock }) {
               ))}
             </Stack>
           )}
-          {hasOutput && <Typography component="div" sx={outputSx}>{block.output}</Typography>}
+          {hasOutput && <Typography component="div" sx={outputSx}>{output}</Typography>}
         </Stack>
       ) : (
         <Typography component="div" sx={{ ...outputSx, fontStyle: "italic", opacity: 0.8 }}>
@@ -183,6 +185,7 @@ export function ToolCall({ block }: { readonly block: ToolBlock }) {
 
 export function CommandCard({ block }: { readonly block: CommandBlock }) {
   const { t } = useI18n();
+  const output = typeof block.output === "string" ? normalizeAgentToolOutput(block.output) : "";
 
   return (
     <ActionFrame
@@ -198,7 +201,7 @@ export function CommandCard({ block }: { readonly block: CommandBlock }) {
         )
       }
     >
-      {block.output && <Typography component="div" sx={outputSx}>{block.output}</Typography>}
+      {output && <Typography component="div" sx={outputSx}>{output}</Typography>}
     </ActionFrame>
   );
 }

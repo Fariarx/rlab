@@ -6,9 +6,10 @@ import { basename, delimiter, dirname, join } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { query, type CanUseTool, type EffortLevel, type Options as ClaudeQueryOptions, type PermissionResult } from "@anthropic-ai/claude-agent-sdk";
-import { chromium, type Browser, type Page } from "playwright";
+import { chromium, type Browser, type BrowserContext, type ConsoleMessage, type Locator, type Page, type Request as PlaywrightRequest } from "playwright";
 import type { Plugin, ViteDevServer, PreviewServer } from "vite";
 import { parseGitStatusPorcelain, parseNumstatTotals } from "./src/lib/git-status";
+import { normalizeAgentToolOutput } from "./src/lib/agent-output";
 import {
   cloneAppSettings,
   defaultAppSettings,
@@ -589,6 +590,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export interface BrowserSessionPayload {
+  readonly sessionId: string;
   readonly url: string;
 }
 
@@ -599,12 +601,68 @@ export interface BrowserStorageSnapshot {
 
 export interface BrowserSyncPayload extends BrowserSessionPayload, BrowserStorageSnapshot {}
 
+type BrowserActionRole = Parameters<Page["getByRole"]>[0];
+
+export type BrowserActionTarget =
+  | { readonly selector: string }
+  | { readonly role: BrowserActionRole; readonly name?: string }
+  | { readonly text: string }
+  | { readonly label: string };
+
 export type BrowserActionPayload =
-  | { readonly type: "refresh" }
-  | { readonly type: "scroll"; readonly deltaY: number };
+  | { readonly sessionId: string; readonly tabId?: string; readonly type: "refresh" }
+  | { readonly sessionId: string; readonly tabId?: string; readonly type: "scroll"; readonly deltaY: number; readonly target?: BrowserActionTarget }
+  | ({ readonly sessionId: string; readonly tabId?: string; readonly type: "click" } & ({ readonly x: number; readonly y: number } | { readonly target: BrowserActionTarget }))
+  | { readonly sessionId: string; readonly tabId?: string; readonly type: "type"; readonly text: string; readonly selector?: string; readonly target?: BrowserActionTarget }
+  | { readonly sessionId: string; readonly tabId?: string; readonly type: "press"; readonly key: string; readonly target?: BrowserActionTarget }
+  | { readonly sessionId: string; readonly tabId: string; readonly type: "select-tab" };
+
+export interface BrowserPreviewTab {
+  readonly id: string;
+  readonly url: string;
+  readonly title: string;
+  readonly active: boolean;
+}
+
+export type BrowserPreviewEventType =
+  | "session.created"
+  | "tab.created"
+  | "tab.selected"
+  | "tab.closed"
+  | "navigation.started"
+  | "navigation.done"
+  | "action.refresh"
+  | "action.scroll"
+  | "action.click"
+  | "action.type"
+  | "action.press"
+  | "console.error"
+  | "page.error"
+  | "network.failed";
+
+export interface BrowserPreviewEvent {
+  readonly id: number;
+  readonly sessionId: string;
+  readonly tabId: string;
+  readonly type: BrowserPreviewEventType;
+  readonly label: string;
+  readonly detail?: string;
+  readonly url?: string;
+  readonly title?: string;
+  readonly point?: { readonly x: number; readonly y: number };
+  readonly deltaY?: number;
+  readonly target?: BrowserActionTarget;
+  readonly selector?: string;
+  readonly text?: string;
+  readonly key?: string;
+  readonly at: string;
+}
 
 export interface BrowserPreviewSnapshot {
   readonly sessionId: string;
+  readonly activeTabId: string;
+  readonly tabs: readonly BrowserPreviewTab[];
+  readonly latestEvent?: BrowserPreviewEvent;
   readonly url: string;
   readonly title: string;
   readonly screenshot: string;
@@ -615,15 +673,74 @@ export interface BrowserPreviewSnapshot {
   readonly updatedAt: string;
 }
 
+export interface BrowserPreviewState {
+  readonly sessionId: string;
+  readonly activeTabId: string;
+  readonly tabs: readonly BrowserPreviewTab[];
+  readonly latestEvent?: BrowserPreviewEvent;
+  readonly url: string;
+  readonly title: string;
+  readonly domTargets: readonly BrowserPreviewDomTarget[];
+  readonly viewport: {
+    readonly width: number;
+    readonly height: number;
+  };
+  readonly updatedAt: string;
+}
+
+export interface BrowserPreviewDomTarget {
+  readonly selector: string;
+  readonly tag: string;
+  readonly role?: string;
+  readonly label?: string;
+  readonly text: string;
+  readonly bounds: {
+    readonly x: number;
+    readonly y: number;
+    readonly width: number;
+    readonly height: number;
+  };
+}
+
 interface BrowserPreviewSession {
   readonly id: string;
   readonly browser: Browser;
-  readonly page: Page;
+  readonly context: BrowserContext;
+  readonly pages: Map<string, Page>;
+  readonly pageIds: Map<Page, string>;
+  readonly events: BrowserPreviewEvent[];
+  readonly clients: Set<ServerResponse>;
+  activeTabId: string;
+  nextTabId: number;
+  nextEventId: number;
 }
 
-const BROWSER_PREVIEW_SESSION_ID = "browser-default";
 const BROWSER_PREVIEW_VIEWPORT = { width: 1280, height: 720 } as const;
-let browserPreviewSession: BrowserPreviewSession | null = null;
+const BROWSER_PREVIEW_EVENT_LIMIT = 80;
+const BROWSER_PREVIEW_SESSION_ID_PATTERN = /^[a-zA-Z0-9_.:-]{1,160}$/;
+let browserPreviewSessions = new Map<string, BrowserPreviewSession>();
+
+function normalizeBrowserPreviewSessionId(value: unknown): string {
+  const raw = typeof value === "string" ? value.trim() : "";
+  if (!raw) {
+    throw new Error("Browser session id is required.");
+  }
+  if (!BROWSER_PREVIEW_SESSION_ID_PATTERN.test(raw)) {
+    throw new Error("Browser session id must contain only letters, numbers, dots, colons, underscores, and dashes.");
+  }
+  return raw;
+}
+
+function optionalBrowserPreviewTabId(value: unknown): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const raw = typeof value === "string" ? value.trim() : "";
+  if (!raw) {
+    throw new Error("Browser tab id must be a non-empty string.");
+  }
+  return raw;
+}
 
 function normalizeBrowserPreviewUrl(value: unknown): string {
   const raw = typeof value === "string" ? value.trim() : "";
@@ -647,7 +764,7 @@ function normalizeBrowserPreviewUrl(value: unknown): string {
 
 export function parseBrowserSessionPayload(body: string): BrowserSessionPayload {
   const parsed = parseJsonObjectPayload(body, "Invalid browser session payload.");
-  return { url: normalizeBrowserPreviewUrl(parsed.url) };
+  return { sessionId: normalizeBrowserPreviewSessionId(parsed.sessionId), url: normalizeBrowserPreviewUrl(parsed.url) };
 }
 
 function parseBrowserStoragePayload(value: unknown): Record<string, string> {
@@ -670,26 +787,108 @@ function parseBrowserStoragePayload(value: unknown): Record<string, string> {
 export function parseBrowserSyncPayload(body: string): BrowserSyncPayload {
   const parsed = parseJsonObjectPayload(body, "Invalid browser sync payload.");
   return {
+    sessionId: normalizeBrowserPreviewSessionId(parsed.sessionId),
     url: normalizeBrowserPreviewUrl(parsed.url),
     localStorage: parseBrowserStoragePayload(parsed.localStorage),
     sessionStorage: parseBrowserStoragePayload(parsed.sessionStorage),
   };
 }
 
+function optionalNonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function parseBrowserActionTarget(value: unknown): BrowserActionTarget | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!isRecord(value)) {
+    throw new Error("Browser action target must be an object.");
+  }
+  const selector = optionalNonEmptyString(value.selector);
+  const role = optionalNonEmptyString(value.role);
+  const text = optionalNonEmptyString(value.text);
+  const label = optionalNonEmptyString(value.label);
+  const locatorCount = [selector, role, text, label].filter((item) => item !== undefined).length;
+  if (locatorCount !== 1) {
+    throw new Error("Browser action target must include exactly one locator.");
+  }
+  if (selector) {
+    return { selector };
+  }
+  if (role) {
+    const name = optionalNonEmptyString(value.name);
+    return name ? { role: role as BrowserActionRole, name } : { role: role as BrowserActionRole };
+  }
+  if (text) {
+    return { text };
+  }
+  if (label) {
+    return { label };
+  }
+  throw new Error("Browser action target must include exactly one locator.");
+}
+
 export function parseBrowserActionPayload(body: string): BrowserActionPayload {
   const parsed = parseJsonObjectPayload(body, "Invalid browser action payload.");
   const type = typeof parsed.type === "string" ? parsed.type.trim() : "";
+  const sessionId = normalizeBrowserPreviewSessionId(parsed.sessionId);
+  const tabId = optionalBrowserPreviewTabId(parsed.tabId);
   if (!type) {
     throw new Error("Browser action type is required.");
   }
   if (type === "refresh") {
-    return { type: "refresh" };
+    return { sessionId, tabId, type: "refresh" };
   }
   if (type === "scroll") {
     if (typeof parsed.deltaY !== "number" || !Number.isFinite(parsed.deltaY)) {
       throw new Error("Browser scroll deltaY is required.");
     }
-    return { type: "scroll", deltaY: parsed.deltaY };
+    const target = parseBrowserActionTarget(parsed.target);
+    return target ? { sessionId, tabId, type: "scroll", deltaY: parsed.deltaY, target } : { sessionId, tabId, type: "scroll", deltaY: parsed.deltaY };
+  }
+  if (type === "click") {
+    const target = parseBrowserActionTarget(parsed.target);
+    const x = typeof parsed.x === "number" && Number.isFinite(parsed.x) ? parsed.x : undefined;
+    const y = typeof parsed.y === "number" && Number.isFinite(parsed.y) ? parsed.y : undefined;
+    const hasPoint = x !== undefined && y !== undefined;
+    if (target && hasPoint) {
+      throw new Error("Browser click must use either target or x and y.");
+    }
+    if (target) {
+      return { sessionId, tabId, type: "click", target };
+    }
+    if (!hasPoint) {
+      throw new Error("Browser click target or x and y are required.");
+    }
+    return { sessionId, tabId, type: "click", x, y };
+  }
+  if (type === "type") {
+    if (typeof parsed.text !== "string" || parsed.text.length === 0) {
+      throw new Error("Browser type text is required.");
+    }
+    const target = parseBrowserActionTarget(parsed.target);
+    const selector = optionalNonEmptyString(parsed.selector);
+    if (target && selector) {
+      throw new Error("Browser type target must be provided only once.");
+    }
+    if (target) {
+      return { sessionId, tabId, type: "type", text: parsed.text, target };
+    }
+    return selector ? { sessionId, tabId, type: "type", text: parsed.text, selector } : { sessionId, tabId, type: "type", text: parsed.text };
+  }
+  if (type === "press") {
+    if (typeof parsed.key !== "string" || parsed.key.trim().length === 0) {
+      throw new Error("Browser key is required.");
+    }
+    const target = parseBrowserActionTarget(parsed.target);
+    return target ? { sessionId, tabId, type: "press", key: parsed.key.trim(), target } : { sessionId, tabId, type: "press", key: parsed.key.trim() };
+  }
+  if (type === "select-tab") {
+    if (!tabId) {
+      throw new Error("Browser tab id is required.");
+    }
+    return { sessionId, tabId, type: "select-tab" };
   }
   throw new Error(`Unsupported browser action '${type}'.`);
 }
@@ -698,56 +897,373 @@ const browserPreviewBadRequestMessages = new Set([
   "Invalid browser session payload.",
   "Invalid browser sync payload.",
   "Invalid browser action payload.",
+  "Browser session id is required.",
+  "Browser session id must contain only letters, numbers, dots, colons, underscores, and dashes.",
+  "Browser tab id must be a non-empty string.",
+  "Browser tab id is required.",
   "Browser URL is required.",
   "Browser URL must be an absolute http(s) URL or about:blank.",
   "Browser storage payload must be an object.",
   "Browser storage values must be strings.",
   "Browser action type is required.",
   "Browser scroll deltaY is required.",
+  "Browser click x and y are required.",
+  "Browser type text is required.",
+  "Browser key is required.",
 ]);
 
 function browserPreviewErrorStatus(error: unknown): 400 | 500 {
   const message = errorMessage(error);
-  return error instanceof SyntaxError || browserPreviewBadRequestMessages.has(message) || message.startsWith("Unsupported browser action ") ? 400 : 500;
+  return error instanceof SyntaxError ||
+    browserPreviewBadRequestMessages.has(message) ||
+    message.startsWith("Unsupported browser action ") ||
+    message.startsWith("Browser tab is not active:")
+    ? 400
+    : 500;
 }
 
-function currentBrowserPreviewSession(): BrowserPreviewSession | null {
-  if (!browserPreviewSession) {
-    return null;
+function trimBrowserPreviewEvents(events: BrowserPreviewEvent[]): void {
+  if (events.length > BROWSER_PREVIEW_EVENT_LIMIT) {
+    events.splice(0, events.length - BROWSER_PREVIEW_EVENT_LIMIT);
   }
-  if (!browserPreviewSession.browser.isConnected() || browserPreviewSession.page.isClosed()) {
-    browserPreviewSession = null;
-    return null;
-  }
-  return browserPreviewSession;
 }
 
-async function ensureBrowserPreviewSession(): Promise<BrowserPreviewSession> {
-  const current = currentBrowserPreviewSession();
+function writeBrowserPreviewSseEvent(res: ServerResponse, event: BrowserPreviewEvent): void {
+  res.write(`id: ${event.id}\n`);
+  res.write("event: browser\n");
+  res.write(`data: ${JSON.stringify(event)}\n\n`);
+}
+
+function emitBrowserPreviewEvent(
+  session: BrowserPreviewSession,
+  input: Omit<BrowserPreviewEvent, "id" | "sessionId" | "at">,
+): BrowserPreviewEvent {
+  const event: BrowserPreviewEvent = {
+    ...input,
+    id: session.nextEventId,
+    sessionId: session.id,
+    at: new Date().toISOString(),
+  };
+  session.nextEventId += 1;
+  session.events.push(event);
+  trimBrowserPreviewEvents(session.events);
+  for (const client of session.clients) {
+    writeBrowserPreviewSseEvent(client, event);
+  }
+  return event;
+}
+
+async function browserPreviewPageTitle(page: Page): Promise<string> {
+  if (page.isClosed()) {
+    return "";
+  }
+  return page.title();
+}
+
+function emitBrowserPreviewPageEvent(session: BrowserPreviewSession, page: Page, type: BrowserPreviewEventType, label: string, detail?: string): void {
+  const tabId = session.pageIds.get(page);
+  if (!tabId || page.isClosed()) {
+    return;
+  }
+  void (async () => {
+    emitBrowserPreviewEvent(session, {
+      tabId,
+      type,
+      label,
+      detail,
+      url: page.url(),
+      title: await browserPreviewPageTitle(page),
+    });
+  })();
+}
+
+function registerBrowserPreviewPage(session: BrowserPreviewSession, page: Page): string {
+  const existingId = session.pageIds.get(page);
+  if (existingId) {
+    return existingId;
+  }
+  const tabId = `tab-${session.nextTabId}`;
+  session.nextTabId += 1;
+  session.pages.set(tabId, page);
+  session.pageIds.set(page, tabId);
+  page.on("domcontentloaded", () => emitBrowserPreviewPageEvent(session, page, "navigation.done", "DOM loaded", page.url()));
+  page.on("load", () => emitBrowserPreviewPageEvent(session, page, "navigation.done", "Page loaded", page.url()));
+  page.on("console", (message: ConsoleMessage) => {
+    if (message.type() === "error") {
+      emitBrowserPreviewPageEvent(session, page, "console.error", "Console error", message.text());
+    }
+  });
+  page.on("pageerror", (error: Error) => emitBrowserPreviewPageEvent(session, page, "page.error", "Page error", error.message));
+  page.on("requestfailed", (request: PlaywrightRequest) => {
+    const failure = request.failure();
+    emitBrowserPreviewPageEvent(session, page, "network.failed", "Network failed", `${request.method()} ${request.url()}${failure?.errorText ? ` · ${failure.errorText}` : ""}`);
+  });
+  page.on("close", () => {
+    session.pages.delete(tabId);
+    session.pageIds.delete(page);
+    emitBrowserPreviewEvent(session, { tabId, type: "tab.closed", label: "Tab closed" });
+    if (session.activeTabId === tabId) {
+      session.activeTabId = session.pages.keys().next().value ?? "";
+    }
+  });
+  emitBrowserPreviewEvent(session, { tabId, type: "tab.created", label: "Tab created", url: page.url() });
+  return tabId;
+}
+
+function currentBrowserPreviewSession(sessionId: string): BrowserPreviewSession | null {
+  const session = browserPreviewSessions.get(sessionId);
+  if (!session) {
+    return null;
+  }
+  if (!session.browser.isConnected()) {
+    browserPreviewSessions.delete(sessionId);
+    return null;
+  }
+  for (const [tabId, page] of session.pages) {
+    if (page.isClosed()) {
+      session.pages.delete(tabId);
+      session.pageIds.delete(page);
+    }
+  }
+  if (session.pages.size === 0) {
+    browserPreviewSessions.delete(sessionId);
+    void session.browser.close();
+    return null;
+  }
+  if (!session.pages.has(session.activeTabId)) {
+    session.activeTabId = session.pages.keys().next().value ?? "";
+  }
+  return session;
+}
+
+async function ensureBrowserPreviewSession(sessionId: string): Promise<BrowserPreviewSession> {
+  const current = currentBrowserPreviewSession(sessionId);
   if (current) {
     return current;
   }
   const browser = await chromium.launch({ headless: true });
-  const page = await browser.newPage({ viewport: BROWSER_PREVIEW_VIEWPORT });
-  browserPreviewSession = { id: BROWSER_PREVIEW_SESSION_ID, browser, page };
-  return browserPreviewSession;
+  const context = await browser.newContext({ viewport: BROWSER_PREVIEW_VIEWPORT });
+  const session: BrowserPreviewSession = {
+    id: sessionId,
+    browser,
+    context,
+    pages: new Map(),
+    pageIds: new Map(),
+    events: [],
+    clients: new Set(),
+    activeTabId: "",
+    nextTabId: 1,
+    nextEventId: 1,
+  };
+  context.on("page", (page) => {
+    const tabId = registerBrowserPreviewPage(session, page);
+    session.activeTabId = tabId;
+  });
+  const page = await context.newPage();
+  const tabId = registerBrowserPreviewPage(session, page);
+  session.activeTabId = tabId;
+  browserPreviewSessions.set(sessionId, session);
+  emitBrowserPreviewEvent(session, { tabId, type: "session.created", label: "Browser session created" });
+  return session;
 }
 
-async function browserPreviewSnapshot(session: BrowserPreviewSession): Promise<BrowserPreviewSnapshot> {
-  const viewport = session.page.viewportSize() ?? BROWSER_PREVIEW_VIEWPORT;
-  const screenshot = await session.page.screenshot({ type: "png", fullPage: false });
+function browserPreviewPageFor(session: BrowserPreviewSession, tabId?: string): Page {
+  const targetTabId = tabId ?? session.activeTabId;
+  const page = session.pages.get(targetTabId);
+  if (!page || page.isClosed()) {
+    throw new Error(`Browser tab is not active: ${targetTabId || "-"}.`);
+  }
+  return page;
+}
+
+async function browserPreviewTabs(session: BrowserPreviewSession): Promise<readonly BrowserPreviewTab[]> {
+  const tabs: BrowserPreviewTab[] = [];
+  for (const [id, page] of session.pages) {
+    if (!page.isClosed()) {
+      tabs.push({ id, url: page.url(), title: await browserPreviewPageTitle(page), active: id === session.activeTabId });
+    }
+  }
+  return tabs;
+}
+
+async function browserPreviewDomTargets(page: Page): Promise<readonly BrowserPreviewDomTarget[]> {
+  if (page.url() === "about:blank") {
+    return [];
+  }
+  return page.evaluate(() => {
+    const maxTargets = 80;
+    const clip = (value: string, maxLength: number) => {
+      const clipped = value.replace(/\s+/g, " ").trim();
+      return clipped.length > maxLength ? `${clipped.slice(0, maxLength - 1)}…` : clipped;
+    };
+    const quoteAttribute = (name: string, value: string) => `[${name}="${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"]`;
+    const escapeIdent = (value: string) => {
+      if (globalThis.CSS?.escape) {
+        return globalThis.CSS.escape(value);
+      }
+      return value.replace(/[^a-zA-Z0-9_-]/g, (char) => `\\${char}`);
+    };
+    const selectorFor = (element: Element): string => {
+      if (element.id) {
+        return `#${escapeIdent(element.id)}`;
+      }
+      const testId = element.getAttribute("data-testid") ?? element.getAttribute("data-test");
+      if (testId) {
+        return quoteAttribute(element.hasAttribute("data-testid") ? "data-testid" : "data-test", testId);
+      }
+      const ariaLabel = element.getAttribute("aria-label");
+      if (ariaLabel) {
+        return `${element.tagName.toLowerCase()}${quoteAttribute("aria-label", ariaLabel)}`;
+      }
+      const name = element.getAttribute("name");
+      if (name && /^(input|textarea|select|button)$/i.test(element.tagName)) {
+        return `${element.tagName.toLowerCase()}${quoteAttribute("name", name)}`;
+      }
+      const parts: string[] = [];
+      let current: Element | null = element;
+      while (current && current !== document.documentElement && parts.length < 4) {
+        const tag = current.tagName.toLowerCase();
+        const parent: Element | null = current.parentElement;
+        if (!parent) {
+          parts.unshift(tag);
+          break;
+        }
+        const currentTagName = current.tagName;
+        const sameTagSiblings = (Array.from(parent.children) as Element[]).filter((child) => child.tagName === currentTagName);
+        const index = sameTagSiblings.indexOf(current) + 1;
+        parts.unshift(sameTagSiblings.length > 1 ? `${tag}:nth-of-type(${index})` : tag);
+        current = parent;
+      }
+      return parts.join(" > ");
+    };
+    const implicitRoleFor = (element: Element): string | undefined => {
+      const tag = element.tagName.toLowerCase();
+      if (tag === "button") {
+        return "button";
+      }
+      if (tag === "a" && element.hasAttribute("href")) {
+        return "link";
+      }
+      if (tag === "textarea") {
+        return "textbox";
+      }
+      if (tag === "select") {
+        return "combobox";
+      }
+      if (tag === "summary") {
+        return "button";
+      }
+      if (element instanceof HTMLInputElement) {
+        if (element.type === "checkbox" || element.type === "radio") {
+          return element.type;
+        }
+        if (element.type === "button" || element.type === "submit" || element.type === "reset") {
+          return "button";
+        }
+        return "textbox";
+      }
+      return undefined;
+    };
+    const labelFor = (element: Element): string | undefined => {
+      const ariaLabel = clip(element.getAttribute("aria-label") ?? "", 100);
+      if (ariaLabel) {
+        return ariaLabel;
+      }
+      if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) {
+        const label = clip(Array.from(element.labels ?? []).map((item) => item.textContent ?? "").join(" "), 100);
+        if (label) {
+          return label;
+        }
+        const placeholder = "placeholder" in element ? clip(String(element.placeholder ?? ""), 100) : "";
+        if (placeholder) {
+          return placeholder;
+        }
+      }
+      return clip(element.getAttribute("title") ?? "", 100) || undefined;
+    };
+    const elements = Array.from(
+      document.querySelectorAll(
+        [
+          "a[href]",
+          "button",
+          "input",
+          "textarea",
+          "select",
+          "summary",
+          "[role]",
+          "[tabindex]",
+          "[aria-label]",
+          "[data-testid]",
+          "[data-test]",
+          '[contenteditable="true"]',
+        ].join(","),
+      ),
+    );
+    const targets: BrowserPreviewDomTarget[] = [];
+    for (const element of elements) {
+      const rect = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      if (rect.width <= 0 || rect.height <= 0 || style.display === "none" || style.visibility === "hidden" || style.pointerEvents === "none") {
+        continue;
+      }
+      targets.push({
+        selector: selectorFor(element),
+        tag: element.tagName.toLowerCase(),
+        role: element.getAttribute("role") ?? implicitRoleFor(element),
+        label: labelFor(element),
+        text: clip(element.textContent ?? "", 120),
+        bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+      });
+      if (targets.length >= maxTargets) {
+        break;
+      }
+    }
+    return targets;
+  });
+}
+
+async function browserPreviewSnapshot(session: BrowserPreviewSession, tabId?: string): Promise<BrowserPreviewSnapshot> {
+  const page = browserPreviewPageFor(session, tabId);
+  const activeTabId = session.pageIds.get(page) ?? session.activeTabId;
+  session.activeTabId = activeTabId;
+  const viewport = page.viewportSize() ?? BROWSER_PREVIEW_VIEWPORT;
+  const screenshot = await page.screenshot({ type: "png", fullPage: false });
   return {
     sessionId: session.id,
-    url: session.page.url(),
-    title: await session.page.title(),
+    activeTabId,
+    tabs: await browserPreviewTabs(session),
+    latestEvent: session.events.at(-1),
+    url: page.url(),
+    title: await browserPreviewPageTitle(page),
     screenshot: `data:image/png;base64,${screenshot.toString("base64")}`,
     viewport,
     updatedAt: new Date().toISOString(),
   };
 }
 
-async function navigateBrowserPreview(page: Page, url: string): Promise<void> {
+async function browserPreviewState(session: BrowserPreviewSession, tabId?: string): Promise<BrowserPreviewState> {
+  const page = browserPreviewPageFor(session, tabId);
+  const activeTabId = session.pageIds.get(page) ?? session.activeTabId;
+  session.activeTabId = activeTabId;
+  const viewport = page.viewportSize() ?? BROWSER_PREVIEW_VIEWPORT;
+  return {
+    sessionId: session.id,
+    activeTabId,
+    tabs: await browserPreviewTabs(session),
+    latestEvent: session.events.at(-1),
+    url: page.url(),
+    title: await browserPreviewPageTitle(page),
+    domTargets: await browserPreviewDomTargets(page),
+    viewport,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+async function navigateBrowserPreview(session: BrowserPreviewSession, page: Page, url: string): Promise<void> {
+  const tabId = session.pageIds.get(page) ?? registerBrowserPreviewPage(session, page);
+  emitBrowserPreviewEvent(session, { tabId, type: "navigation.started", label: "Navigation started", url });
   await page.goto(url, { waitUntil: "domcontentloaded" });
+  emitBrowserPreviewEvent(session, { tabId, type: "navigation.done", label: "Navigation finished", url: page.url(), title: await browserPreviewPageTitle(page) });
 }
 
 export async function applyBrowserStorageSnapshot(page: Pick<Page, "evaluate" | "url">, storage: BrowserStorageSnapshot): Promise<void> {
@@ -1417,8 +1933,9 @@ function handleBrowserSession(req: IncomingMessage, res: ServerResponse): void {
     void (async () => {
       try {
         const payload = parseBrowserSessionPayload(body);
-        const session = await ensureBrowserPreviewSession();
-        await navigateBrowserPreview(session.page, payload.url);
+        const session = await ensureBrowserPreviewSession(payload.sessionId);
+        const page = browserPreviewPageFor(session);
+        await navigateBrowserPreview(session, page, payload.url);
         sendJson(res, 200, await browserPreviewSnapshot(session));
       } catch (error) {
         sendJson(res, browserPreviewErrorStatus(error), { error: errorMessage(error) });
@@ -1432,10 +1949,28 @@ function handleBrowserSync(req: IncomingMessage, res: ServerResponse): void {
     void (async () => {
       try {
         const payload = parseBrowserSyncPayload(body);
-        const session = await ensureBrowserPreviewSession();
-        await navigateBrowserPreview(session.page, payload.url);
-        await applyBrowserStorageSnapshot(session.page, payload);
+        const session = await ensureBrowserPreviewSession(payload.sessionId);
+        const page = browserPreviewPageFor(session);
+        await navigateBrowserPreview(session, page, payload.url);
+        await applyBrowserStorageSnapshot(page, payload);
         sendJson(res, 200, await browserPreviewSnapshot(session));
+      } catch (error) {
+        sendJson(res, browserPreviewErrorStatus(error), { error: errorMessage(error) });
+      }
+    })();
+  });
+}
+
+function handleBrowserBridgeSync(req: IncomingMessage, res: ServerResponse): void {
+  readJsonBody(req, res, (body) => {
+    void (async () => {
+      try {
+        const payload = parseBrowserSyncPayload(body);
+        const session = await ensureBrowserPreviewSession(payload.sessionId);
+        const page = browserPreviewPageFor(session);
+        await navigateBrowserPreview(session, page, payload.url);
+        await applyBrowserStorageSnapshot(page, payload);
+        sendJson(res, 200, await browserPreviewState(session));
       } catch (error) {
         sendJson(res, browserPreviewErrorStatus(error), { error: errorMessage(error) });
       }
@@ -1448,13 +1983,8 @@ function handleBrowserAction(req: IncomingMessage, res: ServerResponse): void {
     void (async () => {
       try {
         const action = parseBrowserActionPayload(body);
-        const session = await ensureBrowserPreviewSession();
-        if (action.type === "refresh") {
-          await session.page.reload({ waitUntil: "domcontentloaded" });
-        } else {
-          await session.page.mouse.wheel(0, action.deltaY);
-        }
-        sendJson(res, 200, await browserPreviewSnapshot(session));
+        const result = await applyBrowserAction(action);
+        sendJson(res, 200, await browserPreviewSnapshot(result.session, result.tabId));
       } catch (error) {
         sendJson(res, browserPreviewErrorStatus(error), { error: errorMessage(error) });
       }
@@ -1462,17 +1992,217 @@ function handleBrowserAction(req: IncomingMessage, res: ServerResponse): void {
   });
 }
 
-function handleBrowserSnapshot(_req: IncomingMessage, res: ServerResponse): void {
+function browserActionTargetDescription(target: BrowserActionTarget): string {
+  if ("selector" in target) {
+    return target.selector;
+  }
+  if ("role" in target) {
+    return target.name ? `role=${target.role} name=${target.name}` : `role=${target.role}`;
+  }
+  if ("text" in target) {
+    return `text=${target.text}`;
+  }
+  return `label=${target.label}`;
+}
+
+function browserActionTargetSelector(target: BrowserActionTarget | undefined): string | undefined {
+  return target && "selector" in target ? target.selector : undefined;
+}
+
+function browserActionLocator(page: Page, target: BrowserActionTarget): Locator {
+  if ("selector" in target) {
+    return page.locator(target.selector).first();
+  }
+  if ("role" in target) {
+    return target.name ? page.getByRole(target.role, { name: target.name, exact: true }).first() : page.getByRole(target.role).first();
+  }
+  if ("text" in target) {
+    return page.getByText(target.text, { exact: true }).first();
+  }
+  return page.getByLabel(target.label, { exact: true }).first();
+}
+
+function browserActionTargetForKeyboard(action: Extract<BrowserActionPayload, { readonly type: "type" | "press" }>): BrowserActionTarget | undefined {
+  if (action.target) {
+    return action.target;
+  }
+  if (action.type === "type" && action.selector) {
+    return { selector: action.selector };
+  }
+  return undefined;
+}
+
+async function browserActionPoint(locator: Locator): Promise<{ readonly x: number; readonly y: number } | undefined> {
+  const box = await locator.boundingBox();
+  if (!box) {
+    return undefined;
+  }
+  return { x: Math.round(box.x + box.width / 2), y: Math.round(box.y + box.height / 2) };
+}
+
+async function applyBrowserAction(action: BrowserActionPayload): Promise<{ readonly session: BrowserPreviewSession; readonly tabId?: string }> {
+  const session = await ensureBrowserPreviewSession(action.sessionId);
+  if (action.type === "select-tab") {
+    browserPreviewPageFor(session, action.tabId);
+    session.activeTabId = action.tabId;
+    emitBrowserPreviewEvent(session, { tabId: action.tabId, type: "tab.selected", label: "Tab selected" });
+    return { session, tabId: action.tabId };
+  }
+  const page = browserPreviewPageFor(session, action.tabId);
+  const tabId = session.pageIds.get(page) ?? session.activeTabId;
+  if (action.type === "refresh") {
+    emitBrowserPreviewEvent(session, { tabId, type: "action.refresh", label: "Refresh" });
+    await page.reload({ waitUntil: "domcontentloaded" });
+  } else if (action.type === "scroll") {
+    if (action.target) {
+      const locator = browserActionLocator(page, action.target);
+      emitBrowserPreviewEvent(session, {
+        tabId,
+        type: "action.scroll",
+        label: "Scroll",
+        detail: `${browserActionTargetDescription(action.target)} · deltaY=${action.deltaY}`,
+        deltaY: action.deltaY,
+        target: action.target,
+        selector: browserActionTargetSelector(action.target),
+      });
+      await locator.evaluate((element, deltaY) => {
+        if (!(element instanceof HTMLElement)) {
+          throw new Error("Browser scroll target must be an HTMLElement.");
+        }
+        element.scrollBy({ top: deltaY, left: 0, behavior: "auto" });
+      }, action.deltaY);
+    } else {
+      emitBrowserPreviewEvent(session, { tabId, type: "action.scroll", label: "Scroll", detail: `deltaY=${action.deltaY}`, deltaY: action.deltaY });
+      await page.mouse.wheel(0, action.deltaY);
+    }
+  } else if (action.type === "click") {
+    if ("target" in action) {
+      const locator = browserActionLocator(page, action.target);
+      emitBrowserPreviewEvent(session, {
+        tabId,
+        type: "action.click",
+        label: "Click",
+        detail: browserActionTargetDescription(action.target),
+        target: action.target,
+        selector: browserActionTargetSelector(action.target),
+        point: await browserActionPoint(locator),
+      });
+      await locator.click();
+    } else {
+      emitBrowserPreviewEvent(session, { tabId, type: "action.click", label: "Click", detail: `x=${action.x} y=${action.y}`, point: { x: action.x, y: action.y } });
+      await page.mouse.click(action.x, action.y);
+    }
+  } else if (action.type === "type") {
+    const target = browserActionTargetForKeyboard(action);
+    emitBrowserPreviewEvent(session, {
+      tabId,
+      type: "action.type",
+      label: "Type",
+      detail: target ? `${browserActionTargetDescription(target)} · ${action.text}` : action.text,
+      target,
+      selector: browserActionTargetSelector(target),
+      text: action.text,
+    });
+    if (target) {
+      await browserActionLocator(page, target).click();
+    }
+    await page.keyboard.type(action.text);
+  } else {
+    const target = browserActionTargetForKeyboard(action);
+    emitBrowserPreviewEvent(session, {
+      tabId,
+      type: "action.press",
+      label: "Press key",
+      detail: target ? `${browserActionTargetDescription(target)} · ${action.key}` : action.key,
+      target,
+      selector: browserActionTargetSelector(target),
+      key: action.key,
+    });
+    if (target) {
+      await browserActionLocator(page, target).press(action.key);
+    } else {
+      await page.keyboard.press(action.key);
+    }
+  }
+  return { session };
+}
+
+function handleBrowserBridgeAction(req: IncomingMessage, res: ServerResponse): void {
+  readJsonBody(req, res, (body) => {
+    void (async () => {
+      try {
+        const action = parseBrowserActionPayload(body);
+        const result = await applyBrowserAction(action);
+        sendJson(res, 200, await browserPreviewState(result.session, result.tabId));
+      } catch (error) {
+        sendJson(res, browserPreviewErrorStatus(error), { error: errorMessage(error) });
+      }
+    })();
+  });
+}
+
+function browserPreviewQuery(req: IncomingMessage): { readonly sessionId: string; readonly tabId?: string } {
+  const parsed = new URL(req.url ?? "", "http://localhost");
+  return {
+    sessionId: normalizeBrowserPreviewSessionId(parsed.searchParams.get("sessionId")),
+    tabId: optionalBrowserPreviewTabId(parsed.searchParams.get("tabId") ?? undefined),
+  };
+}
+
+function handleBrowserSnapshot(req: IncomingMessage, res: ServerResponse): void {
   void (async () => {
     try {
-      const session = currentBrowserPreviewSession();
+      const query = browserPreviewQuery(req);
+      const session = currentBrowserPreviewSession(query.sessionId);
       if (!session) {
         sendJson(res, 404, { error: "No browser preview session is active." });
         return;
       }
-      sendJson(res, 200, await browserPreviewSnapshot(session));
+      sendJson(res, 200, await browserPreviewSnapshot(session, query.tabId));
     } catch (error) {
-      sendJson(res, 500, { error: errorMessage(error) });
+      sendJson(res, browserPreviewErrorStatus(error), { error: errorMessage(error) });
+    }
+  })();
+}
+
+function handleBrowserBridgeSnapshot(req: IncomingMessage, res: ServerResponse): void {
+  void (async () => {
+    try {
+      const query = browserPreviewQuery(req);
+      const session = currentBrowserPreviewSession(query.sessionId);
+      if (!session) {
+        sendJson(res, 404, { error: "No browser preview session is active." });
+        return;
+      }
+      sendJson(res, 200, await browserPreviewState(session, query.tabId));
+    } catch (error) {
+      sendJson(res, browserPreviewErrorStatus(error), { error: errorMessage(error) });
+    }
+  })();
+}
+
+function handleBrowserEvents(req: IncomingMessage, res: ServerResponse): void {
+  void (async () => {
+    try {
+      const query = browserPreviewQuery(req);
+      const session = await ensureBrowserPreviewSession(query.sessionId);
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "text/event-stream");
+      res.setHeader("Cache-Control", "no-store");
+      res.setHeader("Connection", "keep-alive");
+      res.flushHeaders?.();
+      for (const event of session.events) {
+        writeBrowserPreviewSseEvent(res, event);
+      }
+      const heartbeat = setInterval(() => res.write(": heartbeat\n\n"), 15_000);
+      session.clients.add(res);
+      req.on("close", () => {
+        clearInterval(heartbeat);
+        session.clients.delete(res);
+        res.end();
+      });
+    } catch (error) {
+      sendJson(res, browserPreviewErrorStatus(error), { error: errorMessage(error) });
     }
   })();
 }
@@ -2115,6 +2845,51 @@ interface RunArgsRequest {
   readonly accessMode?: AgentAccessMode;
 }
 
+interface BrowserBridgeContext {
+  readonly sessionId: string;
+  readonly baseUrl: string;
+}
+
+function browserBridgeBaseUrlFromRequest(req: IncomingMessage): string {
+  const host = typeof req.headers.host === "string" ? req.headers.host.trim() : "";
+  if (!host) {
+    throw new Error("Browser bridge host is unavailable.");
+  }
+  return `http://${host}`;
+}
+
+export function browserBridgePromptAppendix(context: BrowserBridgeContext): string {
+  const sessionPayload = JSON.stringify({ sessionId: context.sessionId, url: "http://localhost:3000/" });
+  const clickPayload = JSON.stringify({ sessionId: context.sessionId, type: "click", target: { selector: "[data-testid=submit]" } });
+  const roleClickPayload = JSON.stringify({ sessionId: context.sessionId, type: "click", target: { role: "button", name: "Save" } });
+  const typePayload = JSON.stringify({ sessionId: context.sessionId, type: "type", target: { label: "Search" }, text: "hello" });
+  const pressPayload = JSON.stringify({ sessionId: context.sessionId, type: "press", target: { role: "textbox", name: "Search" }, key: "Enter" });
+  const scrollPayload = JSON.stringify({ sessionId: context.sessionId, type: "scroll", target: { selector: "main" }, deltaY: 600 });
+  return [
+    "",
+    "<browser-preview-bridge>",
+    `The user can observe browser work for this run in the app Preview tab. Use sessionId '${context.sessionId}' when browser interaction is useful.`,
+    `Open or sync a page: POST ${context.baseUrl}/api/browser/bridge/sync with JSON ${sessionPayload}`,
+    `Read current state and available DOM targets: GET ${context.baseUrl}/api/browser/bridge/snapshot?sessionId=${encodeURIComponent(context.sessionId)}`,
+    "Do not write bridge snapshots or responses to disk. Do not use -OutFile, temp files, shell redirection, tee, or other file writes for bridge calls. Use in-memory or stdout HTTP calls only, including in read-only access mode.",
+    `Prefer DOM targets from snapshot.domTargets over coordinates. Target can be {selector}, {role,name}, {text}, or {label}.`,
+    `Click by selector: POST ${context.baseUrl}/api/browser/bridge/action with JSON ${clickPayload}`,
+    `Click by role/name: POST ${context.baseUrl}/api/browser/bridge/action with JSON ${roleClickPayload}`,
+    `Type by label: POST ${context.baseUrl}/api/browser/bridge/action with JSON ${typePayload}`,
+    `Press by role/name: POST ${context.baseUrl}/api/browser/bridge/action with JSON ${pressPayload}`,
+    `Scroll a container by selector: POST ${context.baseUrl}/api/browser/bridge/action with JSON ${scrollPayload}`,
+    "Coordinates are only for canvas-like targets that cannot be addressed through DOM. These bridge endpoints return compact JSON without screenshots. All bridge actions are visible to the user as live Preview activity.",
+    "</browser-preview-bridge>",
+  ].join("\n");
+}
+
+function runRequestWithBrowserBridge(request: RunRequest, context: BrowserBridgeContext | null): RunRequest {
+  if (!context) {
+    return request;
+  }
+  return { ...request, prompt: `${request.prompt}${browserBridgePromptAppendix(context)}` };
+}
+
 export interface BackgroundRunBinding {
   readonly conversationId: string;
   readonly runId: string;
@@ -2615,12 +3390,12 @@ function toArgs(input: unknown): Record<string, string> {
 
 function resultText(content: unknown): string {
   if (typeof content === "string") {
-    return content;
+    return normalizeAgentToolOutput(content);
   }
   if (Array.isArray(content)) {
-    return content.map((c) => (c && typeof c === "object" && "text" in c ? String((c as { text: unknown }).text) : clip(c, 120))).join("\n");
+    return normalizeAgentToolOutput(content.map((c) => (c && typeof c === "object" && "text" in c ? String((c as { text: unknown }).text) : clip(c, 120))).join("\n"));
   }
-  return clip(content, 600);
+  return normalizeAgentToolOutput(clip(content, 600));
 }
 
 function splitDiffLines(value: string): string[] {
@@ -4215,7 +4990,7 @@ function commandExecutionEvents(eventType: unknown, item: Record<string, unknown
       type: "tool_result",
       id,
       ok: exitCode === 0 || status === "completed" || status === "success",
-      output,
+      output: normalizeAgentToolOutput(output),
     },
   ];
 }
@@ -5065,6 +5840,18 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
     }
 
     const request: RunRequest = { agent, model, reasoning, mode, prompt, accessMode };
+    let browserBridgeContext: BrowserBridgeContext | null = null;
+    if (binding) {
+      try {
+        browserBridgeContext = { sessionId: binding.conversationId, baseUrl: browserBridgeBaseUrlFromRequest(req) };
+      } catch (error) {
+        send({ type: "error", text: errorMessage(error) });
+        sendDone();
+        sender.end();
+        return;
+      }
+    }
+    const executionRequest = runRequestWithBrowserBridge(request, browserBridgeContext);
     if (binding) {
       accumulator = startPersistedBackgroundRun(binding, request);
     }
@@ -5110,7 +5897,16 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
       return;
     }
     const config = readAgentSecretConfig();
-    const runEnv = { ...process.env, ...config.env };
+    const runEnv = {
+      ...process.env,
+      ...config.env,
+      ...(browserBridgeContext
+        ? {
+            RLAB_BROWSER_BRIDGE_URL: browserBridgeContext.baseUrl,
+            RLAB_BROWSER_SESSION_ID: browserBridgeContext.sessionId,
+          }
+        : {}),
+    };
     const detect = DETECT[agent];
     if (spec.env && detect && !hasConfiguredAgentAuth(detect, config, runEnv)) {
       send({ type: "start" });
@@ -5151,6 +5947,9 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
       send({ type: "status", level: "info", text: `cwd · ${cwd}` });
     }
     send({ type: "status", level: "info", text: `access · ${accessMode}` });
+    if (browserBridgeContext) {
+      send({ type: "status", level: "info", text: `browser · ${browserBridgeContext.sessionId}` });
+    }
     try {
       appendRunAuditEvent(RUN_AUDIT_FILE, {
         type: "run_started",
@@ -5171,7 +5970,7 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
     }
 
     if (agent === "claude-code") {
-      void runClaudeSdk(request, cwd, res, send, sendDone, sender.end, binding, accumulator);
+      void runClaudeSdk(executionRequest, cwd, res, send, sendDone, sender.end, binding, accumulator);
       return;
     }
 
@@ -5189,7 +5988,7 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
     // stalls ~3s: "no stdin data received").
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawnResolvedBin(resolvedBin, spec.args(request), { cwd, env: runEnv, stdio: ["ignore", "pipe", "pipe"] });
+      child = spawnResolvedBin(resolvedBin, spec.args(executionRequest), { cwd, env: runEnv, stdio: ["ignore", "pipe", "pipe"] });
     } catch (error) {
       send({ type: "error", text: error instanceof Error ? `Failed to launch ${spec.bin}: ${error.message}` : `Failed to launch ${spec.bin}` });
       finishAndEnd();
@@ -5208,6 +6007,14 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
         },
       });
     }
+    let pendingDoneEvent: RunEvent | null = null;
+    const sendFinalDone = () => {
+      if (pendingDoneEvent) {
+        send(pendingDoneEvent);
+      } else {
+        sendDone();
+      }
+    };
     const translate = spec.createTranslator();
 
     const timeout = setTimeout(() => {
@@ -5225,7 +6032,11 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
         buffer = buffer.slice(nl + 1);
         if (line) {
           for (const event of translate(line)) {
-            send(event);
+            if (event.type === "done") {
+              pendingDoneEvent = event;
+            } else {
+              send(event);
+            }
           }
         }
       }
@@ -5241,7 +6052,7 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
         notifyBackgroundRunUpdate(binding, true);
         backgroundRunHandles.delete(binding.runId);
       }
-      sendDone();
+      sendFinalDone();
       sender.end();
     });
     child.on("close", (code) => {
@@ -5298,6 +6109,30 @@ function attach(server: ViteDevServer | PreviewServer): void {
     }
     handleBrowserAction(req, res);
   });
+  server.middlewares.use("/api/browser/bridge/sync", (req, res) => {
+    if (req.method !== "POST") {
+      res.statusCode = 405;
+      res.end();
+      return;
+    }
+    handleBrowserBridgeSync(req, res);
+  });
+  server.middlewares.use("/api/browser/bridge/action", (req, res) => {
+    if (req.method !== "POST") {
+      res.statusCode = 405;
+      res.end();
+      return;
+    }
+    handleBrowserBridgeAction(req, res);
+  });
+  server.middlewares.use("/api/browser/bridge/snapshot", (req, res) => {
+    if (req.method !== "GET") {
+      res.statusCode = 405;
+      res.end();
+      return;
+    }
+    handleBrowserBridgeSnapshot(req, res);
+  });
   server.middlewares.use("/api/browser/snapshot", (req, res) => {
     if (req.method !== "GET") {
       res.statusCode = 405;
@@ -5305,6 +6140,14 @@ function attach(server: ViteDevServer | PreviewServer): void {
       return;
     }
     handleBrowserSnapshot(req, res);
+  });
+  server.middlewares.use("/api/browser/events", (req, res) => {
+    if (req.method !== "GET") {
+      res.statusCode = 405;
+      res.end();
+      return;
+    }
+    handleBrowserEvents(req, res);
   });
   server.middlewares.use("/api/workspace", handleWorkspace);
   server.middlewares.use("/api/agents", (_req, res) => {
