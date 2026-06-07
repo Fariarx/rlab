@@ -4552,6 +4552,27 @@ function backgroundBlocks(accumulator: BackgroundRunAccumulator): AgentBlock[] {
   return blocks;
 }
 
+function finishBackgroundLiveBlock(block: AgentBlock, state: "ok" | "error"): AgentBlock {
+  switch (block.kind) {
+    case "reasoning":
+      return block.active ? { ...block, active: false } : block;
+    case "text":
+      return block.streaming ? { ...block, streaming: false } : block;
+    case "tool":
+    case "command":
+    case "search":
+      return block.state === "running" ? { ...block, state } : block;
+    case "plan":
+      return block.steps.some((step) => step.state === "running") ? { ...block, steps: block.steps.map((step) => (step.state === "running" ? { ...step, state } : step)) } : block;
+    default:
+      return block;
+  }
+}
+
+function finishBackgroundLiveBlocks(blocks: readonly AgentBlock[], state: "ok" | "error"): AgentBlock[] {
+  return blocks.map((block) => finishBackgroundLiveBlock(block, state));
+}
+
 function blockNeedsInput(block: AgentBlock): boolean {
   if (block.kind === "approval") {
     return !block.decision;
@@ -4966,14 +4987,14 @@ function applyBackgroundRunEvent(binding: BackgroundRunBinding, accumulator: Bac
 
 export function finishBackgroundRunState(state: WorkspaceState, binding: BackgroundRunBinding, accumulator: BackgroundRunAccumulator, canceled: boolean): WorkspaceState {
   accumulator.done = true;
-  let blocks = backgroundBlocks(accumulator);
   const locale = state.settings.general.locale;
+  const hadError = accumulator.statuses.some((status) => status.level === "error");
+  let blocks = finishBackgroundLiveBlocks(backgroundBlocks(accumulator), canceled || hadError ? "error" : "ok");
   if (canceled) {
     const canceledStatusBlock: AgentBlock = { kind: "status", level: "warn", text: serverRunSnippet(locale, "runCanceledSnippet") };
     const hasCanceledStatus = blocks.some((block) => block.kind === "status" && block.level === canceledStatusBlock.level && block.text === canceledStatusBlock.text);
     blocks = blocks.length === 0 ? [canceledStatusBlock] : hasCanceledStatus ? blocks : [...blocks, canceledStatusBlock];
   }
-  const hadError = accumulator.statuses.some((status) => status.level === "error");
   const hadOutput =
     accumulator.hasText ||
     accumulator.hasReasoning ||
@@ -5676,8 +5697,61 @@ function geminiToolEvents(value: unknown): RunEvent[] {
   return events;
 }
 
+function geminiToolUseId(msg: Record<string, unknown>, fallbackIndex: number): string {
+  return firstString(msg, ["tool_id", "callId", "call_id", "id"]) ?? `gemini-tool-${fallbackIndex}`;
+}
+
+function geminiToolInput(msg: Record<string, unknown>): Record<string, unknown> | undefined {
+  if (isRecord(msg.parameters)) {
+    return msg.parameters;
+  }
+  if (isRecord(msg.args)) {
+    return msg.args;
+  }
+  if (isRecord(msg.input)) {
+    return msg.input;
+  }
+  return undefined;
+}
+
+function geminiUpdateTopicReasoning(input: Record<string, unknown> | undefined): RunEvent | null {
+  const title = firstString(input, ["title", "topic"]);
+  const summary = firstString(input, ["summary", "description"]);
+  const intent = firstString(input, ["strategic_intent", "intent"]);
+  const text = [title, summary, intent ? `Intent: ${intent}` : undefined].filter(Boolean).join("\n");
+  return text ? { type: "reasoning", text } : null;
+}
+
+function geminiToolUseEvents(msg: Record<string, unknown>, fallbackIndex: number): RunEvent[] {
+  const id = geminiToolUseId(msg, fallbackIndex);
+  const name = firstString(msg, ["tool_name", "name"]) ?? "tool";
+  const input = geminiToolInput(msg);
+  if (normalizedToolName(name) === "updatetopic") {
+    const reasoning = geminiUpdateTopicReasoning(input);
+    return reasoning ? [reasoning] : [];
+  }
+  const rich = richToolEvents(id, name, input, "running");
+  if (rich.length > 0) {
+    return rich;
+  }
+  const summary = firstString(input, ["description", "summary", "command", "path", "file_path"]) ?? firstString(msg, ["description", "summary"]) ?? name;
+  return [{ type: "tool", id, name, summary: clip(summary, 80), args: toArgs(input) }];
+}
+
+function geminiToolResultEvents(msg: Record<string, unknown>): RunEvent[] {
+  const id = firstString(msg, ["tool_id", "callId", "call_id", "id"]);
+  if (!id) {
+    return [];
+  }
+  const status = firstString(msg, ["status"])?.toLowerCase() ?? "";
+  const ok = status !== "error" && status !== "failed" && status !== "failure";
+  const output = msg.output ?? msg.resultDisplay ?? msg.result ?? msg.content ?? "";
+  return [{ type: "tool_result", id, ok, output: resultText(output) }];
+}
+
 export function createGeminiStreamTranslator(): (line: string) => RunEvent[] {
   let assistantDeltaText = "";
+  let anonymousToolIndex = 0;
   return (line: string): RunEvent[] => {
     let msg: unknown;
     try {
@@ -5729,6 +5803,14 @@ export function createGeminiStreamTranslator(): (line: string) => RunEvent[] {
     }
     if (msg.type === "tool") {
       return geminiToolEvents(msg);
+    }
+    if (msg.type === "tool_use") {
+      const index = anonymousToolIndex;
+      anonymousToolIndex += 1;
+      return geminiToolUseEvents(msg, index);
+    }
+    if (msg.type === "tool_result") {
+      return geminiToolResultEvents(msg);
     }
     const events: RunEvent[] = [];
     const reasoning = geminiThoughtText(msg.thoughts);
@@ -6118,7 +6200,6 @@ async function runClaudeSdk(
   accumulator: BackgroundRunAccumulator | null,
 ): Promise<void> {
   const abortController = new AbortController();
-  let timedOut = false;
   res.on("close", () => {
     if (!binding && !abortController.signal.aborted) {
       abortController.abort();
@@ -6137,11 +6218,6 @@ async function runClaudeSdk(
   }
   const translate = createClaudeStreamTranslator();
   const canUseTool = createRunApprovalHandler(send, binding?.runId, request.accessMode === "unrestricted");
-  const timeout = setTimeout(() => {
-    timedOut = true;
-    send({ type: "error", text: "Run timed out after 120s" });
-    abortController.abort();
-  }, 120_000);
 
   try {
     for await (const message of query({ prompt: request.prompt, options: buildClaudeSdkOptions(request, cwd, abortController, canUseTool) })) {
@@ -6154,9 +6230,8 @@ async function runClaudeSdk(
       send({ type: "error", text: error instanceof Error ? error.message : String(error) });
     }
   } finally {
-    clearTimeout(timeout);
     if (binding && accumulator) {
-      finishPersistedBackgroundRun(binding, accumulator, abortController.signal.aborted && !timedOut);
+      finishPersistedBackgroundRun(binding, accumulator, abortController.signal.aborted);
       notifyBackgroundRunUpdate(binding, true);
       backgroundRunHandles.delete(binding.runId);
     }
@@ -6477,11 +6552,6 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
     };
     const translate = spec.createTranslator();
 
-    const timeout = setTimeout(() => {
-      send({ type: "error", text: "Run timed out after 120s" });
-      child.kill("SIGTERM");
-    }, 120_000);
-
     let buffer = "";
     let stderr = "";
     child.stdout?.on("data", (chunk: Buffer) => {
@@ -6505,7 +6575,6 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
       stderr += chunk.toString();
     });
     child.on("error", (err) => {
-      clearTimeout(timeout);
       send({ type: "error", text: `Failed to launch ${spec.bin}: ${err.message}` });
       if (binding && accumulator) {
         finishPersistedBackgroundRun(binding, accumulator, canceled);
@@ -6516,7 +6585,6 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
       sender.end();
     });
     child.on("close", (code) => {
-      clearTimeout(timeout);
       if (code !== 0 && stderr) {
         send({ type: "error", text: clip(stderr, 400) });
       }
@@ -6532,7 +6600,6 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
     // Abort the child if the client disconnects. Listen on the RESPONSE, not the
     // request — `req`'s "close" fires as soon as the POST body is consumed.
     res.on("close", () => {
-      clearTimeout(timeout);
       if (!binding && child.exitCode === null) {
         child.kill("SIGTERM");
       }

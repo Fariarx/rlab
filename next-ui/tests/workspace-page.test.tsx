@@ -185,14 +185,6 @@ describe("WorkspacePage", () => {
     expect(screen.getByLabelText("Папка проекта")).toBeInTheDocument();
   });
 
-  it("shows a retry run action for failed conversations", () => {
-    renderWithThemeAndVirtuoso(<WorkspacePage />);
-
-    fireEvent.click(screen.getByText("Сводка incident #4127"));
-
-    expect(screen.getByRole("button", { name: "Повторить запуск" })).toBeInTheDocument();
-  });
-
   it("deletes a conversation immediately when destructive confirmations are disabled", async () => {
     let workspace = {
       ...buildInitialWorkspaceState(),
@@ -504,6 +496,56 @@ describe("WorkspacePage", () => {
   });
 
   it("shows a stop button for a running conversation", async () => {
+    renderWithThemeAndVirtuoso(<WorkspacePage />);
+
+    expect(await screen.findByRole("button", { name: "Остановить запуск" })).toBeInTheDocument();
+  });
+
+  it("shows a stop button when the selected thread still has live agent work", async () => {
+    let workspace: WorkspaceStateWithComposerDrafts = buildInitialWorkspaceState();
+    workspace = {
+      ...workspace,
+      chats: workspace.chats.map((conversation) =>
+        conversation.id === workspace.selectedId ? { ...conversation, status: "done", activeRunId: undefined } : conversation,
+      ),
+      threads: {
+        ...workspace.threads,
+        [workspace.selectedId]: [
+          ...(workspace.threads[workspace.selectedId] ?? []),
+          {
+            id: "a-live-search",
+            role: "agent",
+            time: "12:00",
+            blocks: [{ kind: "search", query: "**/*calculator*", state: "running", results: [] }],
+          },
+        ],
+      },
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+        const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+        const activeRuns = activeRunsResponse(path);
+        if (activeRuns) {
+          return activeRuns;
+        }
+        if (path === "/api/workspace" && (!init || init.method === "GET")) {
+          return Response.json(workspace);
+        }
+        if (path === "/api/workspace" && init?.method === "PUT") {
+          workspace = JSON.parse(String(init.body)) as WorkspaceStateWithComposerDrafts;
+          return Response.json(workspace);
+        }
+        if (path === "/api/project-files") {
+          return Response.json({ files: [] });
+        }
+        if (path === "/api/agent-config") {
+          return Response.json({ agents: {} });
+        }
+        return Response.json({});
+      }),
+    );
+
     renderWithThemeAndVirtuoso(<WorkspacePage />);
 
     expect(await screen.findByRole("button", { name: "Остановить запуск" })).toBeInTheDocument();

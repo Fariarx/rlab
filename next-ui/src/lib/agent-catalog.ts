@@ -60,19 +60,20 @@ export const DEFAULT_AGENT_OPTION_ID = "default";
 const DEFAULT_OPTION: AgentOption = { id: DEFAULT_AGENT_OPTION_ID, label: "Default" };
 const DEFAULT_ONLY = [DEFAULT_OPTION] as const;
 export const CLAUDE_AGENT_MODE_PREFIX = "claude-agent:";
+// Permission-level modes (Auto, Bypass Permissions) are intentionally omitted —
+// filesystem access is governed by the next-ui access mode (read-only vs
+// unrestricted), not a per-message work mode.
 const CLAUDE_MODE_OPTIONS = [
   DEFAULT_OPTION,
   { id: "plan", label: "Plan", value: "plan" },
   { id: "auto-edit", label: "Auto Edit", value: "acceptEdits" },
-  { id: "auto", label: "Auto", value: "auto" },
-  { id: "bypass-permissions", label: "Bypass Permissions", value: "bypassPermissions" },
 ] as const;
 const CODEX_MODE_OPTIONS = [DEFAULT_OPTION, { id: "plan", label: "Plan", value: "plan" }, { id: "review", label: "Review", value: "review" }] as const;
+// Permission-level modes (Auto Edit, YOLO) are omitted — filesystem access is
+// governed by the next-ui access mode (read-only vs unrestricted).
 const GEMINI_MODE_OPTIONS = [
   DEFAULT_OPTION,
   { id: "plan", label: "Plan", value: "plan" },
-  { id: "auto-edit", label: "Auto Edit", value: "auto_edit" },
-  { id: "yolo", label: "YOLO", value: "yolo" },
 ] as const;
 const OPENCODE_MODE_OPTIONS = [
   DEFAULT_OPTION,

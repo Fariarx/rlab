@@ -12,6 +12,8 @@ export const MAX_SIDEBAR_WIDTH = 520;
 export interface AppearanceSettings {
   readonly density: DensityMode;
   readonly reduceMotion: boolean;
+  /** Auto-expand the reasoning block while the agent is thinking. */
+  readonly reasoningAutoExpand: boolean;
   readonly showCost: boolean;
   readonly showTerminal: boolean;
   readonly showTokens: boolean;
@@ -47,6 +49,7 @@ export const defaultAppSettings: AppSettings = {
   appearance: {
     density: "comfortable",
     reduceMotion: false,
+    reasoningAutoExpand: true,
     showCost: false,
     showTerminal: false,
     showTokens: true,
@@ -155,6 +158,7 @@ export function isAppSettings(value: unknown): value is AppSettings {
     (appearance.showTokens === undefined || typeof appearance.showTokens === "boolean") &&
     (appearance.showCost === undefined || typeof appearance.showCost === "boolean") &&
     (appearance.showTerminal === undefined || typeof appearance.showTerminal === "boolean") &&
+    (appearance.reasoningAutoExpand === undefined || typeof appearance.reasoningAutoExpand === "boolean") &&
     (appearance.sidebarWidth === undefined || normalizeSidebarWidth(appearance.sidebarWidth) === appearance.sidebarWidth) &&
     isLocale(general.locale) &&
     typeof general.desktopNotifications === "boolean" &&

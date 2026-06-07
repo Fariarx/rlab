@@ -6,7 +6,7 @@ import PsychologyIcon from "@mui/icons-material/Psychology";
 import SendIcon from "@mui/icons-material/Send";
 import CloseIcon from "@mui/icons-material/Close";
 import { Box, Collapse, Stack, Typography } from "@mui/material";
-import { type ChangeEvent, type ReactNode, useState } from "react";
+import { type ChangeEvent, type KeyboardEvent, type ReactNode, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import { Button, IconButton, Tooltip } from "../ui";
 import { AgentBlockRenderer } from "./AgentBlockRenderer";
@@ -118,26 +118,43 @@ function UserMessage({ message, delay, actions }: { readonly message: ChatMessag
 
   return (
     <Stack direction="row" spacing={1.25} sx={{ justifyContent: "flex-end", alignItems: "flex-start", ...rise(delay), ...revealActionsOnHover }}>
-      <Stack spacing={0.5} sx={{ alignItems: "flex-end", maxWidth: "82%", minWidth: 0 }}>
+      {/* Editing breaks out of the narrow user-bubble width so there's room to
+          rework a longer message comfortably. */}
+      <Stack spacing={0.5} sx={{ alignItems: "flex-end", width: editing ? "100%" : "auto", maxWidth: editing ? "100%" : "82%", minWidth: 0 }}>
         {editing ? (
           <Box
             sx={{
-              p: 1,
-              width: "min(520px, 100%)",
+              width: "100%",
+              p: 1.5,
               borderRadius: (t) => `${t.custom.radii.lg}px`,
               backgroundColor: (t) => t.custom.surfaces.s2,
               border: (t) => `1px solid ${t.custom.borders.focus}`,
+              boxShadow: "0 6px 22px rgba(0, 0, 0, 0.32)",
             }}
           >
-            <Stack spacing={1}>
+            <Stack spacing={1.25}>
+              <Typography variant="microLabel" sx={{ color: "text.secondary" }}>
+                {t("editMessage")}
+              </Typography>
               <Box
                 component="textarea"
                 aria-label={t("editMessage")}
+                autoFocus
                 value={draft}
                 onChange={(event: ChangeEvent<HTMLTextAreaElement>) => setDraft(event.currentTarget.value)}
-                rows={3}
+                onKeyDown={(event: KeyboardEvent<HTMLTextAreaElement>) => {
+                  if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+                    event.preventDefault();
+                    submitEdit();
+                  } else if (event.key === "Escape") {
+                    event.preventDefault();
+                    setEditing(false);
+                  }
+                }}
+                rows={5}
                 sx={{
                   width: "100%",
+                  minHeight: 120,
                   resize: "vertical",
                   border: (t) => `1px solid ${t.custom.borders.subtle}`,
                   borderRadius: (t) => `${t.custom.radii.md}px`,
@@ -145,17 +162,18 @@ function UserMessage({ message, delay, actions }: { readonly message: ChatMessag
                   color: "text.primary",
                   font: "inherit",
                   fontSize: "0.9rem",
-                  lineHeight: 1.5,
-                  p: 1,
+                  lineHeight: 1.6,
+                  p: 1.5,
                   outline: 0,
                   "&:focus": {
                     borderColor: (t) => t.custom.borders.focus,
+                    boxShadow: (t) => `0 0 0 1px ${t.custom.borders.focus}`,
                   },
                 }}
               />
-              <Stack direction="row" spacing={1} sx={{ justifyContent: "flex-end" }}>
-                <Button size="small" variant="text" aria-label={t("cancelEdit")} onClick={() => setEditing(false)}>
-                  <CloseIcon sx={{ fontSize: 15 }} />
+              <Stack direction="row" spacing={1} sx={{ justifyContent: "flex-end", alignItems: "center" }}>
+                <Button size="small" variant="text" onClick={() => setEditing(false)} startIcon={<CloseIcon sx={{ fontSize: 15 }} />}>
+                  {t("cancel")}
                 </Button>
                 <Button size="small" variant="contained" aria-label={t("sendEditedMessage")} onClick={submitEdit} startIcon={<SendIcon sx={{ fontSize: 15 }} />}>
                   {t("send")}
@@ -224,6 +242,8 @@ const ANSWER_BLOCK_KINDS: ReadonlySet<AgentBlock["kind"]> = new Set(["text", "op
 export interface MessageDisplayPrefs {
   readonly showTokens: boolean;
   readonly showCost: boolean;
+  /** Auto-expand the reasoning container while the agent is actively thinking. */
+  readonly reasoningAutoExpand?: boolean;
 }
 
 function UsagePill({ children }: { readonly children: ReactNode }) {
@@ -262,7 +282,7 @@ function AgentUsageMeta({ message, displayPrefs }: { readonly message: ChatMessa
 
 /** Collapsed-by-default container holding an agent turn's intermediate work, so
  *  threads stay readable — only the answer and the (collapsed) details show. */
-function AgentDetails({ blocks, actions }: { readonly blocks: readonly AgentBlock[]; readonly actions?: MessageActionHandlers }) {
+function AgentDetails({ blocks, actions, autoExpand = false }: { readonly blocks: readonly AgentBlock[]; readonly actions?: MessageActionHandlers; readonly autoExpand?: boolean }) {
   const [open, setOpen] = useState(false);
   const { t } = useI18n();
   const reasoning = blocks.find((block) => block.kind === "reasoning");
@@ -271,7 +291,9 @@ function AgentDetails({ blocks, actions }: { readonly blocks: readonly AgentBloc
   // Only expandable when there is real content — an empty reasoning block (e.g.
   // a still-streaming turn) shows the header but can't be opened to nothing.
   const expandable = blocks.some((block) => (block.kind === "reasoning" ? block.text.trim().length > 0 : true));
-  const isOpen = open && expandable;
+  // While the agent is actively thinking, follow the auto-expand setting; once
+  // it's done, respect the user's manual toggle (collapsed by default).
+  const isOpen = expandable && (active ? autoExpand : open);
 
   return (
     <Box sx={{ borderRadius: (t) => `${t.custom.radii.md}px`, border: (t) => `1px dashed ${t.custom.borders.subtle}`, backgroundColor: (t) => t.custom.surfaces.s1, overflow: "hidden" }}>
@@ -341,7 +363,7 @@ function AgentMessage({ message, delay, actions, displayPrefs = DEFAULT_DISPLAY_
           {blocks.length === 0 && <TypingDots />}
           {detailBlocks.length > 0 && (
             <Box sx={rise(delay + 120)}>
-              <AgentDetails blocks={detailBlocks} actions={actions} />
+              <AgentDetails blocks={detailBlocks} actions={actions} autoExpand={displayPrefs.reasoningAutoExpand ?? false} />
             </Box>
           )}
           {answerBlocks.map((block, index) => (

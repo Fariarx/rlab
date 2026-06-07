@@ -142,6 +142,23 @@ function toolToDiffBlock(tool: StreamingTool): DiffBlock | null {
   };
 }
 
+function finishLiveBlock(block: AgentBlock, state: "ok" | "error"): AgentBlock {
+  switch (block.kind) {
+    case "reasoning":
+      return block.active ? { ...block, active: false } : block;
+    case "text":
+      return block.streaming ? { ...block, streaming: false } : block;
+    case "tool":
+    case "command":
+    case "search":
+      return block.state === "running" ? { ...block, state } : block;
+    case "plan":
+      return block.steps.some((step) => step.state === "running") ? { ...block, steps: block.steps.map((step) => (step.state === "running" ? { ...step, state } : step)) } : block;
+    default:
+      return block;
+  }
+}
+
 interface RunPersistenceBinding {
   readonly conversationId: string;
   readonly runId: string;
@@ -606,15 +623,6 @@ export async function runConversation(opts: {
 
   flushLiveBlocks();
   done = true;
-  let finalBlocks = rebuild();
-  // Always emit a final settled render so a canceled run doesn't leave the
-  // message stuck on the live "thinking" placeholder. If nothing streamed in
-  // before the cancel, show an explicit "stopped" note instead of an empty bubble.
-  if (canceled && finalBlocks.length === 0) {
-    finalBlocks = [{ kind: "status", level: "warn", text: translate(opts.locale, "runCanceledSnippet") }];
-  }
-  opts.onBlocks(finalBlocks);
-
   const hadError = statuses.some((s) => s.level === "error");
   const hadOutput =
     hasText ||
@@ -630,6 +638,15 @@ export async function runConversation(opts: {
   const warningOnlyFailure = statuses.some((s) => s.level === "warn") && !hadOutput;
   const needsInput = approvals.length > 0 || options.length > 0;
   const status = hadError || warningOnlyFailure ? "error" : needsInput ? "waiting" : "done";
+  let finalBlocks = rebuild().map((block) => finishLiveBlock(block, status === "error" ? "error" : "ok"));
+  // Always emit a final settled render so a canceled run doesn't leave the
+  // message stuck on the live "thinking" placeholder. If nothing streamed in
+  // before the cancel, show an explicit "stopped" note instead of an empty bubble.
+  if (canceled && finalBlocks.length === 0) {
+    finalBlocks = [{ kind: "status", level: "warn", text: translate(opts.locale, "runCanceledSnippet") }];
+  }
+  opts.onBlocks(finalBlocks);
+
   const snippet = canceled
     ? translate(opts.locale, "runCanceledSnippet")
     : hadError || warningOnlyFailure

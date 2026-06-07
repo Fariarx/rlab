@@ -540,6 +540,11 @@ function AppearanceSection({ settings, onSettingsChange }: Pick<SettingsDialogPr
         description={t("showTerminalDescription")}
         control={<Switch checked={settings.appearance.showTerminal} onChange={(e) => onSettingsChange({ appearance: { showTerminal: e.target.checked } })} />}
       />
+      <SettingRow
+        title={t("reasoningAutoExpand")}
+        description={t("reasoningAutoExpandDescription")}
+        control={<Switch checked={settings.appearance.reasoningAutoExpand} onChange={(e) => onSettingsChange({ appearance: { reasoningAutoExpand: e.target.checked } })} />}
+      />
     </Stack>
   );
 }

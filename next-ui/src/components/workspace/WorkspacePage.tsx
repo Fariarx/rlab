@@ -8,7 +8,6 @@ import InsertDriveFileOutlinedIcon from "@mui/icons-material/InsertDriveFileOutl
 import MenuIcon from "@mui/icons-material/Menu";
 import MenuOpenIcon from "@mui/icons-material/MenuOpen";
 import OpenInBrowserIcon from "@mui/icons-material/OpenInBrowser";
-import RestartAltIcon from "@mui/icons-material/RestartAlt";
 import TerminalIcon from "@mui/icons-material/Terminal";
 import SearchIcon from "@mui/icons-material/Search";
 import SettingsIcon from "@mui/icons-material/Settings";
@@ -178,6 +177,40 @@ function latestAgentDiffBlocks(messages: readonly ChatMessage[]): readonly DiffB
   return lastAgentMessage?.blocks?.filter((block): block is DiffBlock => block.kind === "diff") ?? [];
 }
 
+function messageHasLiveAgentWork(message: ChatMessage): boolean {
+  if (message.role !== "agent") {
+    return false;
+  }
+  return Boolean(
+    message.blocks?.some((block) => {
+      switch (block.kind) {
+        case "reasoning":
+          return block.active === true;
+        case "text":
+          return block.streaming === true;
+        case "tool":
+        case "command":
+        case "search":
+          return block.state === "running";
+        case "plan":
+          return block.steps.some((step) => step.state === "running");
+        default:
+          return false;
+      }
+    }),
+  );
+}
+
+function conversationHasActiveWork(conversation: ConversationSummary | null, messages: readonly ChatMessage[]): boolean {
+  return Boolean(
+    conversation &&
+      (conversation.activeRunId ||
+        conversation.status === "running" ||
+        conversation.status === "waiting" ||
+        messages.some(messageHasLiveAgentWork)),
+  );
+}
+
 function runToastForStatus(status: ConversationStatus, title: string, t: ReturnType<typeof useI18n>["t"]) {
   if (status === "done") {
     return { message: t("runCompletedToast", { title }), severity: "success" as const };
@@ -303,6 +336,7 @@ export function WorkspacePageView({
 
   const selected = composingNew ? null : ws.find(ws.selectedId);
   const messages = ws.threads[ws.selectedId] ?? [];
+  const selectedHasActiveWork = conversationHasActiveWork(selected, messages);
   const lastTurnDiffs = useMemo(() => latestAgentDiffBlocks(messages), [messages]);
   const composerDraft = ws.composerDrafts[ws.selectedId] ?? { text: "", attachments: [] };
   const selectedCwd = ws.cwdOf(ws.selectedId);
@@ -778,14 +812,6 @@ export function WorkspacePageView({
     },
   };
 
-  const retryLastUserMessage = () => {
-    const lastUserMessage = [...messages].reverse().find((message) => message.role === "user");
-    if (lastUserMessage) {
-      notifiableRuns.current.add(ws.selectedId);
-      ws.retryMessage(ws.selectedId, lastUserMessage.id);
-    }
-  };
-
   const commandItems: readonly CommandPaletteItem[] = [
     {
       id: "new-conversation",
@@ -1011,13 +1037,6 @@ export function WorkspacePageView({
             </Stack>
             <Stack direction="row" spacing={0.75} sx={{ alignItems: "center", flex: "0 0 auto", "& .MuiIconButton-root": { width: 30, height: 30 } }}>
               {(selected || composingNew) && <AgentBadge profile={profile} onClick={openPicker} compact />}
-              {selected?.status === "error" && (
-                <Tooltip title={t("retryRun")}>
-                  <IconButton aria-label={t("retryRun")} onClick={retryLastUserMessage}>
-                    <RestartAltIcon sx={{ fontSize: 17 }} />
-                  </IconButton>
-                </Tooltip>
-              )}
               <ToggleButtonGroup
                 size="small"
                 exclusive
@@ -1154,7 +1173,7 @@ export function WorkspacePageView({
                     messages={messages}
                     typing={selected.status === "running" && messages[messages.length - 1]?.role === "user"}
                     actions={messageActions}
-                    displayPrefs={{ showTokens: ws.settings.appearance.showTokens, showCost: ws.settings.appearance.showCost }}
+                    displayPrefs={{ showTokens: ws.settings.appearance.showTokens, showCost: ws.settings.appearance.showCost, reasoningAutoExpand: ws.settings.appearance.reasoningAutoExpand }}
                     contentMaxWidth={THREAD_MAX_WIDTH}
                     contentPaddingX={THREAD_PADDING_X}
                     bottomInset={contentBottomInset}
@@ -1250,7 +1269,7 @@ export function WorkspacePageView({
                 onModeChange={handleModeChange}
                 onStop={() => ws.stopRun(ws.selectedId)}
                 onAttachmentError={(message) => toast({ message, severity: "error", duration: 3000 })}
-                running={selected?.status === "running"}
+                running={selectedHasActiveWork}
                 reviewCount={reviewComments.length}
                 onSendReview={sendReviewComments}
                 onTagsHeightChange={setComposerTagsHeight}

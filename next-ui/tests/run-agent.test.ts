@@ -275,7 +275,7 @@ describe("runConversation", () => {
         kind: "plan",
         steps: [
           { label: "Read logs", state: "ok" },
-          { label: "Patch mapper", state: "running" },
+          { label: "Patch mapper", state: "ok" },
         ],
       },
       {
@@ -320,6 +320,33 @@ describe("runConversation", () => {
 
     expect(blocks[0]).toContainEqual({ kind: "reasoning", text: "", active: true });
     expect(blocks.at(-1)).toEqual([{ kind: "text", text: "answer", streaming: false }]);
+  });
+
+  it("settles live search blocks when the run finishes", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        streamResponse([
+          { type: "search", id: "search-1", query: "**/*calculator*", state: "running", results: [] },
+          { type: "text", text: "checked" },
+          { type: "done" },
+        ]),
+      ),
+    );
+    const blocks: AgentBlock[][] = [];
+
+    await runConversation({
+      profile: DEFAULT_PROFILE,
+      prompt: "search",
+      accessMode: "read-only",
+      locale: "ru",
+      onBlocks: (nextBlocks) => blocks.push(nextBlocks),
+    });
+
+    expect(blocks.at(-1)).toEqual([
+      { kind: "search", query: "**/*calculator*", state: "ok", results: [] },
+      { kind: "text", text: "checked", streaming: false },
+    ]);
   });
 
   it("coalesces consecutive text deltas from the same stream chunk", async () => {

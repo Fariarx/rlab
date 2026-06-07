@@ -90,9 +90,19 @@ export function Conversation({
   );
 
   useLayoutEffect(() => {
-    if (pinnedToBottom.current) {
-      virtuosoRef.current?.autoscrollToBottom();
+    if (!pinnedToBottom.current) {
+      return;
     }
+    virtuosoRef.current?.autoscrollToBottom();
+    // Tall messages (big diffs/code) finish measuring after the first paint, so a
+    // single autoscroll can stop mid-content. Re-pin on the next frame so a freshly
+    // opened thread lands fully at the bottom.
+    const raf = requestAnimationFrame(() => {
+      if (pinnedToBottom.current) {
+        virtuosoRef.current?.autoscrollToBottom();
+      }
+    });
+    return () => cancelAnimationFrame(raf);
   }, [messages, typing]);
 
   return (

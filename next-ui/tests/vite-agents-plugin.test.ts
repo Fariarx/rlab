@@ -783,17 +783,18 @@ Built-in agents:
   });
 
   it("maps Gemini work modes into real approval modes", () => {
-    expect(buildGeminiRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "auto-edit", accessMode: "unrestricted" })).toEqual([
+    // Unrestricted + default -> yolo (the agent's "do anything" approval mode).
+    expect(buildGeminiRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" })).toEqual([
       "--prompt",
       "hello",
       "--output-format",
       "stream-json",
       "--approval-mode",
-      "auto_edit",
+      "yolo",
       "--skip-trust",
     ]);
     expect(buildGeminiRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "plan", accessMode: "unrestricted" })).toContain("plan");
-    expect(buildGeminiRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "yolo", accessMode: "unrestricted" })).toContain("yolo");
+    expect(buildGeminiRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "read-only" })).toContain("plan");
   });
 
   it("builds OpenCode args with a concrete default model, reasoning variant, and no permission bypass", () => {
@@ -1014,6 +1015,58 @@ Built-in agents:
         lines: [{ type: "add", text: "export const ok = true;" }],
       },
     ]);
+  });
+
+  it("translates Gemini CLI tool_use and tool_result events into visible work blocks", () => {
+    const translate = createGeminiStreamTranslator();
+
+    expect(
+      translate(
+        JSON.stringify({
+          type: "tool_use",
+          tool_name: "update_topic",
+          tool_id: "topic-1",
+          parameters: {
+            title: "Исследование каталога",
+            summary: "Проверяю текущую папку перед ответом.",
+            strategic_intent: "Понять контекст запуска.",
+          },
+        }),
+      ),
+    ).toEqual([{ type: "reasoning", text: "Исследование каталога\nПроверяю текущую папку перед ответом.\nIntent: Понять контекст запуска." }]);
+
+    expect(
+      translate(
+        JSON.stringify({
+          type: "tool_use",
+          tool_name: "run_shell_command",
+          tool_id: "shell-1",
+          parameters: {
+            command: "Get-Location",
+            description: "Показать текущую директорию.",
+          },
+        }),
+      ),
+    ).toEqual([
+      {
+        type: "tool",
+        id: "shell-1",
+        name: "run_shell_command",
+        summary: "Показать текущую директорию.",
+        args: { command: "Get-Location", description: "Показать текущую директорию." },
+      },
+    ]);
+
+    expect(
+      translate(
+        JSON.stringify({
+          type: "tool_result",
+          tool_id: "shell-1",
+          status: "success",
+          output: "C:\\Users\\Admin\\Git\\Workspace\\rlab",
+        }),
+      ),
+    ).toEqual([{ type: "tool_result", id: "shell-1", ok: true, output: "C:\\Users\\Admin\\Git\\Workspace\\rlab" }]);
   });
 
   it("translates Codex plan and semantic item events into rich run events", () => {

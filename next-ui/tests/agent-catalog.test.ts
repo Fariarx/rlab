@@ -20,16 +20,15 @@ describe("agent catalog", () => {
   });
 
   it("exposes practical work modes separately from models and reasoning", () => {
-    expect(getAgent("claude-code").modes.map((option) => option.id)).toEqual(["default", "plan", "auto-edit", "auto", "bypass-permissions"]);
+    expect(getAgent("claude-code").modes.map((option) => option.id)).toEqual(["default", "plan", "auto-edit"]);
     expect(resolveAgentModeValue("claude-code", "auto-edit")).toBe("acceptEdits");
-    expect(resolveAgentModeValue("claude-code", "bypass-permissions")).toBe("bypassPermissions");
 
     expect(getAgent("codex").modes.map((option) => option.id)).toEqual(["default", "plan", "review"]);
     expect(resolveAgentModeValue("codex", "plan")).toBe("plan");
     expect(resolveAgentModeValue("codex", "review")).toBe("review");
 
-    expect(getAgent("gemini").modes.map((option) => option.id)).toEqual(["default", "plan", "auto-edit", "yolo"]);
-    expect(resolveAgentModeValue("gemini", "auto-edit")).toBe("auto_edit");
+    expect(getAgent("gemini").modes.map((option) => option.id)).toEqual(["default", "plan"]);
+    expect(resolveAgentModeValue("gemini", "plan")).toBe("plan");
 
     expect(getAgent("opencode").modes.map((option) => option.id)).toEqual(["default", "build", "plan", "explore", "general", "summary"]);
     expect(resolveAgentModeValue("opencode", "explore")).toBe("explore");

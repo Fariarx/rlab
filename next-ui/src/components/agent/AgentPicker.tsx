@@ -116,7 +116,7 @@ export function AgentPicker({
   };
 
   return (
-    <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth aria-labelledby={titleId}>
+    <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth aria-labelledby={titleId} slotProps={{ paper: { sx: { minWidth: { xs: 300, sm: 420 } } } }}>
       <Stack
         direction="row"
         sx={{ alignItems: "center", justifyContent: "space-between", px: 2.5, pt: 2, pb: 1.5 }}

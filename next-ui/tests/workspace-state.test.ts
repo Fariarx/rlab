@@ -20,6 +20,7 @@ describe("workspace state", () => {
       appearance: {
         density: "comfortable",
         reduceMotion: false,
+        reasoningAutoExpand: true,
         showCost: false,
         showTerminal: false,
         showTokens: true,

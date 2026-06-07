@@ -313,16 +313,20 @@ export function StatusNote({ level, children }: { readonly level: StatusKey; rea
       direction="row"
       spacing={1}
       sx={{
-        alignItems: "center",
+        // Top-align the dot so a multi-line message reads cleanly, and use the
+        // standard card radius (a pill blows up the corners when text wraps).
+        alignItems: "flex-start",
         alignSelf: "flex-start",
         px: 1.25,
         py: 0.75,
-        borderRadius: (t) => `${t.custom.radii.pill}px`,
+        borderRadius: (t) => `${t.custom.radii.md}px`,
         backgroundColor: (t) => t.palette.status[level].soft,
         border: (t) => `1px solid ${t.palette.status[level].border}`,
       }}
     >
-      <StatusDot status={level} label={level} pulse={false} size="sm" />
+      <Box sx={{ display: "flex", mt: "3px" }}>
+        <StatusDot status={level} label={level} pulse={false} size="sm" />
+      </Box>
       <Typography sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.74rem", color: "text.primary" }}>
         {children}
       </Typography>

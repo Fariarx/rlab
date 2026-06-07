@@ -175,6 +175,87 @@ function blocksHaveLiveOutput(blocks: readonly AgentBlock[]): boolean {
   });
 }
 
+/** Clears a block's "live" flags so the UI stops animating it. Used when a run
+ *  is stopped or errors mid-stream — otherwise reasoning/tool blocks keep their
+ *  "working" animation even though the agent is no longer running. */
+function settleLiveBlock(block: AgentBlock): AgentBlock {
+  switch (block.kind) {
+    case "reasoning":
+      return block.active ? { ...block, active: false } : block;
+    case "text":
+      return block.streaming ? { ...block, streaming: false } : block;
+    case "tool":
+    case "command":
+    case "search":
+      return block.state === "running" ? { ...block, state: "error" } : block;
+    case "plan":
+      return block.steps.some((step) => step.state === "running") ? { ...block, steps: block.steps.map((step) => (step.state === "running" ? { ...step, state: "error" } : step)) } : block;
+    default:
+      return block;
+  }
+}
+
+function finishLiveBlock(block: AgentBlock, state: "ok" | "error"): AgentBlock {
+  switch (block.kind) {
+    case "reasoning":
+      return block.active ? { ...block, active: false } : block;
+    case "text":
+      return block.streaming ? { ...block, streaming: false } : block;
+    case "tool":
+    case "command":
+    case "search":
+      return block.state === "running" ? { ...block, state } : block;
+    case "plan":
+      return block.steps.some((step) => step.state === "running") ? { ...block, steps: block.steps.map((step) => (step.state === "running" ? { ...step, state } : step)) } : block;
+    default:
+      return block;
+  }
+}
+
+function settleThreadLiveBlocks(state: WorkspaceState, id: string): WorkspaceState {
+  const messages = state.threads[id];
+  if (!messages) {
+    return state;
+  }
+  let changed = false;
+  const next = messages.map((message) => {
+    if (message.role !== "agent" || !message.blocks) {
+      return message;
+    }
+    const blocks = message.blocks.map(settleLiveBlock);
+    if (blocks.some((block, index) => block !== message.blocks![index])) {
+      changed = true;
+      return { ...message, blocks };
+    }
+    return message;
+  });
+  return changed ? { ...state, threads: { ...state.threads, [id]: next } } : state;
+}
+
+function finishThreadLiveBlocks(state: WorkspaceState, id: string, runState: "ok" | "error"): WorkspaceState {
+  const messages = state.threads[id];
+  if (!messages) {
+    return state;
+  }
+  let changed = false;
+  const next = messages.map((message) => {
+    if (message.role !== "agent" || !message.blocks) {
+      return message;
+    }
+    const blocks = message.blocks.map((block) => finishLiveBlock(block, runState));
+    if (blocks.some((block, index) => block !== message.blocks![index])) {
+      changed = true;
+      return { ...message, blocks };
+    }
+    return message;
+  });
+  return changed ? { ...state, threads: { ...state.threads, [id]: next } } : state;
+}
+
+function finishBlocks(blocks: readonly AgentBlock[], runState: "ok" | "error"): AgentBlock[] {
+  return blocks.map((block) => finishLiveBlock(block, runState));
+}
+
 function blocksHaveStatus(blocks: readonly AgentBlock[]): boolean {
   return blocks.some((block) => block.kind === "status");
 }
@@ -248,7 +329,8 @@ function isLiveRunStatus(status: ConversationStatus): boolean {
 function patchActiveRunUpdate(state: WorkspaceState, update: ActiveRunUpdate): WorkspaceState {
   const messages = state.threads[update.conversationId] ?? [];
   const previousBlocks = messages.find((message) => message.id === update.agentMessageId)?.blocks;
-  const blocks = mergeInputBlockState(update.blocks, previousBlocks);
+  const mergedBlocks = mergeInputBlockState(update.blocks, previousBlocks);
+  const blocks = update.done || !isLiveRunStatus(update.status) ? finishBlocks(mergedBlocks, update.status === "error" || update.status === "idle" ? "error" : "ok") : mergedBlocks;
   const message: ChatMessage = {
     id: update.agentMessageId,
     role: "agent",
@@ -850,6 +932,17 @@ class WorkspaceStore implements Workspace {
     const text = userMsg.text ?? "";
     const runId = nextId("run");
 
+    // Cancel any run still in flight for this conversation BEFORE persisting the
+    // (re-truncated) thread. Otherwise a server-owned background run can write the
+    // old agent reply back into storage after our save, so it reappears on reload.
+    const previous = this.runs.get(id);
+    if (previous) {
+      previous.canceled = true;
+      void cancelRun(previous.runId).catch(() => undefined);
+      previous.controller.abort();
+      this.runs.delete(id);
+    }
+
     const runningPatch: Partial<ConversationSummary> = {
       activeRunId: runId,
       status: "running" as ConversationStatus,
@@ -909,12 +1002,6 @@ class WorkspaceStore implements Workspace {
       }
     };
 
-    const previous = this.runs.get(id);
-    if (previous) {
-      previous.canceled = true;
-      void cancelRun(previous.runId).catch(() => undefined);
-      previous.controller.abort();
-    }
     const controller = new AbortController();
     const runHandle: RunHandle = { controller, runId, serverOwned: false, canceled: false };
     this.runs.set(id, runHandle);
@@ -944,14 +1031,16 @@ class WorkspaceStore implements Workspace {
           return;
         }
         this.setState((current) => {
-          const withConversation = patchConversation(current, id, finalRunPatch(current, id, aId, result));
+          const runState = result.status === "error" ? "error" : "ok";
+          const settled = finishThreadLiveBlocks(current, id, runState);
+          const withConversation = patchConversation(settled, id, finalRunPatch(settled, id, aId, result));
           return patchAgentMessageUsage(withConversation, id, aId, result);
         });
         this.persistCurrentStateNow();
       })
       .catch(() => {
         if (!runHandle.canceled) {
-          this.setState((current) => patchConversation(current, id, { activeRunId: undefined, status: "error", snippet: translate(current.settings.general.locale, "runFailedSnippet") }));
+          this.setState((current) => patchConversation(settleThreadLiveBlocks(current, id), id, { activeRunId: undefined, status: "error", snippet: translate(current.settings.general.locale, "runFailedSnippet") }));
           this.persistCurrentStateNow();
         }
       })
@@ -979,11 +1068,14 @@ class WorkspaceStore implements Workspace {
     // seeded "running" conversation, or one left "running" after a decision):
     // otherwise the stop button would hang with nothing to cancel.
     this.setState((current) => {
-      const conversation = findConversation(current, id);
+      // Stop the "working" animation on any in-flight blocks even if the run
+      // handle is already gone.
+      const settled = settleThreadLiveBlocks(current, id);
+      const conversation = findConversation(settled, id);
       if (!conversation || (conversation.status !== "running" && conversation.status !== "waiting")) {
-        return current;
+        return settled;
       }
-      return patchConversation(current, id, {
+      return patchConversation(settled, id, {
         activeRunId: undefined,
         status: "idle",
         snippet: translate(current.settings.general.locale, "runCanceledSnippet"),
