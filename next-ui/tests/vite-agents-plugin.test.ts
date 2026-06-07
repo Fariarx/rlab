@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import {
@@ -53,6 +53,8 @@ import {
   hasGeminiStoredAuthAt,
   installCommandForAgent,
   parseCodexModelsOutput,
+  parseClaudeAgentsOutput,
+  parseOpenCodeAgentsOutput,
   parseOpenCodeModelsOutput,
   resolveAgentInstallLaunch,
   resolveBinOnPath,
@@ -67,6 +69,7 @@ import {
   withStorageFileLock,
   windowsCommandLine,
   writeJsonFileAtomic,
+  writeAgentSecretConfig,
   workspacePutErrorStatus,
   type BackgroundRunBinding,
   type BackgroundRunHandle,
@@ -78,6 +81,15 @@ import { type CanUseTool } from "@anthropic-ai/claude-agent-sdk";
 import { type AgentProfile } from "../src/components/agent";
 
 describe("vite agents plugin", () => {
+  it("does not import client UI modules into the dev-server runtime", () => {
+    const source = readFileSync("vite-agents-plugin.ts", "utf8");
+
+    expect(source).not.toContain('from "./src/components/workspace/app-settings"');
+    expect(source).not.toContain('from "./src/components/workspace/workspace-state"');
+    expect(source).not.toContain('from "./src/components/workspace/sample-data"');
+    expect(source).not.toContain('from "./src/i18n/I18nProvider"');
+  });
+
   it("only exposes the supported visible agents in backend discovery", () => {
     expect(visibleAgentDetectionIds()).toEqual(["claude-code", "codex", "gemini", "opencode"]);
   });
@@ -303,6 +315,45 @@ describe("vite agents plugin", () => {
     });
   });
 
+  it("parses live OpenCode agents as chat work modes", () => {
+    expect(
+      parseOpenCodeAgentsOutput(`build (primary)
+explore (subagent)
+general (subagent)
+plan (primary)
+summary (primary)
+title (primary)
+compaction (primary)
+custom-reviewer (subagent)
+`),
+    ).toEqual([
+      { id: "build", label: "Build", value: "build" },
+      { id: "explore", label: "Explore", value: "explore" },
+      { id: "general", label: "General", value: "general" },
+      { id: "plan", label: "Plan", value: "plan" },
+      { id: "summary", label: "Summary", value: "summary" },
+      { id: "custom-reviewer", label: "Custom Reviewer", value: "custom-reviewer" },
+    ]);
+  });
+
+  it("parses live Claude Code agents as chat work modes", () => {
+    expect(
+      parseClaudeAgentsOutput(`4 active agents
+
+Built-in agents:
+  Explore · haiku
+  general-purpose · inherit
+  Plan · inherit
+  Goal · inherit
+  statusline-setup · sonnet
+`),
+    ).toEqual([
+      { id: "claude-agent:Explore", label: "Explore", value: "Explore" },
+      { id: "claude-agent:general-purpose", label: "General Purpose", value: "general-purpose" },
+      { id: "claude-agent:Goal", label: "Goal", value: "Goal" },
+    ]);
+  });
+
   it("resolves Windows command shims before PowerShell scripts for agent spawns", () => {
     const dir = mkdtempSync(join(tmpdir(), "rlab-path-"));
     try {
@@ -413,6 +464,30 @@ describe("vite agents plugin", () => {
       "--permission-mode",
       "plan",
     ]);
+  });
+
+  it("passes selected Claude Code agent modes to the CLI and SDK", () => {
+    expect(buildClaudeRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "claude-agent:Goal", accessMode: "unrestricted" })).toEqual([
+      "-p",
+      "hello",
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      "--include-partial-messages",
+      "--agent",
+      "Goal",
+      "--permission-mode",
+      "acceptEdits",
+    ]);
+
+    expect(
+      buildClaudeSdkOptions(
+        { agent: "claude-code", model: "default", reasoning: "default", mode: "claude-agent:Goal", prompt: "hello", accessMode: "unrestricted" },
+        "C:/repo",
+        new AbortController(),
+        (() => Promise.resolve({ behavior: "deny", message: "test" })) satisfies CanUseTool,
+      ),
+    ).toMatchObject({ agent: "Goal" });
   });
 
   it("translates Claude text deltas without duplicating the final assistant message", () => {
@@ -608,6 +683,29 @@ describe("vite agents plugin", () => {
     ]);
   });
 
+  it("builds Codex review mode through the real review subcommand", () => {
+    expect(buildCodexRunArgs({ prompt: "review auth changes", model: "gpt-5.5", reasoning: "high", mode: "review", accessMode: "read-only" })).toEqual([
+      "exec",
+      "review",
+      "--json",
+      "--skip-git-repo-check",
+      "--model",
+      "gpt-5.5",
+      "-c",
+      'model_reasoning_effort="high"',
+      "review auth changes",
+    ]);
+  });
+
+  it("builds Codex plan mode as a read-only planning run", () => {
+    const args = buildCodexRunArgs({ prompt: "fix flaky auth tests", model: "default", reasoning: "default", mode: "plan", accessMode: "unrestricted" });
+
+    expect(args.slice(0, 5)).toEqual(["exec", "--json", "--sandbox", "read-only", "--skip-git-repo-check"]);
+    expect(args).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+    expect(args.at(-1)).toContain("Plan mode is active.");
+    expect(args.at(-1)).toContain("fix flaky auth tests");
+  });
+
   it("maps agent access mode into CLI safety flags", () => {
     expect(buildClaudeRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" })).toContain("acceptEdits");
     expect(buildClaudeRunArgs({ prompt: "hello", model: "opus", reasoning: "max", mode: "plan", accessMode: "unrestricted" })).toEqual([
@@ -661,6 +759,20 @@ describe("vite agents plugin", () => {
     expect(buildGeminiRunArgs({ prompt: "hello", model: "gemini-2.5-flash-lite", reasoning: "default", mode: "default", accessMode: "read-only" })).toContain("gemini-2.5-flash-lite");
   });
 
+  it("maps Gemini work modes into real approval modes", () => {
+    expect(buildGeminiRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "auto-edit", accessMode: "unrestricted" })).toEqual([
+      "--prompt",
+      "hello",
+      "--output-format",
+      "stream-json",
+      "--approval-mode",
+      "auto_edit",
+      "--skip-trust",
+    ]);
+    expect(buildGeminiRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "plan", accessMode: "unrestricted" })).toContain("plan");
+    expect(buildGeminiRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "yolo", accessMode: "unrestricted" })).toContain("yolo");
+  });
+
   it("builds OpenCode args with a concrete default model, reasoning variant, and no permission bypass", () => {
     expect(buildOpenCodeRunArgs({ prompt: "hello", model: "default", reasoning: "high", mode: "default", accessMode: "read-only" })).toEqual([
       "run",
@@ -691,6 +803,20 @@ describe("vite agents plugin", () => {
 
   it("passes direct runtime provider/model IDs through to OpenCode", () => {
     expect(buildOpenCodeRunArgs({ prompt: "hello", model: "anthropic/claude-custom-lab", reasoning: "default", mode: "default", accessMode: "read-only" })).toContain("anthropic/claude-custom-lab");
+  });
+
+  it("maps OpenCode work modes into the real agent flag", () => {
+    expect(buildOpenCodeRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "explore", accessMode: "read-only" })).toEqual([
+      "run",
+      "--format",
+      "json",
+      "--thinking",
+      "--agent",
+      "explore",
+      "--model",
+      "opencode/deepseek-v4-flash-free",
+      "hello",
+    ]);
   });
 
   it("translates Codex JSONL events into normalized run events", () => {
@@ -1419,6 +1545,7 @@ describe("vite agents plugin", () => {
   it("validates agent config payloads without accepting non-object JSON", () => {
     expect(() => parseAgentConfigPayload(JSON.stringify(null))).toThrow("Invalid agent config payload.");
     expect(() => parseAgentConfigPayload(JSON.stringify({ agent: "", apiKey: "sk-test" }))).toThrow("Agent id is required.");
+    expect(() => parseAgentConfigPayload(JSON.stringify({ agent: "qwen", apiKey: "sk-test" }))).toThrow("Agent qwen is not supported.");
     expect(() => parseAgentConfigPayload(JSON.stringify({ agent: "codex", apiKey: "" }))).toThrow("API key is required.");
     expect(parseAgentConfigPayload(JSON.stringify({ agent: " codex ", apiKey: " sk-test " }))).toEqual({
       agent: "codex",
@@ -1429,7 +1556,26 @@ describe("vite agents plugin", () => {
   it("validates agent install payloads without accepting non-object JSON", () => {
     expect(() => parseAgentInstallPayload(JSON.stringify([]))).toThrow("Invalid agent install payload.");
     expect(() => parseAgentInstallPayload(JSON.stringify({ agent: "" }))).toThrow("Agent id is required.");
+    expect(() => parseAgentInstallPayload(JSON.stringify({ agent: "amp" }))).toThrow("Agent amp is not supported.");
     expect(parseAgentInstallPayload(JSON.stringify({ agent: " codex " }))).toEqual({ agent: "codex" });
+  });
+
+  it("writes agent secret configs atomically without leaving broad temp files", () => {
+    const dir = mkdtempSync(join(tmpdir(), "rlab-agent-config-"));
+    try {
+      const file = join(dir, "agent-config.json");
+      writeAgentSecretConfig({ env: { OLD_KEY: "old" } }, file);
+      writeAgentSecretConfig({ env: { OPENAI_API_KEY: "sk-test" } }, file);
+
+      expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ env: { OPENAI_API_KEY: "sk-test" } });
+      expect(JSON.parse(readFileSync(`${file}.bak`, "utf8"))).toEqual({ env: { OLD_KEY: "old" } });
+      expect(existsSync(`${file}.tmp`)).toBe(false);
+      if (process.platform !== "win32") {
+        expect(statSync(file).mode & 0o777).toBe(0o600);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("validates project directory payloads without accepting non-object JSON", () => {
@@ -1451,6 +1597,12 @@ describe("vite agents plugin", () => {
       mode: "default",
       accessMode: "unrestricted",
       prompt: "hello",
+    });
+    expect(parseRunRequestPayload(JSON.stringify({ agent: "codex", model: "default", reasoning: "default", mode: "review", prompt: "hello" }))).toMatchObject({
+      ok: true,
+      agent: "codex",
+      mode: "review",
+      profileValid: true,
     });
   });
 

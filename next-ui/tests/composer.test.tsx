@@ -1,4 +1,4 @@
-import { act, fireEvent, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { createRef } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { Composer, type ComposerHandle } from "../src/components/agent";
@@ -109,5 +109,25 @@ describe("Composer", () => {
 
     fireEvent.change(input, { target: { value: "a" } });
     expect(screen.getByTestId("composer-input-area")).toHaveAttribute("data-expanded", "false");
+  });
+
+  it("pins work mode switches to the menu edge", () => {
+    renderWithTheme(
+      <Composer
+        placeholder="Написать"
+        modes={[
+          { id: "plan", label: "Plan" },
+          { id: "review", label: "Review" },
+        ]}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Опции" }));
+
+    const planItem = screen.getByRole("menuitem", { name: "Plan" });
+    const switchRoot = within(planItem).getByRole("switch").closest(".MuiSwitch-root");
+
+    expect(planItem).toHaveStyle({ paddingRight: "4px" });
+    expect(switchRoot).toHaveStyle({ marginLeft: "auto", marginRight: "-1px" });
   });
 });

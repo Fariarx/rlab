@@ -1,4 +1,4 @@
-import { fireEvent, screen } from "@testing-library/react";
+﻿import { fireEvent, screen } from "@testing-library/react";
 import { render } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/App";
@@ -24,7 +24,7 @@ describe("hash routing", () => {
     renderApp();
 
     expect(screen.getAllByText("Объясни auth flow").length).toBeGreaterThan(0);
-    expect(await screen.findByPlaceholderText("Написать: Объясни auth flow...")).toBeInTheDocument();
+    expect(await screen.findByPlaceholderText("Написать: CC")).toBeInTheDocument();
   });
 
   it("opens a project conversation deep link", async () => {
@@ -42,7 +42,7 @@ describe("hash routing", () => {
     renderApp();
 
     expect((await screen.findAllByText("Flaky-тест auth.login")).length).toBeGreaterThan(0);
-    expect(await screen.findByPlaceholderText("Написать: Flaky-тест auth.login...")).toBeInTheDocument();
+    expect(await screen.findByPlaceholderText("Написать: CC")).toBeInTheDocument();
     expect(window.location.hash).toBe("#/project/auth-service");
   });
 
@@ -50,7 +50,7 @@ describe("hash routing", () => {
     window.location.hash = "#/project/auth-service/c-flaky";
 
     renderApp();
-    await screen.findByPlaceholderText("Написать: Flaky-тест auth.login...");
+    await screen.findByPlaceholderText("Написать: CC");
 
     fireEvent.click(screen.getByText("Ротация JWT-секретов"));
 
@@ -61,10 +61,10 @@ describe("hash routing", () => {
     window.location.hash = "#/project/auth-service/c-flaky";
 
     renderApp();
-    await screen.findByPlaceholderText("Написать: Flaky-тест auth.login...");
+    await screen.findByPlaceholderText("Написать: CC");
 
     fireEvent.click(screen.getByRole("button", { name: "Новый диалог" }));
-    const input = await screen.findByPlaceholderText("Начать новый диалог...");
+    const input = await screen.findByPlaceholderText("Написать: CC");
     fireEvent.change(input, { target: { value: "Project-local follow-up" } });
     fireEvent.keyDown(input, { key: "Enter" });
 
@@ -95,6 +95,10 @@ async function fetchWorkspaceResource(input: RequestInfo | URL, init?: RequestIn
 
   if (url === "/api/project-files") {
     return Response.json({ files: [] });
+  }
+
+  if (url === "/api/runs") {
+    return Response.json({ runs: [] });
   }
 
   if (url === "/api/agents") {

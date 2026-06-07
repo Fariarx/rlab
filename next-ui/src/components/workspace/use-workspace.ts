@@ -13,6 +13,22 @@ const WORKSPACE_SAVE_DEBOUNCE_MS = 250;
 let idSeq = 1000;
 const nextId = (prefix: string) => `${prefix}-${++idSeq}`;
 
+function generatedIdSequence(value: string | undefined): number {
+  if (!value) {
+    return 0;
+  }
+  const match = /^(?:chat|u|a|run)-(\d+)/.exec(value);
+  return match ? Number(match[1]) : 0;
+}
+
+function syncGeneratedIdSequence(state: WorkspaceState): void {
+  const conversations = workspaceConversations(state);
+  const messageIds = Object.values(state.threads).flatMap((messages) => messages.map((message) => message.id));
+  const activeRunIds = conversations.map((conversation) => conversation.activeRunId);
+  const max = Math.max(0, ...conversations.map((conversation) => generatedIdSequence(conversation.id)), ...messageIds.map(generatedIdSequence), ...activeRunIds.map(generatedIdSequence));
+  idSeq = Math.max(idSeq, max);
+}
+
 interface RunHandle {
   readonly controller: AbortController;
   readonly runId: string;
@@ -387,6 +403,7 @@ class WorkspaceStore implements Workspace {
   }
 
   private applyServerState(state: WorkspaceState): void {
+    syncGeneratedIdSequence(state);
     if (this.state !== state) {
       this.skipNextSave = true;
       this.state = state;

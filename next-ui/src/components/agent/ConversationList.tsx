@@ -78,7 +78,7 @@ function titleInitials(title: string): string {
 function InitialsAvatar({ title, agent }: { readonly title: string; readonly agent: AgentId }) {
   // Initials for the label, but the tile keeps the agent's brand accent (tint +
   // border + text) so the per-agent colour coding survives.
-  const accent = getAgent(agent).accent;
+  const accent = getAgent(agent)?.accent ?? "#8B949E";
   return (
     <Box
       aria-hidden
@@ -129,6 +129,8 @@ function ConversationRow({
   onMove,
   registerRowRef,
   actions,
+  showCost = false,
+  showTokens = true,
 }: {
   readonly conversation: ConversationSummary;
   readonly active: boolean;
@@ -137,6 +139,8 @@ function ConversationRow({
   readonly onMove: (id: string, offset: -1 | 1) => void;
   readonly registerRowRef: (id: string, element: HTMLDivElement | null) => void;
   readonly actions: ConversationActions;
+  readonly showCost?: boolean;
+  readonly showTokens?: boolean;
 }) {
   const [menuAnchor, setMenuAnchor] = useState<null | HTMLElement>(null);
   const [editing, setEditing] = useState(false);
@@ -267,12 +271,12 @@ function ConversationRow({
             </Typography>
             <Stack direction="row" spacing={0.75} sx={{ alignItems: "center", flex: "0 0 auto" }}>
               {conversation.unread && <Box sx={{ width: 6, height: 6, borderRadius: "50%", backgroundColor: (t) => t.palette.status.running.main }} />}
-              {conversation.costUsd !== undefined && (
+              {showCost && conversation.costUsd !== undefined && (
                 <Typography sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.64rem", color: (t) => t.palette.status.info.main }}>
                   {formatCostUsd(conversation.costUsd)}
                 </Typography>
               )}
-              {conversation.usage !== undefined && (
+              {showTokens && conversation.usage !== undefined && (
                 <Typography sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.64rem", color: "text.secondary" }}>
                   {formatTokenUsage(conversation.usage)}
                 </Typography>
@@ -423,12 +427,16 @@ export function ConversationList({
   selectedId,
   onSelect,
   actions,
+  showCost = false,
+  showTokens = true,
 }: {
   readonly projects: readonly Project[];
   readonly chats: readonly ConversationSummary[];
   readonly selectedId: string | null;
   readonly onSelect: (id: string) => void;
   readonly actions: ConversationActions;
+  readonly showCost?: boolean;
+  readonly showTokens?: boolean;
 }) {
   const virtuosoRef = useRef<VirtuosoHandle | null>(null);
   const rowRefs = useRef(new Map<string, HTMLDivElement>());
@@ -626,6 +634,8 @@ export function ConversationList({
                 onMove={moveConversation}
                 registerRowRef={registerRowRef}
                 actions={actions}
+                showCost={showCost}
+                showTokens={showTokens}
               />
             </Box>
           );

@@ -17,6 +17,9 @@ export interface GitStatusPayload {
   /** Total added/removed lines across unstaged (working-tree) changes. */
   readonly unstagedAdditions?: number;
   readonly unstagedDeletions?: number;
+  /** Short commit hash (7 chars) and subject of the latest commit. */
+  readonly commitHash?: string;
+  readonly commitTitle?: string;
 }
 
 /** Sums the additions/deletions columns of `git diff --numstat` output. Binary

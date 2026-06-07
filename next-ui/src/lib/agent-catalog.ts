@@ -14,7 +14,20 @@ export type AgentId =
   | "droid";
 
 export type AgentSystemStatus = "available" | "running" | "needs-setup" | "unavailable" | "unsupported";
-export type AgentWorkMode = "default" | "plan";
+export const KNOWN_AGENT_WORK_MODE_IDS = [
+  "default",
+  "plan",
+  "auto-edit",
+  "auto",
+  "bypass-permissions",
+  "review",
+  "build",
+  "explore",
+  "general",
+  "summary",
+] as const;
+export type KnownAgentWorkMode = (typeof KNOWN_AGENT_WORK_MODE_IDS)[number];
+export type AgentWorkMode = KnownAgentWorkMode | (string & {});
 
 export interface AgentOption {
   readonly id: string;
@@ -46,8 +59,31 @@ export const DEFAULT_AGENT_OPTION_ID = "default";
 
 const DEFAULT_OPTION: AgentOption = { id: DEFAULT_AGENT_OPTION_ID, label: "Default" };
 const DEFAULT_ONLY = [DEFAULT_OPTION] as const;
-const DEFAULT_MODE_OPTIONS = [DEFAULT_OPTION] as const;
-const CLAUDE_MODE_OPTIONS = [DEFAULT_OPTION, { id: "plan", label: "Plan", value: "plan" }] as const;
+export const CLAUDE_AGENT_MODE_PREFIX = "claude-agent:";
+const CLAUDE_MODE_OPTIONS = [
+  DEFAULT_OPTION,
+  { id: "plan", label: "Plan", value: "plan" },
+  { id: "auto-edit", label: "Auto Edit", value: "acceptEdits" },
+  { id: "auto", label: "Auto", value: "auto" },
+  { id: "bypass-permissions", label: "Bypass Permissions", value: "bypassPermissions" },
+] as const;
+const CODEX_MODE_OPTIONS = [DEFAULT_OPTION, { id: "plan", label: "Plan", value: "plan" }, { id: "review", label: "Review", value: "review" }] as const;
+const GEMINI_MODE_OPTIONS = [
+  DEFAULT_OPTION,
+  { id: "plan", label: "Plan", value: "plan" },
+  { id: "auto-edit", label: "Auto Edit", value: "auto_edit" },
+  { id: "yolo", label: "YOLO", value: "yolo" },
+] as const;
+const OPENCODE_MODE_OPTIONS = [
+  DEFAULT_OPTION,
+  { id: "build", label: "Build", value: "build" },
+  { id: "plan", label: "Plan", value: "plan" },
+  { id: "explore", label: "Explore", value: "explore" },
+  { id: "general", label: "General", value: "general" },
+  { id: "summary", label: "Summary", value: "summary" },
+] as const;
+const OPENCODE_INTERNAL_AGENT_IDS = new Set(["title", "compaction"]);
+const CLAUDE_INTERNAL_AGENT_IDS = new Set(["statusline-setup"]);
 const CLAUDE_REASONING_OPTIONS = [
   DEFAULT_OPTION,
   { id: "low", label: "Low", value: "low" },
@@ -146,7 +182,7 @@ export const AGENTS: readonly AgentDef[] = [
       { id: "gpt-5.3-codex-spark", label: "GPT-5.3 Codex Spark", value: "gpt-5.3-codex-spark" },
     ],
     reasoning: CODEX_REASONING_OPTIONS,
-    modes: DEFAULT_MODE_OPTIONS,
+    modes: CODEX_MODE_OPTIONS,
   },
   {
     id: "gemini",
@@ -158,7 +194,7 @@ export const AGENTS: readonly AgentDef[] = [
     accent: "#4C8DF6",
     models: GEMINI_MODEL_OPTIONS,
     reasoning: DEFAULT_ONLY,
-    modes: DEFAULT_MODE_OPTIONS,
+    modes: GEMINI_MODE_OPTIONS,
   },
   {
     id: "opencode",
@@ -170,7 +206,7 @@ export const AGENTS: readonly AgentDef[] = [
     accent: "#8B5CF6",
     models: OPENCODE_MODEL_OPTIONS,
     reasoning: CLAUDE_REASONING_OPTIONS,
-    modes: DEFAULT_MODE_OPTIONS,
+    modes: OPENCODE_MODE_OPTIONS,
   },
 ];
 
@@ -214,6 +250,7 @@ export interface AgentCliInfo {
   readonly installCommand: string | null;
   readonly models?: readonly AgentOption[];
   readonly reasoning?: readonly AgentOption[];
+  readonly modes?: readonly AgentOption[];
 }
 
 export type AgentCliMap = Partial<Record<AgentId, AgentCliInfo>>;
@@ -250,7 +287,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isAgentWorkMode(value: unknown): value is AgentWorkMode {
-  return value === "default" || value === "plan";
+  return typeof value === "string" && value.trim().length > 0;
 }
 
 function hasOption(options: readonly AgentOption[], id: string): boolean {
@@ -279,6 +316,34 @@ export function isDirectAgentModelValue(agent: AgentId, value: string): boolean 
   }
 }
 
+export function isDirectAgentModeValue(agent: AgentId, value: string): boolean {
+  if (value === DEFAULT_AGENT_OPTION_ID) {
+    return true;
+  }
+  if (agent === "claude-code") {
+    return claudeAgentNameFromMode(value) !== null;
+  }
+  if (agent === "opencode") {
+    return !OPENCODE_INTERNAL_AGENT_IDS.has(value) && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value);
+  }
+  return false;
+}
+
+export function claudeAgentModeId(agentName: string): string {
+  return `${CLAUDE_AGENT_MODE_PREFIX}${agentName}`;
+}
+
+export function claudeAgentNameFromMode(value: string): string | null {
+  if (!value.startsWith(CLAUDE_AGENT_MODE_PREFIX)) {
+    return null;
+  }
+  const agentName = value.slice(CLAUDE_AGENT_MODE_PREFIX.length);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(agentName) || CLAUDE_INTERNAL_AGENT_IDS.has(agentName)) {
+    return null;
+  }
+  return agentName;
+}
+
 function normalizeOptionId(agent: AgentId, kind: "models" | "reasoning", options: readonly AgentOption[], id: string): string {
   if (hasOption(options, id)) {
     return id;
@@ -289,15 +354,23 @@ function normalizeOptionId(agent: AgentId, kind: "models" | "reasoning", options
   return DEFAULT_AGENT_OPTION_ID;
 }
 
+function normalizeModeId(agent: AgentId, options: readonly AgentOption[], id: string): AgentWorkMode {
+  if (hasOption(options, id) || isDirectAgentModeValue(agent, id)) {
+    return id;
+  }
+  return DEFAULT_AGENT_OPTION_ID;
+}
+
 export function defaultProfileForAgent(agent: AgentId): AgentProfile {
   return { agent, model: DEFAULT_AGENT_OPTION_ID, reasoning: DEFAULT_AGENT_OPTION_ID, mode: "default" };
 }
 
 export function normalizeAgentProfile(value: unknown, fallbackAgent: AgentId = DEFAULT_PROFILE.agent): AgentProfile {
+  const activeFallbackAgent = isAgentId(fallbackAgent) ? fallbackAgent : DEFAULT_PROFILE.agent;
   if (!isRecord(value)) {
-    return defaultProfileForAgent(fallbackAgent);
+    return defaultProfileForAgent(activeFallbackAgent);
   }
-  const agent = isAgentId(value.agent) ? value.agent : fallbackAgent;
+  const agent = isAgentId(value.agent) ? value.agent : activeFallbackAgent;
   if (typeof value.variant === "string") {
     return legacyProfileFromVariant(agent, value.variant);
   }
@@ -306,7 +379,7 @@ export function normalizeAgentProfile(value: unknown, fallbackAgent: AgentId = D
     agent,
     model: typeof value.model === "string" ? normalizeOptionId(agent, "models", def.models, value.model) : DEFAULT_AGENT_OPTION_ID,
     reasoning: typeof value.reasoning === "string" ? normalizeOptionId(agent, "reasoning", def.reasoning, value.reasoning) : DEFAULT_AGENT_OPTION_ID,
-    mode: isAgentWorkMode(value.mode) && hasOption(def.modes, value.mode) ? value.mode : "default",
+    mode: isAgentWorkMode(value.mode) ? normalizeModeId(agent, def.modes, value.mode.trim()) : DEFAULT_AGENT_OPTION_ID,
   };
 }
 
@@ -345,6 +418,10 @@ export function resolveAgentModelValue(agent: AgentId, id: string): string | und
 
 export function resolveAgentReasoningValue(agent: AgentId, id: string): string | undefined {
   return resolveAgentOptionValue(agent, "reasoning", id);
+}
+
+export function resolveAgentModeValue(agent: AgentId, id: string): string | undefined {
+  return getAgent(agent).modes.find((option) => option.id === id)?.value;
 }
 
 export function agentProfileLabels(profile: AgentProfile): readonly string[] {

@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { appendFileSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { homedir, tmpdir } from "node:os";
 import { basename, delimiter, dirname, join } from "node:path";
@@ -15,15 +15,19 @@ import {
   isAppSettings,
   type AgentAccessMode,
   type Locale,
-} from "./src/components/workspace/app-settings";
-import { buildInitialWorkspaceState, cloneWorkspaceState, type WorkspaceState } from "./src/components/workspace/workspace-state";
+} from "./src/lib/app-settings";
+import { buildInitialWorkspaceState, cloneWorkspaceState, type WorkspaceState } from "./src/lib/workspace-state";
 import {
   agentProfileEquals,
+  claudeAgentNameFromMode,
+  claudeAgentModeId,
   DEFAULT_AGENT_OPTION_ID,
   getAgent,
+  isDirectAgentModeValue,
   isDirectAgentModelValue,
   isAgentId,
   normalizeAgentProfile,
+  resolveAgentModeValue,
   resolveAgentModelValue,
   resolveAgentReasoningValue,
   type AgentOption,
@@ -41,7 +45,6 @@ import {
   type SearchBlock,
   type SuggestedActionsBlock,
 } from "./src/components/agent/types";
-import { translate } from "./src/i18n/I18nProvider";
 import { pickDirectoryPathFromSystemDialog } from "../src/server/directory-picker";
 
 export { parseGitStatusPorcelain } from "./src/lib/git-status";
@@ -84,6 +87,7 @@ interface AgentCliInfo {
   readonly installCommand: string | null;
   readonly models?: readonly AgentOption[];
   readonly reasoning?: readonly AgentOption[];
+  readonly modes?: readonly AgentOption[];
 }
 
 // Keys must match AgentId in src/components/agent/agents.ts.
@@ -111,7 +115,7 @@ export function installCommandForAgent(agent: string): readonly string[] | null 
   return INSTALL_COMMANDS[agent] ?? null;
 }
 
-interface AgentSecretConfig {
+export interface AgentSecretConfig {
   readonly env: Record<string, string>;
 }
 
@@ -132,11 +136,8 @@ function readAgentSecretConfig(): AgentSecretConfig {
   return { env };
 }
 
-function writeAgentSecretConfig(config: AgentSecretConfig): void {
-  mkdirSync(WORKSPACE_STATE_DIR, { recursive: true });
-  const tempFile = `${AGENT_CONFIG_FILE}.tmp`;
-  writeFileSync(tempFile, `${JSON.stringify(config, null, 2)}\n`, "utf8");
-  renameSync(tempFile, AGENT_CONFIG_FILE);
+export function writeAgentSecretConfig(config: AgentSecretConfig, file = AGENT_CONFIG_FILE): void {
+  writeJsonFileAtomic(file, config, 0o600);
 }
 
 function configuredEnvValueFrom(envName: string, config: AgentSecretConfig, env: NodeJS.ProcessEnv): string | undefined {
@@ -366,6 +367,10 @@ function uniqueAgentOptions(options: readonly AgentOption[]): AgentOption[] {
   return result;
 }
 
+const OPENCODE_INTERNAL_AGENT_IDS = new Set(["title", "compaction"]);
+const CLAUDE_INTERNAL_AGENT_IDS = new Set(["statusline-setup"]);
+const CLAUDE_STATIC_AGENT_IDS = new Set(["plan"]);
+
 export function parseOpenCodeModelsOutput(output: string): AgentOption[] {
   return uniqueAgentOptions(
     output
@@ -373,6 +378,31 @@ export function parseOpenCodeModelsOutput(output: string): AgentOption[] {
       .map((line) => line.trim())
       .filter((line) => line.includes("/") && isDirectAgentModelValue("opencode", line))
       .map((value) => ({ id: value, label: modelLabelFromValue(value), value })),
+  );
+}
+
+export function parseOpenCodeAgentsOutput(output: string): AgentOption[] {
+  return uniqueAgentOptions(
+    output
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .map((line) => line.match(/^([A-Za-z0-9][A-Za-z0-9._-]*)\s+\((?:primary|subagent)\)/)?.[1] ?? null)
+      .filter((id): id is string => id !== null && !OPENCODE_INTERNAL_AGENT_IDS.has(id))
+      .map((id) => ({ id, label: modelLabelFromValue(id), value: id })),
+  );
+}
+
+export function parseClaudeAgentsOutput(output: string): AgentOption[] {
+  return uniqueAgentOptions(
+    output
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .map((line) => line.match(/^([A-Za-z0-9][A-Za-z0-9._-]*)\s+·\s+\S+/)?.[1] ?? null)
+      .filter(
+        (id): id is string =>
+          id !== null && !CLAUDE_INTERNAL_AGENT_IDS.has(id) && !CLAUDE_STATIC_AGENT_IDS.has(id.toLowerCase()) && claudeAgentNameFromMode(claudeAgentModeId(id)) !== null,
+      )
+      .map((id) => ({ id: claudeAgentModeId(id), label: modelLabelFromValue(id), value: id })),
   );
 }
 
@@ -426,14 +456,24 @@ function runResolvedBinText(resolvedBin: string, args: readonly string[]): strin
   return output.length > 0 ? output : null;
 }
 
-function discoveredAgentOptions(id: string, resolvedBin: string | null): Pick<AgentCliInfo, "models" | "reasoning"> {
+function discoveredAgentOptions(id: string, resolvedBin: string | null): Pick<AgentCliInfo, "models" | "reasoning" | "modes"> {
   if (!resolvedBin) {
     return {};
   }
   if (id === "opencode") {
-    const output = runResolvedBinText(resolvedBin, ["models"]);
-    const models = output ? parseOpenCodeModelsOutput(output) : [];
-    return models.length > 0 ? { models } : {};
+    const modelOutput = runResolvedBinText(resolvedBin, ["models"]);
+    const agentOutput = runResolvedBinText(resolvedBin, ["agent", "list"]);
+    const models = modelOutput ? parseOpenCodeModelsOutput(modelOutput) : [];
+    const modes = agentOutput ? parseOpenCodeAgentsOutput(agentOutput) : [];
+    return {
+      ...(models.length > 0 ? { models } : {}),
+      ...(modes.length > 0 ? { modes } : {}),
+    };
+  }
+  if (id === "claude-code") {
+    const agentOutput = runResolvedBinText(resolvedBin, ["agents"]);
+    const modes = agentOutput ? parseClaudeAgentsOutput(agentOutput) : [];
+    return modes.length > 0 ? { modes } : {};
   }
   if (id === "codex") {
     const output = runResolvedBinText(resolvedBin, ["debug", "models"]);
@@ -698,6 +738,25 @@ const interruptedRunSnippet: Record<Locale, string> = {
   ru: "Фоновый запуск прерван",
 };
 
+const serverRunSnippets: Record<Locale, Record<"runCanceledSnippet" | "runDoneSnippet" | "runFailedSnippet" | "runNeedsInputSnippet", string>> = {
+  en: {
+    runCanceledSnippet: "Run canceled",
+    runDoneSnippet: "Done",
+    runFailedSnippet: "Run failed",
+    runNeedsInputSnippet: "Needs input",
+  },
+  ru: {
+    runCanceledSnippet: "Запуск остановлен",
+    runDoneSnippet: "Готово",
+    runFailedSnippet: "Запуск завершился с ошибкой",
+    runNeedsInputSnippet: "Ждёт ввод",
+  },
+};
+
+function serverRunSnippet(locale: Locale, key: keyof (typeof serverRunSnippets)[Locale]): string {
+  return serverRunSnippets[locale][key];
+}
+
 function reconcileConversationRun(conversation: WorkspaceConversation, activeRunIds: ReadonlySet<string>, locale: Locale): WorkspaceConversation {
   if (!conversation.activeRunId || activeRunIds.has(conversation.activeRunId)) {
     return conversation;
@@ -775,7 +834,7 @@ export function reconcileStaleBackgroundRuns(state: WorkspaceState, activeRunIds
 
 export function cancelBackgroundRunState(state: WorkspaceState, runId: string): WorkspaceState {
   const locale = state.settings.general.locale;
-  const snippet = translate(locale, "runCanceledSnippet");
+  const snippet = serverRunSnippet(locale, "runCanceledSnippet");
   const canceledConversationIds = new Set<string>();
   const cancelConversation = (conversation: WorkspaceConversation): WorkspaceConversation => {
     if (conversation.activeRunId !== runId || (conversation.status !== "running" && conversation.status !== "waiting")) {
@@ -858,15 +917,21 @@ function readWorkspaceState(): WorkspaceState {
   throw new Error(`${WORKSPACE_STATE_FILE} does not contain a valid workspace state.`);
 }
 
-export function writeJsonFileAtomic(file: string, value: unknown): void {
+export function writeJsonFileAtomic(file: string, value: unknown, mode?: number): void {
   mkdirSync(dirname(file), { recursive: true });
   const tempFile = `${file}.tmp`;
   if (existsSync(file)) {
     copyFileSync(file, `${file}.bak`);
   }
   try {
-    writeFileSync(tempFile, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+    writeFileSync(tempFile, `${JSON.stringify(value, null, 2)}\n`, mode === undefined ? "utf8" : { encoding: "utf8", mode });
+    if (mode !== undefined) {
+      chmodSync(tempFile, mode);
+    }
     renameSync(tempFile, file);
+    if (mode !== undefined) {
+      chmodSync(file, mode);
+    }
   } finally {
     if (existsSync(tempFile)) {
       unlinkSync(tempFile);
@@ -1086,6 +1151,9 @@ export function parseAgentConfigPayload(body: string): AgentConfigPayload {
   if (!agent) {
     throw new Error("Agent id is required.");
   }
+  if (!isAgentId(agent)) {
+    throw new Error(`Agent ${agent} is not supported.`);
+  }
   const apiKey = typeof parsed.apiKey === "string" ? parsed.apiKey.trim() : "";
   if (!apiKey) {
     throw new Error("API key is required.");
@@ -1105,6 +1173,9 @@ export function parseAgentInstallPayload(body: string): AgentInstallPayload {
   const agent = typeof parsed.agent === "string" ? parsed.agent.trim() : "";
   if (!agent) {
     throw new Error("Agent id is required.");
+  }
+  if (!isAgentId(agent)) {
+    throw new Error(`Agent ${agent} is not supported.`);
   }
   return { agent };
 }
@@ -1530,7 +1601,13 @@ function respondWithGitStatus(cwd: string, res: ServerResponse): void {
     // A second cheap pass for unstaged line totals (the header badge shows +/-).
     runGit(cwd, ["diff", "--numstat"], (numstatResult) => {
       const totals = numstatResult.ok ? parseNumstatTotals(numstatResult.stdout) : { additions: 0, deletions: 0 };
-      sendJson(res, 200, { ...payload, unstagedAdditions: totals.additions, unstagedDeletions: totals.deletions });
+      // A third pass for the latest commit hash and title shown in the Git panel header.
+      runGit(cwd, ["log", "-1", "--pretty=format:%h\n%s"], (logResult) => {
+        const lines = logResult.ok ? logResult.stdout.split("\n") : [];
+        const commitHash = lines[0]?.trim() || undefined;
+        const commitTitle = lines.slice(1).join("\n").trim() || undefined;
+        sendJson(res, 200, { ...payload, unstagedAdditions: totals.additions, unstagedDeletions: totals.deletions, commitHash, commitTitle });
+      });
     });
   });
 }
@@ -1889,6 +1966,12 @@ const CLAUDE_CHAT_UI_SYSTEM_PROMPT = [
   "Use AskUserQuestion for concrete choices, clarifying questions, or option selection that the chat UI should render as interactive controls.",
   "Do not create a numbered question list in prose when the question can be represented with AskUserQuestion options.",
 ].join("\n");
+const CODEX_PLAN_PROMPT_PREFIX = [
+  "Plan mode is active.",
+  "Do not modify files or run commands that write to the filesystem.",
+  "Inspect the workspace as needed, then respond with a concise implementation plan.",
+  "",
+].join("\n");
 
 function profileForArgs(agent: AgentProfile["agent"], request: RunArgsRequest): AgentProfile {
   return normalizeAgentProfile(
@@ -1910,8 +1993,30 @@ function reasoningForProfile(profile: AgentProfile): string | undefined {
   return resolveAgentReasoningValue(profile.agent, profile.reasoning);
 }
 
+function modeForProfile(profile: AgentProfile): string | undefined {
+  return resolveAgentModeValue(profile.agent, profile.mode) ?? (profile.mode !== DEFAULT_AGENT_OPTION_ID && isDirectAgentModeValue(profile.agent, profile.mode) ? profile.mode : undefined);
+}
+
 function asClaudeEffort(value: string | undefined): EffortLevel | undefined {
   return value && CLAUDE_EFFORT_LEVELS.has(value as EffortLevel) ? (value as EffortLevel) : undefined;
+}
+
+function asClaudePermissionMode(value: string | undefined): ClaudeQueryOptions["permissionMode"] | undefined {
+  switch (value) {
+    case "acceptEdits":
+    case "auto":
+    case "bypassPermissions":
+    case "default":
+    case "dontAsk":
+    case "plan":
+      return value;
+    default:
+      return undefined;
+  }
+}
+
+function codexPromptForMode(prompt: string, mode: string | undefined): string {
+  return mode === "plan" ? `${CODEX_PLAN_PROMPT_PREFIX}${prompt}` : prompt;
 }
 
 function requestedProfileError(agent: AgentProfile["agent"], model: string, reasoning: string, mode: AgentProfile["mode"]): string | null {
@@ -1922,7 +2027,7 @@ function requestedProfileError(agent: AgentProfile["agent"], model: string, reas
   if (!def.reasoning.some((option) => option.id === reasoning)) {
     return `Unknown reasoning '${reasoning}' for ${agent}.`;
   }
-  if (!def.modes.some((option) => option.id === mode)) {
+  if (!def.modes.some((option) => option.id === mode) && !isDirectAgentModeValue(agent, mode)) {
     return `Unknown work mode '${mode}' for ${agent}.`;
   }
   return null;
@@ -1985,10 +2090,10 @@ export function parseRunRequestPayload(body: string): ParsedRunRequestPayload {
   if (hasNewProfileFields) {
     model = typeof parsed.model === "string" ? parsed.model : "default";
     reasoning = typeof parsed.reasoning === "string" ? parsed.reasoning : "default";
-    mode = parsed.mode === "plan" ? "plan" : "default";
-    if (parsed.mode !== undefined && parsed.mode !== "default" && parsed.mode !== "plan") {
+    mode = typeof parsed.mode === "string" && parsed.mode.trim().length > 0 ? parsed.mode.trim() : "default";
+    if (parsed.mode !== undefined && (typeof parsed.mode !== "string" || parsed.mode.trim().length === 0)) {
       profileValid = false;
-      profileError = "Invalid mode. Expected default or plan.";
+      profileError = "Invalid mode. Expected a work mode id string.";
     }
   } else if (typeof parsed.variant === "string" && isAgentId(agent)) {
     const legacyProfile = normalizeAgentProfile({ agent, variant: parsed.variant }, agent);
@@ -2026,14 +2131,18 @@ export function parseRunRequestPayload(body: string): ParsedRunRequestPayload {
 }
 
 function claudePermissionModeForRequest(request: RunRequest): ClaudeQueryOptions["permissionMode"] {
-  if (request.accessMode === "read-only" || request.mode === "plan") {
+  const profile = normalizeAgentProfile(request, "claude-code");
+  const mode = modeForProfile(profile);
+  if (request.accessMode === "read-only" || mode === "plan") {
     return "plan";
   }
-  return "default";
+  return asClaudePermissionMode(mode) ?? "default";
 }
 
 function claudeToolsForRequest(request: RunRequest): ClaudeQueryOptions["tools"] {
-  if (request.accessMode === "read-only" || request.mode === "plan") {
+  const profile = normalizeAgentProfile(request, "claude-code");
+  const mode = modeForProfile(profile);
+  if (request.accessMode === "read-only" || mode === "plan") {
     return [...CLAUDE_READ_ONLY_TOOLS];
   }
   return { type: "preset", preset: "claude_code" };
@@ -2058,12 +2167,17 @@ export function buildClaudeSdkOptions(request: RunRequest, cwd: string, abortCon
   if (effort) {
     options.effort = effort;
   }
+  const agentName = claudeAgentNameFromMode(modeForProfile(profile) ?? "");
+  if (agentName) {
+    options.agent = agentName;
+  }
   return options;
 }
 
 export function buildClaudeRunArgs(request: RunArgsRequest): string[] {
   const profile = profileForArgs("claude-code", request);
   const accessMode = request.accessMode ?? "read-only";
+  const mode = modeForProfile(profile);
   const args = ["-p", request.prompt, "--output-format", "stream-json", "--verbose", "--include-partial-messages"];
   const model = modelForProfile(profile);
   if (model) {
@@ -2073,17 +2187,26 @@ export function buildClaudeRunArgs(request: RunArgsRequest): string[] {
   if (effort) {
     args.push("--effort", effort);
   }
-  args.push("--permission-mode", accessMode === "unrestricted" && profile.mode !== "plan" ? "acceptEdits" : "plan");
+  const agentName = claudeAgentNameFromMode(mode ?? "");
+  if (agentName) {
+    args.push("--agent", agentName);
+  }
+  args.push("--permission-mode", accessMode === "unrestricted" ? (asClaudePermissionMode(mode) ?? "acceptEdits") : "plan");
   return args;
 }
 
 export function buildCodexRunArgs(request: RunArgsRequest): string[] {
   const profile = profileForArgs("codex", request);
   const accessMode = request.accessMode ?? "read-only";
-  const args = ["exec", "--json"];
-  if (accessMode === "unrestricted") {
+  const mode = modeForProfile(profile);
+  const planMode = mode === "plan";
+  const reviewMode = mode === "review";
+  const args = reviewMode ? ["exec", "review", "--json"] : ["exec", "--json"];
+  if (planMode) {
+    args.push("--sandbox", "read-only");
+  } else if (accessMode === "unrestricted") {
     args.push("--dangerously-bypass-approvals-and-sandbox");
-  } else {
+  } else if (!reviewMode) {
     args.push("--sandbox", "read-only");
   }
   args.push("--skip-git-repo-check");
@@ -2095,14 +2218,25 @@ export function buildCodexRunArgs(request: RunArgsRequest): string[] {
   if (reasoning) {
     args.push("-c", `model_reasoning_effort="${reasoning}"`);
   }
-  args.push(request.prompt);
+  args.push(codexPromptForMode(request.prompt, mode));
   return args;
+}
+
+function geminiApprovalModeForRequest(profile: AgentProfile, accessMode: AgentAccessMode): string {
+  if (accessMode !== "unrestricted") {
+    return "plan";
+  }
+  const mode = modeForProfile(profile);
+  if (mode === "plan" || mode === "auto_edit" || mode === "yolo") {
+    return mode;
+  }
+  return "yolo";
 }
 
 export function buildGeminiRunArgs(request: RunArgsRequest): string[] {
   const profile = profileForArgs("gemini", request);
   const accessMode = request.accessMode ?? "read-only";
-  const args = ["--prompt", request.prompt, "--output-format", "stream-json", "--approval-mode", accessMode === "unrestricted" ? "yolo" : "plan", "--skip-trust"];
+  const args = ["--prompt", request.prompt, "--output-format", "stream-json", "--approval-mode", geminiApprovalModeForRequest(profile, accessMode), "--skip-trust"];
   const model = modelForProfile(profile);
   if (model) {
     args.push("--model", model);
@@ -2167,6 +2301,10 @@ export function buildOpenCodeRunArgs(request: RunArgsRequest): string[] {
   const args = ["run", "--format", "json", "--thinking"];
   if ((request.accessMode ?? "read-only") === "unrestricted") {
     args.push("--dangerously-skip-permissions");
+  }
+  const mode = modeForProfile(profile);
+  if (mode) {
+    args.push("--agent", mode);
   }
   const model = modelForProfile(profile);
   if (model) {
@@ -2964,7 +3102,7 @@ function mergeInputBlockState(blocks: readonly AgentBlock[], previousBlocks: rea
 
 function snippetFromBlocks(blocks: readonly AgentBlock[], locale: Locale): string {
   const textBlock = [...blocks].reverse().find((block) => block.kind === "text" && block.text.trim().length > 0);
-  const snippetSource = textBlock?.kind === "text" ? textBlock.text : translate(locale, "runDoneSnippet");
+  const snippetSource = textBlock?.kind === "text" ? textBlock.text : serverRunSnippet(locale, "runDoneSnippet");
   return clip(snippetSource.replace(/\s+/g, " "), 60);
 }
 
@@ -3340,7 +3478,7 @@ function applyBackgroundRunEvent(binding: BackgroundRunBinding, accumulator: Bac
   persistBackgroundBlocks(
     binding,
     blocks,
-    blocksNeedInput(blocks) ? { status: "waiting", snippet: translate(locale, "runNeedsInputSnippet"), time: binding.agentMessageTime } : {},
+    blocksNeedInput(blocks) ? { status: "waiting", snippet: serverRunSnippet(locale, "runNeedsInputSnippet"), time: binding.agentMessageTime } : {},
     { costUsd: accumulator.costUsd, usage: accumulator.usage },
   );
   notifyBackgroundRunUpdate(binding, false);
@@ -3351,7 +3489,7 @@ export function finishBackgroundRunState(state: WorkspaceState, binding: Backgro
   let blocks = backgroundBlocks(accumulator);
   const locale = state.settings.general.locale;
   if (canceled) {
-    const canceledStatusBlock: AgentBlock = { kind: "status", level: "warn", text: translate(locale, "runCanceledSnippet") };
+    const canceledStatusBlock: AgentBlock = { kind: "status", level: "warn", text: serverRunSnippet(locale, "runCanceledSnippet") };
     const hasCanceledStatus = blocks.some((block) => block.kind === "status" && block.level === canceledStatusBlock.level && block.text === canceledStatusBlock.text);
     blocks = blocks.length === 0 ? [canceledStatusBlock] : hasCanceledStatus ? blocks : [...blocks, canceledStatusBlock];
   }
@@ -3371,11 +3509,11 @@ export function finishBackgroundRunState(state: WorkspaceState, binding: Backgro
   const failed = hadError || warningOnlyFailure;
   const waiting = !canceled && !failed && blocksNeedInput(blocks);
   const patch = canceled
-    ? { activeRunId: undefined, status: "idle" as const, snippet: translate(locale, "runCanceledSnippet"), time: binding.agentMessageTime }
+    ? { activeRunId: undefined, status: "idle" as const, snippet: serverRunSnippet(locale, "runCanceledSnippet"), time: binding.agentMessageTime }
     : failed
-      ? { activeRunId: undefined, status: "error" as const, snippet: translate(locale, "runFailedSnippet"), time: binding.agentMessageTime }
+      ? { activeRunId: undefined, status: "error" as const, snippet: serverRunSnippet(locale, "runFailedSnippet"), time: binding.agentMessageTime }
       : waiting
-        ? { status: "waiting" as const, snippet: translate(locale, "runNeedsInputSnippet"), time: binding.agentMessageTime }
+        ? { status: "waiting" as const, snippet: serverRunSnippet(locale, "runNeedsInputSnippet"), time: binding.agentMessageTime }
         : {
             activeRunId: undefined,
             status: "done" as const,

@@ -7,7 +7,7 @@ import ReplayIcon from "@mui/icons-material/Replay";
 import SendIcon from "@mui/icons-material/Send";
 import CloseIcon from "@mui/icons-material/Close";
 import { Box, Collapse, Stack, Typography } from "@mui/material";
-import { type ChangeEvent, useState } from "react";
+import { type ChangeEvent, type ReactNode, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import { Button, IconButton, Tooltip } from "../ui";
 import { AgentBlockRenderer } from "./AgentBlockRenderer";
@@ -234,7 +234,7 @@ export interface MessageDisplayPrefs {
   readonly showCost: boolean;
 }
 
-function UsagePill({ children }: { readonly children: React.ReactNode }) {
+function UsagePill({ children }: { readonly children: ReactNode }) {
   return (
     <Box
       component="span"
@@ -321,7 +321,9 @@ function AgentDetails({ blocks, actions }: { readonly blocks: readonly AgentBloc
   );
 }
 
-function AgentMessage({ message, delay, actions }: { readonly message: ChatMessage; readonly delay: number; readonly actions?: MessageActionHandlers }) {
+const DEFAULT_DISPLAY_PREFS: MessageDisplayPrefs = { showTokens: true, showCost: false };
+
+function AgentMessage({ message, delay, actions, displayPrefs = DEFAULT_DISPLAY_PREFS }: { readonly message: ChatMessage; readonly delay: number; readonly actions?: MessageActionHandlers; readonly displayPrefs?: MessageDisplayPrefs }) {
   const { t } = useI18n();
   const blocks = message.blocks ?? [];
   const detailBlocks = blocks.filter((block) => !ANSWER_BLOCK_KINDS.has(block.kind));
@@ -339,7 +341,7 @@ function AgentMessage({ message, delay, actions }: { readonly message: ChatMessa
               {message.time}
             </Typography>
           )}
-          <AgentUsageMeta message={message} />
+          <AgentUsageMeta message={message} displayPrefs={displayPrefs} />
         </Stack>
         <Stack spacing={1.25}>
           {/* The turn starts as an empty agent message; show the thinking dots in
@@ -365,7 +367,7 @@ function AgentMessage({ message, delay, actions }: { readonly message: ChatMessa
   );
 }
 
-export function Message({ message, index = 0, actions }: { readonly message: ChatMessage; readonly index?: number; readonly actions?: MessageActionHandlers }) {
+export function Message({ message, index = 0, actions, displayPrefs }: { readonly message: ChatMessage; readonly index?: number; readonly actions?: MessageActionHandlers; readonly displayPrefs?: MessageDisplayPrefs }) {
   const delay = index * 120;
-  return message.role === "user" ? <UserMessage message={message} delay={delay} actions={actions} /> : <AgentMessage message={message} delay={delay} actions={actions} />;
+  return message.role === "user" ? <UserMessage message={message} delay={delay} actions={actions} /> : <AgentMessage message={message} delay={delay} actions={actions} displayPrefs={displayPrefs} />;
 }

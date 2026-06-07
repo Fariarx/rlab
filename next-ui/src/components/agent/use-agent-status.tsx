@@ -66,7 +66,8 @@ function isAgentCliInfo(value: unknown): value is AgentCliInfo {
     value.env.every((item) => typeof item === "string") &&
     (typeof value.installCommand === "string" || value.installCommand === null) &&
     (value.models === undefined || agentOptions(value.models) !== undefined) &&
-    (value.reasoning === undefined || agentOptions(value.reasoning) !== undefined)
+    (value.reasoning === undefined || agentOptions(value.reasoning) !== undefined) &&
+    (value.modes === undefined || agentOptions(value.modes) !== undefined)
   );
 }
 
@@ -97,6 +98,7 @@ function normalizeAgentPayload(payload: unknown): AgentCliMap {
         env: stringArray(value.env),
         models: agentOptions(value.models),
         reasoning: agentOptions(value.reasoning),
+        modes: agentOptions(value.modes),
       };
     }
   }

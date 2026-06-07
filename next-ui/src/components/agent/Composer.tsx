@@ -477,6 +477,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     backgroundColor: (t) => t.custom.surfaces.s2,
     boxShadow: "0 -8px 24px rgba(0, 0, 0, 0.4)",
   };
+  const modeMenuItemSx: SxProps<Theme> = { display: "flex", gap: 1, fontSize: "0.8rem", minHeight: 0, pl: 1, pr: 0.5, width: "100%" };
+  const modeSwitchSx: SxProps<Theme> = { ml: "auto", mr: -0.125, pointerEvents: "none" };
 
   return (
     // Plain Box (not a spaced Stack): the only in-flow child is the input bar;
@@ -551,7 +553,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           onClose={() => setModeMenuAnchor(null)}
           anchorOrigin={{ vertical: "top", horizontal: "left" }}
           transformOrigin={{ vertical: "bottom", horizontal: "left" }}
-          slotProps={{ list: { dense: true, sx: { py: 0.5 } } }}
+          slotProps={{ paper: { sx: { minWidth: 304 } }, list: { dense: true, sx: { py: 0.5, width: "100%" } } }}
         >
           <MenuItem
             onClick={() => {
@@ -564,10 +566,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             <Box component="span">{t("attach")}</Box>
           </MenuItem>
           {modes.map((mode) => (
-            <MenuItem key={mode.id} onClick={() => onModeChange?.(mode.id === activeMode ? "default" : mode.id)} sx={{ gap: 1, fontSize: "0.8rem", minHeight: 0 }}>
+            <MenuItem key={mode.id} onClick={() => onModeChange?.(mode.id === activeMode ? "default" : mode.id)} sx={modeMenuItemSx}>
               <AutoAwesomeRoundedIcon sx={{ fontSize: 15, color: "text.secondary" }} />
-              <Box component="span" sx={{ flex: 1, minWidth: 84 }}>{mode.label}</Box>
-              <Switch size="small" checked={mode.id === activeMode} onChange={() => undefined} tabIndex={-1} sx={{ pointerEvents: "none" }} />
+              <Box component="span" sx={{ minWidth: 84 }}>{mode.label}</Box>
+              <Switch size="small" checked={mode.id === activeMode} onChange={() => undefined} tabIndex={-1} sx={modeSwitchSx} />
             </MenuItem>
           ))}
         </Menu>

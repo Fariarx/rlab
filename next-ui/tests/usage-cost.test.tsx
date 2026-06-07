@@ -11,6 +11,8 @@ describe("usage cost", () => {
         selectedId="cost-chat"
         onSelect={vi.fn()}
         actions={{ onRename: vi.fn(), onTogglePin: vi.fn(), onArchive: vi.fn(), onDelete: vi.fn() }}
+        showCost={true}
+        showTokens={true}
         chats={[
           {
             id: "cost-chat",
@@ -27,12 +29,13 @@ describe("usage cost", () => {
     );
 
     expect(screen.getByText("$0.0173")).toBeInTheDocument();
-    expect(screen.getByText("9.7k tok")).toBeInTheDocument();
+    expect(screen.getByText("9.7k")).toBeInTheDocument();
   });
 
   it("shows agent message cost and token usage in the conversation", () => {
     renderWithThemeAndVirtuoso(
       <Conversation
+        displayPrefs={{ showTokens: true, showCost: true }}
         messages={[
           {
             id: "a-cost",
@@ -47,6 +50,6 @@ describe("usage cost", () => {
     );
 
     expect(screen.getByText("$0.0042")).toBeInTheDocument();
-    expect(screen.getByText("1.2k tok")).toBeInTheDocument();
+    expect(screen.getByText("1.2k")).toBeInTheDocument();
   });
 });

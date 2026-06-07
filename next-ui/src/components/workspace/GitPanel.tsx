@@ -446,11 +446,21 @@ export function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnst
             borderBottom: (theme) => `1px solid ${theme.custom.borders.subtle}`,
           }}
         >
-          <Box sx={{ minWidth: 0, display: "flex", alignItems: "center", gap: 1 }}>
-            <AccountTreeIcon sx={{ fontSize: 16, color: "text.secondary", flex: "0 0 auto" }} />
+          <Box sx={{ minWidth: 0, flex: "1 1 0", display: "flex", alignItems: "center", gap: 0.75 }}>
+            <AccountTreeIcon sx={{ fontSize: 16, color: "text.secondary", flexShrink: 0 }} />
             <Typography component="span" noWrap sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontWeight: 700, fontSize: "0.82rem" }}>
               {status?.branch ?? t("git")}
             </Typography>
+            {status?.commitHash && (
+              <Typography component="span" sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.75rem", color: "text.secondary", flexShrink: 0, whiteSpace: "nowrap" }}>
+                · {status.commitHash}
+              </Typography>
+            )}
+            {status?.commitTitle && (
+              <Typography component="span" noWrap sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.75rem", color: "text.tertiary", flex: "1 1 0", minWidth: 0 }}>
+                · {status.commitTitle}
+              </Typography>
+            )}
           </Box>
           <Tooltip title={t("refresh")}>
             <span>

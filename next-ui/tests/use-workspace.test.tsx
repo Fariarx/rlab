@@ -256,6 +256,33 @@ describe("useWorkspace", () => {
     expect(localStorageSetItem).not.toHaveBeenCalledWith(expect.stringContaining("rlab-workspace"), expect.any(String));
   });
 
+  it("continues generated ids after persisted workspace ids", async () => {
+    state = {
+      ...state,
+      chats: [{ ...state.chats[0], id: "chat-5000" }, ...state.chats.slice(1)],
+      selectedId: "chat-2",
+      threads: {
+        ...state.threads,
+        "chat-2": [{ id: "u-5000", role: "user", text: "Persisted user message" }],
+      },
+    };
+
+    render(<Probe />);
+
+    await screen.findByText("chat-2");
+    screen.getByRole("button", { name: "send" }).click();
+
+    await waitFor(() => {
+      expect(runRequests).toHaveLength(1);
+    });
+    expect(runRequests[0]?.userMessageId).toBe("u-5001");
+    expect(runRequests[0]?.runId).toBe("run-5002");
+    expect(runRequests[0]?.agentMessageId).toBe("a-5003");
+
+    const ids = state.threads["chat-2"].map((message) => message.id);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
   it("coalesces rapid draft changes into one delayed workspace save", async () => {
     vi.useFakeTimers();
     render(<Probe />);

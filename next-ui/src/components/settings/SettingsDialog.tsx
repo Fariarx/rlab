@@ -17,6 +17,7 @@ import {
   agentStatusKey,
   defaultProfileForAgent,
   normalizeAgentProfile,
+  useAgentCliInfo,
   useAgentStatus,
   useReloadAgentStatus,
 } from "../agent";
@@ -65,6 +66,21 @@ function ProfileToggleRow({
       <TagSelect value={value} options={options} onSelect={onSelect} ariaLabel={ariaLabel} />
     </Box>
   );
+}
+
+function liveModesOrCatalog(catalogOptions: readonly AgentOption[], liveOptions: readonly AgentOption[] | undefined): readonly AgentOption[] {
+  if (!liveOptions?.length) {
+    return catalogOptions;
+  }
+  const seen = new Set(catalogOptions.map((option) => option.id));
+  const merged = [...catalogOptions];
+  for (const option of liveOptions) {
+    if (!seen.has(option.id)) {
+      seen.add(option.id);
+      merged.push(option);
+    }
+  }
+  return merged;
 }
 
 interface AgentConfigInfo {
@@ -142,6 +158,7 @@ function AgentsSection({
   readonly onDefaultProfileChange: (profile: AgentProfile) => void;
 }) {
   const statusOf = useAgentStatus();
+  const cliInfoOf = useAgentCliInfo();
   const reloadAgentStatus = useReloadAgentStatus();
   const { t, agentStatus } = useI18n();
   const [config, setConfig] = useState<AgentConfigResponse>({ agents: {} });
@@ -393,9 +410,9 @@ function AgentsSection({
                 <ProfileToggleRow
                   label={t("defaultWorkMode")}
                   ariaLabel={t("defaultWorkModeFor", { agent: a.name })}
-                  options={a.modes}
+                  options={liveModesOrCatalog(a.modes, cliInfoOf(a.id)?.modes)}
                   value={defaultProfile.mode}
-                  onSelect={(mode) => selectDefaultProfileOption(a.id, { mode: mode === "plan" ? "plan" : "default" })}
+                  onSelect={(mode) => selectDefaultProfileOption(a.id, { mode })}
                 />
               </Stack>
             )}
@@ -507,6 +524,21 @@ function AppearanceSection({ settings, onSettingsChange }: Pick<SettingsDialogPr
         title={t("reduceMotion")}
         description={t("reduceMotionDescription")}
         control={<Switch checked={settings.appearance.reduceMotion} onChange={(e) => onSettingsChange({ appearance: { reduceMotion: e.target.checked } })} />}
+      />
+      <SettingRow
+        title={t("showTokens")}
+        description={t("showTokensDescription")}
+        control={<Switch checked={settings.appearance.showTokens} onChange={(e) => onSettingsChange({ appearance: { showTokens: e.target.checked } })} />}
+      />
+      <SettingRow
+        title={t("showCost")}
+        description={t("showCostDescription")}
+        control={<Switch checked={settings.appearance.showCost} onChange={(e) => onSettingsChange({ appearance: { showCost: e.target.checked } })} />}
+      />
+      <SettingRow
+        title={t("showTerminal")}
+        description={t("showTerminalDescription")}
+        control={<Switch checked={settings.appearance.showTerminal} onChange={(e) => onSettingsChange({ appearance: { showTerminal: e.target.checked } })} />}
       />
     </Stack>
   );

@@ -6,10 +6,13 @@
   "scripts": {
     "dev": "cross-env NODE_ENV=development vite --host 0.0.0.0",
     "build": "tsc --noEmit && vite build",
-    "preview": "cross-env NODE_ENV=development vite preview",
+    "preview": "cross-env NODE_ENV=production vite preview --host 0.0.0.0",
+    "serve": "cross-env NODE_ENV=production vite preview --host 0.0.0.0",
     "typecheck": "tsc --noEmit",
     "test": "cross-env NODE_ENV=test vitest run",
-    "test:watch": "cross-env NODE_ENV=test vitest"
+    "test:watch": "cross-env NODE_ENV=test vitest",
+    "test:e2e": "playwright test",
+    "smoke:agents": "node scripts/agent-smoke.mjs"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.167",

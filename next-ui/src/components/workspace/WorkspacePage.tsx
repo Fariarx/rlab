@@ -50,11 +50,13 @@ import {
   type ConversationStatus,
   type ConversationSummary,
   type ReviewCommentEntry,
+  useAgentCliInfo,
   useAgentStatus,
   useAgentStatusError,
   useAgentStatusLive,
   useReloadAgentStatus,
   agentProfileEquals,
+  agentProfileLabels,
 } from "../agent";
 import { dropIn } from "../agent/anim";
 import { SettingsDialog } from "../settings/SettingsDialog";
@@ -93,6 +95,38 @@ const WORKSPACE_ERROR_ALERT_SX = {
     pt: 0,
   },
 } as const;
+
+function abbreviateLabel(label: string): string {
+  return label
+    .split(/\s+/)
+    .map((w) => (/\d/.test(w) ? w : (w[0]?.toUpperCase() ?? "")))
+    .join(" ");
+}
+
+function buildComposerLabel(profile: AgentProfile): string {
+  const agent = getAgent(profile.agent);
+  const labels = agentProfileLabels(profile);
+  if (labels.length === 0) {
+    return agent?.short ?? profile.agent;
+  }
+  const joined = labels.join(" · ");
+  return joined.length > 24 ? labels.map(abbreviateLabel).join(" · ") : joined;
+}
+
+function liveModesOrCatalog<T extends { readonly id: string }>(catalogOptions: readonly T[], liveOptions: readonly T[] | undefined): readonly T[] {
+  if (!liveOptions?.length) {
+    return catalogOptions;
+  }
+  const seen = new Set(catalogOptions.map((option) => option.id));
+  const merged = [...catalogOptions];
+  for (const option of liveOptions) {
+    if (!seen.has(option.id)) {
+      seen.add(option.id);
+      merged.push(option);
+    }
+  }
+  return merged;
+}
 
 function projectForConversation(workspace: Workspace, conversationId: string): { readonly id: string; readonly name: string } | null {
   const project = workspace.projects.find((item) => item.conversations.some((conversation) => conversation.id === conversationId));
@@ -168,6 +202,7 @@ export function WorkspacePageView({
   const { t, conversationStatus } = useI18n();
   const { toast } = useToast();
   const statusOf = useAgentStatus();
+  const cliInfoOf = useAgentCliInfo();
   const agentStatusLive = useAgentStatusLive();
   const agentStatusError = useAgentStatusError();
   const reloadAgentStatus = useReloadAgentStatus();
@@ -188,6 +223,7 @@ export function WorkspacePageView({
   // matching bottom space so the (still-floating) tags never hide content.
   const [composerTagsHeight, setComposerTagsHeight] = useState(0);
   const contentBottomInset = composerTagsHeight > 0 ? composerTagsHeight + 22 : 0;
+  const showTerminal = ws.settings.appearance.showTerminal ?? false;
   const showView = (next: WorkspaceView) => setView(next);
   // Pending code-review comments, attached to diff lines in the Git view and sent
   // to the thread as one block (without starting an agent run).
@@ -289,6 +325,12 @@ export function WorkspacePageView({
       setProfile(ws.settings.agents.defaultProfile);
     }
   }, [selected, ws.settings.agents.defaultProfile]);
+
+  useEffect(() => {
+    if (!showTerminal) {
+      setView((v) => (v === "terminal" ? "chat" : v));
+    }
+  }, [showTerminal]);
 
   useEffect(() => {
     let alive = true;
@@ -435,7 +477,9 @@ export function WorkspacePageView({
   };
 
   // Work mode is toggled per chat from the composer (not the agent picker).
-  const supportedModes = getAgent(profile.agent).modes.filter((mode) => mode.id !== "default").map((mode) => ({ id: mode.id, label: mode.label }));
+  const supportedModes = liveModesOrCatalog(getAgent(profile.agent).modes, cliInfoOf(profile.agent)?.modes)
+    .filter((mode) => mode.id !== "default")
+    .map((mode) => ({ id: mode.id, label: mode.label }));
   const handleModeChange = (modeId: string) => {
     const next = normalizeAgentProfile({ ...profile, mode: modeId });
     setProfile(next);
@@ -738,7 +782,7 @@ export function WorkspacePageView({
         </Stack>
       </Stack>
 
-      <ConversationList projects={ws.projects} chats={ws.chats} selectedId={ws.selectedId} onSelect={openConversation} actions={conversationActions} />
+      <ConversationList projects={ws.projects} chats={ws.chats} selectedId={ws.selectedId} onSelect={openConversation} actions={conversationActions} showCost={ws.settings.appearance.showCost} showTokens={ws.settings.appearance.showTokens} />
     </Stack>
   );
 
@@ -913,10 +957,12 @@ export function WorkspacePageView({
                     </Box>
                   )}
                 </ToggleButton>
-                <ToggleButton value="terminal" aria-label={t("terminalTab")}>
-                  <TerminalIcon sx={{ fontSize: 15 }} />
-                  <Box component="span" sx={{ display: { xs: "none", sm: "inline" } }}>{t("terminalTab")}</Box>
-                </ToggleButton>
+                {showTerminal && (
+                  <ToggleButton value="terminal" aria-label={t("terminalTab")}>
+                    <TerminalIcon sx={{ fontSize: 15 }} />
+                    <Box component="span" sx={{ display: { xs: "none", sm: "inline" } }}>{t("terminalTab")}</Box>
+                  </ToggleButton>
+                )}
               </ToggleButtonGroup>
             </Stack>
           </Stack>
@@ -992,6 +1038,7 @@ export function WorkspacePageView({
                     messages={messages}
                     typing={selected.status === "running" && messages[messages.length - 1]?.role === "user"}
                     actions={messageActions}
+                    displayPrefs={{ showTokens: ws.settings.appearance.showTokens, showCost: ws.settings.appearance.showCost }}
                     contentMaxWidth={THREAD_MAX_WIDTH}
                     contentPaddingX={THREAD_PADDING_X}
                     bottomInset={contentBottomInset}
@@ -1009,9 +1056,11 @@ export function WorkspacePageView({
                 />
               </Box>
               {/* Keyed by folder so each project's terminal keeps its own scrollback. */}
-              <Box sx={{ position: "absolute", inset: 0, display: view === "terminal" ? "block" : "none" }}>
-                <TerminalView key={selectedCwd ?? "none"} cwd={selectedCwd} />
-              </Box>
+              {showTerminal && (
+                <Box sx={{ position: "absolute", inset: 0, display: view === "terminal" ? "block" : "none" }}>
+                  <TerminalView key={selectedCwd ?? "none"} cwd={selectedCwd} />
+                </Box>
+              )}
             </Box>
           </Box>
         </Box>
@@ -1027,7 +1076,7 @@ export function WorkspacePageView({
               <Composer
                 key="new-draft"
                 ref={composerRef}
-                placeholder={t("startPlaceholder")}
+                placeholder={t("messagePlaceholder", { title: buildComposerLabel(profile) })}
                 onSend={(text) => {
                   const id = composingNew.projectId ? ws.newProjectChat(composingNew.projectId, profile) : ws.newChat(profile);
                   setComposingNew(null);
@@ -1047,7 +1096,7 @@ export function WorkspacePageView({
               <Composer
                 key={ws.selectedId}
                 ref={composerRef}
-                placeholder={selected ? t("messagePlaceholder", { title: selected.title }) : t("startPlaceholder")}
+                placeholder={selected ? t("messagePlaceholder", { title: buildComposerLabel(profile) }) : t("startPlaceholder")}
                 initialValue={composerDraft.text}
                 initialAttachments={composerDraft.attachments}
                 onDraftChange={(draft) => {

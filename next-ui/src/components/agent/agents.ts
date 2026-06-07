@@ -16,6 +16,7 @@ export {
   isAgentId,
   legacyProfileFromVariant,
   normalizeAgentProfile,
+  resolveAgentModeValue,
   resolveAgentModelValue,
   resolveAgentOptionValue,
   resolveAgentReasoningValue,

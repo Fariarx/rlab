@@ -4,6 +4,7 @@ import {
   DEFAULT_AGENT_OPTION_ID,
   agentProfileLabels,
   getAgent,
+  resolveAgentModeValue,
   resolveAgentModelValue,
   resolveAgentReasoningValue,
 } from "../src/lib/agent-catalog";
@@ -16,6 +17,22 @@ describe("agent catalog", () => {
     expect(resolveAgentModelValue("opencode", DEFAULT_AGENT_OPTION_ID)).toBe("opencode/deepseek-v4-flash-free");
     expect(resolveAgentModelValue("opencode", "anthropic-claude-opus-4-7")).toBe("anthropic/claude-opus-4-7");
     expect(resolveAgentReasoningValue("codex", "xhigh")).toBe("xhigh");
+  });
+
+  it("exposes practical work modes separately from models and reasoning", () => {
+    expect(getAgent("claude-code").modes.map((option) => option.id)).toEqual(["default", "plan", "auto-edit", "auto", "bypass-permissions"]);
+    expect(resolveAgentModeValue("claude-code", "auto-edit")).toBe("acceptEdits");
+    expect(resolveAgentModeValue("claude-code", "bypass-permissions")).toBe("bypassPermissions");
+
+    expect(getAgent("codex").modes.map((option) => option.id)).toEqual(["default", "plan", "review"]);
+    expect(resolveAgentModeValue("codex", "plan")).toBe("plan");
+    expect(resolveAgentModeValue("codex", "review")).toBe("review");
+
+    expect(getAgent("gemini").modes.map((option) => option.id)).toEqual(["default", "plan", "auto-edit", "yolo"]);
+    expect(resolveAgentModeValue("gemini", "auto-edit")).toBe("auto_edit");
+
+    expect(getAgent("opencode").modes.map((option) => option.id)).toEqual(["default", "build", "plan", "explore", "general", "summary"]);
+    expect(resolveAgentModeValue("opencode", "explore")).toBe("explore");
   });
 
   it("only exposes the four currently supported visible agents", () => {

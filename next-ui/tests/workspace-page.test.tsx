@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+﻿import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WorkspacePage } from "../src/components/workspace/WorkspacePage";
 import { buildInitialWorkspaceState } from "../src/components/workspace/workspace-state";
@@ -17,6 +17,10 @@ type WorkspaceStateWithComposerDrafts = ReturnType<typeof buildInitialWorkspaceS
   readonly composerDrafts?: Record<string, { readonly text: string; readonly attachments: readonly PersistedComposerAttachmentDraft[] }>;
 };
 
+function activeRunsResponse(path: string): Response | null {
+  return path === "/api/runs" ? Response.json({ runs: [] }) : null;
+}
+
 describe("WorkspacePage", () => {
   beforeEach(() => {
     let workspace = buildInitialWorkspaceState();
@@ -24,6 +28,10 @@ describe("WorkspacePage", () => {
       "fetch",
       vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
         const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+      const activeRuns = activeRunsResponse(path);
+      if (activeRuns) {
+        return activeRuns;
+      }
         if (path === "/api/workspace" && (!init || init.method === "GET")) {
           return Response.json(workspace);
         }
@@ -155,7 +163,7 @@ describe("WorkspacePage", () => {
 
     // Draft mode: no agent-picker confirmation, conversation isn't created until
     // the first message is sent (then it uses the default agent).
-    const input = await screen.findByPlaceholderText("Начать новый диалог...");
+    const input = await screen.findByPlaceholderText("Написать: CC");
     fireEvent.change(input, { target: { value: "Set up CI" } });
     fireEvent.keyDown(input, { key: "Enter" });
 
@@ -194,6 +202,10 @@ describe("WorkspacePage", () => {
     };
     const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+      const activeRuns = activeRunsResponse(path);
+      if (activeRuns) {
+        return activeRuns;
+      }
       if (path === "/api/workspace" && (!init || init.method === "GET")) {
         return Response.json(workspace);
       }
@@ -237,6 +249,10 @@ describe("WorkspacePage", () => {
     let workspace: WorkspaceStateWithComposerDrafts = buildInitialWorkspaceState();
     const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+      const activeRuns = activeRunsResponse(path);
+      if (activeRuns) {
+        return activeRuns;
+      }
       if (path === "/api/workspace" && (!init || init.method === "GET")) {
         return Response.json(workspace);
       }
@@ -270,6 +286,10 @@ describe("WorkspacePage", () => {
     let runPrompt = "";
     const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+      const activeRuns = activeRunsResponse(path);
+      if (activeRuns) {
+        return activeRuns;
+      }
       if (path === "/api/workspace" && (!init || init.method === "GET")) {
         return Response.json(workspace);
       }
@@ -335,6 +355,10 @@ describe("WorkspacePage", () => {
     };
     const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+      const activeRuns = activeRunsResponse(path);
+      if (activeRuns) {
+        return activeRuns;
+      }
       if (path === "/api/workspace" && (!init || init.method === "GET")) {
         return Response.json(workspace);
       }
@@ -398,6 +422,10 @@ describe("WorkspacePage", () => {
     };
     const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+      const activeRuns = activeRunsResponse(path);
+      if (activeRuns) {
+        return activeRuns;
+      }
       if (path === "/api/workspace" && (!init || init.method === "GET")) {
         return Response.json(workspace);
       }
@@ -482,6 +510,10 @@ describe("WorkspacePage", () => {
     let loadAttempts = 0;
     const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+      const activeRuns = activeRunsResponse(path);
+      if (activeRuns) {
+        return activeRuns;
+      }
       if (path === "/api/workspace" && (!init || init.method === "GET")) {
         loadAttempts += 1;
         return loadAttempts === 1 ? new Response("unavailable", { status: 503 }) : Response.json(workspace);
@@ -542,6 +574,10 @@ describe("WorkspacePage", () => {
     };
     const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+      const activeRuns = activeRunsResponse(path);
+      if (activeRuns) {
+        return activeRuns;
+      }
       if (path === "/api/workspace" && (!init || init.method === "GET")) {
         return Response.json(workspace);
       }
@@ -598,6 +634,10 @@ describe("WorkspacePage", () => {
     let savedWorkspace = workspace;
     const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+      const activeRuns = activeRunsResponse(path);
+      if (activeRuns) {
+        return activeRuns;
+      }
       if (path === "/api/workspace" && (!init || init.method === "GET")) {
         return Response.json(savedWorkspace);
       }
@@ -646,6 +686,10 @@ describe("WorkspacePage", () => {
     };
     const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+      const activeRuns = activeRunsResponse(path);
+      if (activeRuns) {
+        return activeRuns;
+      }
       if (path === "/api/workspace" && (!init || init.method === "GET")) {
         return Response.json(workspace);
       }
@@ -672,6 +716,10 @@ describe("WorkspacePage", () => {
     const workspace = { ...buildInitialWorkspaceState(), selectedId: "c-flaky" };
     const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+      const activeRuns = activeRunsResponse(path);
+      if (activeRuns) {
+        return activeRuns;
+      }
       if (path === "/api/workspace" && (!init || init.method === "GET")) {
         return Response.json(workspace);
       }
@@ -697,7 +745,7 @@ describe("WorkspacePage", () => {
 
     renderWithThemeAndVirtuoso(<WorkspacePage />);
 
-    await screen.findByPlaceholderText("Написать: Flaky-тест auth.login...");
+    await screen.findByPlaceholderText("Написать: CC");
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
 
     await waitFor(() => {
@@ -717,6 +765,10 @@ describe("WorkspacePage", () => {
     const workspace = { ...buildInitialWorkspaceState(), selectedId: "c-flaky" };
     const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+      const activeRuns = activeRunsResponse(path);
+      if (activeRuns) {
+        return activeRuns;
+      }
       if (path === "/api/workspace" && (!init || init.method === "GET")) {
         return Response.json(workspace);
       }
@@ -735,7 +787,7 @@ describe("WorkspacePage", () => {
 
     renderWithThemeAndVirtuoso(<WorkspacePage />);
 
-    await screen.findByPlaceholderText("Написать: Flaky-тест auth.login...");
+    await screen.findByPlaceholderText("Написать: CC");
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
 
     expect(await screen.findByText("Git status failed (500)")).toBeInTheDocument();
@@ -745,6 +797,10 @@ describe("WorkspacePage", () => {
     const workspace = { ...buildInitialWorkspaceState(), selectedId: "c-flaky" };
     const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+      const activeRuns = activeRunsResponse(path);
+      if (activeRuns) {
+        return activeRuns;
+      }
       if (path === "/api/workspace" && (!init || init.method === "GET")) {
         return Response.json(workspace);
       }
@@ -781,7 +837,7 @@ describe("WorkspacePage", () => {
 
     renderWithThemeAndVirtuoso(<WorkspacePage />);
 
-    await screen.findByPlaceholderText("Написать: Flaky-тест auth.login...");
+    await screen.findByPlaceholderText("Написать: CC");
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
 
     // The unstaged tab lists each changed file as a card that loads and (for a
@@ -805,6 +861,10 @@ describe("WorkspacePage", () => {
     const bigDiff = ["@@ -1 +1 @@", ...Array.from({ length: 300 }, (_, index) => `+addedLine${index}`)].join("\n");
     const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+      const activeRuns = activeRunsResponse(path);
+      if (activeRuns) {
+        return activeRuns;
+      }
       if (path === "/api/workspace" && (!init || init.method === "GET")) {
         return Response.json(workspace);
       }
@@ -826,7 +886,7 @@ describe("WorkspacePage", () => {
 
     renderWithThemeAndVirtuoso(<WorkspacePage />);
 
-    await screen.findByPlaceholderText("Написать: Flaky-тест auth.login...");
+    await screen.findByPlaceholderText("Написать: CC");
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
 
     // The card header (file path) shows, but a large diff stays collapsed.
@@ -843,6 +903,10 @@ describe("WorkspacePage", () => {
     const giganticDiff = ["@@ -1 +1 @@", ...Array.from({ length: 2100 }, (_, index) => `+hugeLine${index}`)].join("\n");
     const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+      const activeRuns = activeRunsResponse(path);
+      if (activeRuns) {
+        return activeRuns;
+      }
       if (path === "/api/workspace" && (!init || init.method === "GET")) {
         return Response.json(workspace);
       }
@@ -864,7 +928,7 @@ describe("WorkspacePage", () => {
 
     renderWithThemeAndVirtuoso(<WorkspacePage />);
 
-    await screen.findByPlaceholderText("Написать: Flaky-тест auth.login...");
+    await screen.findByPlaceholderText("Написать: CC");
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
 
     const header = await screen.findByText("src/huge.ts");
@@ -880,6 +944,10 @@ describe("WorkspacePage", () => {
     const diffRequests: Array<{ readonly cwd?: string; readonly path?: string; readonly mode?: string }> = [];
     const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+      const activeRuns = activeRunsResponse(path);
+      if (activeRuns) {
+        return activeRuns;
+      }
       if (path === "/api/workspace" && (!init || init.method === "GET")) {
         return Response.json(workspace);
       }
@@ -913,7 +981,7 @@ describe("WorkspacePage", () => {
 
     renderWithThemeAndVirtuoso(<WorkspacePage />);
 
-    await screen.findByPlaceholderText("Написать: Flaky-тест auth.login...");
+    await screen.findByPlaceholderText("Написать: CC");
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
 
     expect(await screen.findByRole("tab", { name: /^Непоставленные 1$/i })).toHaveAttribute("aria-selected", "true");
@@ -932,6 +1000,10 @@ describe("WorkspacePage", () => {
     const workspace = { ...buildInitialWorkspaceState(), selectedId: "c-flaky" };
     const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+      const activeRuns = activeRunsResponse(path);
+      if (activeRuns) {
+        return activeRuns;
+      }
       if (path === "/api/workspace" && (!init || init.method === "GET")) {
         return Response.json(workspace);
       }
@@ -950,7 +1022,7 @@ describe("WorkspacePage", () => {
 
     renderWithThemeAndVirtuoso(<WorkspacePage />);
 
-    await screen.findByPlaceholderText("Написать: Flaky-тест auth.login...");
+    await screen.findByPlaceholderText("Написать: CC");
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
     fireEvent.click(await screen.findByRole("tab", { name: /Последний ход 1/i }));
 
@@ -964,6 +1036,10 @@ describe("WorkspacePage", () => {
     let commitRequest: { readonly cwd?: string; readonly message?: string } | null = null;
     const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+      const activeRuns = activeRunsResponse(path);
+      if (activeRuns) {
+        return activeRuns;
+      }
       if (path === "/api/workspace" && (!init || init.method === "GET")) {
         return Response.json(workspace);
       }
@@ -998,7 +1074,7 @@ describe("WorkspacePage", () => {
 
     renderWithThemeAndVirtuoso(<WorkspacePage />);
 
-    await screen.findByPlaceholderText("Написать: Flaky-тест auth.login...");
+    await screen.findByPlaceholderText("Написать: CC");
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
     fireEvent.click(await screen.findByRole("tab", { name: "Коммит" }));
 
@@ -1019,6 +1095,10 @@ describe("WorkspacePage", () => {
     const workspace = { ...buildInitialWorkspaceState(), selectedId: "c-flaky" };
     const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+      const activeRuns = activeRunsResponse(path);
+      if (activeRuns) {
+        return activeRuns;
+      }
       if (path === "/api/workspace" && (!init || init.method === "GET")) {
         return Response.json(workspace);
       }
@@ -1040,7 +1120,7 @@ describe("WorkspacePage", () => {
 
     renderWithThemeAndVirtuoso(<WorkspacePage />);
 
-    await screen.findByPlaceholderText("Написать: Flaky-тест auth.login...");
+    await screen.findByPlaceholderText("Написать: CC");
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
 
     // The small diff auto-opens; click a line to attach a review comment.
@@ -1057,10 +1137,15 @@ describe("WorkspacePage", () => {
   });
 
   it("runs a command in the Terminal tab and streams its output", async () => {
-    const workspace = { ...buildInitialWorkspaceState(), selectedId: "c-flaky" };
+    const base = buildInitialWorkspaceState();
+    const workspace = { ...base, selectedId: "c-flaky", settings: { ...base.settings, appearance: { ...base.settings.appearance, showTerminal: true } } };
     let terminalRequest: { readonly cwd?: string; readonly command?: string } | null = null;
     const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+      const activeRuns = activeRunsResponse(path);
+      if (activeRuns) {
+        return activeRuns;
+      }
       if (path === "/api/workspace" && (!init || init.method === "GET")) {
         return Response.json(workspace);
       }
@@ -1086,7 +1171,7 @@ describe("WorkspacePage", () => {
 
     renderWithThemeAndVirtuoso(<WorkspacePage />);
 
-    await screen.findByPlaceholderText("Написать: Flaky-тест auth.login...");
+    await screen.findByPlaceholderText("Написать: CC");
     fireEvent.click(screen.getByRole("button", { name: "Терминал" }));
 
     const input = await screen.findByPlaceholderText("Выполнить команду...");
