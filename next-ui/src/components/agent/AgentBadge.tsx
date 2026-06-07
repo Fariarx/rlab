@@ -56,15 +56,22 @@ export function AgentBadge({
       >
         <Box sx={{ position: "relative", display: "flex", flex: "0 0 auto" }}>
           <AgentGlyph agent={profile.agent} size={20} />
-          <Box sx={{ position: "absolute", right: -3, bottom: -3, borderRadius: "50%", display: "flex", p: "1px", backgroundColor: (t) => t.custom.surfaces.s1 }}>
+          <Box
+            sx={{
+              position: "absolute",
+              right: -3,
+              bottom: -3,
+              display: "flex",
+              p: "1px",
+              borderRadius: "50%",
+              backgroundColor: (t) => t.custom.surfaces.s1,
+            }}
+          >
             <StatusDot status={agentStatusKey[sys]} label={agentStatus(sys)} size="sm" pulse={sys === "running"} />
           </Box>
         </Box>
         <Typography noWrap sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.76rem", fontWeight: 600, color: "text.primary", display: { xs: "none", sm: "block" } }}>
           {def.name}
-          {labels.length > 0 && (
-            <Box component="span" sx={{ color: "text.secondary", fontWeight: 500 }}>{` · ${labels.join(" · ")}`}</Box>
-          )}
         </Typography>
         {onClick && <KeyboardArrowDownIcon sx={{ fontSize: 16, color: "text.secondary", flex: "0 0 auto" }} />}
       </Stack>

@@ -127,7 +127,31 @@ describe("Composer", () => {
     const planItem = screen.getByRole("menuitem", { name: "Plan" });
     const switchRoot = within(planItem).getByRole("switch").closest(".MuiSwitch-root");
 
-    expect(planItem).toHaveStyle({ paddingRight: "4px" });
-    expect(switchRoot).toHaveStyle({ marginLeft: "auto", marginRight: "-1px" });
+    expect(planItem).toHaveStyle({ paddingLeft: "16px", paddingRight: "8px" });
+    expect(switchRoot).toHaveStyle({ marginLeft: "auto", marginRight: "0px" });
+  });
+
+  it("uses a restrained shadow for the options menu window", () => {
+    renderWithTheme(<Composer placeholder="Написать" modes={[{ id: "plan", label: "Plan" }]} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Опции" }));
+
+    const menuPaper = screen.getByRole("menu").closest(".MuiPaper-root");
+
+    expect(menuPaper).toHaveStyle({ boxShadow: "0 4px 12px rgba(0, 0, 0, 0.14)" });
+  });
+
+  it("uses a light shadow for floating work-mode tags", () => {
+    renderWithTheme(
+      <Composer
+        placeholder="Написать"
+        modes={[{ id: "review", label: "Review" }]}
+        activeMode="review"
+      />,
+    );
+
+    const floatingTag = screen.getByText("Review").parentElement;
+
+    expect(floatingTag).toHaveStyle({ boxShadow: "0 1px 4px rgba(0, 0, 0, 0.18)" });
   });
 });

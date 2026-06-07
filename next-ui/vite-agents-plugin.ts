@@ -6,6 +6,7 @@ import { basename, delimiter, dirname, join } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { query, type CanUseTool, type EffortLevel, type Options as ClaudeQueryOptions, type PermissionResult } from "@anthropic-ai/claude-agent-sdk";
+import { chromium, type Browser, type Page } from "playwright";
 import type { Plugin, ViteDevServer, PreviewServer } from "vite";
 import { parseGitStatusPorcelain, parseNumstatTotals } from "./src/lib/git-status";
 import {
@@ -585,6 +586,185 @@ function readJsonBody(req: IncomingMessage, res: ServerResponse, onDone: (body: 
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export interface BrowserSessionPayload {
+  readonly url: string;
+}
+
+export interface BrowserStorageSnapshot {
+  readonly localStorage: Record<string, string>;
+  readonly sessionStorage: Record<string, string>;
+}
+
+export interface BrowserSyncPayload extends BrowserSessionPayload, BrowserStorageSnapshot {}
+
+export type BrowserActionPayload =
+  | { readonly type: "refresh" }
+  | { readonly type: "scroll"; readonly deltaY: number };
+
+export interface BrowserPreviewSnapshot {
+  readonly sessionId: string;
+  readonly url: string;
+  readonly title: string;
+  readonly screenshot: string;
+  readonly viewport: {
+    readonly width: number;
+    readonly height: number;
+  };
+  readonly updatedAt: string;
+}
+
+interface BrowserPreviewSession {
+  readonly id: string;
+  readonly browser: Browser;
+  readonly page: Page;
+}
+
+const BROWSER_PREVIEW_SESSION_ID = "browser-default";
+const BROWSER_PREVIEW_VIEWPORT = { width: 1280, height: 720 } as const;
+let browserPreviewSession: BrowserPreviewSession | null = null;
+
+function normalizeBrowserPreviewUrl(value: unknown): string {
+  const raw = typeof value === "string" ? value.trim() : "";
+  if (!raw) {
+    throw new Error("Browser URL is required.");
+  }
+  if (raw.toLowerCase() === "about:blank") {
+    return "about:blank";
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error("Browser URL must be an absolute http(s) URL or about:blank.");
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("Browser URL must be an absolute http(s) URL or about:blank.");
+  }
+  return parsed.toString();
+}
+
+export function parseBrowserSessionPayload(body: string): BrowserSessionPayload {
+  const parsed = parseJsonObjectPayload(body, "Invalid browser session payload.");
+  return { url: normalizeBrowserPreviewUrl(parsed.url) };
+}
+
+function parseBrowserStoragePayload(value: unknown): Record<string, string> {
+  if (value === undefined) {
+    return {};
+  }
+  if (!isRecord(value)) {
+    throw new Error("Browser storage payload must be an object.");
+  }
+  const result: Record<string, string> = {};
+  for (const [key, storageValue] of Object.entries(value)) {
+    if (typeof storageValue !== "string") {
+      throw new Error("Browser storage values must be strings.");
+    }
+    result[key] = storageValue;
+  }
+  return result;
+}
+
+export function parseBrowserSyncPayload(body: string): BrowserSyncPayload {
+  const parsed = parseJsonObjectPayload(body, "Invalid browser sync payload.");
+  return {
+    url: normalizeBrowserPreviewUrl(parsed.url),
+    localStorage: parseBrowserStoragePayload(parsed.localStorage),
+    sessionStorage: parseBrowserStoragePayload(parsed.sessionStorage),
+  };
+}
+
+export function parseBrowserActionPayload(body: string): BrowserActionPayload {
+  const parsed = parseJsonObjectPayload(body, "Invalid browser action payload.");
+  const type = typeof parsed.type === "string" ? parsed.type.trim() : "";
+  if (!type) {
+    throw new Error("Browser action type is required.");
+  }
+  if (type === "refresh") {
+    return { type: "refresh" };
+  }
+  if (type === "scroll") {
+    if (typeof parsed.deltaY !== "number" || !Number.isFinite(parsed.deltaY)) {
+      throw new Error("Browser scroll deltaY is required.");
+    }
+    return { type: "scroll", deltaY: parsed.deltaY };
+  }
+  throw new Error(`Unsupported browser action '${type}'.`);
+}
+
+const browserPreviewBadRequestMessages = new Set([
+  "Invalid browser session payload.",
+  "Invalid browser sync payload.",
+  "Invalid browser action payload.",
+  "Browser URL is required.",
+  "Browser URL must be an absolute http(s) URL or about:blank.",
+  "Browser storage payload must be an object.",
+  "Browser storage values must be strings.",
+  "Browser action type is required.",
+  "Browser scroll deltaY is required.",
+]);
+
+function browserPreviewErrorStatus(error: unknown): 400 | 500 {
+  const message = errorMessage(error);
+  return error instanceof SyntaxError || browserPreviewBadRequestMessages.has(message) || message.startsWith("Unsupported browser action ") ? 400 : 500;
+}
+
+function currentBrowserPreviewSession(): BrowserPreviewSession | null {
+  if (!browserPreviewSession) {
+    return null;
+  }
+  if (!browserPreviewSession.browser.isConnected() || browserPreviewSession.page.isClosed()) {
+    browserPreviewSession = null;
+    return null;
+  }
+  return browserPreviewSession;
+}
+
+async function ensureBrowserPreviewSession(): Promise<BrowserPreviewSession> {
+  const current = currentBrowserPreviewSession();
+  if (current) {
+    return current;
+  }
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage({ viewport: BROWSER_PREVIEW_VIEWPORT });
+  browserPreviewSession = { id: BROWSER_PREVIEW_SESSION_ID, browser, page };
+  return browserPreviewSession;
+}
+
+async function browserPreviewSnapshot(session: BrowserPreviewSession): Promise<BrowserPreviewSnapshot> {
+  const viewport = session.page.viewportSize() ?? BROWSER_PREVIEW_VIEWPORT;
+  const screenshot = await session.page.screenshot({ type: "png", fullPage: false });
+  return {
+    sessionId: session.id,
+    url: session.page.url(),
+    title: await session.page.title(),
+    screenshot: `data:image/png;base64,${screenshot.toString("base64")}`,
+    viewport,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+async function navigateBrowserPreview(page: Page, url: string): Promise<void> {
+  await page.goto(url, { waitUntil: "domcontentloaded" });
+}
+
+export async function applyBrowserStorageSnapshot(page: Pick<Page, "evaluate" | "url">, storage: BrowserStorageSnapshot): Promise<void> {
+  if (Object.keys(storage.localStorage).length === 0 && Object.keys(storage.sessionStorage).length === 0) {
+    return;
+  }
+  if (page.url() === "about:blank") {
+    return;
+  }
+  await page.evaluate(({ localStorage: localStorageItems, sessionStorage: sessionStorageItems }) => {
+    for (const [key, value] of Object.entries(localStorageItems)) {
+      window.localStorage.setItem(key, value);
+    }
+    for (const [key, value] of Object.entries(sessionStorageItems)) {
+      window.sessionStorage.setItem(key, value);
+    }
+  }, storage);
 }
 
 function isWorkspaceState(value: unknown): value is WorkspaceState {
@@ -1230,6 +1410,71 @@ function listMentionableFilesFromDisk(root: string, limit = 120): string[] {
   };
   visit(root, "");
   return files.sort((a, b) => a.localeCompare(b));
+}
+
+function handleBrowserSession(req: IncomingMessage, res: ServerResponse): void {
+  readJsonBody(req, res, (body) => {
+    void (async () => {
+      try {
+        const payload = parseBrowserSessionPayload(body);
+        const session = await ensureBrowserPreviewSession();
+        await navigateBrowserPreview(session.page, payload.url);
+        sendJson(res, 200, await browserPreviewSnapshot(session));
+      } catch (error) {
+        sendJson(res, browserPreviewErrorStatus(error), { error: errorMessage(error) });
+      }
+    })();
+  });
+}
+
+function handleBrowserSync(req: IncomingMessage, res: ServerResponse): void {
+  readJsonBody(req, res, (body) => {
+    void (async () => {
+      try {
+        const payload = parseBrowserSyncPayload(body);
+        const session = await ensureBrowserPreviewSession();
+        await navigateBrowserPreview(session.page, payload.url);
+        await applyBrowserStorageSnapshot(session.page, payload);
+        sendJson(res, 200, await browserPreviewSnapshot(session));
+      } catch (error) {
+        sendJson(res, browserPreviewErrorStatus(error), { error: errorMessage(error) });
+      }
+    })();
+  });
+}
+
+function handleBrowserAction(req: IncomingMessage, res: ServerResponse): void {
+  readJsonBody(req, res, (body) => {
+    void (async () => {
+      try {
+        const action = parseBrowserActionPayload(body);
+        const session = await ensureBrowserPreviewSession();
+        if (action.type === "refresh") {
+          await session.page.reload({ waitUntil: "domcontentloaded" });
+        } else {
+          await session.page.mouse.wheel(0, action.deltaY);
+        }
+        sendJson(res, 200, await browserPreviewSnapshot(session));
+      } catch (error) {
+        sendJson(res, browserPreviewErrorStatus(error), { error: errorMessage(error) });
+      }
+    })();
+  });
+}
+
+function handleBrowserSnapshot(_req: IncomingMessage, res: ServerResponse): void {
+  void (async () => {
+    try {
+      const session = currentBrowserPreviewSession();
+      if (!session) {
+        sendJson(res, 404, { error: "No browser preview session is active." });
+        return;
+      }
+      sendJson(res, 200, await browserPreviewSnapshot(session));
+    } catch (error) {
+      sendJson(res, 500, { error: errorMessage(error) });
+    }
+  })();
 }
 
 function handleWorkspace(req: IncomingMessage, res: ServerResponse): void {
@@ -5028,6 +5273,38 @@ function attach(server: ViteDevServer | PreviewServer): void {
   server.middlewares.use("/api/health", (_req, res) => {
     const health = storageHealthSnapshot();
     sendJson(res, health.storage.ok ? 200 : 500, health);
+  });
+  server.middlewares.use("/api/browser/session", (req, res) => {
+    if (req.method !== "POST") {
+      res.statusCode = 405;
+      res.end();
+      return;
+    }
+    handleBrowserSession(req, res);
+  });
+  server.middlewares.use("/api/browser/sync", (req, res) => {
+    if (req.method !== "POST") {
+      res.statusCode = 405;
+      res.end();
+      return;
+    }
+    handleBrowserSync(req, res);
+  });
+  server.middlewares.use("/api/browser/action", (req, res) => {
+    if (req.method !== "POST") {
+      res.statusCode = 405;
+      res.end();
+      return;
+    }
+    handleBrowserAction(req, res);
+  });
+  server.middlewares.use("/api/browser/snapshot", (req, res) => {
+    if (req.method !== "GET") {
+      res.statusCode = 405;
+      res.end();
+      return;
+    }
+    handleBrowserSnapshot(req, res);
   });
   server.middlewares.use("/api/workspace", handleWorkspace);
   server.middlewares.use("/api/agents", (_req, res) => {

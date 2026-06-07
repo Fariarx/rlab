@@ -78,7 +78,11 @@ describe("WorkspacePage", () => {
   it("opens the agent picker from the agent badge", () => {
     renderWithThemeAndVirtuoso(<WorkspacePage />);
 
-    fireEvent.click(screen.getByRole("button", { name: /Изменить агента/i }));
+    const agentBadge = screen.getByRole("button", { name: /Изменить агента/i });
+    expect(agentBadge.textContent).not.toContain(" · ");
+    expect(agentBadge.querySelector("svg")).toBeInTheDocument();
+
+    fireEvent.click(agentBadge);
     expect(screen.getByText("Выбор агента")).toBeInTheDocument();
   });
 

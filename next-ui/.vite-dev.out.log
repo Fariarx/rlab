@@ -31,3 +31,92 @@
 [2m12:24:56[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/agent/Composer.tsx[22m
 [2m12:27:31[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/agent/Composer.tsx[22m
 [2m12:28:25[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/agent/Composer.tsx[22m
+[2m12:32:08[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/agent/Composer.tsx[22m
+[2m12:35:46[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/agent/Composer.tsx[22m
+[2m12:46:50[22m [36m[1m[vite][22m[39m [32mvite-agents-plugin.ts changed, restarting server...[39m
+[2m12:46:50[22m [36m[1m[vite][22m[39m server restarted.
+[2m12:47:10[22m [36m[1m[vite][22m[39m [32mvite-agents-plugin.ts changed, restarting server...[39m
+[2m12:47:11[22m [36m[1m[vite][22m[39m server restarted.
+[2m12:47:22[22m [36m[1m[vite][22m[39m [32mvite-agents-plugin.ts changed, restarting server...[39m
+[2m12:47:22[22m [36m[1m[vite][22m[39m server restarted.
+[2m12:47:31[22m [36m[1m[vite][22m[39m [32mvite-agents-plugin.ts changed, restarting server...[39m
+[2m12:47:31[22m [36m[1m[vite][22m[39m server restarted.
+[2m12:47:48[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/i18n/I18nProvider.tsx[22m
+[2m12:47:48[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/i18n/I18nProvider.tsx[22m Could not Fast Refresh ("translate" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m12:47:48[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/workspace/WorkspacePage.tsx, /src/components/agent/ConversationList.tsx, /src/components/agent/ConversationSearch.tsx, /src/components/agent/Message.tsx, /src/components/agent/Composer.tsx, /src/components/agent/Reasoning.tsx, /src/components/agent/AgentBadge.tsx, /src/components/agent/ApprovalRequest.tsx, /src/components/agent/OptionSelect.tsx, /src/components/agent/Conversation.tsx, /src/components/agent/parts.tsx, /src/components/agent/actions.tsx and 9 more[22m
+[2m12:47:48[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/components/agent/ConversationList.tsx[22m Could not Fast Refresh ("conversationMatches" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m12:47:48[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/workspace/WorkspacePage.tsx, /src/components/kit/sections/AgentBlocksSection.tsx, /src/components/settings/SettingsDialog.tsx, /src/components/agent/ConversationSearch.tsx[22m
+[2m12:47:48[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/components/workspace/GitDiffViewer.tsx[22m Could not Fast Refresh ("countDiffChanges" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m12:47:48[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/GitPanel.tsx[22m
+[2m12:47:56[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/i18n/I18nProvider.tsx[22m
+[2m12:47:56[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/i18n/I18nProvider.tsx[22m Could not Fast Refresh ("translate" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m12:47:56[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/workspace/WorkspacePage.tsx, /src/components/agent/ConversationList.tsx, /src/components/agent/ConversationSearch.tsx, /src/components/agent/Message.tsx, /src/components/agent/Composer.tsx, /src/components/agent/Reasoning.tsx, /src/components/agent/AgentBadge.tsx, /src/components/agent/ApprovalRequest.tsx, /src/components/agent/OptionSelect.tsx, /src/components/agent/Conversation.tsx, /src/components/agent/parts.tsx, /src/components/agent/actions.tsx and 9 more[22m
+[2m12:47:57[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/components/agent/ConversationList.tsx[22m Could not Fast Refresh ("conversationMatches" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m12:47:57[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/workspace/WorkspacePage.tsx, /src/components/kit/sections/AgentBlocksSection.tsx, /src/components/settings/SettingsDialog.tsx, /src/components/agent/ConversationSearch.tsx[22m
+[2m12:47:57[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/components/workspace/GitDiffViewer.tsx[22m Could not Fast Refresh ("countDiffChanges" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m12:47:57[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/GitPanel.tsx[22m
+[2m12:49:04[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/WorkspacePage.tsx[22m
+[2m12:49:14[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/WorkspacePage.tsx[22m
+[2m12:49:22[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/WorkspacePage.tsx[22m
+[2m12:49:29[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/WorkspacePage.tsx[22m
+[2m12:49:35[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/WorkspacePage.tsx[22m
+[2m12:49:43[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/WorkspacePage.tsx[22m
+[2m12:49:44[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32m✨ new dependencies optimized: [33m@mui/icons-material/OpenInBrowser[32m[39m
+[2m12:50:01[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/WorkspacePage.tsx[22m
+[2m12:50:02[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32m✨ new dependencies optimized: [33m@mui/icons-material/KeyboardArrowUp[32m[39m
+[2m12:50:09[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/WorkspacePage.tsx[22m
+[2m12:50:46[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/BrowserPreview.tsx[22m
+[2m13:02:50[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/BrowserPreview.tsx[22m
+[2m13:02:58[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/BrowserPreview.tsx[22m
+[2m13:03:08[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/BrowserPreview.tsx[22m
+[2m13:03:14[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/BrowserPreview.tsx[22m
+[2m13:03:26[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/BrowserPreview.tsx[22m
+[2m13:03:38[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/BrowserPreview.tsx[22m
+[2m13:03:51[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/BrowserPreview.tsx[22m
+[2m13:03:57[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/BrowserPreview.tsx[22m
+[2m13:04:08[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/BrowserPreview.tsx[22m
+[2m13:04:25[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/BrowserPreview.tsx[22m
+[2m13:04:37[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/i18n/I18nProvider.tsx[22m
+[2m13:04:37[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/i18n/I18nProvider.tsx[22m Could not Fast Refresh ("translate" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m13:04:37[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/workspace/WorkspacePage.tsx, /src/components/agent/ConversationList.tsx, /src/components/agent/ConversationSearch.tsx, /src/components/agent/Message.tsx, /src/components/agent/Composer.tsx, /src/components/agent/Reasoning.tsx, /src/components/agent/AgentBadge.tsx, /src/components/agent/ApprovalRequest.tsx, /src/components/agent/OptionSelect.tsx, /src/components/agent/Conversation.tsx, /src/components/agent/parts.tsx, /src/components/agent/actions.tsx and 10 more[22m
+[2m13:04:37[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/components/agent/ConversationList.tsx[22m Could not Fast Refresh ("conversationMatches" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m13:04:37[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/workspace/WorkspacePage.tsx, /src/components/kit/sections/AgentBlocksSection.tsx, /src/components/settings/SettingsDialog.tsx, /src/components/agent/ConversationSearch.tsx[22m
+[2m13:04:37[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/components/workspace/GitDiffViewer.tsx[22m Could not Fast Refresh ("countDiffChanges" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m13:04:37[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/GitPanel.tsx[22m
+[2m13:06:02[22m [36m[1m[vite][22m[39m [32mvite-agents-plugin.ts changed, restarting server...[39m
+[2m13:06:02[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m Re-optimizing dependencies because lockfile has changed
+[2m13:06:02[22m [36m[1m[vite][22m[39m server restarted.
+[2m13:06:20[22m [36m[1m[vite][22m[39m [32mvite-agents-plugin.ts changed, restarting server...[39m
+[2m13:06:20[22m [36m[1m[vite][22m[39m server restarted.
+[2m13:06:37[22m [36m[1m[vite][22m[39m [32mvite-agents-plugin.ts changed, restarting server...[39m
+[2m13:06:37[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/BrowserPreview.tsx[22m
+[2m13:06:37[22m [36m[1m[vite][22m[39m server restarted.
+[2m13:06:54[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/BrowserPreview.tsx[22m
+[2m13:06:59[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/BrowserPreview.tsx[22m
+[2m13:10:51[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/BrowserPreview.tsx[22m
+[2m13:17:50[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/BrowserPreview.tsx[22m
+[2m13:18:01[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/BrowserPreview.tsx[22m
+[2m13:18:50[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/BrowserPreview.tsx[22m
+[2m13:18:50[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32m✨ new dependencies optimized: [33m@mui/icons-material/ArrowBack, @mui/icons-material/MoreVert, @mui/icons-material/RateReview[32m[39m
+[2m13:18:50[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32m✨ optimized dependencies changed. reloading[39m
+[2m13:19:07[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/i18n/I18nProvider.tsx[22m
+[2m13:19:07[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/i18n/I18nProvider.tsx[22m Could not Fast Refresh ("translate" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m13:19:07[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/workspace/BrowserPreview.tsx, /src/components/workspace/WorkspacePage.tsx, /src/components/ui/Toast.tsx, /src/components/agent/AgentBadge.tsx, /src/components/agent/AgentPicker.tsx, /src/components/agent/ConversationSearch.tsx, /src/components/agent/Conversation.tsx, /src/components/agent/Reasoning.tsx, /src/components/agent/Message.tsx, /src/components/agent/ConversationList.tsx, /src/components/agent/Composer.tsx, /src/components/agent/OptionSelect.tsx and 10 more[22m
+[2m13:19:07[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/components/agent/ConversationList.tsx[22m Could not Fast Refresh ("conversationMatches" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m13:19:07[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/workspace/WorkspacePage.tsx, /src/components/kit/sections/AgentBlocksSection.tsx, /src/components/settings/SettingsDialog.tsx, /src/components/agent/ConversationSearch.tsx[22m
+[2m13:19:07[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/components/workspace/GitDiffViewer.tsx[22m Could not Fast Refresh ("countDiffChanges" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m13:19:07[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/GitPanel.tsx[22m
+[2m13:19:31[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/BrowserPreview.tsx[22m
+[2m13:20:05[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/BrowserPreview.tsx[22m
+[2m13:27:55[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/BrowserPreview.tsx[22m
+[2m13:31:34[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/BrowserPreview.tsx[22m
+[2m13:31:43[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/i18n/I18nProvider.tsx[22m
+[2m13:31:43[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/i18n/I18nProvider.tsx[22m Could not Fast Refresh ("translate" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m13:31:43[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/workspace/BrowserPreview.tsx, /src/components/workspace/WorkspacePage.tsx, /src/components/ui/Toast.tsx, /src/components/agent/AgentBadge.tsx, /src/components/agent/AgentPicker.tsx, /src/components/agent/ConversationSearch.tsx, /src/components/agent/Conversation.tsx, /src/components/agent/Reasoning.tsx, /src/components/agent/Message.tsx, /src/components/agent/ConversationList.tsx, /src/components/agent/Composer.tsx, /src/components/agent/OptionSelect.tsx and 10 more[22m
+[2m13:31:43[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/components/agent/ConversationList.tsx[22m Could not Fast Refresh ("conversationMatches" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m13:31:43[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/workspace/WorkspacePage.tsx, /src/components/kit/sections/AgentBlocksSection.tsx, /src/components/settings/SettingsDialog.tsx, /src/components/agent/ConversationSearch.tsx[22m
+[2m13:31:43[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/components/workspace/GitDiffViewer.tsx[22m Could not Fast Refresh ("countDiffChanges" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m13:31:43[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/GitPanel.tsx[22m
+[2m13:40:17[22m [36m[1m[vite][22m[39m [32mvite-agents-plugin.ts changed, restarting server...[39m
+[2m13:40:17[22m [36m[1m[vite][22m[39m server restarted.
+[2m13:41:06[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/workspace/BrowserPreview.tsx[22m

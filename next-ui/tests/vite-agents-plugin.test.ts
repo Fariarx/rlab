@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
@@ -25,11 +25,15 @@ import {
   createQwenStreamTranslator,
   activeBackgroundRunUpdateFromState,
   activeBackgroundRunSnapshotsFromHandles,
+  applyBrowserStorageSnapshot,
   appendRunAuditEvent,
   parseRunApprovalPayload,
   parseRunCancelPayload,
   parseRunInputPayload,
   parseAttachmentUploadPayload,
+  parseBrowserActionPayload,
+  parseBrowserSessionPayload,
+  parseBrowserSyncPayload,
   parseAgentConfigPayload,
   parseAgentInstallPayload,
   parseGitStatusPorcelain,
@@ -1583,6 +1587,34 @@ Built-in agents:
     expect(() => parseProjectDirectoryPayload(JSON.stringify({ path: "" }), "path", "Project path is required.")).toThrow("Project path is required.");
     expect(parseProjectDirectoryPayload(JSON.stringify({ path: " C:\\work\\app " }), "path", "Project path is required.")).toBe("C:\\work\\app");
     expect(parseProjectDirectoryPayload(JSON.stringify({ cwd: " C:\\work\\app " }), "cwd", "Project directory is required.")).toBe("C:\\work\\app");
+  });
+
+  it("validates browser preview payloads without guessing URLs or actions", () => {
+    expect(parseBrowserSessionPayload(JSON.stringify({ url: " http://localhost:3000 " }))).toEqual({ url: "http://localhost:3000/" });
+    expect(() => parseBrowserSessionPayload(JSON.stringify({ url: "localhost:3000" }))).toThrow("Browser URL must be an absolute http(s) URL or about:blank.");
+    expect(parseBrowserActionPayload(JSON.stringify({ type: "scroll", deltaY: 400 }))).toEqual({ type: "scroll", deltaY: 400 });
+    expect(parseBrowserActionPayload(JSON.stringify({ type: "refresh" }))).toEqual({ type: "refresh" });
+    expect(() => parseBrowserActionPayload(JSON.stringify({ type: "click" }))).toThrow("Unsupported browser action 'click'.");
+    expect(parseBrowserSyncPayload(JSON.stringify({ url: " http://localhost:3000 ", localStorage: { theme: "dark" }, sessionStorage: { step: "2" } }))).toEqual({
+      url: "http://localhost:3000/",
+      localStorage: { theme: "dark" },
+      sessionStorage: { step: "2" },
+    });
+    expect(() => parseBrowserSyncPayload(JSON.stringify({ url: "http://localhost:3000", localStorage: { theme: true } }))).toThrow("Browser storage values must be strings.");
+  });
+
+  it("does not apply browser storage to about:blank preview documents", async () => {
+    const evaluate = vi.fn<() => Promise<unknown>>(async () => undefined);
+
+    await applyBrowserStorageSnapshot(
+      {
+        url: () => "about:blank",
+        evaluate,
+      },
+      { localStorage: { theme: "dark" }, sessionStorage: { step: "2" } },
+    );
+
+    expect(evaluate).not.toHaveBeenCalled();
   });
 
   it("does not mask malformed run payloads as an empty prompt", () => {

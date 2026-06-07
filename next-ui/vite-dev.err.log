@@ -1,0 +1,1 @@
+[2m14:05:09[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22mReact does not recognize the `inputProps` prop on a DOM element. If you intentionally want it to appear in the DOM as a custom attribute, spell it as lowercase `inputprops` instead. If you accidentally passed it from a parent component, remove it from the DOM element.

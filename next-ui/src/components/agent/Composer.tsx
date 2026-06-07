@@ -176,9 +176,9 @@ function FloatingTag({
         color: "text.primary",
         backgroundColor: (t) => t.custom.surfaces.s3,
         border: (t) => `1px solid ${t.custom.borders.strong}`,
-        boxShadow: "0 2px 10px rgba(0, 0, 0, 0.35)",
+        boxShadow: "0 1px 4px rgba(0, 0, 0, 0.18)",
         transition: "transform 120ms ease, box-shadow 120ms ease",
-        "&:hover": { boxShadow: "0 4px 14px rgba(0, 0, 0, 0.45)" },
+        "&:hover": { boxShadow: "0 2px 6px rgba(0, 0, 0, 0.22)" },
       }}
     >
       <Box component="span" sx={{ display: "inline-flex", flex: "0 0 auto", color: tone === "accent" ? (t) => t.palette.status.info.main : "text.secondary" }}>
@@ -477,8 +477,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     backgroundColor: (t) => t.custom.surfaces.s2,
     boxShadow: "0 -8px 24px rgba(0, 0, 0, 0.4)",
   };
-  const modeMenuItemSx: SxProps<Theme> = { display: "flex", gap: 1, fontSize: "0.8rem", minHeight: 0, pl: 1, pr: 0.5, width: "100%" };
-  const modeSwitchSx: SxProps<Theme> = { ml: "auto", mr: -0.125, pointerEvents: "none" };
+  const modeMenuItemSx: SxProps<Theme> = { display: "flex", gap: 1, fontSize: "0.8rem", minHeight: 0, pl: 2, pr: 1, width: "100%" };
+  const modeSwitchSx: SxProps<Theme> = { ml: "auto", mr: 0, pointerEvents: "none" };
 
   return (
     // Plain Box (not a spaced Stack): the only in-flow child is the input bar;
@@ -553,7 +553,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           onClose={() => setModeMenuAnchor(null)}
           anchorOrigin={{ vertical: "top", horizontal: "left" }}
           transformOrigin={{ vertical: "bottom", horizontal: "left" }}
-          slotProps={{ paper: { sx: { minWidth: 304 } }, list: { dense: true, sx: { py: 0.5, width: "100%" } } }}
+          slotProps={{ paper: { sx: { boxShadow: "0 4px 12px rgba(0, 0, 0, 0.14)", minWidth: 304 } }, list: { dense: true, sx: { py: 0.5, width: "100%" } } }}
         >
           <MenuItem
             onClick={() => {

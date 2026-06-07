@@ -1,1 +1,490 @@
 [2m12:15:06[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22mCannot update a component (`GitFileDiffCard`) while rendering a different component (`DiffFileCard`). To locate the bad setState() call inside `DiffFileCard`, follow the stack trace as described in https://react.dev/link/setstate-in-render
+[2m13:02:50[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [31m[Unhandled error] [1mReferenceError[22m: KeyboardArrowUpIcon is not defined
+[39m > BrowserPreview src/components/workspace/BrowserPreview.tsx:253:13
+    251 |            </Button>
+    252 |            <Button variant="outlined" aria-label={t("browserPreviewScrollUp")} disabled={!snapshot || loading} onClick...
+    253 |              <KeyboardArrowUpIcon />
+        |               ^
+    254 |            </Button>
+    255 |            <Button variant="outlined" aria-label={t("browserPreviewScrollDown")} disabled={!snapshot || loading} onCli...
+ > Object.react_stack_bottom_frame node_modules/react-dom/cjs/react-dom-client.development.js:25904:19
+ > renderWithHooks node_modules/react-dom/cjs/react-dom-client.development.js:7662:21
+ > updateFunctionComponent node_modules/react-dom/cjs/react-dom-client.development.js:10166:18
+ > beginWork node_modules/react-dom/cjs/react-dom-client.development.js:11778:17
+ > runWithFiberInDEV node_modules/react-dom/cjs/react-dom-client.development.js:871:29
+ > performUnitOfWork node_modules/react-dom/cjs/react-dom-client.development.js:17641:21
+ > workLoopSync node_modules/react-dom/cjs/react-dom-client.development.js:17469:40
+ > renderRootSync node_modules/react-dom/cjs/react-dom-client.development.js:17450:10
+ > performWorkOnRoot node_modules/react-dom/cjs/react-dom-client.development.js:16583:34
+
+[2m13:02:50[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mAn error occurred in the <BrowserPreview> component.
+
+Consider adding an error boundary to your tree to customize error handling behavior.
+Visit https://react.dev/link/error-boundaries to learn more about error boundaries.
+
+[2m13:02:50[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [31m[Unhandled error] [1mReferenceError[22m: KeyboardArrowUpIcon is not defined
+[39m > BrowserPreview src/components/workspace/BrowserPreview.tsx:253:13
+    251 |            </Button>
+    252 |            <Button variant="outlined" aria-label={t("browserPreviewScrollUp")} disabled={!snapshot || loading} onClick...
+    253 |              <KeyboardArrowUpIcon />
+        |               ^
+    254 |            </Button>
+    255 |            <Button variant="outlined" aria-label={t("browserPreviewScrollDown")} disabled={!snapshot || loading} onCli...
+ > Object.react_stack_bottom_frame node_modules/react-dom/cjs/react-dom-client.development.js:25904:19
+ > renderWithHooks node_modules/react-dom/cjs/react-dom-client.development.js:7662:21
+ > updateFunctionComponent node_modules/react-dom/cjs/react-dom-client.development.js:10166:18
+ > beginWork node_modules/react-dom/cjs/react-dom-client.development.js:11778:17
+ > runWithFiberInDEV node_modules/react-dom/cjs/react-dom-client.development.js:871:29
+ > performUnitOfWork node_modules/react-dom/cjs/react-dom-client.development.js:17641:21
+ > workLoopSync node_modules/react-dom/cjs/react-dom-client.development.js:17469:40
+ > renderRootSync node_modules/react-dom/cjs/react-dom-client.development.js:17450:10
+ > performWorkOnRoot node_modules/react-dom/cjs/react-dom-client.development.js:16583:34
+
+[2m13:02:50[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mAn error occurred in the <BrowserPreview> component.
+
+Consider adding an error boundary to your tree to customize error handling behavior.
+Visit https://react.dev/link/error-boundaries to learn more about error boundaries.
+
+[2m13:02:59[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [31m[Unhandled error] [1mReferenceError[22m: KeyboardArrowUpIcon is not defined
+[39m > BrowserPreview src/components/workspace/BrowserPreview.tsx:256:13
+    254 |            </Button>
+    255 |            <Button variant="outlined" aria-label={t("browserPreviewScrollUp")} disabled={!snapshot || loading} onClick...
+    256 |              <KeyboardArrowUpIcon />
+        |               ^
+    257 |            </Button>
+    258 |            <Button variant="outlined" aria-label={t("browserPreviewScrollDown")} disabled={!snapshot || loading} onCli...
+ > Object.react_stack_bottom_frame node_modules/react-dom/cjs/react-dom-client.development.js:25904:19
+ > renderWithHooks node_modules/react-dom/cjs/react-dom-client.development.js:7662:21
+ > updateFunctionComponent node_modules/react-dom/cjs/react-dom-client.development.js:10166:18
+ > beginWork node_modules/react-dom/cjs/react-dom-client.development.js:11778:17
+ > runWithFiberInDEV node_modules/react-dom/cjs/react-dom-client.development.js:871:29
+ > performUnitOfWork node_modules/react-dom/cjs/react-dom-client.development.js:17641:21
+ > workLoopSync node_modules/react-dom/cjs/react-dom-client.development.js:17469:40
+ > renderRootSync node_modules/react-dom/cjs/react-dom-client.development.js:17450:10
+ > performWorkOnRoot node_modules/react-dom/cjs/react-dom-client.development.js:16583:34
+
+[2m13:02:59[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mAn error occurred in the <BrowserPreview> component.
+
+Consider adding an error boundary to your tree to customize error handling behavior.
+Visit https://react.dev/link/error-boundaries to learn more about error boundaries.
+
+[2m13:02:59[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [31m[Unhandled error] [1mReferenceError[22m: KeyboardArrowUpIcon is not defined
+[39m > BrowserPreview src/components/workspace/BrowserPreview.tsx:256:13
+    254 |            </Button>
+    255 |            <Button variant="outlined" aria-label={t("browserPreviewScrollUp")} disabled={!snapshot || loading} onClick...
+    256 |              <KeyboardArrowUpIcon />
+        |               ^
+    257 |            </Button>
+    258 |            <Button variant="outlined" aria-label={t("browserPreviewScrollDown")} disabled={!snapshot || loading} onCli...
+ > Object.react_stack_bottom_frame node_modules/react-dom/cjs/react-dom-client.development.js:25904:19
+ > renderWithHooks node_modules/react-dom/cjs/react-dom-client.development.js:7662:21
+ > updateFunctionComponent node_modules/react-dom/cjs/react-dom-client.development.js:10166:18
+ > beginWork node_modules/react-dom/cjs/react-dom-client.development.js:11778:17
+ > runWithFiberInDEV node_modules/react-dom/cjs/react-dom-client.development.js:871:29
+ > performUnitOfWork node_modules/react-dom/cjs/react-dom-client.development.js:17641:21
+ > workLoopSync node_modules/react-dom/cjs/react-dom-client.development.js:17469:40
+ > renderRootSync node_modules/react-dom/cjs/react-dom-client.development.js:17450:10
+ > performWorkOnRoot node_modules/react-dom/cjs/react-dom-client.development.js:16583:34
+
+[2m13:02:59[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mAn error occurred in the <BrowserPreview> component.
+
+Consider adding an error boundary to your tree to customize error handling behavior.
+Visit https://react.dev/link/error-boundaries to learn more about error boundaries.
+
+[2m13:03:08[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [31m[Unhandled error] [1mReferenceError[22m: KeyboardArrowUpIcon is not defined
+[39m > BrowserPreview src/components/workspace/BrowserPreview.tsx:284:13
+    282 |            </Button>
+    283 |            <Button variant="outlined" aria-label={t("browserPreviewScrollUp")} disabled={!snapshot || loading} onClick...
+    284 |              <KeyboardArrowUpIcon />
+        |               ^
+    285 |            </Button>
+    286 |            <Button variant="outlined" aria-label={t("browserPreviewScrollDown")} disabled={!snapshot || loading} onCli...
+ > Object.react_stack_bottom_frame node_modules/react-dom/cjs/react-dom-client.development.js:25904:19
+ > renderWithHooks node_modules/react-dom/cjs/react-dom-client.development.js:7662:21
+ > updateFunctionComponent node_modules/react-dom/cjs/react-dom-client.development.js:10166:18
+ > beginWork node_modules/react-dom/cjs/react-dom-client.development.js:11778:17
+ > runWithFiberInDEV node_modules/react-dom/cjs/react-dom-client.development.js:871:29
+ > performUnitOfWork node_modules/react-dom/cjs/react-dom-client.development.js:17641:21
+ > workLoopSync node_modules/react-dom/cjs/react-dom-client.development.js:17469:40
+ > renderRootSync node_modules/react-dom/cjs/react-dom-client.development.js:17450:10
+ > performWorkOnRoot node_modules/react-dom/cjs/react-dom-client.development.js:16583:34
+
+[2m13:03:08[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mAn error occurred in the <BrowserPreview> component.
+
+Consider adding an error boundary to your tree to customize error handling behavior.
+Visit https://react.dev/link/error-boundaries to learn more about error boundaries.
+
+[2m13:03:09[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [31m[Unhandled error] [1mReferenceError[22m: KeyboardArrowUpIcon is not defined
+[39m > BrowserPreview src/components/workspace/BrowserPreview.tsx:284:13
+    282 |            </Button>
+    283 |            <Button variant="outlined" aria-label={t("browserPreviewScrollUp")} disabled={!snapshot || loading} onClick...
+    284 |              <KeyboardArrowUpIcon />
+        |               ^
+    285 |            </Button>
+    286 |            <Button variant="outlined" aria-label={t("browserPreviewScrollDown")} disabled={!snapshot || loading} onCli...
+ > Object.react_stack_bottom_frame node_modules/react-dom/cjs/react-dom-client.development.js:25904:19
+ > renderWithHooks node_modules/react-dom/cjs/react-dom-client.development.js:7662:21
+ > updateFunctionComponent node_modules/react-dom/cjs/react-dom-client.development.js:10166:18
+ > beginWork node_modules/react-dom/cjs/react-dom-client.development.js:11778:17
+ > runWithFiberInDEV node_modules/react-dom/cjs/react-dom-client.development.js:871:29
+ > performUnitOfWork node_modules/react-dom/cjs/react-dom-client.development.js:17641:21
+ > workLoopSync node_modules/react-dom/cjs/react-dom-client.development.js:17469:40
+ > renderRootSync node_modules/react-dom/cjs/react-dom-client.development.js:17450:10
+ > performWorkOnRoot node_modules/react-dom/cjs/react-dom-client.development.js:16583:34
+
+[2m13:03:09[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mAn error occurred in the <BrowserPreview> component.
+
+Consider adding an error boundary to your tree to customize error handling behavior.
+Visit https://react.dev/link/error-boundaries to learn more about error boundaries.
+
+[2m13:03:15[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [31m[Unhandled error] [1mReferenceError[22m: KeyboardArrowUpIcon is not defined
+[39m > BrowserPreview src/components/workspace/BrowserPreview.tsx:284:13
+    282 |            </Button>
+    283 |            <Button variant="outlined" aria-label={t("browserPreviewScrollUp")} disabled={!snapshot || loading} onClick...
+    284 |              <KeyboardArrowUpIcon />
+        |               ^
+    285 |            </Button>
+    286 |            <Button variant="outlined" aria-label={t("browserPreviewScrollDown")} disabled={!snapshot || loading} onCli...
+ > Object.react_stack_bottom_frame node_modules/react-dom/cjs/react-dom-client.development.js:25904:19
+ > renderWithHooks node_modules/react-dom/cjs/react-dom-client.development.js:7662:21
+ > updateFunctionComponent node_modules/react-dom/cjs/react-dom-client.development.js:10166:18
+ > beginWork node_modules/react-dom/cjs/react-dom-client.development.js:11778:17
+ > runWithFiberInDEV node_modules/react-dom/cjs/react-dom-client.development.js:871:29
+ > performUnitOfWork node_modules/react-dom/cjs/react-dom-client.development.js:17641:21
+ > workLoopSync node_modules/react-dom/cjs/react-dom-client.development.js:17469:40
+ > renderRootSync node_modules/react-dom/cjs/react-dom-client.development.js:17450:10
+ > performWorkOnRoot node_modules/react-dom/cjs/react-dom-client.development.js:16583:34
+
+[2m13:03:15[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mAn error occurred in the <BrowserPreview> component.
+
+Consider adding an error boundary to your tree to customize error handling behavior.
+Visit https://react.dev/link/error-boundaries to learn more about error boundaries.
+
+[2m13:03:15[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [31m[Unhandled error] [1mReferenceError[22m: KeyboardArrowUpIcon is not defined
+[39m > BrowserPreview src/components/workspace/BrowserPreview.tsx:284:13
+    282 |            </Button>
+    283 |            <Button variant="outlined" aria-label={t("browserPreviewScrollUp")} disabled={!snapshot || loading} onClick...
+    284 |              <KeyboardArrowUpIcon />
+        |               ^
+    285 |            </Button>
+    286 |            <Button variant="outlined" aria-label={t("browserPreviewScrollDown")} disabled={!snapshot || loading} onCli...
+ > Object.react_stack_bottom_frame node_modules/react-dom/cjs/react-dom-client.development.js:25904:19
+ > renderWithHooks node_modules/react-dom/cjs/react-dom-client.development.js:7662:21
+ > updateFunctionComponent node_modules/react-dom/cjs/react-dom-client.development.js:10166:18
+ > beginWork node_modules/react-dom/cjs/react-dom-client.development.js:11778:17
+ > runWithFiberInDEV node_modules/react-dom/cjs/react-dom-client.development.js:871:29
+ > performUnitOfWork node_modules/react-dom/cjs/react-dom-client.development.js:17641:21
+ > workLoopSync node_modules/react-dom/cjs/react-dom-client.development.js:17469:40
+ > renderRootSync node_modules/react-dom/cjs/react-dom-client.development.js:17450:10
+ > performWorkOnRoot node_modules/react-dom/cjs/react-dom-client.development.js:16583:34
+
+[2m13:03:15[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mAn error occurred in the <BrowserPreview> component.
+
+Consider adding an error boundary to your tree to customize error handling behavior.
+Visit https://react.dev/link/error-boundaries to learn more about error boundaries.
+
+[2m13:03:26[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [31m[Unhandled error] [1mReferenceError[22m: loading is not defined
+[39m > BrowserPreview src/components/workspace/BrowserPreview.tsx:282:63
+    280 |              sx={{ minWidth: { xs: "100%", md: 320 } }}
+    281 |            />
+    282 |  ...       <Button type="submit" variant="contained" startIcon={loading ? <CircularProgress color="inherit" size={16} ...
+        |                                                                 ^
+    283 |              {t("browserPreviewOpen")}
+    284 |            </Button>
+ > Object.react_stack_bottom_frame node_modules/react-dom/cjs/react-dom-client.development.js:25904:19
+ > renderWithHooks node_modules/react-dom/cjs/react-dom-client.development.js:7662:21
+ > updateFunctionComponent node_modules/react-dom/cjs/react-dom-client.development.js:10166:18
+ > beginWork node_modules/react-dom/cjs/react-dom-client.development.js:11778:17
+ > runWithFiberInDEV node_modules/react-dom/cjs/react-dom-client.development.js:871:29
+ > performUnitOfWork node_modules/react-dom/cjs/react-dom-client.development.js:17641:21
+ > workLoopSync node_modules/react-dom/cjs/react-dom-client.development.js:17469:40
+ > renderRootSync node_modules/react-dom/cjs/react-dom-client.development.js:17450:10
+ > performWorkOnRoot node_modules/react-dom/cjs/react-dom-client.development.js:16583:34
+
+[2m13:03:26[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mAn error occurred in the <BrowserPreview> component.
+
+Consider adding an error boundary to your tree to customize error handling behavior.
+Visit https://react.dev/link/error-boundaries to learn more about error boundaries.
+
+[2m13:03:26[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [31m[Unhandled error] [1mReferenceError[22m: loading is not defined
+[39m > BrowserPreview src/components/workspace/BrowserPreview.tsx:282:63
+    280 |              sx={{ minWidth: { xs: "100%", md: 320 } }}
+    281 |            />
+    282 |  ...       <Button type="submit" variant="contained" startIcon={loading ? <CircularProgress color="inherit" size={16} ...
+        |                                                                 ^
+    283 |              {t("browserPreviewOpen")}
+    284 |            </Button>
+ > Object.react_stack_bottom_frame node_modules/react-dom/cjs/react-dom-client.development.js:25904:19
+ > renderWithHooks node_modules/react-dom/cjs/react-dom-client.development.js:7662:21
+ > updateFunctionComponent node_modules/react-dom/cjs/react-dom-client.development.js:10166:18
+ > beginWork node_modules/react-dom/cjs/react-dom-client.development.js:11778:17
+ > runWithFiberInDEV node_modules/react-dom/cjs/react-dom-client.development.js:871:29
+ > performUnitOfWork node_modules/react-dom/cjs/react-dom-client.development.js:17641:21
+ > workLoopSync node_modules/react-dom/cjs/react-dom-client.development.js:17469:40
+ > renderRootSync node_modules/react-dom/cjs/react-dom-client.development.js:17450:10
+ > performWorkOnRoot node_modules/react-dom/cjs/react-dom-client.development.js:16583:34
+
+[2m13:03:26[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mAn error occurred in the <BrowserPreview> component.
+
+Consider adding an error boundary to your tree to customize error handling behavior.
+Visit https://react.dev/link/error-boundaries to learn more about error boundaries.
+
+[2m13:03:38[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [31m[Unhandled error] [1mReferenceError[22m: loading is not defined
+[39m > BrowserPreview src/components/workspace/BrowserPreview.tsx:296:63
+    294 |              sx={{ minWidth: { xs: "100%", md: 320 } }}
+    295 |            />
+    296 |  ...       <Button type="submit" variant="contained" startIcon={loading ? <CircularProgress color="inherit" size={16} ...
+        |                                                                 ^
+    297 |              {t("browserPreviewOpen")}
+    298 |            </Button>
+ > Object.react_stack_bottom_frame node_modules/react-dom/cjs/react-dom-client.development.js:25904:19
+ > renderWithHooks node_modules/react-dom/cjs/react-dom-client.development.js:7662:21
+ > updateFunctionComponent node_modules/react-dom/cjs/react-dom-client.development.js:10166:18
+ > beginWork node_modules/react-dom/cjs/react-dom-client.development.js:11778:17
+ > runWithFiberInDEV node_modules/react-dom/cjs/react-dom-client.development.js:871:29
+ > performUnitOfWork node_modules/react-dom/cjs/react-dom-client.development.js:17641:21
+ > workLoopSync node_modules/react-dom/cjs/react-dom-client.development.js:17469:40
+ > renderRootSync node_modules/react-dom/cjs/react-dom-client.development.js:17450:10
+ > performWorkOnRoot node_modules/react-dom/cjs/react-dom-client.development.js:16583:34
+
+[2m13:03:38[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mAn error occurred in the <BrowserPreview> component.
+
+Consider adding an error boundary to your tree to customize error handling behavior.
+Visit https://react.dev/link/error-boundaries to learn more about error boundaries.
+
+[2m13:03:38[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [31m[Unhandled error] [1mReferenceError[22m: loading is not defined
+[39m > BrowserPreview src/components/workspace/BrowserPreview.tsx:296:63
+    294 |              sx={{ minWidth: { xs: "100%", md: 320 } }}
+    295 |            />
+    296 |  ...       <Button type="submit" variant="contained" startIcon={loading ? <CircularProgress color="inherit" size={16} ...
+        |                                                                 ^
+    297 |              {t("browserPreviewOpen")}
+    298 |            </Button>
+ > Object.react_stack_bottom_frame node_modules/react-dom/cjs/react-dom-client.development.js:25904:19
+ > renderWithHooks node_modules/react-dom/cjs/react-dom-client.development.js:7662:21
+ > updateFunctionComponent node_modules/react-dom/cjs/react-dom-client.development.js:10166:18
+ > beginWork node_modules/react-dom/cjs/react-dom-client.development.js:11778:17
+ > runWithFiberInDEV node_modules/react-dom/cjs/react-dom-client.development.js:871:29
+ > performUnitOfWork node_modules/react-dom/cjs/react-dom-client.development.js:17641:21
+ > workLoopSync node_modules/react-dom/cjs/react-dom-client.development.js:17469:40
+ > renderRootSync node_modules/react-dom/cjs/react-dom-client.development.js:17450:10
+ > performWorkOnRoot node_modules/react-dom/cjs/react-dom-client.development.js:16583:34
+
+[2m13:03:38[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mAn error occurred in the <BrowserPreview> component.
+
+Consider adding an error boundary to your tree to customize error handling behavior.
+Visit https://react.dev/link/error-boundaries to learn more about error boundaries.
+
+[2m13:03:52[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [31m[Unhandled error] [1mReferenceError[22m: loading is not defined
+[39m > BrowserPreview src/components/workspace/BrowserPreview.tsx:298:63
+    296 |              sx={{ minWidth: { xs: "100%", md: 320 } }}
+    297 |            />
+    298 |  ...       <Button type="submit" variant="contained" startIcon={loading ? <CircularProgress color="inherit" size={16} ...
+        |                                                                 ^
+    299 |              {t("browserPreviewOpen")}
+    300 |            </Button>
+ > Object.react_stack_bottom_frame node_modules/react-dom/cjs/react-dom-client.development.js:25904:19
+ > renderWithHooks node_modules/react-dom/cjs/react-dom-client.development.js:7662:21
+ > updateFunctionComponent node_modules/react-dom/cjs/react-dom-client.development.js:10166:18
+ > beginWork node_modules/react-dom/cjs/react-dom-client.development.js:11778:17
+ > runWithFiberInDEV node_modules/react-dom/cjs/react-dom-client.development.js:871:29
+ > performUnitOfWork node_modules/react-dom/cjs/react-dom-client.development.js:17641:21
+ > workLoopSync node_modules/react-dom/cjs/react-dom-client.development.js:17469:40
+ > renderRootSync node_modules/react-dom/cjs/react-dom-client.development.js:17450:10
+ > performWorkOnRoot node_modules/react-dom/cjs/react-dom-client.development.js:16583:34
+
+[2m13:03:52[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mAn error occurred in the <BrowserPreview> component.
+
+Consider adding an error boundary to your tree to customize error handling behavior.
+Visit https://react.dev/link/error-boundaries to learn more about error boundaries.
+
+[2m13:03:52[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [31m[Unhandled error] [1mReferenceError[22m: loading is not defined
+[39m > BrowserPreview src/components/workspace/BrowserPreview.tsx:298:63
+    296 |              sx={{ minWidth: { xs: "100%", md: 320 } }}
+    297 |            />
+    298 |  ...       <Button type="submit" variant="contained" startIcon={loading ? <CircularProgress color="inherit" size={16} ...
+        |                                                                 ^
+    299 |              {t("browserPreviewOpen")}
+    300 |            </Button>
+ > Object.react_stack_bottom_frame node_modules/react-dom/cjs/react-dom-client.development.js:25904:19
+ > renderWithHooks node_modules/react-dom/cjs/react-dom-client.development.js:7662:21
+ > updateFunctionComponent node_modules/react-dom/cjs/react-dom-client.development.js:10166:18
+ > beginWork node_modules/react-dom/cjs/react-dom-client.development.js:11778:17
+ > runWithFiberInDEV node_modules/react-dom/cjs/react-dom-client.development.js:871:29
+ > performUnitOfWork node_modules/react-dom/cjs/react-dom-client.development.js:17641:21
+ > workLoopSync node_modules/react-dom/cjs/react-dom-client.development.js:17469:40
+ > renderRootSync node_modules/react-dom/cjs/react-dom-client.development.js:17450:10
+ > performWorkOnRoot node_modules/react-dom/cjs/react-dom-client.development.js:16583:34
+
+[2m13:03:52[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mAn error occurred in the <BrowserPreview> component.
+
+Consider adding an error boundary to your tree to customize error handling behavior.
+Visit https://react.dev/link/error-boundaries to learn more about error boundaries.
+
+[2m13:03:58[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [31m[Unhandled error] [1mReferenceError[22m: loading is not defined
+[39m > BrowserPreview src/components/workspace/BrowserPreview.tsx:299:63
+    297 |              sx={{ minWidth: { xs: "100%", md: 320 } }}
+    298 |            />
+    299 |  ...       <Button type="submit" variant="contained" startIcon={loading ? <CircularProgress color="inherit" size={16} ...
+        |                                                                 ^
+    300 |              {t("browserPreviewOpen")}
+    301 |            </Button>
+ > Object.react_stack_bottom_frame node_modules/react-dom/cjs/react-dom-client.development.js:25904:19
+ > renderWithHooks node_modules/react-dom/cjs/react-dom-client.development.js:7662:21
+ > updateFunctionComponent node_modules/react-dom/cjs/react-dom-client.development.js:10166:18
+ > beginWork node_modules/react-dom/cjs/react-dom-client.development.js:11778:17
+ > runWithFiberInDEV node_modules/react-dom/cjs/react-dom-client.development.js:871:29
+ > performUnitOfWork node_modules/react-dom/cjs/react-dom-client.development.js:17641:21
+ > workLoopSync node_modules/react-dom/cjs/react-dom-client.development.js:17469:40
+ > renderRootSync node_modules/react-dom/cjs/react-dom-client.development.js:17450:10
+ > performWorkOnRoot node_modules/react-dom/cjs/react-dom-client.development.js:16583:34
+
+[2m13:03:58[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mAn error occurred in the <BrowserPreview> component.
+
+Consider adding an error boundary to your tree to customize error handling behavior.
+Visit https://react.dev/link/error-boundaries to learn more about error boundaries.
+
+[2m13:03:58[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [31m[Unhandled error] [1mReferenceError[22m: loading is not defined
+[39m > BrowserPreview src/components/workspace/BrowserPreview.tsx:299:63
+    297 |              sx={{ minWidth: { xs: "100%", md: 320 } }}
+    298 |            />
+    299 |  ...       <Button type="submit" variant="contained" startIcon={loading ? <CircularProgress color="inherit" size={16} ...
+        |                                                                 ^
+    300 |              {t("browserPreviewOpen")}
+    301 |            </Button>
+ > Object.react_stack_bottom_frame node_modules/react-dom/cjs/react-dom-client.development.js:25904:19
+ > renderWithHooks node_modules/react-dom/cjs/react-dom-client.development.js:7662:21
+ > updateFunctionComponent node_modules/react-dom/cjs/react-dom-client.development.js:10166:18
+ > beginWork node_modules/react-dom/cjs/react-dom-client.development.js:11778:17
+ > runWithFiberInDEV node_modules/react-dom/cjs/react-dom-client.development.js:871:29
+ > performUnitOfWork node_modules/react-dom/cjs/react-dom-client.development.js:17641:21
+ > workLoopSync node_modules/react-dom/cjs/react-dom-client.development.js:17469:40
+ > renderRootSync node_modules/react-dom/cjs/react-dom-client.development.js:17450:10
+ > performWorkOnRoot node_modules/react-dom/cjs/react-dom-client.development.js:16583:34
+
+[2m13:03:58[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mAn error occurred in the <BrowserPreview> component.
+
+Consider adding an error boundary to your tree to customize error handling behavior.
+Visit https://react.dev/link/error-boundaries to learn more about error boundaries.
+
+[2m13:17:51[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [31m[Unhandled error] [1mReferenceError[22m: Typography is not defined
+[39m > BrowserPreview src/components/workspace/BrowserPreview.tsx:322:13
+    320 |          <Stack direction={{ xs: "column", md: "row" }} spacing={1} sx={{ alignItems: { xs: "stretch", md: "center" } }}>
+    321 |            <Stack sx={{ minWidth: 0, flex: 1 }}>
+    322 |              <Typography variant="subtitle2" sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontWeight: 800 }}>
+        |               ^
+    323 |                {t("browserPreviewTitle")}
+    324 |              </Typography>
+ > Object.react_stack_bottom_frame node_modules/react-dom/cjs/react-dom-client.development.js:25904:19
+ > renderWithHooks node_modules/react-dom/cjs/react-dom-client.development.js:7662:21
+ > updateFunctionComponent node_modules/react-dom/cjs/react-dom-client.development.js:10166:18
+ > beginWork node_modules/react-dom/cjs/react-dom-client.development.js:11778:17
+ > runWithFiberInDEV node_modules/react-dom/cjs/react-dom-client.development.js:871:29
+ > performUnitOfWork node_modules/react-dom/cjs/react-dom-client.development.js:17641:21
+ > workLoopSync node_modules/react-dom/cjs/react-dom-client.development.js:17469:40
+ > renderRootSync node_modules/react-dom/cjs/react-dom-client.development.js:17450:10
+ > performWorkOnRoot node_modules/react-dom/cjs/react-dom-client.development.js:16583:34
+
+[2m13:17:51[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mAn error occurred in the <BrowserPreview> component.
+
+Consider adding an error boundary to your tree to customize error handling behavior.
+Visit https://react.dev/link/error-boundaries to learn more about error boundaries.
+
+[2m13:17:51[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [31m[Unhandled error] [1mReferenceError[22m: Typography is not defined
+[39m > BrowserPreview src/components/workspace/BrowserPreview.tsx:322:13
+    320 |          <Stack direction={{ xs: "column", md: "row" }} spacing={1} sx={{ alignItems: { xs: "stretch", md: "center" } }}>
+    321 |            <Stack sx={{ minWidth: 0, flex: 1 }}>
+    322 |              <Typography variant="subtitle2" sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontWeight: 800 }}>
+        |               ^
+    323 |                {t("browserPreviewTitle")}
+    324 |              </Typography>
+ > Object.react_stack_bottom_frame node_modules/react-dom/cjs/react-dom-client.development.js:25904:19
+ > renderWithHooks node_modules/react-dom/cjs/react-dom-client.development.js:7662:21
+ > updateFunctionComponent node_modules/react-dom/cjs/react-dom-client.development.js:10166:18
+ > beginWork node_modules/react-dom/cjs/react-dom-client.development.js:11778:17
+ > runWithFiberInDEV node_modules/react-dom/cjs/react-dom-client.development.js:871:29
+ > performUnitOfWork node_modules/react-dom/cjs/react-dom-client.development.js:17641:21
+ > workLoopSync node_modules/react-dom/cjs/react-dom-client.development.js:17469:40
+ > renderRootSync node_modules/react-dom/cjs/react-dom-client.development.js:17450:10
+ > performWorkOnRoot node_modules/react-dom/cjs/react-dom-client.development.js:16583:34
+
+[2m13:17:51[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mAn error occurred in the <BrowserPreview> component.
+
+Consider adding an error boundary to your tree to customize error handling behavior.
+Visit https://react.dev/link/error-boundaries to learn more about error boundaries.
+
+[2m13:18:01[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [31m[Unhandled error] [1mReferenceError[22m: Typography is not defined
+[39m > BrowserPreview src/components/workspace/BrowserPreview.tsx:336:13
+    334 |          <Stack direction={{ xs: "column", md: "row" }} spacing={1} sx={{ alignItems: { xs: "stretch", md: "center" } }}>
+    335 |            <Stack sx={{ minWidth: 0, flex: 1 }}>
+    336 |              <Typography variant="subtitle2" sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontWeight: 800 }}>
+        |               ^
+    337 |                {t("browserPreviewTitle")}
+    338 |              </Typography>
+ > Object.react_stack_bottom_frame node_modules/react-dom/cjs/react-dom-client.development.js:25904:19
+ > renderWithHooks node_modules/react-dom/cjs/react-dom-client.development.js:7662:21
+ > updateFunctionComponent node_modules/react-dom/cjs/react-dom-client.development.js:10166:18
+ > beginWork node_modules/react-dom/cjs/react-dom-client.development.js:11778:17
+ > runWithFiberInDEV node_modules/react-dom/cjs/react-dom-client.development.js:871:29
+ > performUnitOfWork node_modules/react-dom/cjs/react-dom-client.development.js:17641:21
+ > workLoopSync node_modules/react-dom/cjs/react-dom-client.development.js:17469:40
+ > renderRootSync node_modules/react-dom/cjs/react-dom-client.development.js:17450:10
+ > performWorkOnRoot node_modules/react-dom/cjs/react-dom-client.development.js:16583:34
+
+[2m13:18:01[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mAn error occurred in the <BrowserPreview> component.
+
+Consider adding an error boundary to your tree to customize error handling behavior.
+Visit https://react.dev/link/error-boundaries to learn more about error boundaries.
+
+[2m13:18:01[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [31m[Unhandled error] [1mReferenceError[22m: Typography is not defined
+[39m > BrowserPreview src/components/workspace/BrowserPreview.tsx:336:13
+    334 |          <Stack direction={{ xs: "column", md: "row" }} spacing={1} sx={{ alignItems: { xs: "stretch", md: "center" } }}>
+    335 |            <Stack sx={{ minWidth: 0, flex: 1 }}>
+    336 |              <Typography variant="subtitle2" sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontWeight: 800 }}>
+        |               ^
+    337 |                {t("browserPreviewTitle")}
+    338 |              </Typography>
+ > Object.react_stack_bottom_frame node_modules/react-dom/cjs/react-dom-client.development.js:25904:19
+ > renderWithHooks node_modules/react-dom/cjs/react-dom-client.development.js:7662:21
+ > updateFunctionComponent node_modules/react-dom/cjs/react-dom-client.development.js:10166:18
+ > beginWork node_modules/react-dom/cjs/react-dom-client.development.js:11778:17
+ > runWithFiberInDEV node_modules/react-dom/cjs/react-dom-client.development.js:871:29
+ > performUnitOfWork node_modules/react-dom/cjs/react-dom-client.development.js:17641:21
+ > workLoopSync node_modules/react-dom/cjs/react-dom-client.development.js:17469:40
+ > renderRootSync node_modules/react-dom/cjs/react-dom-client.development.js:17450:10
+ > performWorkOnRoot node_modules/react-dom/cjs/react-dom-client.development.js:16583:34
+
+[2m13:18:01[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mAn error occurred in the <BrowserPreview> component.
+
+Consider adding an error boundary to your tree to customize error handling behavior.
+Visit https://react.dev/link/error-boundaries to learn more about error boundaries.
+
+[2m13:18:50[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22m[vite] Failed to reload /src/components/workspace/BrowserPreview.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above)
+[2m13:18:50[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mYou are loading @emotion/react when it is already loaded. Running multiple instances may cause problems. This can happen if multiple versions are used, or if multiple builds of the same version are used.
+[2m13:18:50[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22mInvalid hook call. Hooks can only be called inside of the body of a function component. This could happen for one of the following reasons:
+1. You might have mismatching versions of React and the renderer (such as React DOM)
+2. You might be breaking the Rules of Hooks
+3. You might have more than one copy of React in the same app
+See https://react.dev/link/invalid-hook-call for tips about how to debug and fix this problem.
+[2m13:18:51[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22mInvalid hook call. Hooks can only be called inside of the body of a function component. This could happen for one of the following reasons:
+1. You might have mismatching versions of React and the renderer (such as React DOM)
+2. You might be breaking the Rules of Hooks
+3. You might have more than one copy of React in the same app
+See https://react.dev/link/invalid-hook-call for tips about how to debug and fix this problem.
+[2m13:18:51[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [31m[Unhandled error] [1mTypeError[22m: Cannot read properties of null (reading 'useContext')
+[39m > exports.useContext node_modules/react/cjs/react.development.js:1212:24
+ > useDefaultProps node_modules/@mui/system/DefaultPropsProvider/DefaultPropsProvider.mjs:55:20
+ > useSystemDefaultProps node_modules/@mui/material/DefaultPropsProvider/DefaultPropsProvider.mjs:28:9
+ > SvgIcon node_modules/@mui/material/SvgIcon/SvgIcon.mjs:112:16
+ > Object.react_stack_bottom_frame node_modules/react-dom/cjs/react-dom-client.development.js:25904:19
+ > renderWithHooks node_modules/react-dom/cjs/react-dom-client.development.js:7662:21
+ > updateForwardRef node_modules/react-dom/cjs/react-dom-client.development.js:9724:18
+ > beginWork node_modules/react-dom/cjs/react-dom-client.development.js:12117:17
+ > runWithFiberInDEV node_modules/react-dom/cjs/react-dom-client.development.js:871:29
+ > performUnitOfWork node_modules/react-dom/cjs/react-dom-client.development.js:17641:21
+
+[2m13:18:51[22m [33m[1m[vite][22m[39m [33m[2m(client)[22m[39m [2m[console.warn] [22mAn error occurred in the <ForwardRef(SvgIcon)> component.
+
+Consider adding an error boundary to your tree to customize error handling behavior.
+Visit https://react.dev/link/error-boundaries to learn more about error boundaries.
+

@@ -6,6 +6,7 @@ import CreateNewFolderIcon from "@mui/icons-material/CreateNewFolder";
 import FolderOutlinedIcon from "@mui/icons-material/FolderOutlined";
 import MenuIcon from "@mui/icons-material/Menu";
 import MenuOpenIcon from "@mui/icons-material/MenuOpen";
+import OpenInBrowserIcon from "@mui/icons-material/OpenInBrowser";
 import RestartAltIcon from "@mui/icons-material/RestartAlt";
 import TerminalIcon from "@mui/icons-material/Terminal";
 import SearchIcon from "@mui/icons-material/Search";
@@ -63,6 +64,7 @@ import { SettingsDialog } from "../settings/SettingsDialog";
 import { Button, EmptyState, IconButton, StatusDot, useToast } from "../ui";
 import { CommandPalette, type CommandPaletteItem } from "./CommandPalette";
 import { CreateProjectDialog } from "./CreateProjectDialog";
+import { BrowserPreview } from "./BrowserPreview";
 import { type DiffCommentApi, GitView } from "./GitPanel";
 import { TerminalView } from "./TerminalView";
 import { DEFAULT_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, normalizeSidebarWidth } from "./app-settings";
@@ -71,7 +73,7 @@ import { conversationProfile, type Workspace, useWorkspace } from "./use-workspa
 const COMPOSER_DRAFT_SAVE_DELAY_MS = 350;
 const EMPTY_COMPOSER_DRAFT: ComposerDraft = { text: "", attachments: [] };
 
-type WorkspaceView = "chat" | "git" | "terminal";
+type WorkspaceView = "chat" | "git" | "preview" | "terminal";
 
 // The sidebar title bar and the chat pane header share one fixed height so the
 // two columns line up across the top.
@@ -267,6 +269,14 @@ export function WorkspacePageView({
   const lastTurnDiffs = useMemo(() => latestAgentDiffBlocks(messages), [messages]);
   const composerDraft = ws.composerDrafts[ws.selectedId] ?? { text: "", attachments: [] };
   const selectedCwd = ws.cwdOf(ws.selectedId);
+  const sendBrowserAnnotation = (message: string) => {
+    if (!selected) {
+      return;
+    }
+    notifiableRuns.current.add(ws.selectedId);
+    ws.sendMessage(ws.selectedId, message);
+    showView("chat");
+  };
   const draftProject = composingNew?.projectId ? ws.projects.find((p) => p.id === composingNew.projectId) ?? null : null;
   const activeCwd = composingNew ? draftProject?.path : selectedCwd;
   const headerTitle = composingNew ? t("newChat") : selected?.title ?? t("noConversation");
@@ -713,6 +723,12 @@ export function WorkspacePageView({
       action: () => showView("git"),
     },
     {
+      id: "open-preview",
+      label: t("commandOpenPreview"),
+      keywords: [t("previewTab"), t("browserPreviewTitle")],
+      action: () => showView("preview"),
+    },
+    {
       id: "toggle-theme",
       label: t("commandToggleTheme"),
       keywords: [t("theme"), t("dark"), t("light")],
@@ -901,7 +917,7 @@ export function WorkspacePageView({
                 )}
               </Box>
             </Stack>
-            <Stack direction="row" spacing={1} sx={{ alignItems: "center", flex: "0 0 auto", "& .MuiIconButton-root": { width: 30, height: 30 } }}>
+            <Stack direction="row" spacing={0.5} sx={{ alignItems: "center", flex: "0 0 auto", "& .MuiIconButton-root": { width: 30, height: 30 } }}>
               {(selected || composingNew) && <AgentBadge profile={profile} onClick={openPicker} compact />}
               {selected?.status === "error" && (
                 <Tooltip title={t("retryRun")}>
@@ -956,6 +972,10 @@ export function WorkspacePageView({
                       <Box component="span" sx={{ color: (t) => t.palette.status.error.main }}>−{gitUnstaged.deletions}</Box>
                     </Box>
                   )}
+                </ToggleButton>
+                <ToggleButton value="preview" aria-label={t("previewTab")}>
+                  <OpenInBrowserIcon sx={{ fontSize: 15 }} />
+                  <Box component="span" sx={{ display: { xs: "none", sm: "inline" } }}>{t("previewTab")}</Box>
                 </ToggleButton>
                 {showTerminal && (
                   <ToggleButton value="terminal" aria-label={t("terminalTab")}>
@@ -1055,6 +1075,9 @@ export function WorkspacePageView({
                   bottomInset={contentBottomInset}
                 />
               </Box>
+              <Box sx={{ position: "absolute", inset: 0, display: view === "preview" ? "block" : "none" }}>
+                <BrowserPreview active={view === "preview"} onSendAnnotation={selected ? sendBrowserAnnotation : undefined} />
+              </Box>
               {/* Keyed by folder so each project's terminal keeps its own scrollback. */}
               {showTerminal && (
                 <Box sx={{ position: "absolute", inset: 0, display: view === "terminal" ? "block" : "none" }}>
@@ -1065,9 +1088,9 @@ export function WorkspacePageView({
           </Box>
         </Box>
 
-        {/* The terminal tab is a pure web terminal — it has its own input, so the
+        {/* The terminal and browser-preview tabs have their own controls, so the
             agent composer (and its tags) is hidden there. */}
-        {view !== "terminal" && (
+        {view !== "terminal" && view !== "preview" && (
         <Box sx={{ flex: "0 0 auto", borderTop: (t) => `1px solid ${t.custom.borders.subtle}`, backgroundColor: (t) => t.custom.surfaces.s1 }}>
           <Box sx={{ width: "100%", maxWidth: THREAD_MAX_WIDTH, mx: "auto", px: THREAD_PADDING_X, py: 1.5 }}>
             {workspaceHydrating ? (
