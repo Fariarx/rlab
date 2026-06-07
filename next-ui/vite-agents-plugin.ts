@@ -62,10 +62,10 @@ type AgentStatus = "available" | "running" | "needs-setup" | "unavailable" | "un
 
 const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url));
 // Persisted workspace state lives under `.data/` next to the plugin by default.
-// `NEXT_UI_DATA_DIR` relocates it — useful when running the prod server as a
+// `RLAB_DATA_DIR` relocates it — useful when running the prod server as a
 // service (point it at a writable data volume) and for isolating e2e runs.
-const WORKSPACE_STATE_DIR = process.env.NEXT_UI_DATA_DIR
-  ? (isAbsolute(process.env.NEXT_UI_DATA_DIR) ? process.env.NEXT_UI_DATA_DIR : resolve(process.cwd(), process.env.NEXT_UI_DATA_DIR))
+const WORKSPACE_STATE_DIR = process.env.RLAB_DATA_DIR
+  ? (isAbsolute(process.env.RLAB_DATA_DIR) ? process.env.RLAB_DATA_DIR : resolve(process.cwd(), process.env.RLAB_DATA_DIR))
   : join(PLUGIN_DIR, ".data");
 const WORKSPACE_STATE_FILE = join(WORKSPACE_STATE_DIR, "workspace-state.json");
 const WORKSPACE_STATE_LOCK_FILE = join(WORKSPACE_STATE_DIR, "workspace-state.lock");
@@ -1768,10 +1768,10 @@ export function cancelBackgroundRunRequestState(state: WorkspaceState, runId: st
   };
 }
 
-/** Demo conversations are seeded only in development or with NEXT_UI_DEMO=1; a
+/** Demo conversations are seeded only in development or with RLAB_DEMO=1; a
  *  production server starts with a clean, empty workspace. */
 function isDemoWorkspaceEnabled(): boolean {
-  return process.env.NEXT_UI_DEMO === "1" || process.env.NODE_ENV === "development";
+  return process.env.RLAB_DEMO === "1" || process.env.NODE_ENV === "development";
 }
 
 function readWorkspaceState(): WorkspaceState {

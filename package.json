@@ -1,17 +1,16 @@
 {
-  "name": "kanban",
+  "name": "rlab-workspace",
   "version": "0.2.0",
   "private": true,
-  "description": "Repository wrapper for next-ui — a local web workspace for running coding agents. The product lives in next-ui/.",
-  "homepage": "https://github.com/cline/kanban",
+  "description": "Repository wrapper for rlab — a local web workspace for running coding agents. The product lives in next-ui/.",
+  "homepage": "https://github.com/Fariarx/rlab",
   "bugs": {
-    "url": "https://github.com/cline/kanban/issues"
+    "url": "https://github.com/Fariarx/rlab/issues"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/cline/kanban"
+    "url": "https://github.com/Fariarx/rlab"
   },
-  "author": "Cline",
   "license": "Apache-2.0",
   "type": "module",
   "engines": {

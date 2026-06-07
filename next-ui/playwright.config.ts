@@ -24,8 +24,8 @@ export default defineConfig({
     // and isolate persisted state in a throwaway dir so e2e never touches the
     // developer's real `.data/` (and stays deterministic in CI).
     env: {
-      NEXT_UI_DEMO: "1",
-      NEXT_UI_DATA_DIR: ".e2e-data",
+      RLAB_DEMO: "1",
+      RLAB_DATA_DIR: ".e2e-data",
     },
   },
   projects: [

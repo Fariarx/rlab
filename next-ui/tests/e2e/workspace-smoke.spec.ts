@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 // Labels come from the default (Russian) locale in src/i18n/I18nProvider.tsx.
-// The web server for these e2e runs boots with NEXT_UI_DEMO=1 (see
+// The web server for these e2e runs boots with RLAB_DEMO=1 (see
 // playwright.config.ts), so the workspace is seeded with demo conversations.
 const L = {
   conversationList: "Список диалогов",

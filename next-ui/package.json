@@ -1,11 +1,20 @@
 {
-  "name": "@kanban/next-ui",
+  "name": "rlab",
   "version": "0.2.0",
-  "description": "Agent workspace — a local web UI for running coding agents (Claude, Codex, Gemini, …) with chat, git, browser preview, and worktrees.",
+  "description": "rlab — a local web workspace for running coding agents (Claude, Codex, Gemini, OpenCode) with chat, git, browser preview, and worktrees.",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/Fariarx/rlab",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Fariarx/rlab"
+  },
+  "bugs": {
+    "url": "https://github.com/Fariarx/rlab/issues"
+  },
   "private": false,
   "type": "module",
   "bin": {
-    "next-ui": "bin/next-ui.mjs"
+    "rlab": "bin/rlab.mjs"
   },
   "files": [
     "bin",
@@ -25,7 +34,7 @@
     "build": "tsc --noEmit && vite build",
     "preview": "cross-env NODE_ENV=production vite preview --host 0.0.0.0",
     "serve": "cross-env NODE_ENV=production vite preview --host 0.0.0.0",
-    "start": "node bin/next-ui.mjs",
+    "start": "node bin/rlab.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "biome lint src",
     "lint:fix": "biome lint --write src",

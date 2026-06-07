@@ -1,27 +1,32 @@
-# kanban
+# rlab
 
-This repository's product is **[next-ui](./next-ui)** — a local web workspace for
-running coding agents (Claude Code, Codex, Gemini, OpenCode) with chat, git,
-browser preview, and worktrees.
+**rlab** is a local web workspace for running coding agents (Claude Code, Codex,
+Gemini, OpenCode) with chat, git, browser preview, and worktrees.
 
-Everything lives in [`next-ui/`](./next-ui). The root only provides convenience
-scripts that delegate to it.
+The source lives in [`next-ui/`](./next-ui). The repository root only provides
+convenience scripts that delegate to it.
 
 ## Quick start
 
 ```bash
-npm run install:all   # installs next-ui dependencies
+npm run install:all   # install rlab dependencies
 npm run dev           # dev server  -> http://localhost:5187
 npm start             # production server -> http://0.0.0.0:4280
 ```
 
+…or run the published package directly:
+
+```bash
+npx rlab
+```
+
 See **[next-ui/README.md](./next-ui/README.md)** for full documentation:
-requirements, the production server, the demo-data flag (`NEXT_UI_DEMO`), data
-location (`NEXT_UI_DATA_DIR`), and how to run it as a service.
+requirements, the production server, the demo-data flag (`RLAB_DEMO`), data
+location (`RLAB_DATA_DIR`), and how to run it as a service.
 
 ## Root scripts
 
-| Script                  | Delegates to next-ui     |
+| Script                  | Delegates to rlab        |
 | ----------------------- | ------------------------ |
 | `npm run install:all`   | `npm install`            |
 | `npm run dev`           | `npm run dev`            |
