@@ -82,8 +82,15 @@ export function conversationProfile(conversation: ConversationSummary | null | u
   return normalizeAgentProfile(conversation?.profile, conversation?.agent ?? "claude-code");
 }
 
-function conversationCwd(state: WorkspaceState, id: string): string | undefined {
+/** The project's base working directory (ignores any worktree override). */
+function conversationBasePath(state: WorkspaceState, id: string): string | undefined {
   return state.projects.find((p) => p.conversations.some((c) => c.id === id))?.path;
+}
+
+/** The directory the agent/Git view actually operate in: an isolated worktree
+ *  when one is attached to the conversation, otherwise the project base path. */
+function conversationCwd(state: WorkspaceState, id: string): string | undefined {
+  return findConversation(state, id)?.worktreePath ?? conversationBasePath(state, id);
 }
 
 function patchConversation(state: WorkspaceState, id: string, patch: Partial<ConversationSummary>): WorkspaceState {
@@ -305,6 +312,8 @@ export interface Workspace {
   readonly reloadWorkspace: () => void;
   readonly find: (id: string) => ConversationSummary | null;
   readonly cwdOf: (id: string) => string | undefined;
+  readonly basePathOf: (id: string) => string | undefined;
+  readonly setWorktree: (id: string, worktreePath: string | undefined) => void;
   readonly loaded: boolean;
   readonly loading: boolean;
   readonly loadError: string | null;
@@ -672,6 +681,14 @@ class WorkspaceStore implements Workspace {
 
   cwdOf(id: string): string | undefined {
     return conversationCwd(this.state, id);
+  }
+
+  basePathOf(id: string): string | undefined {
+    return conversationBasePath(this.state, id);
+  }
+
+  setWorktree(id: string, worktreePath: string | undefined): void {
+    this.patchConv(id, { worktreePath });
   }
 
   select(id: string): void {

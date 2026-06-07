@@ -203,6 +203,9 @@ export interface ConversationSummary {
   readonly pinned?: boolean;
   readonly costUsd?: number;
   readonly usage?: RunUsage;
+  /** When set, this conversation's agent runs (and Git view) operate in an
+   *  isolated git worktree at this path instead of the project's base path. */
+  readonly worktreePath?: string;
 }
 
 export interface Project {

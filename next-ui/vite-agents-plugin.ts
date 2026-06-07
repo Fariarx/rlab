@@ -749,12 +749,27 @@ interface BrowserPreviewSession {
   activeTabId: string;
   nextTabId: number;
   nextEventId: number;
+  lastActiveAt: number;
 }
 
 const BROWSER_PREVIEW_VIEWPORT = { width: 1280, height: 720 } as const;
 const BROWSER_PREVIEW_EVENT_LIMIT = 80;
 const BROWSER_PREVIEW_SESSION_ID_PATTERN = /^[a-zA-Z0-9_.:-]{1,160}$/;
+// A session with no connected viewers (SSE clients) is closed after this idle
+// window so headless Chromium processes don't leak. Swept lazily on each
+// ensureBrowserPreviewSession() — no module-level timer (that would keep the
+// test process alive and hang CI; see AGENTS.md).
+const BROWSER_PREVIEW_IDLE_MS = 5 * 60_000;
 let browserPreviewSessions = new Map<string, BrowserPreviewSession>();
+
+function sweepIdleBrowserPreviewSessions(now: number): void {
+  for (const [id, session] of browserPreviewSessions) {
+    if (session.clients.size === 0 && now - session.lastActiveAt > BROWSER_PREVIEW_IDLE_MS) {
+      browserPreviewSessions.delete(id);
+      void session.browser.close().catch(() => undefined);
+    }
+  }
+}
 
 function normalizeBrowserPreviewSessionId(value: unknown): string {
   const raw = typeof value === "string" ? value.trim() : "";
@@ -1103,10 +1118,12 @@ function currentBrowserPreviewSession(sessionId: string): BrowserPreviewSession 
   if (!session.pages.has(session.activeTabId)) {
     session.activeTabId = session.pages.keys().next().value ?? "";
   }
+  session.lastActiveAt = Date.now();
   return session;
 }
 
 async function ensureBrowserPreviewSession(sessionId: string): Promise<BrowserPreviewSession> {
+  sweepIdleBrowserPreviewSessions(Date.now());
   const current = currentBrowserPreviewSession(sessionId);
   if (current) {
     return current;
@@ -1124,6 +1141,7 @@ async function ensureBrowserPreviewSession(sessionId: string): Promise<BrowserPr
     activeTabId: "",
     nextTabId: 1,
     nextEventId: 1,
+    lastActiveAt: Date.now(),
   };
   context.on("page", (page) => {
     const tabId = registerBrowserPreviewPage(session, page);
@@ -2358,7 +2376,13 @@ async function applyBrowserAction(action: BrowserActionPayload): Promise<{ reado
   if (action.type === "select-tab") {
     const selectedPage = browserPreviewPageFor(session, action.tabId);
     session.activeTabId = action.tabId;
-    emitBrowserPreviewEvent(session, { tabId: action.tabId, type: "tab.selected", label: "Tab selected" });
+    emitBrowserPreviewEvent(session, {
+      tabId: action.tabId,
+      type: "tab.selected",
+      label: "Tab selected",
+      url: selectedPage.url(),
+      title: await browserPreviewPageTitle(selectedPage),
+    });
     return { session, tabId: action.tabId, actionResult: await browserPreviewActionSuccessResult(selectedPage, action) };
   }
   const page = browserPreviewPageFor(session, action.tabId);
@@ -2939,6 +2963,84 @@ function sendGitStatusAfterMutation(cwd: string, res: ServerResponse): void {
   respondWithGitStatus(cwd, res);
 }
 
+function runGitP(cwd: string, args: readonly string[]): Promise<GitCommandResult> {
+  return new Promise((resolve) => runGit(cwd, args, resolve));
+}
+
+/** Creates an isolated git worktree off the current HEAD on a fresh branch. The
+ *  worktree dir lives in a sibling `<repo>.worktrees/` folder so it never shows
+ *  up as an untracked path inside the repo itself. */
+function handleGitWorktreeCreate(req: IncomingMessage, res: ServerResponse): void {
+  readJsonBody(req, res, (body) => {
+    void (async () => {
+      try {
+        const parsed = parseJsonObjectPayload(body, "Invalid git request payload.");
+        const cwd = typeof parsed.cwd === "string" ? parsed.cwd : "";
+        const cwdError = validateGitCwd(cwd);
+        if (cwdError) {
+          sendJson(res, 400, { error: cwdError });
+          return;
+        }
+        const leaf = `wt-${Date.now().toString(36)}`;
+        const branch = `kanban/${leaf}`;
+        const path = join(dirname(cwd), `${basename(cwd)}.worktrees`, leaf);
+        const result = await runGitP(cwd, ["worktree", "add", "-b", branch, path]);
+        if (!result.ok) {
+          sendJson(res, 500, { error: result.error });
+          return;
+        }
+        sendJson(res, 200, { path, branch });
+      } catch (error) {
+        sendJson(res, gitErrorStatus(error), { error: errorMessage(error) });
+      }
+    })();
+  });
+}
+
+/** Commits any pending work in the worktree, merges its branch into the base
+ *  repo's current branch, then removes the worktree and deletes the branch. */
+function handleGitWorktreeMerge(req: IncomingMessage, res: ServerResponse): void {
+  readJsonBody(req, res, (body) => {
+    void (async () => {
+      try {
+        const parsed = parseJsonObjectPayload(body, "Invalid git request payload.");
+        const base = typeof parsed.base === "string" ? parsed.base : "";
+        const worktreePath = typeof parsed.worktreePath === "string" ? parsed.worktreePath : "";
+        const baseError = validateGitCwd(base);
+        if (baseError) {
+          sendJson(res, 400, { error: baseError });
+          return;
+        }
+        const wtError = validateGitCwd(worktreePath);
+        if (wtError) {
+          sendJson(res, 400, { error: wtError });
+          return;
+        }
+        const branchResult = await runGitP(worktreePath, ["rev-parse", "--abbrev-ref", "HEAD"]);
+        if (!branchResult.ok) {
+          sendJson(res, 500, { error: branchResult.error });
+          return;
+        }
+        const branch = branchResult.stdout.trim();
+        // Stage + commit any pending work (a no-op commit just fails harmlessly).
+        await runGitP(worktreePath, ["add", "-A"]);
+        await runGitP(worktreePath, ["commit", "-m", "Kanban: worktree changes"]);
+        const mergeResult = await runGitP(base, ["merge", "--no-ff", "-m", `Kanban: merge ${branch}`, branch]);
+        if (!mergeResult.ok) {
+          // Leave the worktree intact so the user can resolve and retry.
+          sendJson(res, 409, { error: mergeResult.error });
+          return;
+        }
+        await runGitP(base, ["worktree", "remove", "--force", worktreePath]);
+        await runGitP(base, ["branch", "-D", branch]);
+        sendGitStatusAfterMutation(base, res);
+      } catch (error) {
+        sendJson(res, gitErrorStatus(error), { error: errorMessage(error) });
+      }
+    })();
+  });
+}
+
 function handleGitDiff(req: IncomingMessage, res: ServerResponse): void {
   readJsonBody(req, res, (body) => {
     try {
@@ -3379,20 +3481,6 @@ function asClaudeEffort(value: string | undefined): EffortLevel | undefined {
   return value && CLAUDE_EFFORT_LEVELS.has(value as EffortLevel) ? (value as EffortLevel) : undefined;
 }
 
-function asClaudePermissionMode(value: string | undefined): ClaudeQueryOptions["permissionMode"] | undefined {
-  switch (value) {
-    case "acceptEdits":
-    case "auto":
-    case "bypassPermissions":
-    case "default":
-    case "dontAsk":
-    case "plan":
-      return value;
-    default:
-      return undefined;
-  }
-}
-
 function codexPromptForMode(prompt: string, mode: string | undefined): string {
   return mode === "plan" ? `${CODEX_PLAN_PROMPT_PREFIX}${prompt}` : prompt;
 }
@@ -3514,7 +3602,9 @@ function claudePermissionModeForRequest(request: RunRequest): ClaudeQueryOptions
   if (request.accessMode === "read-only" || mode === "plan") {
     return "plan";
   }
-  return asClaudePermissionMode(mode) ?? "default";
+  // Unrestricted is the agent's "do anything" mode: bypass every permission gate
+  // so Claude runs tools without surfacing an approval prompt.
+  return "bypassPermissions";
 }
 
 function claudeToolsForRequest(request: RunRequest): ClaudeQueryOptions["tools"] {
@@ -3569,7 +3659,12 @@ export function buildClaudeRunArgs(request: RunArgsRequest): string[] {
   if (agentName) {
     args.push("--agent", agentName);
   }
-  args.push("--permission-mode", accessMode === "unrestricted" ? (asClaudePermissionMode(mode) ?? "acceptEdits") : "plan");
+  if (accessMode === "read-only" || mode === "plan") {
+    args.push("--permission-mode", "plan");
+  } else if (accessMode === "unrestricted") {
+    // The CLI's "do anything" flag — no permission prompts at all.
+    args.push("--dangerously-skip-permissions");
+  }
   return args;
 }
 
@@ -4306,13 +4401,20 @@ function createRunInputHandler(input: Record<string, unknown>, context: Paramete
   });
 }
 
-export function createRunApprovalHandler(send: (event: RunEvent) => void, scopeId?: string): CanUseTool {
+export function createRunApprovalHandler(send: (event: RunEvent) => void, scopeId?: string, autoApprove = false): CanUseTool {
   return (toolName, input, context) => {
     if (toolName === "AskUserQuestion") {
       const inputHandler = createRunInputHandler(input, context, send, scopeId);
       if (inputHandler) {
         return inputHandler;
       }
+    }
+
+    // Unrestricted "do anything" mode: allow every tool without surfacing an
+    // approval prompt. Genuine questions (AskUserQuestion above) still reach the
+    // user; only the permission gate is bypassed.
+    if (autoApprove) {
+      return Promise.resolve<PermissionResult>({ behavior: "allow", updatedInput: input, toolUseID: context.toolUseID });
     }
 
     return new Promise<PermissionResult>((resolve, reject) => {
@@ -6034,7 +6136,7 @@ async function runClaudeSdk(
     });
   }
   const translate = createClaudeStreamTranslator();
-  const canUseTool = createRunApprovalHandler(send, binding?.runId);
+  const canUseTool = createRunApprovalHandler(send, binding?.runId, request.accessMode === "unrestricted");
   const timeout = setTimeout(() => {
     timedOut = true;
     send({ type: "error", text: "Run timed out after 120s" });
@@ -6601,6 +6703,22 @@ function attach(server: ViteDevServer | PreviewServer): void {
       return;
     }
     handleGitPush(req, res);
+  });
+  server.middlewares.use("/api/git-worktree-create", (req, res) => {
+    if (req.method !== "POST") {
+      res.statusCode = 405;
+      res.end();
+      return;
+    }
+    handleGitWorktreeCreate(req, res);
+  });
+  server.middlewares.use("/api/git-worktree-merge", (req, res) => {
+    if (req.method !== "POST") {
+      res.statusCode = 405;
+      res.end();
+      return;
+    }
+    handleGitWorktreeMerge(req, res);
   });
   server.middlewares.use("/api/git-init", (req, res) => {
     if (req.method !== "POST") {

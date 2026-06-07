@@ -33,7 +33,7 @@ describe("workspace state", () => {
         telemetry: false,
       },
       agents: {
-        accessMode: "read-only",
+        accessMode: "unrestricted",
         defaultProfile: {
           agent: "claude-code",
           model: "default",

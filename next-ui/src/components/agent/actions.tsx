@@ -4,11 +4,12 @@ import CodeIcon from "@mui/icons-material/Code";
 import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
 import SearchIcon from "@mui/icons-material/Search";
 import TerminalIcon from "@mui/icons-material/Terminal";
-import { Box, CircularProgress, Collapse, Link, Stack, Typography } from "@mui/material";
+import { Box, CircularProgress, Collapse, Stack, Typography } from "@mui/material";
 import { type ReactNode, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import { normalizeAgentToolOutput } from "../../lib/agent-output";
 import { StatusDot } from "../ui";
+import { MessageLink } from "./parts";
 import { type CommandBlock, type RunState, type SearchBlock, type ToolBlock } from "./types";
 
 /* ------------------------------ Run indicator ------------------------------- */
@@ -233,9 +234,9 @@ export function SearchCard({ block }: { readonly block: SearchBlock }) {
           <Stack key={result.url} direction="row" spacing={1} sx={{ alignItems: "baseline" }}>
             <Box sx={{ width: 5, height: 5, borderRadius: "50%", mt: "7px", flex: "0 0 auto", backgroundColor: (t) => t.palette.status.info.main }} />
             <Box sx={{ minWidth: 0 }}>
-              <Link href={result.url} underline="hover" sx={{ fontSize: "0.8rem" }}>
-                {result.title}
-              </Link>
+              <Box sx={{ fontSize: "0.8rem" }}>
+                <MessageLink href={result.url}>{result.title}</MessageLink>
+              </Box>
               <Typography sx={{ ...metaSx, color: "text.secondary" }}>{result.url}</Typography>
             </Box>
           </Stack>

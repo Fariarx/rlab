@@ -1,7 +1,9 @@
 import AccountTreeIcon from "@mui/icons-material/AccountTree";
 import AddIcon from "@mui/icons-material/Add";
+import CallSplitIcon from "@mui/icons-material/CallSplit";
 import DescriptionIcon from "@mui/icons-material/Description";
 import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
+import MergeIcon from "@mui/icons-material/Merge";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import RemoveIcon from "@mui/icons-material/Remove";
 import { Alert, Box, Chip, CircularProgress, Collapse, Stack, Tab, Tabs, type Theme, Tooltip, Typography } from "@mui/material";
@@ -38,6 +40,19 @@ interface GitViewProps {
   readonly focusNonce?: number;
   /** Bumped to force a fresh `git status` fetch (e.g. after a revert). */
   readonly reloadSignal?: number;
+  /** Worktree controls (shown only in unrestricted mode). */
+  readonly worktree?: GitWorktreeControl;
+}
+
+/** Worktree workflow controls surfaced in the Git tab in unrestricted mode:
+ *  move the conversation's work into an isolated worktree, then merge it back
+ *  into the base repo (deleting the worktree). */
+export interface GitWorktreeControl {
+  readonly active: boolean;
+  readonly inWorktree: boolean;
+  readonly busy: boolean;
+  readonly onCreate: () => void;
+  readonly onMerge: () => void;
 }
 
 type GitApiErrorPayload = {
@@ -376,7 +391,7 @@ function GitFileDiffCard({
   );
 }
 
-export function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnstagedStatsChange, bottomInset = 0, focusPath, focusNonce = 0, reloadSignal = 0 }: GitViewProps) {
+export function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnstagedStatsChange, bottomInset = 0, focusPath, focusNonce = 0, reloadSignal = 0, worktree }: GitViewProps) {
   const { t } = useI18n();
   const [status, setStatus] = useState<GitStatusPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -518,6 +533,38 @@ export function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnst
             </span>
           </Tooltip>
         </Stack>
+
+        {worktree?.active && cwd && (
+          <Stack
+            direction="row"
+            spacing={1}
+            sx={{
+              alignItems: "center",
+              justifyContent: "space-between",
+              px: 1.5,
+              py: 0.75,
+              flex: "0 0 auto",
+              borderBottom: (theme) => `1px solid ${theme.custom.borders.subtle}`,
+              backgroundColor: (theme) => (worktree.inWorktree ? theme.palette.status.running.soft : theme.custom.surfaces.s1),
+            }}
+          >
+            <Stack direction="row" spacing={0.75} sx={{ alignItems: "center", minWidth: 0 }}>
+              <CallSplitIcon sx={{ fontSize: 15, flexShrink: 0, color: (theme) => (worktree.inWorktree ? theme.palette.status.running.main : theme.palette.text.secondary) }} />
+              <Typography noWrap sx={{ fontSize: "0.74rem", color: "text.secondary" }}>
+                {worktree.inWorktree ? t("worktreeActive") : t("worktreeIdle")}
+              </Typography>
+            </Stack>
+            {worktree.inWorktree ? (
+              <Button size="small" variant="contained" disabled={worktree.busy} onClick={worktree.onMerge} startIcon={<MergeIcon sx={{ fontSize: 15 }} />}>
+                {t("worktreeMerge")}
+              </Button>
+            ) : (
+              <Button size="small" variant="subtle" disabled={worktree.busy} onClick={worktree.onCreate} startIcon={<CallSplitIcon sx={{ fontSize: 15 }} />}>
+                {t("worktreeCreate")}
+              </Button>
+            )}
+          </Stack>
+        )}
 
         {status && (
           <Tabs

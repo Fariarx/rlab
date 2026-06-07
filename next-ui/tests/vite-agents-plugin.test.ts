@@ -500,8 +500,7 @@ Built-in agents:
       "--include-partial-messages",
       "--agent",
       "Goal",
-      "--permission-mode",
-      "acceptEdits",
+      "--dangerously-skip-permissions",
     ]);
 
     expect(
@@ -731,7 +730,7 @@ Built-in agents:
   });
 
   it("maps agent access mode into CLI safety flags", () => {
-    expect(buildClaudeRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" })).toContain("acceptEdits");
+    expect(buildClaudeRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" })).toContain("--dangerously-skip-permissions");
     expect(buildClaudeRunArgs({ prompt: "hello", model: "opus", reasoning: "max", mode: "plan", accessMode: "unrestricted" })).toEqual([
       "-p",
       "hello",
@@ -2512,7 +2511,7 @@ Built-in agents:
       allowedTools: ["Read", "Glob", "Grep", "LS"],
       canUseTool,
       cwd: "C:/repo",
-      permissionMode: "default",
+      permissionMode: "bypassPermissions",
       systemPrompt: expect.objectContaining({
         append: expect.stringContaining("AskUserQuestion"),
       }),

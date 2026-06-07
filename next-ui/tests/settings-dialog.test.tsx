@@ -224,11 +224,12 @@ describe("SettingsDialog agent configuration", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Без ограничений" }));
+    // Default is unrestricted, so toggling to read-only is the change that fires.
+    fireEvent.click(screen.getByRole("button", { name: "Только чтение" }));
 
     expect(onSettingsChange).toHaveBeenCalledWith({
       agents: {
-        accessMode: "unrestricted",
+        accessMode: "read-only",
       },
     });
   });

@@ -222,6 +222,26 @@ describe("BrowserPreview", () => {
     expect(screen.getByRole("tab", { name: "Two" })).toHaveAttribute("aria-selected", "true");
   });
 
+  it("hydrates existing Playwright tabs even when the bridge snapshot has no latest event", async () => {
+    const tabs = [
+      { id: "tab-1", url: "http://localhost:3000/one", title: "One", active: false },
+      { id: "tab-2", url: "http://localhost:3000/two", title: "Two", active: true },
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json(browserSnapshot({ activeTabId: "tab-2", url: "http://localhost:3000/two", title: "Two", tabs })),
+      ),
+    );
+
+    renderWithTheme(<BrowserPreview sessionId="test-session" active />);
+
+    expect(await screen.findByRole("tab", { name: "Two" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "One" })).toHaveAttribute("aria-selected", "false");
+    expect(screen.getByTitle("Живой просмотр страницы")).toHaveAttribute("src", "http://localhost:3000/two");
+    expect(screen.getByLabelText("URL для просмотра")).toHaveValue("http://localhost:3000/two");
+  });
+
   it("shows live browser activity events and the last agent click marker", async () => {
     MockEventSource.instances = [];
     vi.stubGlobal("EventSource", MockEventSource);

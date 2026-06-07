@@ -1,4 +1,5 @@
 import AdsClickIcon from "@mui/icons-material/AdsClick";
+import LanguageIcon from "@mui/icons-material/Language";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import ArrowForwardIcon from "@mui/icons-material/ArrowForward";
 import OpenInBrowserIcon from "@mui/icons-material/OpenInBrowser";
@@ -114,6 +115,9 @@ interface BrowserPreviewProps {
   readonly active: boolean;
   readonly onSendAnnotation?: (message: string) => void;
   readonly bottomInset?: number;
+  /** External request to open a URL (e.g. from a chat link's "open in preview").
+   *  The nonce changes per request so re-opening the same URL re-triggers. */
+  readonly openRequest?: { readonly url: string; readonly nonce: number };
 }
 
 interface BrowserSyncRequest {
@@ -566,6 +570,37 @@ function browserTabLabel(tab: BrowserTab): string {
   }
 }
 
+function tabHost(url: string): string {
+  if (!url || url === "about:blank") {
+    return "";
+  }
+  try {
+    return new URL(url).host;
+  } catch {
+    return "";
+  }
+}
+
+/** A tab favicon with a graceful globe fallback (offline / blocked / blank). */
+function PreviewTabFavicon({ url }: { readonly url: string }) {
+  const [failed, setFailed] = useState(false);
+  const host = tabHost(url);
+  if (!host || failed) {
+    return <LanguageIcon sx={{ fontSize: 13, color: "text.tertiary", flex: "0 0 auto" }} />;
+  }
+  return (
+    <Box
+      component="img"
+      src={`https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&sz=32`}
+      alt=""
+      width={13}
+      height={13}
+      onError={() => setFailed(true)}
+      sx={{ flex: "0 0 auto", borderRadius: "2px", display: "block" }}
+    />
+  );
+}
+
 function liveFrameDocument(frame: HTMLIFrameElement | null): Document | null {
   if (!frame?.contentWindow) {
     return null;
@@ -814,20 +849,23 @@ function replayBrowserActivityEvent(frame: HTMLIFrameElement | null, event: Brow
     view.eval(event.script);
     return true;
   }
-  return true;
+  // A replayable event reached here only if it was missing its payload (e.g. a
+  // click with neither target nor point) — report it as not replayed.
+  return false;
 }
 
 function isReplayableBrowserActivityEvent(event: BrowserActivityEvent): boolean {
   return event.type === "action.click" || event.type === "action.scroll" || event.type === "action.type" || event.type === "action.press" || event.type === "action.eval";
 }
 
-export function BrowserPreview({ sessionId, active, onSendAnnotation, bottomInset = 0 }: BrowserPreviewProps) {
+export function BrowserPreview({ sessionId, active, onSendAnnotation, bottomInset = 0, openRequest }: BrowserPreviewProps) {
   const { t } = useI18n();
   const { toast } = useToast();
   const frameRef = useRef<HTMLIFrameElement | null>(null);
   const [url, setUrl] = useState("");
   const [liveUrl, setLiveUrl] = useState<string | null>(null);
   const liveUrlRef = useRef<string | null>(null);
+  const userLiveNavigationStartedRef = useRef(false);
   const [frameKey, setFrameKey] = useState(0);
   const [mode, setMode] = useState<PreviewMode>("interact");
   const [snapshot, setSnapshot] = useState<BrowserSnapshot | null>(null);
@@ -918,11 +956,13 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, bottomInse
     let canceled = false;
     void loadBrowserState(sessionId, t("browserPreviewInvalidResponse"))
       .then((next) => {
-        if (canceled || next === null || !next.latestEvent) {
+        if (canceled || next === null) {
           return;
         }
         applySnapshot(next);
-        adoptBrowserUrl(next.url);
+        if (!userLiveNavigationStartedRef.current) {
+          adoptBrowserUrl(next.url);
+        }
         setMirrorStatus("synced");
         setError(null);
       })
@@ -944,40 +984,76 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, bottomInse
       setEventStreamStatus("idle");
       return;
     }
+    // Generation guard: events from a previous sessionId's stream must never
+    // mutate the current session's state if a stale packet arrives mid-teardown.
+    let alive = true;
     const source = new EventSource(`/api/browser/events?sessionId=${encodeURIComponent(sessionId)}`);
     setEventStreamStatus("connected");
     const handleBrowserEvent = (event: Event) => {
+      if (!alive) {
+        return;
+      }
       const message = event as MessageEvent<string>;
+      let parsed: unknown;
       try {
-        const parsed = JSON.parse(message.data) as unknown;
-        if (isBrowserActivityEvent(parsed) && parsed.sessionId === sessionId) {
-          setActivityEvents((current) => appendBrowserActivityEvent(current, parsed));
-          if (isReplayableBrowserActivityEvent(parsed)) {
-            setLiveReplayBlocked(!replayBrowserActivityEvent(frameRef.current, parsed));
-          }
-          if (parsed.url && (parsed.type === "navigation.started" || parsed.type === "navigation.done" || parsed.type === "tab.selected")) {
-            setLiveReplayBlocked(false);
-            adoptBrowserUrl(parsed.url);
-          }
-          if (parsed.url || parsed.title) {
-            setSnapshot((current) =>
-              current
-                ? {
-                    ...current,
-                    url: parsed.url ?? current.url,
-                    title: parsed.title ?? current.title,
-                  }
-                : current,
-            );
-          }
-        }
+        parsed = JSON.parse(message.data) as unknown;
       } catch {
-        setEventStreamStatus("error");
+        // A single malformed frame must not tear down the whole stream; drop it
+        // and keep listening (the connection itself is still healthy).
+        return;
+      }
+      if (!isBrowserActivityEvent(parsed) || parsed.sessionId !== sessionId) {
+        return;
+      }
+      setActivityEvents((current) => appendBrowserActivityEvent(current, parsed));
+      if (isReplayableBrowserActivityEvent(parsed)) {
+        // Replaying into the live iframe can throw on cross-origin frames or
+        // missing DOM APIs; treat any failure as "blocked" without tearing the
+        // event stream down.
+        let replayed = false;
+        try {
+          replayed = replayBrowserActivityEvent(frameRef.current, parsed);
+        } catch {
+          replayed = false;
+        }
+        setLiveReplayBlocked(!replayed);
+      }
+      if (parsed.url && (parsed.type === "navigation.started" || parsed.type === "navigation.done" || parsed.type === "tab.selected")) {
+        setLiveReplayBlocked(false);
+        adoptBrowserUrl(parsed.url);
+      }
+      if (parsed.url || parsed.title) {
+        setSnapshot((current) =>
+          current
+            ? {
+                ...current,
+                url: parsed.url ?? current.url,
+                title: parsed.title ?? current.title,
+              }
+            : current,
+        );
+      }
+      // The agent (or a window.open in the page) can change the set of tabs; the
+      // event itself carries no tab list, so re-pull the snapshot to refresh the
+      // strip and active tab.
+      if (parsed.type === "tab.created" || parsed.type === "tab.closed" || parsed.type === "tab.selected") {
+        void loadBrowserState(sessionId, t("browserPreviewInvalidResponse"))
+          .then((next) => {
+            if (alive && next) {
+              applySnapshot(next);
+            }
+          })
+          .catch(() => undefined);
       }
     };
     source.addEventListener("browser", handleBrowserEvent);
-    source.onerror = () => setEventStreamStatus("error");
+    source.onerror = () => {
+      if (alive) {
+        setEventStreamStatus("error");
+      }
+    };
     return () => {
+      alive = false;
       source.removeEventListener("browser", handleBrowserEvent);
       source.close();
     };
@@ -998,10 +1074,10 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, bottomInse
     }
   };
 
-  const open = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
+  const openTarget = (rawUrl: string) => {
     try {
-      const normalizedUrl = normalizeBrowserPreviewUrl(url);
+      const normalizedUrl = normalizeBrowserPreviewUrl(rawUrl);
+      userLiveNavigationStartedRef.current = true;
       liveUrlRef.current = normalizedUrl;
       setLiveUrl(normalizedUrl);
       setUrl(normalizedUrl === browserPreviewDefaultUrl ? "" : normalizedUrl);
@@ -1019,6 +1095,23 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, bottomInse
     }
   };
 
+  const open = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    openTarget(url);
+  };
+
+  // Open a URL requested from outside (a chat link's "open in preview"). Kept in
+  // a ref so the effect can fire on the request nonce alone without re-running on
+  // every render that recreates openTarget.
+  const openTargetRef = useRef(openTarget);
+  openTargetRef.current = openTarget;
+  useEffect(() => {
+    if (openRequest?.url) {
+      openTargetRef.current(openRequest.url);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openRequest?.nonce]);
+
   const refreshLivePreview = () => {
     if (!liveUrl) {
       return;
@@ -1035,13 +1128,16 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, bottomInse
     }
     setFrameHistory({ entries: frameHistory.entries, index: nextIndex });
     liveUrlRef.current = nextUrl;
+    userLiveNavigationStartedRef.current = true;
     setLiveUrl(nextUrl);
     setUrl(nextUrl === browserPreviewDefaultUrl ? "" : nextUrl);
     setFrameKey((current) => current + 1);
     setError(null);
-      setMirrorStatus("idle");
-      setLiveReplayBlocked(false);
-      clearSelection();
+    setLiveReplayBlocked(false);
+    clearSelection();
+    // Keep the Playwright mirror aligned with the page the iframe just navigated
+    // to, otherwise subsequent agent actions target a stale DOM.
+    void syncMirror(nextUrl);
   };
 
   const clearSelection = () => {
@@ -1085,6 +1181,7 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, bottomInse
         t("browserPreviewInvalidResponse"),
       );
       applySnapshot(next);
+      userLiveNavigationStartedRef.current = true;
       liveUrlRef.current = tab.url;
       setLiveUrl(tab.url);
       setUrl(tab.url === browserPreviewDefaultUrl ? "" : tab.url);
@@ -1336,40 +1433,69 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, bottomInse
           sx={{
             flex: "0 0 auto",
             display: "flex",
-            alignItems: "center",
+            alignItems: "flex-end",
             gap: 0.5,
             px: 1,
-            py: 0.5,
+            pt: 0.75,
             overflowX: "auto",
             borderBottom: (theme) => `1px solid ${theme.custom.borders.subtle}`,
             backgroundColor: (theme) => theme.custom.surfaces.s1,
+            // Hide the horizontal scrollbar while keeping the row scrollable.
+            scrollbarWidth: "none",
+            "&::-webkit-scrollbar": { display: "none" },
           }}
         >
-          {tabs.map((tab) => (
-            <Button
-              key={tab.id}
-              role="tab"
-              aria-selected={tab.id === activeTabId}
-              variant={tab.id === activeTabId ? "contained" : "outlined"}
-              size="small"
-              onClick={() => void selectMirrorTab(tab)}
-              sx={{
-                minWidth: 0,
-                maxWidth: 220,
-                height: 26,
-                px: 1,
-                textTransform: "none",
-                fontFamily: (theme) => theme.custom.fonts.mono,
-                fontSize: "0.68rem",
-                justifyContent: "flex-start",
-                overflow: "hidden",
-                whiteSpace: "nowrap",
-                textOverflow: "ellipsis",
-              }}
-            >
-              {browserTabLabel(tab)}
-            </Button>
-          ))}
+          {tabs.map((tab) => {
+            const selected = tab.id === activeTabId;
+            return (
+              <Box
+                key={tab.id}
+                role="tab"
+                aria-selected={selected}
+                tabIndex={0}
+                title={tab.url}
+                onClick={() => void selectMirrorTab(tab)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    void selectMirrorTab(tab);
+                  }
+                }}
+                sx={{
+                  position: "relative",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 0.625,
+                  minWidth: 0,
+                  maxWidth: 200,
+                  height: 30,
+                  pl: 1,
+                  pr: 1.25,
+                  cursor: "pointer",
+                  borderTopLeftRadius: (theme) => `${theme.custom.radii.md}px`,
+                  borderTopRightRadius: (theme) => `${theme.custom.radii.md}px`,
+                  border: (theme) => `1px solid ${theme.custom.borders.subtle}`,
+                  borderBottom: "none",
+                  // The selected tab sits flush over the bottom divider, the rest
+                  // recede a row below it.
+                  mb: selected ? "-1px" : 0,
+                  backgroundColor: (theme) => (selected ? theme.custom.surfaces.s2 : theme.custom.surfaces.s1),
+                  color: (theme) => (selected ? theme.palette.text.primary : theme.palette.text.secondary),
+                  transition: "background-color 120ms ease, color 120ms ease",
+                  "&:hover": { backgroundColor: (theme) => (selected ? theme.custom.surfaces.s2 : theme.custom.surfaces.s3), color: "text.primary" },
+                  "&:focus-visible": { outline: (theme) => `2px solid ${theme.custom.borders.focus}`, outlineOffset: -2 },
+                  "&::after": selected
+                    ? { content: '""', position: "absolute", left: 0, right: 0, top: 0, height: 2, backgroundColor: (theme) => theme.palette.status.running.main, borderTopLeftRadius: "inherit", borderTopRightRadius: "inherit" }
+                    : undefined,
+                }}
+              >
+                <PreviewTabFavicon url={tab.url} />
+                <Box component="span" sx={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.72rem" }}>
+                  {browserTabLabel(tab)}
+                </Box>
+              </Box>
+            );
+          })}
         </Box>
       )}
 

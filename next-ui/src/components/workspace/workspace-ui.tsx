@@ -10,12 +10,10 @@ import { createContext, type ReactNode, useContext } from "react";
  * components fall back to inert behavior (e.g. a link stays a plain link).
  */
 export interface WorkspaceUiApi {
-  /** Switch to the Preview tab and load the given URL in its iframe. */
+  /** Switch to the Preview (browser) tab and open the given URL there. */
   readonly openPreview: (url: string) => void;
   /** Switch to the Git tab and focus/expand the diff for the given file path. */
   readonly openGitFile: (file: string) => void;
-  /** Discard working-tree changes for a file (git restore back to HEAD). */
-  readonly revertFile: (file: string) => void;
 }
 
 const WorkspaceUiContext = createContext<WorkspaceUiApi | null>(null);

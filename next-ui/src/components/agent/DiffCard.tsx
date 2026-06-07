@@ -1,28 +1,13 @@
-import AccountTreeIcon from "@mui/icons-material/AccountTree";
 import DescriptionIcon from "@mui/icons-material/Description";
 import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
-import UndoIcon from "@mui/icons-material/Undo";
 import { Box, Collapse, Stack, Typography } from "@mui/material";
 import { useState } from "react";
-import { useI18n } from "../../i18n/I18nProvider";
-import { IconButton, Tooltip } from "../ui";
 import { type DiffBlock } from "./types";
 
 const signPrefix = { add: "+", del: "-", ctx: " " } as const;
 
-/** DiffCard — a file edit with +/- counts and a collapsible hunk preview. When
- *  `onRevert`/`onOpenInGit` are provided the header gains inline actions (used
- *  for diffs surfaced directly under an agent message). */
-export function DiffCard({
-  block,
-  onRevert,
-  onOpenInGit,
-}: {
-  readonly block: DiffBlock;
-  readonly onRevert?: () => void;
-  readonly onOpenInGit?: () => void;
-}) {
-  const { t } = useI18n();
+/** DiffCard — a file edit with +/- counts and a collapsible hunk preview. */
+export function DiffCard({ block }: { readonly block: DiffBlock }) {
   const [open, setOpen] = useState(true);
 
   return (
@@ -50,24 +35,6 @@ export function DiffCard({
         <Typography component="span" sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.72rem", color: (t) => t.palette.status.error.main }}>
           −{block.deletions}
         </Typography>
-        {(onRevert || onOpenInGit) && (
-          <Stack direction="row" spacing={0.25} sx={{ flex: "0 0 auto" }} onClick={(event) => event.stopPropagation()}>
-            {onOpenInGit && (
-              <Tooltip title={t("diffOpenInGit")}>
-                <IconButton aria-label={t("diffOpenInGit")} onClick={onOpenInGit} sx={{ p: 0.5 }}>
-                  <AccountTreeIcon sx={{ fontSize: 15 }} />
-                </IconButton>
-              </Tooltip>
-            )}
-            {onRevert && (
-              <Tooltip title={t("diffRevert")}>
-                <IconButton aria-label={t("diffRevert")} onClick={onRevert} sx={{ p: 0.5 }}>
-                  <UndoIcon sx={{ fontSize: 15 }} />
-                </IconButton>
-              </Tooltip>
-            )}
-          </Stack>
-        )}
         <KeyboardArrowDownIcon sx={{ fontSize: 18, color: "text.secondary", transition: "transform 180ms ease", transform: open ? "rotate(180deg)" : "none" }} />
       </Stack>
       <Collapse in={open} unmountOnExit>

@@ -4,6 +4,7 @@ import AttachFileIcon from "@mui/icons-material/AttachFile";
 import ChatBubbleOutlineIcon from "@mui/icons-material/ChatOutlined";
 import CreateNewFolderIcon from "@mui/icons-material/CreateNewFolder";
 import FolderOutlinedIcon from "@mui/icons-material/FolderOutlined";
+import InsertDriveFileOutlinedIcon from "@mui/icons-material/InsertDriveFileOutlined";
 import MenuIcon from "@mui/icons-material/Menu";
 import MenuOpenIcon from "@mui/icons-material/MenuOpen";
 import OpenInBrowserIcon from "@mui/icons-material/OpenInBrowser";
@@ -28,6 +29,7 @@ import {
 } from "@mui/material";
 import { type DragEvent, type MouseEvent as ReactMouseEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { I18nProvider, useI18n } from "../../i18n/I18nProvider";
+import { normalizeExternalUrl } from "../../lib/external-url";
 import { type HashRoute } from "../../lib/use-hash-route";
 import {
   type AgentProfile,
@@ -66,14 +68,41 @@ import { CommandPalette, type CommandPaletteItem } from "./CommandPalette";
 import { CreateProjectDialog } from "./CreateProjectDialog";
 import { BrowserPreview } from "./BrowserPreview";
 import { type DiffCommentApi, GitView } from "./GitPanel";
+import { ResourcesPanel } from "./ResourcesPanel";
 import { TerminalView } from "./TerminalView";
+import { WorkspaceUiProvider, type WorkspaceUiApi } from "./workspace-ui";
 import { DEFAULT_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, normalizeSidebarWidth } from "./app-settings";
 import { conversationProfile, type Workspace, useWorkspace } from "./use-workspace";
 
 const COMPOSER_DRAFT_SAVE_DELAY_MS = 350;
 const EMPTY_COMPOSER_DRAFT: ComposerDraft = { text: "", attachments: [] };
 
-type WorkspaceView = "chat" | "git" | "preview" | "terminal";
+type WorkspaceView = "chat" | "git" | "resources" | "preview" | "terminal";
+
+async function createWorktree(cwd: string): Promise<{ readonly path: string; readonly branch: string }> {
+  const response = await fetch("/api/git-worktree-create", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cwd }),
+  });
+  const payload = (await response.json().catch(() => ({}))) as { path?: string; branch?: string; error?: string };
+  if (!response.ok || !payload.path) {
+    throw new Error(payload.error ?? `Worktree create failed (${response.status})`);
+  }
+  return { path: payload.path, branch: payload.branch ?? "" };
+}
+
+async function mergeWorktree(base: string, worktreePath: string): Promise<void> {
+  const response = await fetch("/api/git-worktree-merge", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ base, worktreePath }),
+  });
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => ({}))) as { error?: string };
+    throw new Error(payload.error ?? `Worktree merge failed (${response.status})`);
+  }
+}
 
 // The sidebar title bar and the chat pane header share one fixed height so the
 // two columns line up across the top.
@@ -219,6 +248,14 @@ export function WorkspacePageView({
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [view, setView] = useState<WorkspaceView>("chat");
+  // A URL requested from a chat link's "open in preview"; handed to BrowserPreview
+  // via a nonce so re-opening the same link re-triggers the load.
+  const [browserOpenRequest, setBrowserOpenRequest] = useState<{ readonly url: string; readonly nonce: number }>({ url: "", nonce: 0 });
+  // External "open in Git" target + a nonce so re-clicking the same file re-jumps.
+  const [gitFocus, setGitFocus] = useState<{ readonly path: string; readonly nonce: number }>({ path: "", nonce: 0 });
+  // Bumped to force the Git view to re-fetch status (after a worktree op).
+  const [gitReloadSignal, setGitReloadSignal] = useState(0);
+  const [worktreeBusy, setWorktreeBusy] = useState(false);
   // Unstaged line totals for the header Git-tab badge, reported by the Git view.
   const [gitUnstaged, setGitUnstaged] = useState<{ readonly additions: number; readonly deletions: number }>({ additions: 0, deletions: 0 });
   // Height of the composer's floating tags row; the thread/Git content reserves
@@ -277,10 +314,64 @@ export function WorkspacePageView({
     ws.sendMessage(ws.selectedId, message);
     showView("chat");
   };
+  // Workspace navigation handed to deeply nested chat components (markdown links,
+  // resource rows) through context — see workspace-ui.tsx.
+  const uiApi = useMemo<WorkspaceUiApi>(
+    () => ({
+      openPreview: (url: string) => {
+        // Bare-domain links (vitest.dev/api) must be upgraded to an absolute URL
+        // before the browser preview, which only accepts http(s)/about:blank.
+        const target = normalizeExternalUrl(url) ?? url;
+        setBrowserOpenRequest((prev) => ({ url: target, nonce: prev.nonce + 1 }));
+        setView("preview");
+      },
+      openGitFile: (file: string) => {
+        setGitFocus((prev) => ({ path: file, nonce: prev.nonce + 1 }));
+        setView("git");
+      },
+    }),
+    [],
+  );
   const draftProject = composingNew?.projectId ? ws.projects.find((p) => p.id === composingNew.projectId) ?? null : null;
   const activeCwd = composingNew ? draftProject?.path : selectedCwd;
   const headerTitle = composingNew ? t("newChat") : selected?.title ?? t("noConversation");
   const accessMode = ws.settings.agents.accessMode;
+  const selectedBasePath = ws.basePathOf(ws.selectedId);
+  // Worktree controls for the Git tab. Only in unrestricted mode, only for a
+  // real project conversation (a base repo path exists).
+  const worktreeApi = selected && selectedBasePath
+    ? {
+        active: accessMode === "unrestricted",
+        inWorktree: Boolean(selected.worktreePath),
+        busy: worktreeBusy,
+        onCreate: () => {
+          setWorktreeBusy(true);
+          createWorktree(selectedBasePath)
+            .then(({ path }) => {
+              ws.setWorktree(ws.selectedId, path);
+              setGitReloadSignal((value) => value + 1);
+              toast({ message: t("worktreeCreatedToast"), severity: "success", duration: 2500 });
+            })
+            .catch((error) => toast({ message: error instanceof Error ? error.message : String(error), severity: "error", duration: 3500 }))
+            .finally(() => setWorktreeBusy(false));
+        },
+        onMerge: () => {
+          const worktreePath = selected.worktreePath;
+          if (!worktreePath) {
+            return;
+          }
+          setWorktreeBusy(true);
+          mergeWorktree(selectedBasePath, worktreePath)
+            .then(() => {
+              ws.setWorktree(ws.selectedId, undefined);
+              setGitReloadSignal((value) => value + 1);
+              toast({ message: t("worktreeMergedToast"), severity: "success", duration: 2500 });
+            })
+            .catch((error) => toast({ message: error instanceof Error ? error.message : String(error), severity: "error", duration: 4000 }))
+            .finally(() => setWorktreeBusy(false));
+        },
+      }
+    : undefined;
   const mode = ws.settings.appearance.theme;
   const routeKind = route?.kind;
   const routeProjectId = route?.kind === "project" ? route.projectId : undefined;
@@ -803,6 +894,7 @@ export function WorkspacePageView({
   );
 
   return (
+    <WorkspaceUiProvider value={uiApi}>
     <Box sx={{ height: "100dvh", display: "flex", overflow: "hidden", bgcolor: "background.default" }}>
       <Box
         ref={sidebarShellRef}
@@ -973,6 +1065,10 @@ export function WorkspacePageView({
                     </Box>
                   )}
                 </ToggleButton>
+                <ToggleButton value="resources" aria-label={t("resourcesTab")}>
+                  <InsertDriveFileOutlinedIcon sx={{ fontSize: 15 }} />
+                  <Box component="span" sx={{ display: { xs: "none", sm: "inline" } }}>{t("resourcesTab")}</Box>
+                </ToggleButton>
                 <ToggleButton value="preview" aria-label={t("previewTab")}>
                   <OpenInBrowserIcon sx={{ fontSize: 15 }} />
                   <Box component="span" sx={{ display: { xs: "none", sm: "inline" } }}>{t("previewTab")}</Box>
@@ -1073,10 +1169,22 @@ export function WorkspacePageView({
                   active={view === "git"}
                   onUnstagedStatsChange={setGitUnstaged}
                   bottomInset={contentBottomInset}
+                  focusPath={gitFocus.path}
+                  focusNonce={gitFocus.nonce}
+                  reloadSignal={gitReloadSignal}
+                  worktree={worktreeApi}
                 />
               </Box>
+              {/* Mounted only while active: it derives purely from the thread
+                  (no scroll/expanded state to preserve), and keeping it mounted
+                  would duplicate file/link text into the hidden DOM. */}
+              {view === "resources" && (
+                <Box sx={{ position: "absolute", inset: 0 }}>
+                  <ResourcesPanel messages={messages} bottomInset={contentBottomInset} />
+                </Box>
+              )}
               <Box sx={{ position: "absolute", inset: 0, display: view === "preview" ? "block" : "none" }}>
-                {selected ? <BrowserPreview sessionId={selected.id} active={view === "preview"} onSendAnnotation={sendBrowserAnnotation} /> : null}
+                {selected ? <BrowserPreview sessionId={selected.id} active={view === "preview"} onSendAnnotation={sendBrowserAnnotation} openRequest={browserOpenRequest} /> : null}
               </Box>
               {/* Keyed by folder so each project's terminal keeps its own scrollback. */}
               {showTerminal && (
@@ -1186,5 +1294,6 @@ export function WorkspacePageView({
         </DialogActions>
       </Dialog>
     </Box>
+    </WorkspaceUiProvider>
   );
 }

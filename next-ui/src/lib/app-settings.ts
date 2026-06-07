@@ -60,7 +60,10 @@ export const defaultAppSettings: AppSettings = {
     telemetry: false,
   },
   agents: {
-    accessMode: "read-only",
+    // Default to unrestricted: each agent receives its own "do anything" CLI flag
+    // (Claude: bypassPermissions, codex: --dangerously-bypass-approvals-and-sandbox,
+    // amp: --dangerously-allow-all, gemini/qwen: yolo, cursor: --force).
+    accessMode: "unrestricted",
     defaultProfile: DEFAULT_PROFILE,
   },
 };

@@ -1,17 +1,86 @@
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import ArrowForwardIcon from "@mui/icons-material/ArrowForward";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
+import OpenInNewIcon from "@mui/icons-material/OpenInNew";
 import RefreshIcon from "@mui/icons-material/Refresh";
+import VisibilityOutlinedIcon from "@mui/icons-material/VisibilityOutlined";
 import { Box, Stack, Typography } from "@mui/material";
 import { styled } from "@mui/material/styles";
-import { type ReactNode } from "react";
+import { type MouseEvent as ReactMouseEvent, type ReactNode, useState } from "react";
 import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useI18n } from "../../i18n/I18nProvider";
+import { normalizeExternalUrl } from "../../lib/external-url";
 import { type StatusKey } from "../../theme/tokens";
-import { Button, IconButton, StatusDot } from "../ui";
+import { useWorkspaceUi } from "../workspace/workspace-ui";
+import { Button, IconButton, Menu, MenuItem, StatusDot } from "../ui";
 import { blink, bounce } from "./anim";
 import { type SuggestedActionIconKey } from "./types";
+
+const linkSx = {
+  color: "primary.main",
+  textDecorationColor: "currentColor",
+  textUnderlineOffset: 3,
+  cursor: "pointer",
+  "&:hover": { color: "primary.light" },
+} as const;
+
+/**
+ * A link inside agent/user markdown. Clicking opens a small menu offering either
+ * the in-app Preview (browser) tab or the real external link. Outside the
+ * workspace (kit showcase, isolated tests) or for non-http targets it degrades to
+ * a plain link that opens in a new tab.
+ */
+export function MessageLink({ href, children }: { readonly href?: string; readonly children: ReactNode }) {
+  const ui = useWorkspaceUi();
+  const { t } = useI18n();
+  const [anchor, setAnchor] = useState<HTMLElement | null>(null);
+  const target = normalizeExternalUrl(href ?? "");
+
+  if (!ui || !target) {
+    return (
+      <Box component="a" href={href} target="_blank" rel="noreferrer" sx={linkSx}>
+        {children}
+      </Box>
+    );
+  }
+
+  const close = () => setAnchor(null);
+  const openExternal = () => {
+    window.open(target, "_blank", "noopener,noreferrer");
+    close();
+  };
+  const openPreview = () => {
+    ui.openPreview(target);
+    close();
+  };
+
+  return (
+    <>
+      <Box
+        component="a"
+        href={target}
+        onClick={(event: ReactMouseEvent<HTMLAnchorElement>) => {
+          event.preventDefault();
+          setAnchor(event.currentTarget);
+        }}
+        sx={linkSx}
+      >
+        {children}
+      </Box>
+      <Menu open={Boolean(anchor)} anchorEl={anchor} onClose={close} slotProps={{ list: { dense: true } }}>
+        <MenuItem onClick={openPreview} sx={{ gap: 1, fontSize: "0.8rem" }}>
+          <VisibilityOutlinedIcon sx={{ fontSize: 16, color: "text.secondary" }} />
+          {t("openInPreview")}
+        </MenuItem>
+        <MenuItem onClick={openExternal} sx={{ gap: 1, fontSize: "0.8rem" }}>
+          <OpenInNewIcon sx={{ fontSize: 16, color: "text.secondary" }} />
+          {t("openExternalLink")}
+        </MenuItem>
+      </Menu>
+    </>
+  );
+}
 
 /* ---------------------------------- Avatars --------------------------------- */
 
@@ -150,22 +219,7 @@ const markdownComponents = {
     );
   },
   a({ href, children }) {
-    return (
-      <Box
-        component="a"
-        href={href}
-        target="_blank"
-        rel="noreferrer"
-        sx={{
-          color: "primary.main",
-          textDecorationColor: "currentColor",
-          textUnderlineOffset: 3,
-          "&:hover": { color: "primary.light" },
-        }}
-      >
-        {children}
-      </Box>
-    );
+    return <MessageLink href={href}>{children}</MessageLink>;
   },
   blockquote({ children }) {
     return (

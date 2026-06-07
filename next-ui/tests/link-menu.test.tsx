@@ -5,7 +5,7 @@ import { type WorkspaceUiApi, WorkspaceUiProvider } from "../src/components/work
 import { renderWithTheme } from "./util/render-with-theme";
 
 function makeUi(): WorkspaceUiApi {
-  return { openPreview: vi.fn(), openGitFile: vi.fn(), revertFile: vi.fn() };
+  return { openPreview: vi.fn(), openGitFile: vi.fn() };
 }
 
 describe("chat link menu", () => {
