@@ -13,8 +13,11 @@ export function ImageLightbox({ src, label, onClose }: { readonly src: string | 
   return (
     <Backdrop open={src != null} onClick={onClose} sx={{ zIndex: (theme) => theme.zIndex.modal, backgroundColor: "rgba(8, 11, 14, 0.88)", backdropFilter: "blur(2px)" }}>
       {src != null && (
-        <Stack sx={{ width: "100%", height: "100%", p: 3, minHeight: 0 }} onClick={(event) => event.stopPropagation()}>
-          <Stack direction="row" spacing={1} sx={{ alignItems: "center", justifyContent: "space-between", flex: "0 0 auto", pb: 1.5 }}>
+        // No stopPropagation on the full-size column — clicks on the empty area
+        // around the image must reach the Backdrop's onClose. Only the header and
+        // the image itself swallow clicks.
+        <Stack sx={{ width: "100%", height: "100%", p: 3, minHeight: 0 }}>
+          <Stack direction="row" spacing={1} onClick={(event) => event.stopPropagation()} sx={{ alignItems: "center", justifyContent: "space-between", flex: "0 0 auto", pb: 1.5 }}>
             <Typography noWrap sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.78rem", color: "text.secondary", minWidth: 0 }}>
               {label ?? src}
             </Typography>
@@ -28,7 +31,7 @@ export function ImageLightbox({ src, label, onClose }: { readonly src: string | 
             </Stack>
           </Stack>
           <Box sx={{ flex: 1, minHeight: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
-            <Box component="img" src={displaySrc ?? ""} alt={label ?? ""} sx={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", borderRadius: (theme) => `${theme.custom.radii.md}px` }} />
+            <Box component="img" src={displaySrc ?? ""} alt={label ?? ""} onClick={(event) => event.stopPropagation()} sx={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", borderRadius: (theme) => `${theme.custom.radii.md}px` }} />
           </Box>
         </Stack>
       )}

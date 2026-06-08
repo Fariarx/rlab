@@ -234,7 +234,7 @@ function AttachmentThumb({ attachment, onRemove, onOpen, removeLabel }: { readon
           color: "#fff",
           backgroundColor: (t) => t.palette.status.error.main,
           border: (t) => `1px solid ${t.custom.surfaces.s1}`,
-          "&:hover": { backgroundColor: (t) => t.palette.status.error.dark ?? t.palette.status.error.main, opacity: 0.9 },
+          "&:hover": { backgroundColor: (t) => t.palette.status.error.main, opacity: 0.85 },
         }}
       >
         <CloseRoundedIcon sx={{ fontSize: 12 }} />

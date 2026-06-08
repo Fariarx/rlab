@@ -320,7 +320,7 @@ describe("runConversation", () => {
       onBlocks: (nextBlocks) => blocks.push(nextBlocks),
     });
 
-    expect(blocks[0]).toContainEqual({ kind: "reasoning", text: "", active: true });
+    expect(blocks[0]).toContainEqual(expect.objectContaining({ kind: "reasoning", text: "", active: true, startedAtMs: expect.any(Number) }));
     expect(blocks.at(-1)).toEqual([{ kind: "text", text: "answer", streaming: false, result: true }]);
   });
 

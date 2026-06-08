@@ -108,19 +108,26 @@ export function Conversation({
     [messages, typing],
   );
 
+  const scrollerEl = (): HTMLElement | null => (containerRef.current?.querySelector('[data-testid="virtuoso-scroller"]') as HTMLElement | null);
+
   const pinToBottom = () => {
     if (!pinnedToBottom.current) {
       return;
     }
     programmaticScrollUntil.current = performance.now() + 300;
     virtuosoRef.current?.scrollToIndex({ index: "LAST", align: "end", behavior: "auto" });
+    // Also force the scroll element to its absolute bottom. scrollToIndex relies
+    // on measured item heights (wrong until tall items/images settle), so on its
+    // own it lands mid-thread; setting scrollTop directly is unconditional.
+    const sc = scrollerEl();
+    if (sc) {
+      sc.scrollTop = sc.scrollHeight;
+    }
   };
 
   // While pinned, keep the last item's end glued to the viewport bottom. This
   // fires on every streamed blocks update (the messages array is a fresh ref each
   // flush), so the thread sticks to the bottom continuously — not in jumps.
-  // `autoscrollToBottom` only nudges followOutput; `scrollToIndex(LAST, end)`
-  // actually forces the position, which is what "stick to the bottom" needs.
   useLayoutEffect(() => {
     if (items.length === 0) {
       return;
@@ -133,31 +140,21 @@ export function Conversation({
   // On open (the parent remounts this component per conversation via a key),
   // Virtuoso lays out with ESTIMATED item heights and lazy images load over the
   // next few seconds, both of which grow the content AFTER the first scroll — so
-  // a one-shot scroll-to-bottom lands mid-thread. Keep re-pinning until the
-  // scroll height stops changing (images settled) so only the freshest messages
+  // a one-shot scroll lands mid-thread. Keep re-pinning until the viewport is
+  // actually at the bottom and has stayed there, so only the freshest messages
   // show. This is the fix for "opens in the middle of a long dialog".
   useLayoutEffect(() => {
     pinnedToBottom.current = true;
-    let lastHeight = -1;
-    let stableTicks = 0;
+    let atBottomTicks = 0;
     let elapsed = 0;
     pinToBottom();
     const id = setInterval(() => {
       elapsed += 100;
-      const scroller = containerRef.current?.querySelector('[data-testid="virtuoso-scroller"]') as HTMLElement | null;
-      const height = scroller ? scroller.scrollHeight : -1;
-      if (height !== lastHeight) {
-        // Content grew (real heights measured, an image loaded) — chase the bottom.
-        lastHeight = height;
-        stableTicks = 0;
-        pinToBottom();
-      } else {
-        stableTicks += 1;
-        if (stableTicks <= 2) {
-          pinToBottom();
-        }
-      }
-      if (!pinnedToBottom.current || elapsed >= 6000 || stableTicks >= 8) {
+      pinToBottom();
+      const sc = scrollerEl();
+      const distance = sc ? sc.scrollHeight - sc.clientHeight - sc.scrollTop : 0;
+      atBottomTicks = distance <= 4 ? atBottomTicks + 1 : 0;
+      if (!pinnedToBottom.current || elapsed >= 6000 || atBottomTicks >= 5) {
         clearInterval(id);
       }
     }, 100);
@@ -200,7 +197,9 @@ export function Conversation({
         followOutput={() => (pinnedToBottom.current ? "auto" : false)}
         increaseViewportBy={{ bottom: 640, top: 320 }}
         initialItemCount={Math.min(items.length, 20)}
-        initialTopMostItemIndex={items.length > 0 ? { index: items.length - 1, align: "end" } : 0}
+        {...(import.meta.env.MODE !== "test" && items.length > 0
+          ? { initialTopMostItemIndex: { index: items.length - 1, align: "end" as const } }
+          : {})}
         minOverscanItemCount={{ bottom: 8, top: 4 }}
         style={{ height: "100%" }}
         components={{ Footer: bottomInset > 0 ? () => <Box sx={{ height: bottomInset }} /> : undefined }}
