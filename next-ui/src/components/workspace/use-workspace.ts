@@ -328,13 +328,16 @@ function isLiveRunStatus(status: ConversationStatus): boolean {
 
 function patchActiveRunUpdate(state: WorkspaceState, update: ActiveRunUpdate): WorkspaceState {
   const messages = state.threads[update.conversationId] ?? [];
-  const previousBlocks = messages.find((message) => message.id === update.agentMessageId)?.blocks;
+  const previousMessage = messages.find((message) => message.id === update.agentMessageId);
+  const previousBlocks = previousMessage?.blocks;
+  const profile = previousMessage?.profile ?? conversationProfile(findConversation(state, update.conversationId));
   const mergedBlocks = mergeInputBlockState(update.blocks, previousBlocks);
   const blocks = update.done || !isLiveRunStatus(update.status) ? finishBlocks(mergedBlocks, update.status === "error" || update.status === "idle" ? "error" : "ok") : mergedBlocks;
   const message: ChatMessage = {
     id: update.agentMessageId,
     role: "agent",
     time: update.time,
+    profile,
     blocks,
     ...(update.costUsd === undefined ? {} : { costUsd: update.costUsd }),
     ...(update.usage === undefined ? {} : { usage: update.usage }),
@@ -968,7 +971,7 @@ class WorkspaceStore implements Workspace {
       if (arr.some((m) => m.id === aId)) {
         return current;
       }
-      return { ...current, threads: { ...current.threads, [id]: [...arr, { id: aId, role: "agent", time: agentTime, blocks: [] }] } };
+      return { ...current, threads: { ...current.threads, [id]: [...arr, { id: aId, role: "agent", time: agentTime, profile, blocks: [] }] } };
     });
     const applyBlocks = (blocks: AgentBlock[]) => {
       let shouldFlush = false;
@@ -981,7 +984,7 @@ class WorkspaceStore implements Workspace {
           this.skipNextSave = true;
         }
         shouldFlush = needsInput || blocksHaveStatus(mergedBlocks);
-        const message: ChatMessage = { id: aId, role: "agent", time: agentTime, blocks: mergedBlocks };
+        const message: ChatMessage = { id: aId, role: "agent", time: agentTime, profile, blocks: mergedBlocks };
         const nextState = {
           ...current,
           threads: {

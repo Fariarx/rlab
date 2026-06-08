@@ -12,6 +12,7 @@ import { useI18n } from "../../i18n/I18nProvider";
 import { Button, IconButton, Tooltip } from "../ui";
 import { AgentBlockRenderer } from "./AgentBlockRenderer";
 import { DiffCard } from "./DiffCard";
+import { DEFAULT_AGENT_OPTION_ID, agentProfileLabels, getAgent, type AgentProfile } from "./agents";
 import { rise } from "./anim";
 import type { MessageActionHandlers } from "./message-actions";
 import { AgentAvatar, TypingDots, UserAvatar } from "./parts";
@@ -307,6 +308,19 @@ function AgentUsageMeta({ message, displayPrefs }: { readonly message: ChatMessa
   );
 }
 
+function agentMessageProfileLabel(profile: AgentProfile | undefined): string | null {
+  if (!profile) {
+    return null;
+  }
+  const agent = getAgent(profile.agent);
+  const modelOption = agent.models.find((option) => option.id === profile.model);
+  const modelLabel =
+    profile.model === DEFAULT_AGENT_OPTION_ID
+      ? (modelOption?.value ?? modelOption?.label)
+      : (agentProfileLabels({ ...profile, reasoning: DEFAULT_AGENT_OPTION_ID, mode: "default" })[0] ?? modelOption?.label ?? profile.model);
+  return modelLabel ? `${agent.name} · ${modelLabel}` : agent.name;
+}
+
 /** Collapsed-by-default container holding an agent turn's intermediate work, so
  *  threads stay readable — only the answer and the (collapsed) details show. */
 function AgentDetails({ blocks, actions, autoExpand = false }: { readonly blocks: readonly AgentBlock[]; readonly actions?: MessageActionHandlers; readonly autoExpand?: boolean }) {
@@ -387,13 +401,29 @@ function AgentDetails({ blocks, actions, autoExpand = false }: { readonly blocks
 
 const DEFAULT_DISPLAY_PREFS: MessageDisplayPrefs = { showTokens: true, showCost: false };
 
-function AgentMessage({ message, delay, actions, displayPrefs = DEFAULT_DISPLAY_PREFS }: { readonly message: ChatMessage; readonly delay: number; readonly actions?: MessageActionHandlers; readonly displayPrefs?: MessageDisplayPrefs }) {
+function AgentMessage({
+  message,
+  delay,
+  actions,
+  displayPrefs = DEFAULT_DISPLAY_PREFS,
+  agentProfile,
+}: {
+  readonly message: ChatMessage;
+  readonly delay: number;
+  readonly actions?: MessageActionHandlers;
+  readonly displayPrefs?: MessageDisplayPrefs;
+  readonly agentProfile?: AgentProfile;
+}) {
   const { t } = useI18n();
   const blocks = message.blocks ?? [];
   const diffBlocks = blocks.filter((block): block is DiffBlock => block.kind === DIFF_KIND);
-  const detailBlocks = blocks.filter((block) => !ANSWER_BLOCK_KINDS.has(block.kind) && block.kind !== DIFF_KIND);
+  // The plan is pinned under the message (visible even while the agent works),
+  // not folded into the collapsible details.
+  const planBlocks = blocks.filter((block) => block.kind === "plan");
+  const detailBlocks = blocks.filter((block) => !ANSWER_BLOCK_KINDS.has(block.kind) && block.kind !== DIFF_KIND && block.kind !== "plan");
   const answerBlocks = blocks.filter((block) => ANSWER_BLOCK_KINDS.has(block.kind));
   const live = isMessageLive(blocks);
+  const profileLabel = agentMessageProfileLabel(message.profile ?? agentProfile);
   return (
     <Stack direction="row" spacing={1.25} sx={{ alignItems: "flex-start", ...rise(delay), ...revealActionsOnHover }}>
       <AgentAvatar />
@@ -402,6 +432,11 @@ function AgentMessage({ message, delay, actions, displayPrefs = DEFAULT_DISPLAY_
           <Typography sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.8rem", fontWeight: 700, color: "text.primary" }}>
             {t("agent")}
           </Typography>
+          {profileLabel && (
+            <Typography noWrap sx={{ minWidth: 0, maxWidth: 260, fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.7rem", fontWeight: 700, color: "text.secondary" }}>
+              {profileLabel}
+            </Typography>
+          )}
           {message.time && (
             <Typography sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.66rem", color: "text.secondary" }}>
               {message.time}
@@ -418,6 +453,12 @@ function AgentMessage({ message, delay, actions, displayPrefs = DEFAULT_DISPLAY_
               <AgentDetails blocks={detailBlocks} actions={actions} autoExpand={displayPrefs.reasoningAutoExpand ?? false} />
             </Box>
           )}
+          {/* Plan stays pinned and visible under the message, even mid-run. */}
+          {planBlocks.map((block, index) => (
+            <Box key={`plan-${index}`} sx={rise(delay + 160)}>
+              <AgentBlockRenderer block={block} />
+            </Box>
+          ))}
           {answerBlocks.map((block, index) => (
             <Box key={index} sx={rise(delay + 200 + index * 90)}>
               <AgentBlockRenderer
@@ -444,7 +485,23 @@ function AgentMessage({ message, delay, actions, displayPrefs = DEFAULT_DISPLAY_
   );
 }
 
-export function Message({ message, index = 0, actions, displayPrefs }: { readonly message: ChatMessage; readonly index?: number; readonly actions?: MessageActionHandlers; readonly displayPrefs?: MessageDisplayPrefs }) {
+export function Message({
+  message,
+  index = 0,
+  actions,
+  displayPrefs,
+  agentProfile,
+}: {
+  readonly message: ChatMessage;
+  readonly index?: number;
+  readonly actions?: MessageActionHandlers;
+  readonly displayPrefs?: MessageDisplayPrefs;
+  readonly agentProfile?: AgentProfile;
+}) {
   const delay = index * 120;
-  return message.role === "user" ? <UserMessage message={message} delay={delay} actions={actions} /> : <AgentMessage message={message} delay={delay} actions={actions} displayPrefs={displayPrefs} />;
+  return message.role === "user" ? (
+    <UserMessage message={message} delay={delay} actions={actions} />
+  ) : (
+    <AgentMessage message={message} delay={delay} actions={actions} displayPrefs={displayPrefs} agentProfile={agentProfile} />
+  );
 }

@@ -1,6 +1,8 @@
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import ArrowForwardIcon from "@mui/icons-material/ArrowForward";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
+import DescriptionOutlinedIcon from "@mui/icons-material/DescriptionOutlined";
+import LinkOffIcon from "@mui/icons-material/LinkOff";
 import OpenInNewIcon from "@mui/icons-material/OpenInNew";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import VisibilityOutlinedIcon from "@mui/icons-material/VisibilityOutlined";
@@ -14,7 +16,7 @@ import { normalizeExternalUrl } from "../../lib/external-url";
 import type { StatusKey } from "../../theme/tokens";
 import { useWorkspaceUi } from "../workspace/workspace-ui";
 import { Button, IconButton, Menu, MenuItem, StatusDot } from "../ui";
-import { blink, bounce } from "./anim";
+import { bounce } from "./anim";
 import type { SuggestedActionIconKey } from "./types";
 
 const linkSx = {
@@ -24,6 +26,44 @@ const linkSx = {
   cursor: "pointer",
   "&:hover": { color: "primary.light" },
 } as const;
+
+const IMAGE_URL_RE = /\.(png|jpe?g|gif|webp|svg|avif|bmp)(\?|#|$)/i;
+
+/** A local file path (not a web URL, anchor, or mailto): has a path separator or
+ *  a file extension. These open in the in-app Git file viewer, not the browser. */
+function isFilePathLike(value: string): boolean {
+  if (!value || /^https?:\/\//i.test(value) || value.startsWith("//") || value.startsWith("#") || /^[a-z][a-z0-9+.-]*:/i.test(value)) {
+    return false;
+  }
+  return /[\\/]/.test(value) || /\.[a-z0-9]{1,8}$/i.test(value);
+}
+
+function fileBaseName(path: string): string {
+  const parts = path.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] ?? path;
+}
+
+/** A link target that can't be opened: not a web URL and not a plausible file
+ *  path (e.g. a bare word, a dangling anchor). Rendered as broken, not a link. */
+function BrokenLink({ children }: { readonly children: ReactNode }) {
+  return (
+    <Box
+      component="span"
+      sx={{
+        display: "inline-flex",
+        alignItems: "baseline",
+        gap: 0.25,
+        color: (t) => t.palette.status.error.main,
+        textDecoration: "underline",
+        textDecorationStyle: "wavy",
+        textUnderlineOffset: 3,
+      }}
+    >
+      <LinkOffIcon sx={{ fontSize: 13, alignSelf: "center" }} />
+      {children}
+    </Box>
+  );
+}
 
 /**
  * A link inside agent/user markdown. Clicking opens a small menu offering either
@@ -35,14 +75,39 @@ export function MessageLink({ href, children }: { readonly href?: string; readon
   const ui = useWorkspaceUi();
   const { t } = useI18n();
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
-  const target = normalizeExternalUrl(href ?? "");
+  const raw = (href ?? "").trim();
+  const target = normalizeExternalUrl(raw);
 
-  if (!ui || !target) {
+  // Outside the workspace (kit/tests): degrade to a plain new-tab link.
+  if (!ui) {
     return (
-      <Box component="a" href={href} target="_blank" rel="noreferrer" sx={linkSx}>
+      <Box component="a" href={raw || href} target="_blank" rel="noreferrer" sx={linkSx}>
         {children}
       </Box>
     );
+  }
+
+  // Local file path → open in the in-app Git file viewer (it isn't a web link).
+  if (!target && isFilePathLike(raw)) {
+    return (
+      <Box
+        component="a"
+        href={raw}
+        onClick={(event: ReactMouseEvent<HTMLAnchorElement>) => {
+          event.preventDefault();
+          ui.openGitFile(raw);
+        }}
+        sx={{ ...linkSx, display: "inline-flex", alignItems: "baseline", gap: 0.25 }}
+      >
+        <DescriptionOutlinedIcon sx={{ fontSize: 13, alignSelf: "center" }} />
+        {children}
+      </Box>
+    );
+  }
+
+  // Not a web URL and not a plausible file: show it as broken, not a dead link.
+  if (!target) {
+    return <BrokenLink>{children}</BrokenLink>;
   }
 
   const close = () => setAnchor(null);
@@ -154,17 +219,6 @@ export function TypingDots() {
 
 /* ------------------------------- Message text ------------------------------- */
 
-const Caret = styled("span")(({ theme }) => ({
-  display: "inline-block",
-  width: 7,
-  height: "1.05em",
-  marginLeft: 2,
-  transform: "translateY(2px)",
-  borderRadius: 1,
-  backgroundColor: theme.palette.status.running.main,
-  animation: `${blink} 1s steps(1) infinite`,
-}));
-
 function textFromReactNode(children: ReactNode): string {
   if (typeof children === "string" || typeof children === "number") {
     return String(children);
@@ -220,6 +274,25 @@ const markdownComponents = {
   },
   a({ href, children }) {
     return <MessageLink href={href}>{children}</MessageLink>;
+  },
+  img({ src, alt }) {
+    const raw = typeof src === "string" ? src.trim() : "";
+    const webTarget = normalizeExternalUrl(raw);
+    const label = (typeof alt === "string" && alt.trim()) || (raw ? fileBaseName(raw) : "image");
+    if (webTarget && IMAGE_URL_RE.test(webTarget)) {
+      return (
+        <Box
+          component="img"
+          src={webTarget}
+          alt={label}
+          loading="lazy"
+          sx={{ maxWidth: "100%", maxHeight: 360, my: 0.5, display: "block", borderRadius: (t) => `${t.custom.radii.md}px`, border: (t) => `1px solid ${t.custom.borders.subtle}` }}
+        />
+      );
+    }
+    // A local screenshot/file path can't load as a browser <img>; surface it as a
+    // file link that opens in the Git viewer (or broken if it isn't openable).
+    return <MessageLink href={raw}>{label}</MessageLink>;
   },
   blockquote({ children }) {
     return (
@@ -300,7 +373,11 @@ export function MessageText({ text, streaming }: { readonly text: string; readon
   return (
     <Box sx={{ minWidth: 0 }}>
       <MarkdownMessage text={text} />
-      {streaming && <Caret />}
+      {streaming && (
+        <Box sx={{ mt: 0.5 }}>
+          <TypingDots />
+        </Box>
+      )}
     </Box>
   );
 }

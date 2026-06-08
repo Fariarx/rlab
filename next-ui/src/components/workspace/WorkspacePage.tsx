@@ -20,6 +20,8 @@ import {
   DialogContentText,
   DialogTitle,
   Drawer,
+  Menu,
+  MenuItem,
   Stack,
   ToggleButton,
   ToggleButtonGroup,
@@ -274,6 +276,7 @@ export function WorkspacePageView({
   // A pending new chat that exists only in the composer until the user sends
   // the first message (then it's created with the current/default agent).
   const [composingNew, setComposingNew] = useState<{ readonly projectId?: string } | null>(null);
+  const [projectMenuAnchor, setProjectMenuAnchor] = useState<HTMLElement | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
@@ -581,8 +584,10 @@ export function WorkspacePageView({
   // conversation isn't created until the user sends the first message.
   const startNewChat = () => {
     setProfile(ws.settings.agents.defaultProfile ?? DEFAULT_PROFILE);
-    const selectedProjectId = projectForConversation(ws, ws.selectedId)?.id;
-    setComposingNew({ projectId: routeProjectId ?? selectedProjectId });
+    // Inherit the project only when the user is explicitly on a project route;
+    // otherwise start standalone (don't silently fall back to the selected
+    // conversation's project). The draft's picker lets the user change it.
+    setComposingNew({ projectId: routeProjectId });
     setDrawerOpen(false);
   };
 
@@ -1165,6 +1170,7 @@ export function WorkspacePageView({
                     messages={messages}
                     typing={selected.status === "running" && messages[messages.length - 1]?.role === "user"}
                     actions={messageActions}
+                    agentProfile={conversationProfile(selected)}
                     displayPrefs={{ showTokens: ws.settings.appearance.showTokens, showCost: ws.settings.appearance.showCost, reasoningAutoExpand: ws.settings.appearance.reasoningAutoExpand }}
                     contentMaxWidth={THREAD_MAX_WIDTH}
                     contentPaddingX={THREAD_PADDING_X}
@@ -1215,6 +1221,42 @@ export function WorkspacePageView({
             {workspaceHydrating ? (
               <Box aria-busy="true" sx={{ minHeight: 52 }} />
             ) : composingNew ? (
+              <Stack spacing={1}>
+                <Box>
+                  <Button
+                    variant="text"
+                    size="small"
+                    startIcon={<FolderOutlinedIcon sx={{ fontSize: 15 }} />}
+                    aria-label={t("chatProjectLabel")}
+                    onClick={(event) => setProjectMenuAnchor(event.currentTarget)}
+                    sx={{ color: "text.secondary", textTransform: "none", fontSize: "0.74rem" }}
+                  >
+                    {composingNew.projectId ? (ws.projects.find((p) => p.id === composingNew.projectId)?.name ?? t("noProjectOption")) : t("noProjectOption")}
+                  </Button>
+                  <Menu anchorEl={projectMenuAnchor} open={Boolean(projectMenuAnchor)} onClose={() => setProjectMenuAnchor(null)}>
+                    <MenuItem
+                      selected={!composingNew.projectId}
+                      onClick={() => {
+                        setComposingNew({ projectId: undefined });
+                        setProjectMenuAnchor(null);
+                      }}
+                    >
+                      {t("noProjectOption")}
+                    </MenuItem>
+                    {ws.projects.map((project) => (
+                      <MenuItem
+                        key={project.id}
+                        selected={composingNew.projectId === project.id}
+                        onClick={() => {
+                          setComposingNew({ projectId: project.id });
+                          setProjectMenuAnchor(null);
+                        }}
+                      >
+                        {project.name}
+                      </MenuItem>
+                    ))}
+                  </Menu>
+                </Box>
               <Composer
                 key="new-draft"
                 ref={composerRef}
@@ -1234,6 +1276,7 @@ export function WorkspacePageView({
                 onAttachmentError={(message) => toast({ message, severity: "error", duration: 3000 })}
                 onTagsHeightChange={setComposerTagsHeight}
               />
+              </Stack>
             ) : (
               <Composer
                 key={ws.selectedId}

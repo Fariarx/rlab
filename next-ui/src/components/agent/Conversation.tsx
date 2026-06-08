@@ -7,6 +7,7 @@ import { rise } from "./anim";
 import type { MessageActionHandlers } from "./message-actions";
 import { AgentAvatar, TypingDots } from "./parts";
 import type { ChatMessage } from "./types";
+import type { AgentProfile } from "./agents";
 
 function hasLiveAgentBlock(message: ChatMessage): boolean {
   if (message.role !== "agent") {
@@ -65,6 +66,7 @@ export function Conversation({
   typing,
   actions,
   displayPrefs,
+  agentProfile,
   contentMaxWidth,
   contentPaddingX,
   bottomInset = 0,
@@ -73,6 +75,7 @@ export function Conversation({
   readonly typing?: boolean;
   readonly actions?: MessageActionHandlers;
   readonly displayPrefs?: MessageDisplayPrefs;
+  readonly agentProfile?: AgentProfile;
   /** Max width of the centered message column. The scroll container stays
    *  full-width so its scrollbar sits at the screen edge. */
   readonly contentMaxWidth?: number;
@@ -136,7 +139,7 @@ export function Conversation({
         components={{ Footer: bottomInset > 0 ? () => <Box sx={{ height: bottomInset }} /> : undefined }}
         itemContent={(index, item) => (
           <Box sx={{ width: "100%", maxWidth: contentMaxWidth, mx: "auto", px: contentPaddingX, pt: index === 0 ? { xs: 2.5, sm: 4 } : 0, pb: 3 }}>
-            {item.kind === "message" ? <Message actions={actions} displayPrefs={displayPrefs} message={item.message} index={index} /> : <TypingRow delay={messages.length * 120} />}
+            {item.kind === "message" ? <Message actions={actions} displayPrefs={displayPrefs} agentProfile={agentProfile} message={item.message} index={index} /> : <TypingRow delay={messages.length * 120} />}
           </Box>
         )}
       />

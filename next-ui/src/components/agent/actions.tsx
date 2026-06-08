@@ -142,12 +142,12 @@ export function ToolCall({ block }: { readonly block: ToolBlock }) {
       state={block.state}
       defaultOpen={block.state === "error"}
       title={
-        <Stack direction="row" spacing={1} sx={{ alignItems: "baseline", flexWrap: "wrap" }}>
-          <Typography component="span" sx={titleSx}>
+        <Stack direction="row" spacing={1} sx={{ alignItems: "baseline", flexWrap: "nowrap", minWidth: 0, overflow: "hidden" }}>
+          <Typography component="span" noWrap sx={{ ...titleSx, flex: "0 0 auto" }}>
             {block.name}
           </Typography>
           {block.summary && (
-            <Typography component="span" sx={{ fontSize: "0.78rem", color: "text.secondary" }}>
+            <Typography component="span" noWrap sx={{ fontSize: "0.78rem", color: "text.secondary", minWidth: 0 }}>
               {block.summary}
             </Typography>
           )}
@@ -193,7 +193,7 @@ export function CommandCard({ block }: { readonly block: CommandBlock }) {
       icon={<TerminalIcon sx={{ fontSize: 16 }} />}
       state={block.state}
       defaultOpen={block.state === "error"}
-      title={<Typography component="code" sx={titleSx}>{block.command}</Typography>}
+      title={<Typography component="code" noWrap sx={{ ...titleSx, display: "block", minWidth: 0 }}>{block.command}</Typography>}
       meta={
         block.exitCode != null && (
           <Typography component="span" sx={metaSx}>

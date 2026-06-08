@@ -141,6 +141,8 @@ export interface ChatMessage {
   readonly id: string;
   readonly role: "user" | "agent";
   readonly time?: string;
+  /** Agent profile used for this specific assistant turn. */
+  readonly profile?: AgentProfile;
   /** User messages carry plain text; agent messages carry rich blocks. */
   readonly text?: string;
   readonly blocks?: readonly AgentBlock[];

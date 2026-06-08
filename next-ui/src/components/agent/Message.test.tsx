@@ -6,11 +6,11 @@ import { appTheme } from "../../theme/app-theme";
 import { Message } from "./Message";
 import type { ChatMessage } from "./types";
 
-function renderMessage(message: ChatMessage, actions?: Parameters<typeof Message>[0]["actions"]) {
+function renderMessage(message: ChatMessage, actions?: Parameters<typeof Message>[0]["actions"], agentProfile?: Parameters<typeof Message>[0]["agentProfile"]) {
   return render(
     <ThemeProvider theme={appTheme}>
       <I18nProvider locale="ru">
-        <Message message={message} actions={actions} />
+        <Message message={message} actions={actions} agentProfile={agentProfile} />
       </I18nProvider>
     </ThemeProvider>,
   );
@@ -47,5 +47,18 @@ describe("Message", () => {
     fireEvent.click(disclosure);
 
     expect(disclosure).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("shows the agent model next to the agent label", () => {
+    const message: ChatMessage = {
+      id: "agent-3",
+      role: "agent",
+      blocks: [{ kind: "text", text: "Готово" }],
+    };
+
+    renderMessage(message, undefined, { agent: "codex", model: "gpt-5.5", reasoning: "default", mode: "default" });
+
+    expect(screen.getByText("Агент")).toBeInTheDocument();
+    expect(screen.getByText("Codex · GPT-5.5")).toBeInTheDocument();
   });
 });

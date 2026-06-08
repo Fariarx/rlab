@@ -6,13 +6,6 @@ export const riseIn = keyframes`
   to { opacity: 1; transform: translateY(0); }
 `;
 
-/** Streaming caret blink. */
-export const blink = keyframes`
-  0%, 45% { opacity: 1; }
-  50%, 95% { opacity: 0; }
-  100% { opacity: 1; }
-`;
-
 /** Typing / thinking dots bounce. */
 export const bounce = keyframes`
   0%, 80%, 100% { transform: translateY(0); opacity: 0.35; }

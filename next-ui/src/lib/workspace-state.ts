@@ -81,6 +81,7 @@ function cloneThreadMessages(messages: readonly ChatMessage[]): ChatMessage[] {
     return {
       ...message,
       id,
+      profile: message.profile ? normalizeAgentProfile(message.profile, message.profile.agent) : undefined,
       blocks: message.blocks?.map(cloneBlock),
     };
   });
