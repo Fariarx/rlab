@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { appendFileSync, chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { homedir, tmpdir } from "node:os";
@@ -3680,6 +3681,7 @@ export type RunEvent =
   | { type: "options"; id: string; prompt: string; multi?: boolean; options: ReadonlyArray<{ readonly id: string; readonly label: string; readonly description?: string }> }
   | { type: "status"; level: "info" | "ok" | "warn" | "error"; text: string }
   | { type: "error"; text: string }
+  | { type: "session"; id: string }
   | { type: "done"; costUsd?: number; usage?: RunUsage };
 
 type ApprovalDecision = "approved" | "rejected";
@@ -3705,6 +3707,11 @@ interface RunRequest {
   readonly mode: AgentProfile["mode"];
   readonly prompt: string;
   readonly accessMode: AgentAccessMode;
+  /** Native session id to resume (same agent continuing the conversation). */
+  readonly resume?: string;
+  /** Server-assigned session id for a NEW session (agents that let us set it,
+   *  e.g. Gemini `--session-id`). Agents that mint their own id ignore this. */
+  readonly sessionId?: string;
 }
 
 interface RunArgsRequest {
@@ -3713,6 +3720,8 @@ interface RunArgsRequest {
   readonly reasoning?: string;
   readonly mode?: AgentProfile["mode"];
   readonly accessMode?: AgentAccessMode;
+  readonly resume?: string;
+  readonly sessionId?: string;
 }
 
 // The in-app Preview tab is native iframe UI for the user; the /bridge endpoints
@@ -3923,6 +3932,7 @@ interface ParsedRunRequestSuccess {
   readonly prompt: string;
   readonly requestedCwd: string;
   readonly accessMode: AgentAccessMode;
+  readonly resume: string | undefined;
   readonly accessModeValid: boolean;
   readonly profileValid: boolean;
   readonly profileError: string;
@@ -3971,6 +3981,7 @@ export function parseRunRequestPayload(body: string): ParsedRunRequestPayload {
     mode = legacyProfile.mode;
   }
   prompt = typeof parsed.prompt === "string" ? parsed.prompt.trim() : "";
+  const resume = typeof parsed.resume === "string" && parsed.resume.trim().length > 0 ? parsed.resume.trim() : undefined;
   requestedCwd = typeof parsed.cwd === "string" ? parsed.cwd : "";
   const parsedAccessMode = parseAccessMode(parsed.accessMode);
   if (parsedAccessMode) {
@@ -3991,6 +4002,7 @@ export function parseRunRequestPayload(body: string): ParsedRunRequestPayload {
     prompt,
     requestedCwd,
     accessMode,
+    resume,
     accessModeValid,
     profileValid,
     profileError,
@@ -4045,6 +4057,9 @@ export function buildClaudeSdkOptions(request: RunRequest, cwd: string, abortCon
   if (agentName) {
     options.agent = agentName;
   }
+  if (request.resume) {
+    options.resume = request.resume;
+  }
   return options;
 }
 
@@ -4080,7 +4095,8 @@ export function buildCodexRunArgs(request: RunArgsRequest): string[] {
   const mode = modeForProfile(profile);
   const planMode = mode === "plan";
   const reviewMode = mode === "review";
-  const args = reviewMode ? ["exec", "review", "--json"] : ["exec", "--json"];
+  // Resume a prior session continues it: `codex exec resume <id> [flags] <prompt>`.
+  const args = request.resume ? ["exec", "resume", request.resume, "--json"] : reviewMode ? ["exec", "review", "--json"] : ["exec", "--json"];
   if (planMode) {
     args.push("--sandbox", "read-only");
   } else if (accessMode === "unrestricted") {
@@ -4116,6 +4132,13 @@ export function buildGeminiRunArgs(request: RunArgsRequest): string[] {
   const profile = profileForArgs("gemini", request);
   const accessMode = request.accessMode ?? "read-only";
   const args = ["--prompt", request.prompt, "--output-format", "stream-json", "--approval-mode", geminiApprovalModeForRequest(profile, accessMode), "--skip-trust"];
+  // Continue a prior session (--resume <id>) or open a new one with the
+  // server-assigned id (--session-id <uuid>) so the client can resume it later.
+  if (request.resume) {
+    args.push("--resume", request.resume);
+  } else if (request.sessionId) {
+    args.push("--session-id", request.sessionId);
+  }
   const model = modelForProfile(profile);
   if (model) {
     args.push("--model", model);
@@ -4178,6 +4201,11 @@ function ensureAmpReadOnlySettingsFile(): void {
 export function buildOpenCodeRunArgs(request: RunArgsRequest): string[] {
   const profile = profileForArgs("opencode", request);
   const args = ["run", "--format", "json", "--thinking"];
+  // Continue a prior session by id (opencode mints the id; we capture it from the
+  // json stream and pass it back here on the next turn).
+  if (request.resume) {
+    args.push("--session", request.resume);
+  }
   if ((request.accessMode ?? "read-only") === "unrestricted") {
     args.push("--dangerously-skip-permissions");
   } else {
@@ -5398,16 +5426,31 @@ function accumulateBackgroundRunEvent(accumulator: BackgroundRunAccumulator, eve
   }
 }
 
+/** The conversation patch a still-streaming background run writes on every event.
+ *
+ *  It re-asserts the run as active — both `status` (running, or waiting when a
+ *  block needs input) and `activeRunId` — instead of leaving them untouched. A
+ *  live run must keep its conversation pinned to its runId and a live status,
+ *  otherwise a stale "interrupted" reconcile (one that fired in the window before
+ *  this run's handle registered, or against a previous run's id) leaves the
+ *  conversation stuck at status "error" while the agent keeps working, and the UI
+ *  shows no running indicator or stop button. Re-asserting heals that on the next
+ *  event and keeps `reconcileConversationRun` from re-marking a live run. */
+export function backgroundRunStatusPatch(
+  binding: BackgroundRunBinding,
+  blocks: readonly AgentBlock[],
+  locale: Locale,
+): Partial<WorkspaceState["chats"][number]> {
+  return blocksNeedInput(blocks)
+    ? { status: "waiting", activeRunId: binding.runId, snippet: serverRunSnippet(locale, "runNeedsInputSnippet"), time: binding.agentMessageTime }
+    : { status: "running", activeRunId: binding.runId, time: binding.agentMessageTime };
+}
+
 function applyBackgroundRunEvent(binding: BackgroundRunBinding, accumulator: BackgroundRunAccumulator, event: RunEvent): void {
   accumulateBackgroundRunEvent(accumulator, event);
   const blocks = backgroundBlocks(accumulator);
   const locale = readWorkspaceState().settings.general.locale;
-  persistBackgroundBlocks(
-    binding,
-    blocks,
-    blocksNeedInput(blocks) ? { status: "waiting", snippet: serverRunSnippet(locale, "runNeedsInputSnippet"), time: binding.agentMessageTime } : {},
-    { costUsd: accumulator.costUsd, usage: accumulator.usage },
-  );
+  persistBackgroundBlocks(binding, blocks, backgroundRunStatusPatch(binding, blocks, locale), { costUsd: accumulator.costUsd, usage: accumulator.usage });
   notifyBackgroundRunUpdate(binding, false);
 }
 
@@ -5613,6 +5656,9 @@ function translateClaudeMessage(msg: Record<string, unknown>, state: ClaudeStrea
   if (type === "system" && msg.subtype === "init") {
     const model = typeof msg.model === "string" ? msg.model : "agent";
     events.push({ type: "status", level: "info", text: `model · ${model}` });
+    if (typeof msg.session_id === "string" && msg.session_id) {
+      events.push({ type: "session", id: msg.session_id });
+    }
   } else if (type === "system" && msg.subtype === "api_retry") {
     events.push({ type: "status", level: "warn", text: `api retry · ${clip(msg.error ?? msg.message ?? "retrying", 200)}` });
   } else if (type === "stream_event") {
@@ -6069,6 +6115,12 @@ export function createCodexStreamTranslator(): (line: string) => RunEvent[] {
       return planEvents;
     }
     switch (msg.type) {
+      case "thread.started":
+      case "session.created":
+      case "session_configured": {
+        const id = firstString(msg, ["thread_id", "session_id", "conversation_id", "threadId", "sessionId", "id"]);
+        return id ? [{ type: "session", id }] : [];
+      }
       case "turn.started":
         return [{ type: "status", level: "info", text: "codex turn started" }];
       case "agent_message_delta":
@@ -6465,6 +6517,27 @@ interface OpenCodeStreamState {
   readonly messageRoleByKey: Map<string, string>;
   readonly assistantTextByMessageKey: Map<string, string>;
   readonly assistantReasoningByMessageKey: Map<string, string>;
+  sessionEmitted: boolean;
+}
+
+/** opencode mints its own session id (`ses_…`), present on every event (top-level
+ *  or nested). The first event is a content-free `step_start`, so emitting the
+ *  session id there loses nothing. */
+function opencodeSessionId(msg: Record<string, unknown>): string | undefined {
+  const direct = firstString(msg, ["sessionID", "sessionId"]);
+  if (direct) {
+    return direct;
+  }
+  for (const key of ["part", "info", "properties", "message"]) {
+    const nested = msg[key];
+    if (isRecord(nested)) {
+      const id = firstString(nested, ["sessionID", "sessionId"]);
+      if (id) {
+        return id;
+      }
+    }
+  }
+  return undefined;
 }
 
 function opencodeEventProperties(event: Record<string, unknown>): Record<string, unknown> {
@@ -6556,6 +6629,7 @@ export function createOpenCodeStreamTranslator(): (line: string) => RunEvent[] {
     messageRoleByKey: new Map(),
     assistantTextByMessageKey: new Map(),
     assistantReasoningByMessageKey: new Map(),
+    sessionEmitted: false,
   };
   return (line: string): RunEvent[] => {
     let msg: unknown;
@@ -6567,6 +6641,13 @@ export function createOpenCodeStreamTranslator(): (line: string) => RunEvent[] {
     }
     if (!isRecord(msg)) {
       return [];
+    }
+    if (!state.sessionEmitted) {
+      const sessionId = opencodeSessionId(msg);
+      if (sessionId) {
+        state.sessionEmitted = true;
+        return [{ type: "session", id: sessionId }];
+      }
     }
     const todoEvents = opencodeTodoEvents(msg);
     if (todoEvents.length > 0) {
@@ -6710,6 +6791,606 @@ async function runClaudeSdk(
   }
 }
 
+// --- OpenCode via its HTTP server (like vibe-kanban) ------------------------
+// `opencode run --format json` drops the assistant text part for some models;
+// the `opencode serve` HTTP API returns the full {info, parts} (text included),
+// so we drive opencode through a per-run server instead of the CLI run mode.
+
+const OPENCODE_SERVER_TIMEOUT_MS = 20_000;
+const OPENCODE_RUN_TIMEOUT_MS = 5 * 60_000;
+
+function waitForOpenCodeServerUrl(proc: ReturnType<typeof spawn>, signal: AbortSignal): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let buffer = "";
+    const cleanup = () => {
+      clearTimeout(timer);
+      proc.stdout?.off("data", onData);
+      proc.off("exit", onExit);
+      signal.removeEventListener("abort", onAbort);
+    };
+    const onData = (chunk: Buffer) => {
+      buffer += chunk.toString("utf8");
+      const match = buffer.match(/(https?:\/\/127\.0\.0\.1:\d+)/);
+      if (match?.[1]) {
+        cleanup();
+        resolve(match[1]);
+      }
+    };
+    const onExit = () => {
+      cleanup();
+      reject(new Error("opencode server exited before reporting a URL"));
+    };
+    const onAbort = () => {
+      cleanup();
+      reject(new Error("aborted"));
+    };
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error("opencode server did not report a URL in time"));
+    }, OPENCODE_SERVER_TIMEOUT_MS);
+    proc.stdout?.on("data", onData);
+    proc.once("exit", onExit);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function emitOpenCodeParts(parts: unknown, send: (event: RunEvent) => void): void {
+  if (!Array.isArray(parts)) {
+    return;
+  }
+  for (const part of parts) {
+    if (!isRecord(part)) {
+      continue;
+    }
+    if (part.type === "text" && typeof part.text === "string" && part.text.trim().length > 0) {
+      send({ type: "text", text: part.text });
+    } else if (part.type === "reasoning" && typeof part.text === "string" && part.text.trim().length > 0) {
+      send({ type: "reasoning", text: part.text });
+    } else if (part.type === "tool") {
+      const callId = firstString(part, ["id", "callID", "call_id"]) ?? `opencode-tool-${firstString(part, ["tool", "name"]) ?? ""}`;
+      const name = firstString(part, ["tool", "name"]) ?? "tool";
+      send({ type: "tool", id: callId, name });
+      const state = isRecord(part.state) ? part.state : undefined;
+      if (state && (typeof state.output === "string" || state.status === "completed" || state.status === "error")) {
+        send({ type: "tool_result", id: callId, ok: state.status !== "error", output: typeof state.output === "string" ? state.output : "" });
+      }
+    }
+  }
+}
+
+async function runOpenCodeServer(
+  request: RunRequest,
+  cwd: string,
+  res: ServerResponse,
+  send: (event: RunEvent) => void,
+  sendDone: () => void,
+  end: () => void,
+  binding: BackgroundRunBinding | null,
+  accumulator: BackgroundRunAccumulator | null,
+): Promise<void> {
+  const abortController = new AbortController();
+  res.on("close", () => {
+    if (!binding && !abortController.signal.aborted) {
+      abortController.abort();
+    }
+  });
+  if (binding) {
+    backgroundRunHandles.set(binding.runId, {
+      binding,
+      startedAt: new Date().toISOString(),
+      cancel: () => {
+        if (!abortController.signal.aborted) {
+          abortController.abort();
+        }
+      },
+    });
+  }
+  const runTimeout = setTimeout(() => {
+    if (!abortController.signal.aborted) {
+      abortController.abort();
+    }
+  }, OPENCODE_RUN_TIMEOUT_MS);
+  let serverProc: ReturnType<typeof spawn> | null = null;
+  try {
+    const resolvedBin = resolveBinOnPath("opencode", process.env.PATH ?? "");
+    if (!resolvedBin) {
+      throw new Error("opencode is not installed (not found on PATH).");
+    }
+    const password = randomUUID();
+    const launch = resolveLaunchCommand(resolvedBin, ["serve", "--hostname", "127.0.0.1", "--port", "0"]);
+    serverProc = spawn(launch.command, [...launch.args], {
+      cwd,
+      env: { ...process.env, ...readAgentSecretConfig().env, OPENCODE_SERVER_USERNAME: "opencode", OPENCODE_SERVER_PASSWORD: password },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const baseUrl = await waitForOpenCodeServerUrl(serverProc, abortController.signal);
+    const headers = { "Content-Type": "application/json", Authorization: `Basic ${Buffer.from(`opencode:${password}`).toString("base64")}` };
+    const dir = `directory=${encodeURIComponent(cwd)}`;
+
+    let sessionId = request.resume;
+    if (!sessionId) {
+      const sessionRes = await fetch(`${baseUrl}/session?${dir}`, { method: "POST", headers, body: "{}", signal: abortController.signal });
+      if (!sessionRes.ok) {
+        throw new Error(`opencode session create failed: HTTP ${sessionRes.status}`);
+      }
+      const sessionJson = (await sessionRes.json()) as { id?: string };
+      sessionId = typeof sessionJson.id === "string" ? sessionJson.id : undefined;
+      if (!sessionId) {
+        throw new Error("opencode session create returned no id");
+      }
+    }
+    send({ type: "session", id: sessionId });
+
+    const profile = normalizeAgentProfile(request, "opencode");
+    const body: Record<string, unknown> = { parts: [{ type: "text", text: request.prompt }] };
+    const modelValue = modelForProfile(profile);
+    if (modelValue && modelValue.includes("/")) {
+      const slash = modelValue.indexOf("/");
+      body.model = { providerID: modelValue.slice(0, slash), modelID: modelValue.slice(slash + 1) };
+    }
+    const reasoning = reasoningForProfile(profile);
+    if (reasoning) {
+      body.variant = reasoning;
+    }
+    if (request.accessMode !== "unrestricted") {
+      body.agent = "plan";
+    }
+
+    const messageRes = await fetch(`${baseUrl}/session/${sessionId}/message?${dir}`, { method: "POST", headers, body: JSON.stringify(body), signal: abortController.signal });
+    const rawBody = await messageRes.text();
+    if (!messageRes.ok) {
+      throw new Error(`opencode message failed: HTTP ${messageRes.status} ${rawBody.slice(0, 200)}`);
+    }
+    const parsed = JSON.parse(rawBody) as Record<string, unknown>;
+    if (typeof parsed.name === "string" && parsed.data) {
+      const detail = isRecord(parsed.data) && typeof parsed.data.message === "string" ? parsed.data.message : "";
+      throw new Error(`opencode: ${parsed.name}: ${detail}`);
+    }
+    emitOpenCodeParts(parsed.parts, send);
+    const info = isRecord(parsed.info) ? parsed.info : undefined;
+    send({ type: "done", costUsd: info && typeof info.cost === "number" ? info.cost : undefined, usage: info ? runUsageFromRecord(info.tokens) : undefined });
+  } catch (error) {
+    if (!abortController.signal.aborted) {
+      send({ type: "error", text: error instanceof Error ? error.message : String(error) });
+    }
+  } finally {
+    clearTimeout(runTimeout);
+    if (serverProc) {
+      try {
+        serverProc.kill("SIGTERM");
+      } catch {
+        // already gone
+      }
+    }
+    if (binding && accumulator) {
+      finishPersistedBackgroundRun(binding, accumulator, abortController.signal.aborted);
+      notifyBackgroundRunUpdate(binding, true);
+      backgroundRunHandles.delete(binding.runId);
+    }
+    sendDone();
+    end();
+  }
+}
+
+// --- Codex via its `app-server` JSON-RPC protocol (like vibe-kanban) ---------
+// `codex exec --json` only surfaces a flat event stream. The `codex app-server`
+// process speaks newline-delimited JSON-RPC 2.0 over stdin/stdout (bidirectional,
+// so it can request approvals), exposing structured thread items, streaming
+// deltas, reasoning, plans, and token usage. We drive a per-run app-server and
+// translate its notifications into RunEvents. Protocol reference (camelCase, the
+// installed codex 0.137): `codex app-server generate-ts`.
+
+const CODEX_APP_SERVER_TIMEOUT_MS = 30_000;
+const CODEX_RUN_TIMEOUT_MS = 30 * 60_000;
+
+/** Map a Codex `ThreadTokenUsage` (total breakdown) to our RunUsage shape. */
+export function codexAppServerUsage(tokenUsage: unknown): RunUsage | undefined {
+  if (!isRecord(tokenUsage)) {
+    return undefined;
+  }
+  const total = isRecord(tokenUsage.total) ? tokenUsage.total : tokenUsage;
+  return compactUsage({
+    totalTokens: firstNumber(total, ["totalTokens"]),
+    inputTokens: firstNumber(total, ["inputTokens"]),
+    outputTokens: firstNumber(total, ["outputTokens"]),
+    reasoningTokens: firstNumber(total, ["reasoningOutputTokens"]),
+    cacheReadTokens: firstNumber(total, ["cachedInputTokens"]),
+  });
+}
+
+function codexPlanStepState(status: unknown): RunState {
+  const value = String(status ?? "").toLowerCase();
+  if (value === "completed") {
+    return "ok";
+  }
+  if (value === "inprogress" || value === "in_progress") {
+    return "running";
+  }
+  return "pending";
+}
+
+/** Translate a Codex app-server `ThreadItem` (camelCase tags) into RunEvents. */
+export function codexAppServerItemEvents(item: Record<string, unknown>, completed: boolean): RunEvent[] {
+  const type = typeof item.type === "string" ? item.type : "";
+  const id = firstString(item, ["id"]);
+  switch (type) {
+    case "agentMessage": {
+      const text = firstString(item, ["text"]);
+      return text ? [{ type: "text", text }] : [];
+    }
+    case "reasoning": {
+      const summary = Array.isArray(item.summary) ? item.summary.filter((s): s is string => typeof s === "string") : [];
+      const content = Array.isArray(item.content) ? item.content.filter((s): s is string => typeof s === "string") : [];
+      const text = [...summary, ...content].join("\n").trim();
+      return text ? [{ type: "reasoning", text }] : [];
+    }
+    case "plan": {
+      const text = firstString(item, ["text"]);
+      return text ? [{ type: "plan", id, steps: planStepsFromText(text) }] : [];
+    }
+    case "commandExecution": {
+      const command = firstString(item, ["command"]) ?? "";
+      const callId = id ?? `codex-cmd-${command}`;
+      const events: RunEvent[] = [{ type: "tool", id: callId, name: "Shell", summary: clip(command, 120) }];
+      if (completed) {
+        const ok = String(item.status ?? "").toLowerCase() === "completed";
+        events.push({ type: "tool_result", id: callId, ok, output: firstString(item, ["aggregatedOutput"]) ?? "" });
+      }
+      return events;
+    }
+    case "fileChange": {
+      const changes = Array.isArray(item.changes) ? item.changes.filter(isRecord) : [];
+      const events: RunEvent[] = [];
+      for (const change of changes) {
+        const file = firstString(change, ["path"]);
+        if (!file) {
+          continue;
+        }
+        const diffText = firstString(change, ["diff"]);
+        if (diffText) {
+          const block = diffBlockFromLines(file, parseUnifiedDiffLines(diffText));
+          events.push({ type: "diff", id, file, additions: block.additions, deletions: block.deletions, lines: block.lines });
+        } else {
+          events.push({ type: "tool", id: id ?? `codex-file-${file}`, name: "Edit", summary: file });
+        }
+      }
+      return events;
+    }
+    case "mcpToolCall": {
+      const server = firstString(item, ["server"]);
+      const tool = firstString(item, ["tool"]) ?? "mcp";
+      const callId = id ?? `codex-mcp-${tool}`;
+      const events: RunEvent[] = [{ type: "tool", id: callId, name: server ? `${server}/${tool}` : tool }];
+      if (completed) {
+        const ok = String(item.status ?? "").toLowerCase() === "completed";
+        const result = item.result ?? item.error;
+        events.push({ type: "tool_result", id: callId, ok, output: typeof result === "string" ? result : result == null ? "" : clip(JSON.stringify(result), 2000) });
+      }
+      return events;
+    }
+    case "webSearch": {
+      const query = firstString(item, ["query"]) ?? "";
+      return [{ type: "search", id, query, state: completed ? "ok" : "running" }];
+    }
+    default:
+      return [];
+  }
+}
+
+/** Sandbox/approval/model/effort + plan-aware prompt for a Codex thread. */
+function buildCodexThreadParams(request: RunRequest): {
+  readonly sandbox: "read-only" | "danger-full-access";
+  readonly approvalPolicy: "never";
+  readonly model?: string;
+  readonly effort?: string;
+  readonly prompt: string;
+} {
+  const profile = normalizeAgentProfile(request, "codex");
+  const mode = modeForProfile(profile);
+  const planMode = mode === "plan";
+  const sandbox = request.accessMode === "unrestricted" && !planMode ? "danger-full-access" : "read-only";
+  return {
+    sandbox,
+    approvalPolicy: "never",
+    model: modelForProfile(profile),
+    effort: reasoningForProfile(profile),
+    prompt: codexPromptForMode(request.prompt, mode),
+  };
+}
+
+async function runCodexAppServer(
+  request: RunRequest,
+  cwd: string,
+  res: ServerResponse,
+  send: (event: RunEvent) => void,
+  sendDone: () => void,
+  end: () => void,
+  binding: BackgroundRunBinding | null,
+  accumulator: BackgroundRunAccumulator | null,
+): Promise<void> {
+  const abortController = new AbortController();
+  res.on("close", () => {
+    if (!binding && !abortController.signal.aborted) {
+      abortController.abort();
+    }
+  });
+  if (binding) {
+    backgroundRunHandles.set(binding.runId, {
+      binding,
+      startedAt: new Date().toISOString(),
+      cancel: () => {
+        if (!abortController.signal.aborted) {
+          abortController.abort();
+        }
+      },
+    });
+  }
+  const runTimeout = setTimeout(() => {
+    if (!abortController.signal.aborted) {
+      abortController.abort();
+    }
+  }, CODEX_RUN_TIMEOUT_MS);
+
+  let child: ReturnType<typeof spawn> | null = null;
+  const unrestricted = request.accessMode === "unrestricted";
+  const streamedText = new Set<string>();
+  const streamedReasoning = new Set<string>();
+  let latestUsage: RunUsage | undefined;
+
+  // Minimal newline-delimited JSON-RPC peer over the app-server's stdio.
+  let idCounter = 0;
+  const pending = new Map<number, { resolve: (value: Record<string, unknown>) => void; reject: (error: Error) => void }>();
+  let settleTurn: (() => void) | null = null;
+  const turnSettled = new Promise<void>((resolve) => {
+    settleTurn = resolve;
+  });
+
+  const writeMessage = (message: Record<string, unknown>): void => {
+    if (child?.stdin && !child.stdin.destroyed) {
+      child.stdin.write(`${JSON.stringify(message)}\n`);
+    }
+  };
+  const sendRequest = (method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> => {
+    const id = ++idCounter;
+    return new Promise<Record<string, unknown>>((resolve, reject) => {
+      pending.set(id, { resolve, reject });
+      writeMessage({ jsonrpc: "2.0", id, method, params });
+    });
+  };
+
+  const handleServerRequest = (id: unknown, method: string): void => {
+    // We run with approvalPolicy "never", so these should not fire. Respond
+    // defensively so a stray request never deadlocks the turn.
+    let result: Record<string, unknown> = {};
+    if (method.endsWith("requestApproval")) {
+      result = { decision: unrestricted ? "acceptForSession" : "decline" };
+    } else if (method === "item/tool/requestUserInput") {
+      result = { answers: {} };
+    }
+    writeMessage({ jsonrpc: "2.0", id, result });
+  };
+
+  const handleNotification = (method: string, params: Record<string, unknown>): void => {
+    switch (method) {
+      case "item/agentMessage/delta": {
+        const itemId = firstString(params, ["itemId"]);
+        const delta = firstString(params, ["delta"]);
+        if (itemId) {
+          streamedText.add(itemId);
+        }
+        if (delta) {
+          send({ type: "text", text: delta });
+        }
+        return;
+      }
+      case "item/reasoning/textDelta":
+      case "item/reasoning/summaryTextDelta": {
+        const itemId = firstString(params, ["itemId"]);
+        const delta = firstString(params, ["delta"]);
+        if (itemId) {
+          streamedReasoning.add(itemId);
+        }
+        if (delta) {
+          send({ type: "reasoning", text: delta });
+        }
+        return;
+      }
+      case "turn/plan/updated": {
+        const plan = Array.isArray(params.plan) ? params.plan.filter(isRecord) : [];
+        const steps = plan
+          .map((step) => ({ label: firstString(step, ["step", "text", "label"]) ?? "", state: codexPlanStepState(step.status) }))
+          .filter((step) => step.label.length > 0);
+        if (steps.length > 0) {
+          send({ type: "plan", steps });
+        }
+        return;
+      }
+      case "item/started": {
+        const item = isRecord(params.item) ? params.item : null;
+        if (!item || item.type === "agentMessage" || item.type === "reasoning") {
+          return;
+        }
+        for (const event of codexAppServerItemEvents(item, false)) {
+          send(event);
+        }
+        return;
+      }
+      case "item/completed": {
+        const item = isRecord(params.item) ? params.item : null;
+        if (!item) {
+          return;
+        }
+        const itemId = firstString(item, ["id"]);
+        if (item.type === "agentMessage" && itemId && streamedText.has(itemId)) {
+          return;
+        }
+        if (item.type === "reasoning" && itemId && streamedReasoning.has(itemId)) {
+          return;
+        }
+        for (const event of codexAppServerItemEvents(item, true)) {
+          send(event);
+        }
+        return;
+      }
+      case "thread/tokenUsage/updated": {
+        const usage = codexAppServerUsage(params.tokenUsage);
+        if (usage) {
+          latestUsage = usage;
+        }
+        return;
+      }
+      case "error": {
+        const error = isRecord(params.error) ? params.error : params;
+        const text = firstString(error, ["message"]) ?? errorText(params);
+        send({ type: "error", text });
+        if (params.willRetry !== true) {
+          settleTurn?.();
+        }
+        return;
+      }
+      case "turn/completed": {
+        const turn = isRecord(params.turn) ? params.turn : undefined;
+        if (turn && String(turn.status ?? "").toLowerCase() === "failed") {
+          const turnError = isRecord(turn.error) ? turn.error : undefined;
+          send({ type: "error", text: turnError ? (firstString(turnError, ["message"]) ?? "Codex turn failed") : "Codex turn failed" });
+        }
+        send({ type: "done", usage: latestUsage });
+        settleTurn?.();
+        return;
+      }
+      default:
+        return;
+    }
+  };
+
+  try {
+    const resolvedBin = resolveBinOnPath("codex", process.env.PATH ?? "");
+    if (!resolvedBin) {
+      throw new Error("codex is not installed (not found on PATH).");
+    }
+    child = spawnResolvedBin(resolvedBin, ["app-server"], {
+      cwd,
+      env: { ...process.env, ...readAgentSecretConfig().env, NODE_NO_WARNINGS: "1", NO_COLOR: "1", RUST_LOG: "error" },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    const childProc = child;
+    childProc.on("exit", () => {
+      for (const { reject } of pending.values()) {
+        reject(new Error("codex app-server exited"));
+      }
+      pending.clear();
+      settleTurn?.();
+    });
+    abortController.signal.addEventListener("abort", () => {
+      if (childProc.exitCode === null) {
+        childProc.kill("SIGTERM");
+      }
+      settleTurn?.();
+    });
+
+    let buffer = "";
+    childProc.stdout?.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString("utf8");
+      let nl: number;
+      while ((nl = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, nl).trim();
+        buffer = buffer.slice(nl + 1);
+        if (!line) {
+          continue;
+        }
+        let msg: unknown;
+        try {
+          msg = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (!isRecord(msg)) {
+          continue;
+        }
+        if (msg.id !== undefined && (msg.result !== undefined || msg.error !== undefined)) {
+          const id = typeof msg.id === "number" ? msg.id : Number(msg.id);
+          const entry = pending.get(id);
+          if (entry) {
+            pending.delete(id);
+            if (msg.error !== undefined) {
+              entry.reject(new Error(errorText(isRecord(msg.error) ? msg.error.message ?? msg.error : msg.error)));
+            } else {
+              entry.resolve(isRecord(msg.result) ? msg.result : {});
+            }
+          }
+        } else if (typeof msg.method === "string" && msg.id !== undefined) {
+          handleServerRequest(msg.id, msg.method);
+        } else if (typeof msg.method === "string") {
+          handleNotification(msg.method, isRecord(msg.params) ? msg.params : {});
+        }
+      }
+    });
+
+    const initTimeout = setTimeout(() => {
+      if (!abortController.signal.aborted) {
+        abortController.abort();
+      }
+    }, CODEX_APP_SERVER_TIMEOUT_MS);
+    try {
+      await sendRequest("initialize", {
+        clientInfo: { name: "rlab", title: null, version: "0.1.0" },
+        capabilities: { experimentalApi: true, requestAttestation: false },
+      });
+      writeMessage({ jsonrpc: "2.0", method: "initialized" });
+    } finally {
+      clearTimeout(initTimeout);
+    }
+
+    const params = buildCodexThreadParams(request);
+    const threadParams: Record<string, unknown> = { cwd, sandbox: params.sandbox, approvalPolicy: params.approvalPolicy };
+    if (params.model) {
+      threadParams.model = params.model;
+    }
+    const startResponse = request.resume
+      ? await sendRequest("thread/resume", { threadId: request.resume, ...threadParams })
+      : await sendRequest("thread/start", threadParams);
+    const thread = isRecord(startResponse.thread) ? startResponse.thread : undefined;
+    const threadId = thread ? firstString(thread, ["id"]) : undefined;
+    if (!threadId) {
+      throw new Error("codex app-server did not return a thread id");
+    }
+    send({ type: "session", id: threadId });
+
+    const turnParams: Record<string, unknown> = {
+      threadId,
+      input: [{ type: "text", text: params.prompt, text_elements: [] }],
+      approvalPolicy: params.approvalPolicy,
+    };
+    if (params.effort) {
+      turnParams.effort = params.effort;
+    }
+    await sendRequest("turn/start", turnParams);
+
+    await turnSettled;
+  } catch (error) {
+    if (!abortController.signal.aborted) {
+      send({ type: "error", text: error instanceof Error ? error.message : String(error) });
+    }
+  } finally {
+    clearTimeout(runTimeout);
+    if (child && child.exitCode === null) {
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        // already gone
+      }
+    }
+    if (binding && accumulator) {
+      finishPersistedBackgroundRun(binding, accumulator, abortController.signal.aborted);
+      notifyBackgroundRunUpdate(binding, true);
+      backgroundRunHandles.delete(binding.runId);
+    }
+    sendDone();
+    end();
+  }
+}
+
 function handleRunCancel(req: IncomingMessage, res: ServerResponse): void {
   readJsonBody(req, res, (body) => {
     try {
@@ -6828,7 +7509,7 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
       sender.end();
       return;
     }
-    const { agent, model, reasoning, mode, prompt, requestedCwd, accessMode, accessModeValid, profileValid, profileError, bindingInvalid } = parsedPayload;
+    const { agent, model, reasoning, mode, prompt, requestedCwd, accessMode, resume, accessModeValid, profileValid, profileError, bindingInvalid } = parsedPayload;
     binding = parsedPayload.binding;
 
     if (!prompt) {
@@ -6844,7 +7525,14 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
       return;
     }
 
-    const request: RunRequest = { agent, model, reasoning, mode, prompt, accessMode };
+    // Gemini lets us set a session id for a NEW session; assign one so the client
+    // can resume it later. Claude/Codex/OpenCode mint their own and report it back
+    // via a "session" event from their stream translators.
+    const assignedSessionId = !resume && agent === "gemini" ? randomUUID() : undefined;
+    const request: RunRequest = { agent, model, reasoning, mode, prompt, accessMode, resume, sessionId: assignedSessionId };
+    if (assignedSessionId) {
+      send({ type: "session", id: assignedSessionId });
+    }
     const origin = browserBridgeOrigin(req);
     const executionRequest: RunRequest = {
       ...request,
@@ -6966,6 +7654,16 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
 
     if (agent === "claude-code") {
       void runClaudeSdk(executionRequest, cwd, res, send, sendDone, sender.end, binding, accumulator);
+      return;
+    }
+
+    if (agent === "opencode") {
+      void runOpenCodeServer(executionRequest, cwd, res, send, sendDone, sender.end, binding, accumulator);
+      return;
+    }
+
+    if (agent === "codex") {
+      void runCodexAppServer(executionRequest, cwd, res, send, sendDone, sender.end, binding, accumulator);
       return;
     }
 

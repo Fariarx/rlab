@@ -55,6 +55,10 @@ export interface TextBlock {
   readonly text: string;
   /** Appends a blinking caret to convey live streaming. */
   readonly streaming?: boolean;
+  /** The final answer text (the trailing text after the last reasoning/tool).
+   *  Only result text escapes the Reasoning container; narration text that
+   *  arrived before/between tool calls stays inline with them. */
+  readonly result?: boolean;
 }
 
 export interface CodeBlockData {
@@ -205,6 +209,11 @@ export interface ConversationSummary {
   readonly pinned?: boolean;
   readonly costUsd?: number;
   readonly usage?: RunUsage;
+  /** Native agent session id to resume on the next turn (continuity without
+   *  replaying the transcript), and the agent that owns it. When the user switches
+   *  agents, the session can't be resumed and the transcript is replayed instead. */
+  readonly sessionId?: string;
+  readonly sessionAgent?: AgentId;
   /** When set, this conversation's agent runs (and Git view) operate in an
    *  isolated git worktree at this path instead of the project's base path. */
   readonly worktreePath?: string;

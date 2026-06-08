@@ -11,6 +11,8 @@ import {
   buildClaudeRunArgs,
   buildClaudeSdkOptions,
   buildCodexRunArgs,
+  codexAppServerItemEvents,
+  codexAppServerUsage,
   buildGeminiRunArgs,
   buildGitCommitArgs,
   buildGitPushArgs,
@@ -54,6 +56,7 @@ import {
   cancelBackgroundRunState,
   cancelBackgroundRunRequestState,
   finishBackgroundRunState,
+  backgroundRunStatusPatch,
   mergeWorkspacePutState,
   listMentionableFiles,
   reconcileStaleBackgroundRuns,
@@ -834,6 +837,28 @@ Built-in agents:
     ]);
   });
 
+  it("threads native session resume into each agent's run args", () => {
+    const claudeOptions = buildClaudeSdkOptions(
+      { agent: "claude-code", model: "default", reasoning: "default", mode: "default", prompt: "next", accessMode: "unrestricted", resume: "claude-sess" },
+      "/repo",
+      new AbortController(),
+      (() => Promise.resolve({ behavior: "deny", message: "x" })) satisfies CanUseTool,
+    );
+    expect(claudeOptions.resume).toBe("claude-sess");
+    // Codex resume is a subcommand: `exec resume <id>`.
+    expect(buildCodexRunArgs({ prompt: "next", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted", resume: "cdx-sess" }).slice(0, 4)).toEqual(["exec", "resume", "cdx-sess", "--json"]);
+    // Gemini: --resume for an existing session, --session-id for a new assigned one.
+    expect(buildGeminiRunArgs({ prompt: "next", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted", resume: "gem-sess" })).toEqual(expect.arrayContaining(["--resume", "gem-sess"]));
+    expect(buildGeminiRunArgs({ prompt: "new", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted", sessionId: "gem-new" })).toEqual(expect.arrayContaining(["--session-id", "gem-new"]));
+    // OpenCode continues by session id.
+    expect(buildOpenCodeRunArgs({ prompt: "next", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted", resume: "oc-sess" })).toEqual(expect.arrayContaining(["--session", "oc-sess"]));
+  });
+
+  it("captures each agent's native session id from its stream", () => {
+    expect(createCodexStreamTranslator()(JSON.stringify({ type: "thread.started", thread_id: "cdx-123" }))).toEqual([{ type: "session", id: "cdx-123" }]);
+    expect(createOpenCodeStreamTranslator()(JSON.stringify({ type: "step_start", sessionID: "ses_abc", part: { sessionID: "ses_abc" } }))).toEqual([{ type: "session", id: "ses_abc" }]);
+  });
+
   it("translates Codex JSONL events into normalized run events", () => {
     const translate = createCodexStreamTranslator();
 
@@ -843,11 +868,47 @@ Built-in agents:
     expect(translate(JSON.stringify({ type: "turn.failed", error: { message: "model unsupported" } }))).toEqual([{ type: "error", text: "model unsupported" }]);
   });
 
+  it("maps Codex app-server thread items (camelCase) into run events", () => {
+    // agentMessage -> text
+    expect(codexAppServerItemEvents({ type: "agentMessage", id: "m1", text: "hi" }, true)).toEqual([{ type: "text", text: "hi" }]);
+    // reasoning -> joins summary + content
+    expect(codexAppServerItemEvents({ type: "reasoning", id: "r1", summary: ["plan"], content: ["details"] }, true)).toEqual([{ type: "reasoning", text: "plan\ndetails" }]);
+    // commandExecution started -> tool; completed -> tool + tool_result
+    expect(codexAppServerItemEvents({ type: "commandExecution", id: "c1", command: "ls" }, false)).toEqual([{ type: "tool", id: "c1", name: "Shell", summary: "ls" }]);
+    expect(codexAppServerItemEvents({ type: "commandExecution", id: "c1", command: "ls", status: "completed", aggregatedOutput: "a\nb" }, true)).toEqual([
+      { type: "tool", id: "c1", name: "Shell", summary: "ls" },
+      { type: "tool_result", id: "c1", ok: true, output: "a\nb" },
+    ]);
+    // fileChange with a unified diff -> diff event
+    expect(codexAppServerItemEvents({ type: "fileChange", id: "f1", status: "completed", changes: [{ path: "a.ts", kind: "update", diff: "@@\n+added\n-removed" }] }, true)).toEqual([
+      { type: "diff", id: "f1", file: "a.ts", additions: 1, deletions: 1, lines: [{ type: "add", text: "added" }, { type: "del", text: "removed" }] },
+    ]);
+    // mcpToolCall -> tool + tool_result (failed)
+    expect(codexAppServerItemEvents({ type: "mcpToolCall", id: "t1", server: "srv", tool: "fetch", status: "failed", error: { message: "boom" } }, true)).toEqual([
+      { type: "tool", id: "t1", name: "srv/fetch" },
+      { type: "tool_result", id: "t1", ok: false, output: JSON.stringify({ message: "boom" }) },
+    ]);
+    // webSearch -> search
+    expect(codexAppServerItemEvents({ type: "webSearch", id: "w1", query: "rust" }, true)).toEqual([{ type: "search", id: "w1", query: "rust", state: "ok" }]);
+  });
+
+  it("maps Codex app-server token usage (total breakdown) to RunUsage", () => {
+    expect(codexAppServerUsage({ total: { totalTokens: 100, inputTokens: 80, cachedInputTokens: 60, outputTokens: 20, reasoningOutputTokens: 5 } })).toEqual({
+      totalTokens: 100,
+      inputTokens: 80,
+      outputTokens: 20,
+      reasoningTokens: 5,
+      cacheReadTokens: 60,
+    });
+    expect(codexAppServerUsage(undefined)).toBeUndefined();
+  });
+
   it("translates Amp Claude-compatible stream JSON into normalized run events", () => {
     const translate = createAmpStreamTranslator();
 
     expect(translate(JSON.stringify({ type: "system", subtype: "init", cwd: "/repo", session_id: "T-1", tools: ["Read"], mcp_servers: [], reasoning_effort: "high" }))).toEqual([
       { type: "status", level: "info", text: "model · agent" },
+      { type: "session", id: "T-1" },
     ]);
     expect(translate(JSON.stringify({ type: "assistant", message: { type: "message", role: "assistant", content: [{ type: "thinking", thinking: "scan" }, { type: "text", text: "done" }], stop_reason: "end_turn" } }))).toEqual([
       { type: "reasoning", text: "scan" },
@@ -877,6 +938,7 @@ Built-in agents:
 
     expect(translate(JSON.stringify({ type: "system", subtype: "init", model: "Claude 4 Sonnet", session_id: "T-1" }))).toEqual([
       { type: "status", level: "info", text: "model · Claude 4 Sonnet" },
+      { type: "session", id: "T-1" },
     ]);
     expect(translate(JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "hel" }] } }))).toEqual([{ type: "text", text: "hel" }]);
     expect(translate(JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "lo" }] } }))).toEqual([{ type: "text", text: "lo" }]);
@@ -2684,6 +2746,27 @@ Built-in agents:
       status: "running",
       snippet: "Still running",
     });
+  });
+
+  it("re-asserts a streaming background run as active so a stale interrupt can't strand it", () => {
+    const binding: BackgroundRunBinding = {
+      conversationId: "chat-2",
+      runId: "run-live",
+      userMessageId: "u-live",
+      userMessageTime: "2026-06-06T14:00:00.000Z",
+      agentMessageId: "a-live",
+      agentMessageTime: "2026-06-06T14:00:01.000Z",
+    };
+
+    // A normal streaming event pins the conversation to "running" + this runId,
+    // not an empty patch — otherwise a prior "interrupted" reconcile leaves it
+    // stuck at "error" while the agent keeps working.
+    const streaming = backgroundRunStatusPatch(binding, [{ kind: "text", text: "working" }], "en");
+    expect(streaming).toEqual({ status: "running", activeRunId: "run-live", time: "2026-06-06T14:00:01.000Z" });
+
+    // A block awaiting input pins it to "waiting" but still keeps the runId.
+    const waiting = backgroundRunStatusPatch(binding, [{ kind: "approval", title: "Run cmd" }], "en");
+    expect(waiting).toEqual({ status: "waiting", activeRunId: "run-live", snippet: "Needs input", time: "2026-06-06T14:00:01.000Z" });
   });
 
   it("serializes active background run handles for browser reconnects", () => {

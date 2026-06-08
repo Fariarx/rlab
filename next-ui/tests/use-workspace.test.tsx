@@ -507,7 +507,7 @@ describe("useWorkspace", () => {
         agent: "codex",
         agentMessageId: expect.stringMatching(/^a-/),
         conversationId: "chat-2",
-        prompt: "Persist this message",
+        prompt: expect.stringContaining("Persist this message"),
         runId: expect.stringMatching(/^run-/),
         userMessageId: expect.stringMatching(/^u-/),
         model: "gpt-5.5",
@@ -593,6 +593,76 @@ describe("useWorkspace", () => {
       expect(screen.getByTestId("status")).toHaveTextContent("done");
     });
     expect(screen.getByTestId("loading")).toHaveTextContent("false");
+  });
+
+  it("reattaches to a server-active run the persisted status missed (e.g. after a reload)", async () => {
+    // The conversation looks finished/broken in saved state (no activeRunId,
+    // "error"), but the server still owns a live run for it — one left mid-stream,
+    // alive and waiting for tool approval. A reload must reattach, not abandon it.
+    state = {
+      ...state,
+      chats: state.chats.map((chat) => (chat.id === "chat-2" ? { ...chat, status: "error", activeRunId: undefined } : chat)),
+    };
+    const liveRun = {
+      runId: "run-live",
+      conversationId: "chat-2",
+      userMessageId: "test-user-message",
+      agentMessageId: "test-agent-message",
+      startedAt: "2026-06-06T14:00:00.000Z",
+    };
+    vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/workspace" && (!init || init.method === "GET")) {
+        return Response.json(state);
+      }
+      if (url === "/api/workspace" && init?.method === "PUT") {
+        state = JSON.parse(String(init.body)) as WorkspaceState;
+        return Response.json(state);
+      }
+      if (url === "/api/runs") {
+        return Response.json({ runs: [liveRun] });
+      }
+      if (url.startsWith("/api/run-attach")) {
+        attachRunRequests.push(url);
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            attachRunController = controller;
+          },
+        });
+        return new Response(stream, { headers: { "Content-Type": "application/x-ndjson" } });
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    render(<Probe />);
+
+    await screen.findByText("chat-2");
+    await waitFor(() => {
+      expect(attachRunRequests).toEqual(["/api/run-attach?runId=run-live"]);
+    });
+
+    // The attach stream heals the conversation back to its real (waiting) status.
+    attachRunController?.enqueue(
+      new TextEncoder().encode(
+        `${JSON.stringify({
+          type: "update",
+          update: {
+            runId: "run-live",
+            conversationId: "chat-2",
+            agentMessageId: "test-agent-message",
+            status: "waiting",
+            snippet: "Waiting for input",
+            time: "14:01",
+            done: false,
+            blocks: [{ kind: "tool", name: "Bash", summary: "systemctl is-active rlab", state: "pending" }],
+          },
+        })}\n`,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("status")).toHaveTextContent("waiting");
+    });
   });
 
   it("does not save server-owned attach stream updates back through the workspace API", async () => {

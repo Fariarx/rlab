@@ -82,6 +82,36 @@ export function conversationProfile(conversation: ConversationSummary | null | u
   return normalizeAgentProfile(conversation?.profile, conversation?.agent ?? "claude-code");
 }
 
+/** A lean transcript line for one message: the user's text, or the agent's
+ *  answer (text/code blocks only — reasoning and tool noise are omitted). */
+function messageTranscriptText(message: ChatMessage): string {
+  if (message.role === "user") {
+    return (message.text ?? "").trim();
+  }
+  return (message.blocks ?? [])
+    .map((block) => (block.kind === "text" ? block.text : block.kind === "code" ? block.code : ""))
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+}
+
+/** Builds the agent prompt from the conversation so far. Each agent run is a
+ *  fresh, stateless invocation (no session/resume), so prior turns must be
+ *  replayed in the prompt or the agent loses the thread. First message in a
+ *  conversation → just the text. */
+export function buildAgentPrompt(priorMessages: readonly ChatMessage[], currentText: string): string {
+  const turns = priorMessages
+    .map((message) => {
+      const content = messageTranscriptText(message);
+      return content ? `${message.role === "user" ? "User" : "Assistant"}: ${content}` : null;
+    })
+    .filter((line): line is string => line !== null);
+  if (turns.length === 0) {
+    return currentText;
+  }
+  return `This is a continuing conversation; here are the earlier turns for context:\n\n${turns.join("\n\n")}\n\n---\n\nUser: ${currentText}`;
+}
+
 /** The project's base working directory (ignores any worktree override). */
 function conversationBasePath(state: WorkspaceState, id: string): string | undefined {
   return state.projects.find((p) => p.conversations.some((c) => c.id === id))?.path;
@@ -524,8 +554,8 @@ class WorkspaceStore implements Workspace {
     }
     if (!this.pollTimer) {
       this.pollTimer = setInterval(() => {
-        if (this.hydrated && !this.loading && this.hasPersistedActiveRuns()) {
-          void this.syncBackgroundRuns();
+        if (this.hydrated && !this.loading) {
+          void this.refreshBackgroundRuns();
         }
       }, 2000);
     }
@@ -634,9 +664,7 @@ class WorkspaceStore implements Workspace {
           this.loaded = true;
           this.hydrated = true;
         });
-        if (this.hasPersistedActiveRuns()) {
-          void this.syncBackgroundRuns();
-        }
+        void this.refreshBackgroundRuns();
       })
       .catch((error) => {
         if (seq !== this.loadSeq) {
@@ -660,6 +688,38 @@ class WorkspaceStore implements Workspace {
     return [...this.state.chats, ...this.state.projects.flatMap((project) => project.conversations)].some(
       (conversation) => Boolean(conversation.activeRunId) && !this.runs.has(conversation.id) && (conversation.status === "running" || conversation.status === "waiting"),
     );
+  }
+
+  /** Decide whether to reconcile background runs with the server, then do it.
+   *
+   *  Two independent triggers, because either side can be the stale one:
+   *   - The persisted state shows an active run we aren't tracking — reconcile it
+   *     (it may have finished server-side, so this is also how a run flips to
+   *     "done" after a reload).
+   *   - The server still owns a live run we aren't tracking, even though the
+   *     persisted status missed it (e.g. a run left mid-stream is alive and
+   *     waiting for tool approval, yet the saved status reads "error"/no
+   *     activeRunId). Gating reattach purely on persisted status meant a page
+   *     reload silently abandoned that live run; the server handle list is the
+   *     source of truth, so we consult it to re-attach and surface the approval. */
+  private async refreshBackgroundRuns(): Promise<void> {
+    if (this.hasPersistedActiveRuns()) {
+      void this.syncBackgroundRuns();
+      return;
+    }
+    const seq = this.loadSeq;
+    let active: ActiveRunSnapshot[];
+    try {
+      active = await loadActiveRuns();
+    } catch {
+      return;
+    }
+    if (seq !== this.loadSeq) {
+      return;
+    }
+    if (active.some((run) => !this.runs.has(run.conversationId))) {
+      void this.syncBackgroundRuns();
+    }
   }
 
   private async syncBackgroundRuns(): Promise<void> {
@@ -935,6 +995,21 @@ class WorkspaceStore implements Workspace {
     const profile = conversationProfile(conv);
     const isDefaultTitle = isDefaultConversationTitle(conv?.title);
     const text = userMsg.text ?? "";
+    // Resume the agent's native session only when it belongs to the CURRENT agent.
+    // Then the agent already holds the thread, so we send just the new message.
+    // Otherwise (first turn, or the user switched agents) replay the transcript so
+    // a fresh/switched session still has the context.
+    const canResume = Boolean(conv?.sessionId && conv.sessionAgent === profile.agent);
+    const resume = canResume ? conv?.sessionId : undefined;
+    let prompt: string;
+    if (canResume) {
+      prompt = text;
+    } else {
+      const thread = this.state.threads[id] ?? [];
+      const userIndex = thread.findIndex((message) => message.id === userMsg.id);
+      const priorMessages = userIndex >= 0 ? thread.slice(0, userIndex) : thread.filter((message) => message.id !== userMsg.id);
+      prompt = buildAgentPrompt(priorMessages, text);
+    }
     const runId = nextId("run");
 
     // Cancel any run still in flight for this conversation BEFORE persisting the
@@ -1013,7 +1088,8 @@ class WorkspaceStore implements Workspace {
 
     runConversation({
       profile,
-      prompt: text,
+      prompt,
+      resume,
       cwd: this.cwdOf(id),
       accessMode: this.state.settings.agents.accessMode,
       locale: this.state.settings.general.locale,
@@ -1028,6 +1104,11 @@ class WorkspaceStore implements Workspace {
       signal: controller.signal,
       onAccepted: () => {
         runHandle.serverOwned = true;
+      },
+      onSession: (sessionId) => {
+        // Persist the native session id so the next same-agent turn resumes it.
+        this.setState((current) => patchConversation(current, id, { sessionId, sessionAgent: profile.agent }));
+        this.persistCurrentStateNow();
       },
       onBlocks: applyBlocks,
     })

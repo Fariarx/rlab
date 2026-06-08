@@ -140,7 +140,6 @@ export function ToolCall({ block }: { readonly block: ToolBlock }) {
     <ActionFrame
       icon={<CodeIcon sx={{ fontSize: 16 }} />}
       state={block.state}
-      defaultOpen={block.state === "error"}
       title={
         <Stack direction="row" spacing={1} sx={{ alignItems: "baseline", flexWrap: "nowrap", minWidth: 0, overflow: "hidden" }}>
           <Typography component="span" noWrap sx={{ ...titleSx, flex: "0 0 auto" }}>

@@ -30,6 +30,7 @@ type RunEvent =
   | { type: "options"; id: string; prompt: string; multi?: boolean; options: ReadonlyArray<{ readonly id: string; readonly label: string; readonly description?: string }> }
   | { type: "status"; level: "info" | "ok" | "warn" | "error"; text: string }
   | { type: "error"; text: string }
+  | { type: "session"; id: string }
   | { type: "done"; costUsd?: number; usage?: RunUsage };
 
 const LIVE_BLOCK_FLUSH_MS = 32;
@@ -39,6 +40,7 @@ export interface RunConversationResult {
   readonly snippet: string;
   readonly costUsd?: number;
   readonly usage?: RunUsage;
+  readonly sessionId?: string;
 }
 
 type StreamingTool = {
@@ -325,6 +327,7 @@ async function streamRun(
   cwd: string | undefined,
   accessMode: AgentAccessMode,
   binding: RunPersistenceBinding | undefined,
+  resume: string | undefined,
   onEvent: (e: RunEvent) => void,
   onAccepted: () => void,
   signal?: AbortSignal,
@@ -332,7 +335,7 @@ async function streamRun(
   const res = await fetch("/api/run", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ agent: profile.agent, model: profile.model, reasoning: profile.reasoning, mode: profile.mode, prompt, cwd, accessMode, ...binding }),
+    body: JSON.stringify({ agent: profile.agent, model: profile.model, reasoning: profile.reasoning, mode: profile.mode, prompt, cwd, accessMode, ...(resume ? { resume } : {}), ...binding }),
     signal,
   });
   if (!res.ok || !res.body) {
@@ -373,18 +376,31 @@ export async function runConversation(opts: {
   readonly locale: Locale;
   readonly binding?: RunPersistenceBinding;
   readonly signal?: AbortSignal;
+  /** Native session id to resume (same agent continuing the conversation). */
+  readonly resume?: string;
   readonly onAccepted?: () => void;
+  /** Fires as soon as the agent reports its session id, so it can be persisted
+   *  immediately (even if the run later detaches or errors). */
+  readonly onSession?: (sessionId: string) => void;
   readonly onBlocks: (blocks: AgentBlock[]) => void;
 }): Promise<RunConversationResult> {
   let hasReasoning = false;
   let started = false;
+  let sessionId: string | undefined;
   let text = "";
   let hasText = false;
   const tools: StreamingTool[] = [];
-  // Reasoning segments and tool calls in the order they actually arrived, so the
-  // UI can show them interleaved chronologically instead of grouping all
-  // reasoning before all tools.
-  const timeline: Array<{ kind: "reasoning"; text: string } | { readonly kind: "tool"; readonly tool: StreamingTool }> = [];
+  // Reasoning segments, narration text, and tool calls in the order they
+  // actually arrived, so the UI can show them interleaved chronologically inside
+  // the Reasoning container. Text that arrives after the last reasoning/tool is
+  // the final answer ("result") and is the only thing rendered outside it.
+  const timeline: Array<
+    | { kind: "reasoning"; text: string }
+    | { kind: "text"; text: string }
+    | { readonly kind: "tool"; readonly tool: StreamingTool }
+    | { readonly kind: "search"; readonly search: StreamingSearch }
+    | { readonly kind: "code"; readonly data: CodeBlockData }
+  > = [];
   const diffs: DiffBlock[] = [];
   const plans: StreamingPlan[] = [];
   const codes: CodeBlockData[] = [];
@@ -413,35 +429,46 @@ export async function runConversation(opts: {
       }
     }
     const duration = `${Math.max(1, Math.round((performance.now() - start) / 1000))}s`;
+    // The final answer is the trailing run of text after the last reasoning/tool;
+    // earlier text is narration that stays interleaved with the tools.
+    let lastNonTextIdx = -1;
+    let lastTextIdx = -1;
+    timeline.forEach((item, idx) => {
+      if (item.kind === "text") {
+        lastTextIdx = idx;
+      } else {
+        lastNonTextIdx = idx;
+      }
+    });
     timeline.forEach((item, idx) => {
       if (item.kind === "reasoning") {
         blocks.push({ kind: "reasoning", text: item.text, active: !done && idx === lastReasoningIdx, duration: done && idx === firstReasoningIdx ? duration : undefined });
+      } else if (item.kind === "text") {
+        blocks.push({ kind: "text", text: item.text, streaming: !done && idx === lastTextIdx, result: idx > lastNonTextIdx });
+      } else if (item.kind === "search") {
+        const s = item.search;
+        blocks.push({ kind: "search", query: s.query, state: s.state, results: s.results });
+      } else if (item.kind === "code") {
+        blocks.push(item.data);
       } else {
         const t = item.tool;
         blocks.push(toolToDiffBlock(t) ?? { kind: "tool", name: t.name, summary: t.summary, args: t.args, state: t.state, output: t.output });
       }
     });
-    // Before any reasoning/tool arrives, show the empty "thinking" placeholder.
-    if (firstReasoningIdx === -1 && started && !done) {
+    // Before anything streams in, show the empty "thinking" placeholder.
+    if (timeline.length === 0 && started && !done) {
       blocks.push({ kind: "reasoning", text: "", active: true });
     }
     for (const plan of plans) {
       blocks.push({ kind: "plan", steps: plan.steps });
     }
     blocks.push(...diffs);
-    blocks.push(...codes);
-    for (const search of searches) {
-      blocks.push({ kind: "search", query: search.query, state: search.state, results: search.results });
-    }
     blocks.push(...suggested);
     for (const approval of approvals) {
       blocks.push({ kind: "approval", id: approval.id, title: approval.title, detail: approval.detail });
     }
     for (const option of options) {
       blocks.push({ kind: "options", id: option.id, prompt: option.prompt, multi: option.multi, options: option.options });
-    }
-    if (hasText) {
-      blocks.push({ kind: "text", text, streaming: !done });
     }
     for (const s of statuses) {
       blocks.push({ kind: "status", level: s.level, text: s.text });
@@ -495,12 +522,19 @@ export async function runConversation(opts: {
         queueLiveBlocks();
         break;
       }
-      case "text":
+      case "text": {
         started = true;
         hasText = true;
         text += e.text;
+        const last = timeline[timeline.length - 1];
+        if (last && last.kind === "text") {
+          last.text += e.text;
+        } else {
+          timeline.push({ kind: "text", text: e.text });
+        }
         queueLiveBlocks();
         break;
+      }
       case "tool":
         started = true;
         {
@@ -550,11 +584,14 @@ export async function runConversation(opts: {
         emitBlocks();
         break;
       }
-      case "code":
+      case "code": {
         started = true;
-        codes.push({ kind: "code", language: e.language, code: e.code });
+        const data: CodeBlockData = { kind: "code", language: e.language, code: e.code };
+        codes.push(data);
+        timeline.push({ kind: "code", data });
         emitBlocks();
         break;
+      }
       case "search": {
         started = true;
         const existing = e.id ? searches.find((item) => item.id === e.id) : searches.find((item) => item.query === e.query);
@@ -563,7 +600,9 @@ export async function runConversation(opts: {
           existing.state = e.state;
           existing.results = e.results ?? existing.results;
         } else {
-          searches.push({ id: e.id, query: e.query, state: e.state, results: e.results ?? [] });
+          const search: StreamingSearch = { id: e.id, query: e.query, state: e.state, results: e.results ?? [] };
+          searches.push(search);
+          timeline.push({ kind: "search", search });
         }
         emitBlocks();
         break;
@@ -608,6 +647,10 @@ export async function runConversation(opts: {
         started = true;
         emitBlocks();
         break;
+      case "session":
+        sessionId = e.id;
+        opts.onSession?.(e.id);
+        break;
       case "done":
         costUsd = e.costUsd;
         usage = e.usage;
@@ -624,6 +667,7 @@ export async function runConversation(opts: {
       opts.cwd,
       opts.accessMode,
       opts.binding,
+      opts.resume,
       onEvent,
       () => {
         accepted = true;
@@ -644,7 +688,7 @@ export async function runConversation(opts: {
   if (detached) {
     flushLiveBlocks();
     opts.onBlocks([...rebuild(), { kind: "status", level: "info", text: translate(opts.locale, "runDetachedSnippet") }]);
-    return { status: "detached", snippet: "" };
+    return { status: "detached", snippet: "", sessionId };
   }
 
   flushLiveBlocks();
@@ -680,5 +724,5 @@ export async function runConversation(opts: {
       : needsInput
         ? translate(opts.locale, "runNeedsInputSnippet")
       : truncate((hasText ? text : translate(opts.locale, "runDoneSnippet")).replace(/\s+/g, " "), 60);
-  return { status, snippet, costUsd, usage };
+  return { status, snippet, costUsd, usage, sessionId };
 }

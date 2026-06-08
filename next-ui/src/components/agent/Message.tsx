@@ -420,8 +420,14 @@ function AgentMessage({
   // The plan is pinned under the message (visible even while the agent works),
   // not folded into the collapsible details.
   const planBlocks = blocks.filter((block) => block.kind === "plan");
-  const detailBlocks = blocks.filter((block) => !ANSWER_BLOCK_KINDS.has(block.kind) && block.kind !== DIFF_KIND && block.kind !== "plan");
-  const answerBlocks = blocks.filter((block) => ANSWER_BLOCK_KINDS.has(block.kind));
+  // Only the final result text escapes the Reasoning container; narration text
+  // that arrived before/between tool calls stays interleaved with them inside.
+  // Legacy/persisted text blocks have no `result` flag — treat them as result
+  // (visible) unless explicitly marked as narration (result === false).
+  const isResultText = (block: AgentBlock): boolean => block.kind === "text" && block.result !== false;
+  const isAnswerBlock = (block: AgentBlock): boolean => isResultText(block) || (ANSWER_BLOCK_KINDS.has(block.kind) && block.kind !== "text");
+  const detailBlocks = blocks.filter((block) => !isAnswerBlock(block) && block.kind !== DIFF_KIND && block.kind !== "plan");
+  const answerBlocks = blocks.filter((block) => isAnswerBlock(block));
   const live = isMessageLive(blocks);
   const profileLabel = agentMessageProfileLabel(message.profile ?? agentProfile);
   return (

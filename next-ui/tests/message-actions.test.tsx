@@ -21,6 +21,8 @@ describe("message actions", () => {
 
     renderWithTheme(<AgentBlockRenderer block={message.blocks?.[0] ?? { kind: "text", text: "" }} />);
 
+    // Tools are collapsed by default (even on error); expand to inspect output.
+    fireEvent.click(screen.getByText("Command"));
     expect(screen.getByText(displayOutput)).toBeInTheDocument();
     expect(screen.queryByText(rawOutput)).not.toBeInTheDocument();
     expect(messageToPlainText(message)).toContain(displayOutput);

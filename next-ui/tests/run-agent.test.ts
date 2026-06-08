@@ -319,7 +319,7 @@ describe("runConversation", () => {
     });
 
     expect(blocks[0]).toContainEqual({ kind: "reasoning", text: "", active: true });
-    expect(blocks.at(-1)).toEqual([{ kind: "text", text: "answer", streaming: false }]);
+    expect(blocks.at(-1)).toEqual([{ kind: "text", text: "answer", streaming: false, result: true }]);
   });
 
   it("settles live search blocks when the run finishes", async () => {
@@ -345,7 +345,7 @@ describe("runConversation", () => {
 
     expect(blocks.at(-1)).toEqual([
       { kind: "search", query: "**/*calculator*", state: "ok", results: [] },
-      { kind: "text", text: "checked", streaming: false },
+      { kind: "text", text: "checked", streaming: false, result: true },
     ]);
   });
 
@@ -374,8 +374,8 @@ describe("runConversation", () => {
     });
 
     const liveTextBlocks = blocks.flatMap((blockList) => blockList.filter((block) => block.kind === "text" && block.streaming === true));
-    expect(liveTextBlocks).toEqual([{ kind: "text", text: "hello", streaming: true }]);
-    expect(blocks.at(-1)).toEqual([{ kind: "text", text: "hello", streaming: false }]);
+    expect(liveTextBlocks).toEqual([{ kind: "text", text: "hello", streaming: true, result: true }]);
+    expect(blocks.at(-1)).toEqual([{ kind: "text", text: "hello", streaming: false, result: true }]);
   });
 
   it("coalesces rapid text chunks into a frame-level live update", async () => {
@@ -405,13 +405,13 @@ describe("runConversation", () => {
 
     await vi.advanceTimersByTimeAsync(35);
     expect(blocks.flatMap((blockList) => blockList.filter((block) => block.kind === "text" && block.streaming === true))).toEqual([
-      { kind: "text", text: "hello", streaming: true },
+      { kind: "text", text: "hello", streaming: true, result: true },
     ]);
 
     await vi.advanceTimersByTimeAsync(100);
     await resultPromise;
 
-    expect(blocks.at(-1)).toEqual([{ kind: "text", text: "hello", streaming: false }]);
+    expect(blocks.at(-1)).toEqual([{ kind: "text", text: "hello", streaming: false, result: true }]);
   });
 
   it("surfaces malformed run stream lines as explicit errors", async () => {
