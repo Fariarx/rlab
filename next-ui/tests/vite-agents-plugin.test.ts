@@ -879,8 +879,14 @@ Built-in agents:
       { type: "tool", id: "c1", name: "Shell", summary: "ls" },
       { type: "tool_result", id: "c1", ok: true, output: "a\nb" },
     ]);
-    // fileChange with a unified diff -> diff event
+    // fileChange started -> running Edit tool (no perpetual "running": resolved on completed)
+    expect(codexAppServerItemEvents({ type: "fileChange", id: "f1", status: "inProgress", changes: [{ path: "a.ts", kind: "update" }] }, false)).toEqual([
+      { type: "tool", id: "f1", name: "Edit", summary: "a.ts" },
+    ]);
+    // fileChange completed -> tool + tool_result (settles it) + a diff block
     expect(codexAppServerItemEvents({ type: "fileChange", id: "f1", status: "completed", changes: [{ path: "a.ts", kind: "update", diff: "@@\n+added\n-removed" }] }, true)).toEqual([
+      { type: "tool", id: "f1", name: "Edit", summary: "a.ts" },
+      { type: "tool_result", id: "f1", ok: true, output: "update a.ts" },
       { type: "diff", id: "f1", file: "a.ts", additions: 1, deletions: 1, lines: [{ type: "add", text: "added" }, { type: "del", text: "removed" }] },
     ]);
     // mcpToolCall -> tool + tool_result (failed)
@@ -2532,7 +2538,7 @@ Built-in agents:
         text: "partial",
         hasText: true,
         tools: [],
-        timeline: [{ kind: "reasoning" as const, text: "Still running" }],
+        timeline: [{ kind: "reasoning" as const, text: "Still running" }, { kind: "text" as const, text: "partial" }],
         diffs: [],
         plans: [],
         codes: [],
@@ -2556,7 +2562,7 @@ Built-in agents:
     });
     expect(blocks).toEqual([
       { kind: "reasoning", text: "Still running", active: false, duration: expect.stringMatching(/s$/) },
-      { kind: "text", text: "partial", streaming: false },
+      { kind: "text", text: "partial", streaming: false, result: true },
       { kind: "status", level: "warn", text: "Запуск остановлен" },
     ]);
   });

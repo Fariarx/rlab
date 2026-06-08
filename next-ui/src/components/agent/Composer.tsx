@@ -259,6 +259,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const [activeSuggestion, setActiveSuggestion] = useState(0);
   const [suggestDismissed, setSuggestDismissed] = useState(false);
   const [modeMenuAnchor, setModeMenuAnchor] = useState<null | HTMLElement>(null);
+  // How far the multiline input overlay rises above the bar, so the floating
+  // tags row can sit above it instead of overlapping the typed lines.
+  const [overlayLift, setOverlayLift] = useState(0);
   const activeModeOption = modes.find((mode) => mode.id === activeMode) ?? null;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -302,6 +305,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     const baseline = singleRowRef.current || 24;
     const needsMultiline = composerValue.length > 0 && (composerValue.includes("\n") || el.scrollHeight > baseline * 1.5);
     setExpanded(needsMultiline);
+    // The expanded overlay (~textarea content + vertical padding) rises above the
+    // bar by its height minus one baseline row; lift the tags by that much.
+    setOverlayLift(needsMultiline ? Math.max(0, el.scrollHeight + 16 - baseline) : 0);
   }, [composerValue, expanded]);
 
   // Report the floating tags row height so the thread/Git content can reserve
@@ -434,7 +440,35 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   };
 
   const handlePaste = (event: ClipboardEvent<HTMLDivElement>) => {
-    const pasted = event.clipboardData?.getData("text/plain") ?? "";
+    const clipboard = event.clipboardData;
+    if (!clipboard) {
+      return;
+    }
+    // Pasted files/images (e.g. a screenshot or copied file) become attachments.
+    const pastedFiles: File[] = [];
+    for (const item of Array.from(clipboard.items ?? [])) {
+      if (item.kind !== "file") {
+        continue;
+      }
+      const file = item.getAsFile();
+      if (!file) {
+        continue;
+      }
+      if (file.name) {
+        pastedFiles.push(file);
+      } else {
+        // Clipboard images often arrive unnamed; synthesize a name from the mime.
+        const ext = file.type.split("/")[1] || "bin";
+        const kind = isImageMime(file.type) ? "image" : "file";
+        pastedFiles.push(new File([file], `pasted-${kind}-${attachmentIdSeq++}.${ext}`, { type: file.type }));
+      }
+    }
+    if (pastedFiles.length > 0) {
+      event.preventDefault();
+      void addFiles(pastedFiles);
+      return;
+    }
+    const pasted = clipboard.getData("text/plain") ?? "";
     if (pasted.length > PASTE_AS_FILE_CHARS) {
       event.preventDefault();
       void addFiles([new File([pasted], `pasted-${pasted.length}.txt`, { type: "text/plain" })]);
@@ -490,7 +524,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           never boxed together and never reflowing the thread. */}
       {/* Always mounted (even when empty) so its height can be measured and the
           content above can reserve matching space. */}
-      <Box ref={tagsRef} sx={{ position: "absolute", left: 0, right: 0, bottom: "calc(100% + 22px)", display: "flex", flexWrap: "wrap", gap: 0.75, pointerEvents: "none", zIndex: 6 }}>
+      <Box ref={tagsRef} sx={{ position: "absolute", left: 0, right: 0, bottom: `calc(100% + ${22 + overlayLift}px)`, display: "flex", flexWrap: "wrap", gap: 0.75, pointerEvents: "none", zIndex: 6, transition: "bottom 120ms ease" }}>
         {reviewCount > 0 && (
           <FloatingTag
             tone="accent"

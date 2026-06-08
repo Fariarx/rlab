@@ -323,26 +323,28 @@ function agentMessageProfileLabel(profile: AgentProfile | undefined): string | n
 
 /** Collapsed-by-default container holding an agent turn's intermediate work, so
  *  threads stay readable — only the answer and the (collapsed) details show. */
-function AgentDetails({ blocks, actions, autoExpand = false }: { readonly blocks: readonly AgentBlock[]; readonly actions?: MessageActionHandlers; readonly autoExpand?: boolean }) {
-  const [open, setOpen] = useState(false);
+function AgentDetails({ blocks, actions, autoExpand = false, live = false }: { readonly blocks: readonly AgentBlock[]; readonly actions?: MessageActionHandlers; readonly autoExpand?: boolean; readonly live?: boolean }) {
+  // `autoExpand` only seeds the initial open state — expanded while the turn is
+  // live (the agent is still working). We key off the live turn, not a reasoning
+  // block being active, because some agents stream their thinking as plain text
+  // rather than reasoning events. Afterwards the user's manual toggle always
+  // wins, so the container can be collapsed mid-thought.
+  const [open, setOpen] = useState(autoExpand && live);
   const detailsId = useId();
   const { t } = useI18n();
   const reasoning = blocks.find((block) => block.kind === "reasoning");
   const reasoningDuration = reasoning?.kind === "reasoning" ? reasoning.duration : undefined;
-  const active = blocks.some((block) => block.kind === "reasoning" && block.active);
   // Only expandable when there is real content — an empty reasoning block (e.g.
   // a still-streaming turn) shows the header but can't be opened to nothing.
   const expandable = blocks.some((block) => (block.kind === "reasoning" ? block.text.trim().length > 0 : true));
-  // While the agent is actively thinking, follow the auto-expand setting; once
-  // it's done, respect the user's manual toggle (collapsed by default).
-  const isOpen = expandable && (active ? autoExpand : open);
+  const isOpen = expandable && open;
   const headerContent = (
     <>
       <PsychologyIcon sx={{ fontSize: 16, color: "text.secondary", flex: "0 0 auto" }} />
       <Typography variant="microLabel" sx={{ color: "text.secondary", flex: 1, minWidth: 0 }}>
         {reasoningDuration ? t("reasoningThoughtFor", { duration: reasoningDuration }) : t("reasoning")}
       </Typography>
-      {active && <TypingDots />}
+      {live && <TypingDots />}
       {expandable && <KeyboardArrowDownIcon sx={{ fontSize: 18, color: "text.secondary", transition: "transform 180ms ease", transform: isOpen ? "rotate(180deg)" : "none" }} />}
     </>
   );
@@ -375,7 +377,7 @@ function AgentDetails({ blocks, actions, autoExpand = false }: { readonly blocks
         </Stack>
       )}
       <Collapse in={isOpen} unmountOnExit>
-        <Stack id={detailsId} spacing={1.25} sx={{ px: 1.5, py: 1.5, borderTop: (t) => `1px dashed ${t.custom.borders.subtle}` }}>
+        <Stack id={detailsId} spacing={0.5} sx={{ px: 1.5, py: 1.5, borderTop: (t) => `1px dashed ${t.custom.borders.subtle}` }}>
           {blocks.map((block, index) =>
             block.kind === "reasoning" ? (
               <Typography
@@ -456,7 +458,7 @@ function AgentMessage({
           {blocks.length === 0 && <TypingDots />}
           {detailBlocks.length > 0 && (
             <Box sx={rise(delay + 120)}>
-              <AgentDetails blocks={detailBlocks} actions={actions} autoExpand={displayPrefs.reasoningAutoExpand ?? false} />
+              <AgentDetails blocks={detailBlocks} actions={actions} autoExpand={displayPrefs.reasoningAutoExpand ?? false} live={live} />
             </Box>
           )}
           {/* Plan stays pinned and visible under the message, even mid-run. */}

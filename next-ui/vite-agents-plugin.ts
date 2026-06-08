@@ -3794,9 +3794,17 @@ interface BackgroundRunAccumulator {
   text: string;
   hasText: boolean;
   readonly tools: StreamingTool[];
-  // Reasoning segments and tool calls in arrival order, so they can be rendered
-  // interleaved chronologically rather than all-reasoning-then-all-tools.
-  readonly timeline: Array<{ kind: "reasoning"; text: string } | { readonly kind: "tool"; readonly tool: StreamingTool }>;
+  // Reasoning, narration text, tools, searches, and code in arrival order, so the
+  // UI can render them interleaved chronologically. Mirrors the frontend
+  // accumulator in run-agent.ts; both MUST stay in sync or reloaded (persisted)
+  // conversations render differently from the live ones.
+  readonly timeline: Array<
+    | { kind: "reasoning"; text: string }
+    | { kind: "text"; text: string }
+    | { readonly kind: "tool"; readonly tool: StreamingTool }
+    | { readonly kind: "search"; readonly search: StreamingSearch }
+    | { readonly kind: "code"; readonly data: CodeBlockData }
+  >;
   readonly diffs: DiffBlock[];
   readonly plans: StreamingPlan[];
   readonly codes: CodeBlockData[];
@@ -4948,10 +4956,8 @@ function backgroundBlocks(accumulator: BackgroundRunAccumulator): AgentBlock[] {
   const blocks: AgentBlock[] = [];
   const plans = accumulator.plans ?? [];
   const diffs = accumulator.diffs ?? [];
-  const codes = accumulator.codes ?? [];
-  const searches = accumulator.searches ?? [];
   const suggested = accumulator.suggested ?? [];
-  // Reasoning segments and tools interleaved in arrival order (chronological).
+  // Reasoning, text, tools, searches, and code interleaved in arrival order.
   const timeline = accumulator.timeline ?? [];
   const firstReasoningIdx = timeline.findIndex((item) => item.kind === "reasoning");
   let lastReasoningIdx = -1;
@@ -4962,34 +4968,45 @@ function backgroundBlocks(accumulator: BackgroundRunAccumulator): AgentBlock[] {
     }
   }
   const reasoningDuration = `${Math.max(1, Math.round((Date.now() - accumulator.start) / 1000))}s`;
+  // The final answer is the trailing run of text after the last reasoning/tool;
+  // earlier text is narration that stays interleaved with the tools.
+  let lastNonTextIdx = -1;
+  let lastTextIdx = -1;
+  timeline.forEach((item, idx) => {
+    if (item.kind === "text") {
+      lastTextIdx = idx;
+    } else {
+      lastNonTextIdx = idx;
+    }
+  });
   timeline.forEach((item, idx) => {
     if (item.kind === "reasoning") {
       blocks.push({ kind: "reasoning", text: item.text, active: !accumulator.done && idx === lastReasoningIdx, duration: accumulator.done && idx === firstReasoningIdx ? reasoningDuration : undefined });
+    } else if (item.kind === "text") {
+      blocks.push({ kind: "text", text: item.text, streaming: !accumulator.done && idx === lastTextIdx, result: idx > lastNonTextIdx });
+    } else if (item.kind === "search") {
+      const s = item.search;
+      blocks.push({ kind: "search", query: s.query, state: s.state, results: s.results });
+    } else if (item.kind === "code") {
+      blocks.push(item.data);
     } else {
       const tool = item.tool;
       blocks.push(toolToDiffBlock(tool) ?? { kind: "tool", name: tool.name, summary: tool.summary, args: tool.args, state: tool.state, output: tool.output });
     }
   });
-  if (firstReasoningIdx === -1 && accumulator.started && !accumulator.done) {
+  if (timeline.length === 0 && accumulator.started && !accumulator.done) {
     blocks.push({ kind: "reasoning", text: "", active: true });
   }
   for (const plan of plans) {
     blocks.push({ kind: "plan", steps: plan.steps });
   }
   blocks.push(...diffs);
-  blocks.push(...codes);
-  for (const search of searches) {
-    blocks.push({ kind: "search", query: search.query, state: search.state, results: search.results });
-  }
   blocks.push(...suggested);
   for (const approval of accumulator.approvals) {
     blocks.push({ kind: "approval", id: approval.id, title: approval.title, detail: approval.detail });
   }
   for (const option of accumulator.options) {
     blocks.push({ kind: "options", id: option.id, prompt: option.prompt, multi: option.multi, options: option.options });
-  }
-  if (accumulator.hasText) {
-    blocks.push({ kind: "text", text: accumulator.text, streaming: !accumulator.done });
   }
   for (const status of accumulator.statuses) {
     blocks.push({ kind: "status", level: status.level, text: status.text });
@@ -5324,11 +5341,18 @@ function accumulateBackgroundRunEvent(accumulator: BackgroundRunAccumulator, eve
       }
       break;
     }
-    case "text":
+    case "text": {
       accumulator.started = true;
       accumulator.hasText = true;
       accumulator.text += event.text;
+      const last = accumulator.timeline[accumulator.timeline.length - 1];
+      if (last && last.kind === "text") {
+        last.text += event.text;
+      } else {
+        accumulator.timeline.push({ kind: "text", text: event.text });
+      }
       break;
+    }
     case "tool": {
       accumulator.started = true;
       const existing = accumulator.tools.find((tool) => tool.id === event.id);
@@ -5373,10 +5397,13 @@ function accumulateBackgroundRunEvent(accumulator: BackgroundRunAccumulator, eve
       }
       break;
     }
-    case "code":
+    case "code": {
       accumulator.started = true;
-      accumulator.codes.push({ kind: "code", language: event.language, code: event.code });
+      const data: CodeBlockData = { kind: "code", language: event.language, code: event.code };
+      accumulator.codes.push(data);
+      accumulator.timeline.push({ kind: "code", data });
       break;
+    }
     case "search": {
       accumulator.started = true;
       const existing = event.id ? accumulator.searches.find((item) => item.id === event.id) : accumulator.searches.find((item) => item.query === event.query);
@@ -5385,7 +5412,9 @@ function accumulateBackgroundRunEvent(accumulator: BackgroundRunAccumulator, eve
         existing.state = event.state;
         existing.results = event.results ?? existing.results;
       } else {
-        accumulator.searches.push({ id: event.id, query: event.query, state: event.state, results: event.results ?? [] });
+        const search: StreamingSearch = { id: event.id, query: event.query, state: event.state, results: event.results ?? [] };
+        accumulator.searches.push(search);
+        accumulator.timeline.push({ kind: "search", search });
       }
       break;
     }
@@ -7039,19 +7068,26 @@ export function codexAppServerItemEvents(item: Record<string, unknown>, complete
       return events;
     }
     case "fileChange": {
+      // Model a file change as a tool with a full lifecycle: a running "Edit" on
+      // item.started, then a tool_result on item.completed so it settles as soon
+      // as the patch applies — not when the whole turn ends. The unified diff is
+      // surfaced as a separate diff block for rich rendering once it's known.
       const changes = Array.isArray(item.changes) ? item.changes.filter(isRecord) : [];
-      const events: RunEvent[] = [];
-      for (const change of changes) {
-        const file = firstString(change, ["path"]);
-        if (!file) {
-          continue;
-        }
-        const diffText = firstString(change, ["diff"]);
-        if (diffText) {
-          const block = diffBlockFromLines(file, parseUnifiedDiffLines(diffText));
-          events.push({ type: "diff", id, file, additions: block.additions, deletions: block.deletions, lines: block.lines });
-        } else {
-          events.push({ type: "tool", id: id ?? `codex-file-${file}`, name: "Edit", summary: file });
+      const files = changes.map((change) => firstString(change, ["path"])).filter((path): path is string => typeof path === "string" && path.length > 0);
+      const callId = id ?? `codex-file-${files[0] ?? "change"}`;
+      const summary = files.length === 0 ? "file change" : files.length === 1 ? files[0] : `${files.length} files changed`;
+      const events: RunEvent[] = [{ type: "tool", id: callId, name: "Edit", summary }];
+      if (completed) {
+        const ok = String(item.status ?? "").toLowerCase() === "completed";
+        const output = changes.map((change) => `${firstString(change, ["kind"]) ?? "update"} ${firstString(change, ["path"]) ?? ""}`.trim()).join("\n");
+        events.push({ type: "tool_result", id: callId, ok, output });
+        for (const change of changes) {
+          const file = firstString(change, ["path"]);
+          const diffText = firstString(change, ["diff"]);
+          if (file && diffText) {
+            const block = diffBlockFromLines(file, parseUnifiedDiffLines(diffText));
+            events.push({ type: "diff", id: callId, file, additions: block.additions, deletions: block.deletions, lines: block.lines });
+          }
         }
       }
       return events;

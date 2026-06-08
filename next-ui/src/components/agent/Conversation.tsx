@@ -89,6 +89,14 @@ export function Conversation({
   // freshly opened conversation lands at the bottom; flips off when the user
   // scrolls up to read history so streaming updates don't yank them back down.
   const pinnedToBottom = useRef(true);
+  // True only while the *user* is actively scrolling. We use it to distinguish a
+  // user scroll-up (which should unpin) from the viewport leaving the bottom
+  // simply because streaming content grew taller (which must NOT unpin, or
+  // auto-scroll stops following after the first growth).
+  const userScrolling = useRef(false);
+  // Timestamp until which scroll activity is our own (programmatic) autoscroll,
+  // so it isn't mistaken for a user scroll-up.
+  const programmaticScrollUntil = useRef(0);
   const hasLiveContent = typing === true || messages.some(hasLiveAgentBlock);
   const items = useMemo<readonly ConversationItem[]>(
     () => (typing ? [...messages.map((message) => ({ kind: "message" as const, message })), { kind: "typing" as const }] : messages.map((message) => ({ kind: "message" as const, message }))),
@@ -99,12 +107,14 @@ export function Conversation({
     if (!pinnedToBottom.current) {
       return;
     }
+    programmaticScrollUntil.current = performance.now() + 300;
     virtuosoRef.current?.autoscrollToBottom();
     // Tall messages (big diffs/code) finish measuring after the first paint, so a
     // single autoscroll can stop mid-content. Re-pin on the next frame so a freshly
     // opened thread lands fully at the bottom.
     const raf = requestAnimationFrame(() => {
       if (pinnedToBottom.current) {
+        programmaticScrollUntil.current = performance.now() + 300;
         virtuosoRef.current?.autoscrollToBottom();
       }
     });
@@ -126,12 +136,21 @@ export function Conversation({
         data={items}
         alignToBottom
         atBottomThreshold={BOTTOM_PIN_THRESHOLD}
+        isScrolling={(scrolling) => {
+          userScrolling.current = scrolling;
+        }}
         atBottomStateChange={(atBottom) => {
-          pinnedToBottom.current = atBottom;
+          if (atBottom) {
+            pinnedToBottom.current = true;
+          } else if (userScrolling.current && performance.now() > programmaticScrollUntil.current) {
+            // Only a deliberate user scroll-up unpins; content growth (and our own
+            // programmatic autoscroll) must not.
+            pinnedToBottom.current = false;
+          }
         }}
         computeItemKey={itemKey}
         defaultItemHeight={96}
-        followOutput={(atBottom) => (atBottom ? "auto" : false)}
+        followOutput={() => (pinnedToBottom.current ? "auto" : false)}
         increaseViewportBy={{ bottom: 640, top: 320 }}
         initialItemCount={Math.min(items.length, 20)}
         minOverscanItemCount={{ bottom: 8, top: 4 }}
