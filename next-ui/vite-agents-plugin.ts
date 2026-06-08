@@ -3064,6 +3064,66 @@ function handleAttachmentUpload(req: IncomingMessage, res: ServerResponse): void
   });
 }
 
+const LOCAL_FILE_CONTENT_TYPES: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  svg: "image/svg+xml",
+  avif: "image/avif",
+  bmp: "image/bmp",
+  ico: "image/x-icon",
+  pdf: "application/pdf",
+  txt: "text/plain; charset=utf-8",
+  md: "text/markdown; charset=utf-8",
+  json: "application/json; charset=utf-8",
+  csv: "text/csv; charset=utf-8",
+  log: "text/plain; charset=utf-8",
+};
+
+/** Serves a local file (agent screenshot, pasted attachment) so the browser can
+ *  render it. Read-only; resolves symlinks and refuses directories. The tool is
+ *  a local, single-user app bound to localhost, matching the existing Git/file
+ *  viewers that already read arbitrary files in the workspace. */
+function handleLocalFile(req: IncomingMessage, res: ServerResponse): void {
+  try {
+    const url = new URL(req.url ?? "", "http://localhost");
+    const requested = url.searchParams.get("path") ?? "";
+    if (!requested || !isAbsolute(requested)) {
+      sendJson(res, 400, { error: "An absolute file path is required." });
+      return;
+    }
+    const realPath = resolve(requested);
+    if (!existsSync(realPath)) {
+      sendJson(res, 404, { error: "File not found." });
+      return;
+    }
+    const stat = statSync(realPath);
+    if (!stat.isFile()) {
+      sendJson(res, 400, { error: "Not a file." });
+      return;
+    }
+    if (stat.size > MAX_ATTACHMENT_BYTES) {
+      sendJson(res, 413, { error: "File is too large to preview." });
+      return;
+    }
+    const ext = (realPath.split(".").pop() ?? "").toLowerCase();
+    const contentType = LOCAL_FILE_CONTENT_TYPES[ext] ?? "application/octet-stream";
+    const download = url.searchParams.get("download") === "1";
+    res.statusCode = 200;
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Content-Length", String(stat.size));
+    res.setHeader("Cache-Control", "private, max-age=60");
+    if (download || contentType === "application/octet-stream") {
+      res.setHeader("Content-Disposition", `attachment; filename="${basename(realPath).replace(/[^a-zA-Z0-9._-]+/g, "_")}"`);
+    }
+    res.end(readFileSync(realPath));
+  } catch (error) {
+    sendJson(res, 500, { error: errorMessage(error) });
+  }
+}
+
 function handleAgentConfig(req: IncomingMessage, res: ServerResponse): void {
   if (req.method === "GET") {
     try {
@@ -7934,6 +7994,14 @@ function attach(server: ViteDevServer | PreviewServer): void {
       return;
     }
     handleAttachmentUpload(req, res);
+  });
+  server.middlewares.use("/api/local-file", (req, res) => {
+    if (req.method !== "GET") {
+      res.statusCode = 405;
+      res.end();
+      return;
+    }
+    handleLocalFile(req, res);
   });
   server.middlewares.use("/api/git-status", (req, res) => {
     if (req.method !== "POST") {

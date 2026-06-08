@@ -191,7 +191,6 @@ export function CommandCard({ block }: { readonly block: CommandBlock }) {
     <ActionFrame
       icon={<TerminalIcon sx={{ fontSize: 16 }} />}
       state={block.state}
-      defaultOpen={block.state === "error"}
       title={<Typography component="code" noWrap sx={{ ...titleSx, display: "block", minWidth: 0 }}>{block.command}</Typography>}
       meta={
         block.exitCode != null && (
@@ -215,7 +214,6 @@ export function SearchCard({ block }: { readonly block: SearchBlock }) {
     <ActionFrame
       icon={<SearchIcon sx={{ fontSize: 16 }} />}
       state={block.state}
-      defaultOpen
       title={
         <Stack direction="row" spacing={1} sx={{ alignItems: "baseline", flexWrap: "wrap" }}>
           <Typography component="span" sx={titleSx}>

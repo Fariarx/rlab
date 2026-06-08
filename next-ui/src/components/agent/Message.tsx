@@ -323,7 +323,7 @@ function agentMessageProfileLabel(profile: AgentProfile | undefined): string | n
 
 /** Collapsed-by-default container holding an agent turn's intermediate work, so
  *  threads stay readable — only the answer and the (collapsed) details show. */
-function AgentDetails({ blocks, actions, autoExpand = false, live = false }: { readonly blocks: readonly AgentBlock[]; readonly actions?: MessageActionHandlers; readonly autoExpand?: boolean; readonly live?: boolean }) {
+function AgentDetails({ blocks, actions, autoExpand = false, live = false, showSpinner = false }: { readonly blocks: readonly AgentBlock[]; readonly actions?: MessageActionHandlers; readonly autoExpand?: boolean; readonly live?: boolean; readonly showSpinner?: boolean }) {
   // `autoExpand` only seeds the initial open state — expanded while the turn is
   // live (the agent is still working). We key off the live turn, not a reasoning
   // block being active, because some agents stream their thinking as plain text
@@ -344,7 +344,7 @@ function AgentDetails({ blocks, actions, autoExpand = false, live = false }: { r
       <Typography variant="microLabel" sx={{ color: "text.secondary", flex: 1, minWidth: 0 }}>
         {reasoningDuration ? t("reasoningThoughtFor", { duration: reasoningDuration }) : t("reasoning")}
       </Typography>
-      {live && <TypingDots />}
+      {showSpinner && <TypingDots />}
       {expandable && <KeyboardArrowDownIcon sx={{ fontSize: 18, color: "text.secondary", transition: "transform 180ms ease", transform: isOpen ? "rotate(180deg)" : "none" }} />}
     </>
   );
@@ -431,6 +431,11 @@ function AgentMessage({
   const detailBlocks = blocks.filter((block) => !isAnswerBlock(block) && block.kind !== DIFF_KIND && block.kind !== "plan");
   const answerBlocks = blocks.filter((block) => isAnswerBlock(block));
   const live = isMessageLive(blocks);
+  // The live "thinking" dots live in exactly one place. Once the answer text
+  // starts streaming (white text appears) it carries its own trailing dots, so
+  // the reasoning header dots would otherwise hang awkwardly in the middle.
+  const answerStreaming = answerBlocks.some((block) => block.kind === "text" && block.streaming === true);
+  const showDetailSpinner = live && !answerStreaming;
   const profileLabel = agentMessageProfileLabel(message.profile ?? agentProfile);
   return (
     <Stack direction="row" spacing={1.25} sx={{ alignItems: "flex-start", ...rise(delay), ...revealActionsOnHover }}>
@@ -458,7 +463,7 @@ function AgentMessage({
           {blocks.length === 0 && <TypingDots />}
           {detailBlocks.length > 0 && (
             <Box sx={rise(delay + 120)}>
-              <AgentDetails blocks={detailBlocks} actions={actions} autoExpand={displayPrefs.reasoningAutoExpand ?? false} live={live} />
+              <AgentDetails blocks={detailBlocks} actions={actions} autoExpand={displayPrefs.reasoningAutoExpand ?? false} live={live} showSpinner={showDetailSpinner} />
             </Box>
           )}
           {/* Plan stays pinned and visible under the message, even mid-run. */}

@@ -453,24 +453,27 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       return;
     }
     // Pasted files/images (e.g. a screenshot or copied file) become attachments.
-    const pastedFiles: File[] = [];
+    // Browsers populate either clipboardData.files or clipboardData.items (kind
+    // "file"); collect from both and de-dupe by identity.
+    const rawFiles: File[] = [...Array.from(clipboard.files ?? [])];
     for (const item of Array.from(clipboard.items ?? [])) {
       if (item.kind !== "file") {
         continue;
       }
       const file = item.getAsFile();
-      if (!file) {
-        continue;
-      }
-      if (file.name) {
-        pastedFiles.push(file);
-      } else {
-        // Clipboard images often arrive unnamed; synthesize a name from the mime.
-        const ext = file.type.split("/")[1] || "bin";
-        const kind = isImageMime(file.type) ? "image" : "file";
-        pastedFiles.push(new File([file], `pasted-${kind}-${attachmentIdSeq++}.${ext}`, { type: file.type }));
+      if (file && !rawFiles.includes(file)) {
+        rawFiles.push(file);
       }
     }
+    const pastedFiles: File[] = rawFiles.map((file) => {
+      if (file.name) {
+        return file;
+      }
+      // Clipboard images often arrive unnamed; synthesize a name from the mime.
+      const ext = file.type.split("/")[1] || "bin";
+      const kind = isImageMime(file.type) ? "image" : "file";
+      return new File([file], `pasted-${kind}-${attachmentIdSeq++}.${ext}`, { type: file.type });
+    });
     if (pastedFiles.length > 0) {
       event.preventDefault();
       void addFiles(pastedFiles);
@@ -532,7 +535,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           never boxed together and never reflowing the thread. */}
       {/* Always mounted (even when empty) so its height can be measured and the
           content above can reserve matching space. */}
-      <Box ref={tagsRef} sx={{ position: "absolute", left: 0, right: 0, bottom: `calc(100% + ${22 + overlayLift}px)`, display: "flex", flexWrap: "wrap", gap: 0.75, pointerEvents: "none", zIndex: 6, transition: "bottom 120ms ease" }}>
+      {/* No `bottom` transition: the textarea overlay grows instantly, so an eased
+          tags move would lag a frame behind and briefly overlap the typed lines. */}
+      <Box ref={tagsRef} sx={{ position: "absolute", left: 0, right: 0, bottom: `calc(100% + ${22 + overlayLift}px)`, display: "flex", flexWrap: "wrap", gap: 0.75, pointerEvents: "none", zIndex: 6 }}>
         {reviewCount > 0 && (
           <FloatingTag
             tone="accent"

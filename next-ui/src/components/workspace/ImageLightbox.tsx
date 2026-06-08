@@ -2,11 +2,13 @@ import CloseIcon from "@mui/icons-material/Close";
 import OpenInNewIcon from "@mui/icons-material/OpenInNew";
 import { Backdrop, Box, Stack, Typography } from "@mui/material";
 import { useI18n } from "../../i18n/I18nProvider";
+import { localFileUrl } from "../../lib/external-url";
 import { IconButton } from "../ui";
 
 /** Full-screen image viewer opened from the Resources tab thumbnails. */
 export function ImageLightbox({ src, label, onClose }: { readonly src: string | null; readonly label?: string; readonly onClose: () => void }) {
   const { t } = useI18n();
+  const displaySrc = src != null ? localFileUrl(src) : null;
 
   return (
     <Backdrop open={src != null} onClick={onClose} sx={{ zIndex: (theme) => theme.zIndex.modal, backgroundColor: "rgba(8, 11, 14, 0.88)", backdropFilter: "blur(2px)" }}>
@@ -17,7 +19,7 @@ export function ImageLightbox({ src, label, onClose }: { readonly src: string | 
               {label ?? src}
             </Typography>
             <Stack direction="row" spacing={0.5} sx={{ flex: "0 0 auto" }}>
-              <IconButton aria-label={t("openExternalLink")} onClick={() => window.open(src, "_blank", "noopener,noreferrer")}>
+              <IconButton aria-label={t("openExternalLink")} onClick={() => window.open(displaySrc ?? src, "_blank", "noopener,noreferrer")}>
                 <OpenInNewIcon sx={{ fontSize: 18 }} />
               </IconButton>
               <IconButton aria-label={t("previewClose")} onClick={onClose}>
@@ -26,7 +28,7 @@ export function ImageLightbox({ src, label, onClose }: { readonly src: string | 
             </Stack>
           </Stack>
           <Box sx={{ flex: 1, minHeight: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
-            <Box component="img" src={src} alt={label ?? ""} sx={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", borderRadius: (theme) => `${theme.custom.radii.md}px` }} />
+            <Box component="img" src={displaySrc ?? ""} alt={label ?? ""} sx={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", borderRadius: (theme) => `${theme.custom.radii.md}px` }} />
           </Box>
         </Stack>
       )}

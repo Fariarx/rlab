@@ -12,7 +12,7 @@ import { type MouseEvent as ReactMouseEvent, type ReactNode, useState } from "re
 import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useI18n } from "../../i18n/I18nProvider";
-import { normalizeExternalUrl } from "../../lib/external-url";
+import { localFileUrl, normalizeExternalUrl } from "../../lib/external-url";
 import type { StatusKey } from "../../theme/tokens";
 import { useWorkspaceUi } from "../workspace/workspace-ui";
 import { Button, IconButton, Menu, MenuItem, StatusDot } from "../ui";
@@ -279,19 +279,20 @@ const markdownComponents = {
     const raw = typeof src === "string" ? src.trim() : "";
     const webTarget = normalizeExternalUrl(raw);
     const label = (typeof alt === "string" && alt.trim()) || (raw ? fileBaseName(raw) : "image");
-    if (webTarget && IMAGE_URL_RE.test(webTarget)) {
+    // Web image URL, or a local image path served through the local-file endpoint.
+    const imageSrc = webTarget && IMAGE_URL_RE.test(webTarget) ? webTarget : raw && IMAGE_URL_RE.test(raw) && !webTarget ? localFileUrl(raw) : null;
+    if (imageSrc) {
       return (
         <Box
           component="img"
-          src={webTarget}
+          src={imageSrc}
           alt={label}
           loading="lazy"
           sx={{ maxWidth: "100%", maxHeight: 360, my: 0.5, display: "block", borderRadius: (t) => `${t.custom.radii.md}px`, border: (t) => `1px solid ${t.custom.borders.subtle}` }}
         />
       );
     }
-    // A local screenshot/file path can't load as a browser <img>; surface it as a
-    // file link that opens in the Git viewer (or broken if it isn't openable).
+    // A non-image local file path; surface it as a file link (Git viewer / download).
     return <MessageLink href={raw}>{label}</MessageLink>;
   },
   blockquote({ children }) {

@@ -36,8 +36,12 @@ const BOTTOM_PIN_THRESHOLD = 96;
 
 type ConversationItem = { readonly kind: "message"; readonly message: ChatMessage } | { readonly kind: "typing" };
 
-function itemKey(index: number, item: ConversationItem): string {
-  return item.kind === "message" ? item.message.id : `typing-${index}`;
+// react-virtuoso can invoke computeItemKey/itemContent with an out-of-range
+// (undefined) item during a data transition — e.g. when the messages array
+// changes from a background-run update. Guard the deref so a stale index can't
+// throw and white-screen the entire thread.
+function itemKey(index: number, item: ConversationItem | undefined): string {
+  return item?.kind === "message" ? item.message.id : `typing-${index}`;
 }
 
 function TypingRow({ delay }: { readonly delay: number }) {
@@ -103,23 +107,29 @@ export function Conversation({
     [messages, typing],
   );
 
+  // While pinned, keep the last item's end glued to the viewport bottom. This
+  // fires on every streamed blocks update (the messages array is a fresh ref each
+  // flush), so the thread sticks to the bottom continuously — not in jumps.
+  // `autoscrollToBottom` only nudges followOutput; `scrollToIndex(LAST, end)`
+  // actually forces the position, which is what "stick to the bottom" needs.
   useLayoutEffect(() => {
-    if (!pinnedToBottom.current) {
+    if (!pinnedToBottom.current || items.length === 0) {
       return;
     }
-    programmaticScrollUntil.current = performance.now() + 300;
-    virtuosoRef.current?.autoscrollToBottom();
-    // Tall messages (big diffs/code) finish measuring after the first paint, so a
-    // single autoscroll can stop mid-content. Re-pin on the next frame so a freshly
-    // opened thread lands fully at the bottom.
-    const raf = requestAnimationFrame(() => {
-      if (pinnedToBottom.current) {
-        programmaticScrollUntil.current = performance.now() + 300;
-        virtuosoRef.current?.autoscrollToBottom();
+    const pin = () => {
+      if (!pinnedToBottom.current) {
+        return;
       }
-    });
+      programmaticScrollUntil.current = performance.now() + 300;
+      virtuosoRef.current?.scrollToIndex({ index: "LAST", align: "end", behavior: "auto" });
+    };
+    pin();
+    // Tall messages (big diffs/code) finish measuring after the first paint, so a
+    // single scroll can stop mid-content. Re-pin on the next frame so the thread
+    // lands fully at the bottom.
+    const raf = requestAnimationFrame(pin);
     return () => cancelAnimationFrame(raf);
-  }, [messages, typing]);
+  }, [items]);
 
   return (
     <Box
@@ -153,14 +163,17 @@ export function Conversation({
         followOutput={() => (pinnedToBottom.current ? "auto" : false)}
         increaseViewportBy={{ bottom: 640, top: 320 }}
         initialItemCount={Math.min(items.length, 20)}
+        initialTopMostItemIndex={items.length > 0 ? { index: items.length - 1, align: "end" } : 0}
         minOverscanItemCount={{ bottom: 8, top: 4 }}
         style={{ height: "100%" }}
         components={{ Footer: bottomInset > 0 ? () => <Box sx={{ height: bottomInset }} /> : undefined }}
-        itemContent={(index, item) => (
-          <Box sx={{ width: "100%", maxWidth: contentMaxWidth, mx: "auto", px: contentPaddingX, pt: index === 0 ? { xs: 2.5, sm: 4 } : 0, pb: 3 }}>
-            {item.kind === "message" ? <Message actions={actions} displayPrefs={displayPrefs} agentProfile={agentProfile} message={item.message} index={index} /> : <TypingRow delay={messages.length * 120} />}
-          </Box>
-        )}
+        itemContent={(index, item) =>
+          item ? (
+            <Box sx={{ width: "100%", maxWidth: contentMaxWidth, mx: "auto", px: contentPaddingX, pt: index === 0 ? { xs: 2.5, sm: 4 } : 0, pb: 3 }}>
+              {item.kind === "message" ? <Message actions={actions} displayPrefs={displayPrefs} agentProfile={agentProfile} message={item.message} index={index} /> : <TypingRow delay={messages.length * 120} />}
+            </Box>
+          ) : null
+        }
       />
     </Box>
   );

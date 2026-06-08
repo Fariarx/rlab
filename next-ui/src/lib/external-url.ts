@@ -20,3 +20,16 @@ export function normalizeExternalUrl(href: string): string | null {
   }
   return null;
 }
+
+/**
+ * Turns a local filesystem path (an agent screenshot, a pasted attachment) into
+ * a URL the browser can load, routed through the server's local-file endpoint.
+ * Already-web URLs and data URIs are returned unchanged.
+ */
+export function localFileUrl(path: string): string {
+  const value = path.trim();
+  if (!value || /^(https?:|data:|blob:)/i.test(value) || value.startsWith("//")) {
+    return value;
+  }
+  return `/api/local-file?path=${encodeURIComponent(value)}`;
+}

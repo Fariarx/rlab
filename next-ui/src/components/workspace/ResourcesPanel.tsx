@@ -6,6 +6,7 @@ import { Box, Stack, Typography } from "@mui/material";
 import { useMemo, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import { type ConversationResource, collectResources } from "../../lib/conversation-resources";
+import { localFileUrl } from "../../lib/external-url";
 import type { ChatMessage } from "../agent";
 import { EmptyState } from "../ui";
 import { ImageLightbox } from "./ImageLightbox";
@@ -21,7 +22,22 @@ function KindIcon({ kind }: { readonly kind: ConversationResource["kind"] }) {
 }
 
 
-/** A compact resource card with uniform height. Kind icon always shown. */
+/** Small banner thumbnail for image cards, with a graceful fallback. */
+function ImageBanner({ resource }: { readonly resource: ConversationResource }) {
+  const [failed, setFailed] = useState(false);
+  return (
+    <Box sx={{ width: "100%", aspectRatio: "16 / 9", flex: "0 0 auto", borderRadius: (theme) => `${theme.custom.radii.sm}px`, overflow: "hidden", backgroundColor: (theme) => theme.custom.surfaces.s3, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      {failed ? (
+        <ImageOutlinedIcon sx={{ fontSize: 22, color: "text.tertiary" }} />
+      ) : (
+        <Box component="img" src={localFileUrl(resource.url)} alt={resource.label} loading="lazy" onError={() => setFailed(true)} sx={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+      )}
+    </Box>
+  );
+}
+
+/** A compact resource card with uniform height. Image cards lead with a
+ *  thumbnail; all cards show a kind icon + label. */
 function ResourceCard({ resource, onClick }: { readonly resource: ConversationResource; readonly onClick?: () => void }) {
   const showSecondary = resource.url !== resource.label;
   return (
@@ -40,6 +56,7 @@ function ResourceCard({ resource, onClick }: { readonly resource: ConversationRe
         "&:hover": onClick ? { backgroundColor: (theme) => theme.custom.surfaces.s3, borderColor: (theme) => theme.custom.borders.strong } : undefined,
       }}
     >
+      {resource.kind === "image" && <ImageBanner resource={resource} />}
       <Stack direction="row" spacing={0.75} sx={{ alignItems: "center", minWidth: 0 }}>
         <KindIcon kind={resource.kind} />
         <Typography
@@ -84,12 +101,19 @@ export function ResourcesPanel({ messages, bottomInset = 0 }: { readonly message
   const [lightbox, setLightbox] = useState<ConversationResource | null>(null);
   const resources = useMemo(() => collectResources(messages), [messages]);
 
+  const isAbsolutePath = (value: string): boolean => value.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(value);
+
   const onResourceClick = (resource: ConversationResource): (() => void) | undefined => {
     if (resource.kind === "image") {
       return () => setLightbox(resource);
     }
     if (resource.kind === "link") {
       return ui ? () => ui.openPreview(resource.url) : undefined;
+    }
+    // An absolute path (a pasted attachment / produced artifact) downloads through
+    // the local-file endpoint; a repo-relative path jumps to the Git file viewer.
+    if (isAbsolutePath(resource.url)) {
+      return () => window.open(`${localFileUrl(resource.url)}&download=1`, "_blank", "noopener,noreferrer");
     }
     return ui ? () => ui.openGitFile(resource.url) : undefined;
   };
