@@ -7,12 +7,12 @@ import RefreshIcon from "@mui/icons-material/Refresh";
 import SendIcon from "@mui/icons-material/Send";
 import CloseIcon from "@mui/icons-material/Close";
 import { Box, ButtonBase, Collapse, Stack, Typography } from "@mui/material";
-import { type ChangeEvent, type KeyboardEvent, type ReactNode, useId, useState } from "react";
+import { type ChangeEvent, type KeyboardEvent, type ReactNode, useEffect, useId, useRef, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import { Button, IconButton, Tooltip } from "../ui";
 import { AgentBlockRenderer } from "./AgentBlockRenderer";
 import { DiffCard } from "./DiffCard";
-import { DEFAULT_AGENT_OPTION_ID, agentProfileLabels, getAgent, type AgentProfile } from "./agents";
+import { DEFAULT_AGENT_OPTION_ID, agentProfileLabels, getAgent, resolveAgentReasoningValue, type AgentProfile } from "./agents";
 import { rise } from "./anim";
 import type { MessageActionHandlers } from "./message-actions";
 import { AgentAvatar, TypingDots, UserAvatar } from "./parts";
@@ -318,7 +318,9 @@ function agentMessageProfileLabel(profile: AgentProfile | undefined): string | n
     profile.model === DEFAULT_AGENT_OPTION_ID
       ? (modelOption?.value ?? modelOption?.label)
       : (agentProfileLabels({ ...profile, reasoning: DEFAULT_AGENT_OPTION_ID, mode: "default" })[0] ?? modelOption?.label ?? profile.model);
-  return modelLabel ? `${agent.name} · ${modelLabel}` : agent.name;
+  // e.g. "Claude Code · Opus 4.8 · medium" — the effort is shown when set.
+  const effort = resolveAgentReasoningValue(profile.agent, profile.reasoning);
+  return [agent.name, modelLabel, effort].filter(Boolean).join(" · ");
 }
 
 /** Collapsed-by-default container holding an agent turn's intermediate work, so
@@ -334,17 +336,54 @@ function AgentDetails({ blocks, actions, autoExpand = false, live = false, showS
   const { t } = useI18n();
   const reasoning = blocks.find((block) => block.kind === "reasoning");
   const reasoningDuration = reasoning?.kind === "reasoning" ? reasoning.duration : undefined;
+  // The turn's real wall-clock start (epoch ms) so the live timer shows actual
+  // elapsed time, surviving page reloads, instead of counting from mount.
+  const startedAtMs = reasoning?.kind === "reasoning" ? reasoning.startedAtMs : undefined;
+  // Parse the persisted "17s" duration string into seconds for a tidy m/s label.
+  const doneSeconds = reasoningDuration ? Number.parseInt(reasoningDuration, 10) : Number.NaN;
+  // Re-render once per second so the live elapsed label ticks.
+  const [, forceTick] = useState(0);
+  const liveStartRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!showSpinner) {
+      liveStartRef.current = null;
+      return;
+    }
+    // Fall back to a mount-relative clock only if the block carries no real start.
+    if (liveStartRef.current === null) {
+      liveStartRef.current = Date.now();
+    }
+    const id = setInterval(() => forceTick((n) => n + 1), 1000);
+    return () => clearInterval(id);
+  }, [showSpinner]);
+  const fmtDuration = (totalSec: number): string => {
+    const safe = Math.max(0, totalSec);
+    const m = Math.floor(safe / 60);
+    const s = safe % 60;
+    return m > 0 ? `${m}${t("unitMinShort")} ${s}${t("unitSecShort")}` : `${s}${t("unitSecShort")}`;
+  };
+  const liveAnchor = startedAtMs ?? liveStartRef.current;
+  const liveSeconds = showSpinner && liveAnchor !== null && liveAnchor !== undefined ? Math.round((Date.now() - liveAnchor) / 1000) : 0;
   // Only expandable when there is real content — an empty reasoning block (e.g.
   // a still-streaming turn) shows the header but can't be opened to nothing.
   const expandable = blocks.some((block) => (block.kind === "reasoning" ? block.text.trim().length > 0 : true));
   const isOpen = expandable && open;
+  const durationLabelSx = { fontFamily: (th: { custom: { fonts: { mono: string } } }) => th.custom.fonts.mono, fontSize: "0.68rem", color: "text.secondary", flex: "0 0 auto", whiteSpace: "nowrap" } as const;
   const headerContent = (
     <>
       <PsychologyIcon sx={{ fontSize: 16, color: "text.secondary", flex: "0 0 auto" }} />
       <Typography variant="microLabel" sx={{ color: "text.secondary", flex: 1, minWidth: 0 }}>
-        {reasoningDuration ? t("reasoningThoughtFor", { duration: reasoningDuration }) : t("reasoning")}
+        {t("reasoning")}
       </Typography>
-      {showSpinner && <TypingDots />}
+      {/* Right edge: dots + live elapsed while working, or "Worked Xm Ys" when done. */}
+      {showSpinner ? (
+        <Stack direction="row" spacing={0.75} sx={{ alignItems: "center", flex: "0 0 auto" }}>
+          <TypingDots />
+          <Typography component="span" sx={durationLabelSx}>{fmtDuration(liveSeconds)}</Typography>
+        </Stack>
+      ) : Number.isFinite(doneSeconds) ? (
+        <Typography component="span" sx={durationLabelSx}>{t("reasoningWorked", { duration: fmtDuration(doneSeconds) })}</Typography>
+      ) : null}
       {expandable && <KeyboardArrowDownIcon sx={{ fontSize: 18, color: "text.secondary", transition: "transform 180ms ease", transform: isOpen ? "rotate(180deg)" : "none" }} />}
     </>
   );
@@ -377,24 +416,28 @@ function AgentDetails({ blocks, actions, autoExpand = false, live = false, showS
         </Stack>
       )}
       <Collapse in={isOpen} unmountOnExit>
-        <Stack id={detailsId} spacing={0.5} sx={{ px: 1.5, py: 1.5, borderTop: (t) => `1px dashed ${t.custom.borders.subtle}` }}>
-          {blocks.map((block, index) =>
-            block.kind === "reasoning" ? (
-              <Typography
-                key={index}
-                component="div"
-                sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.76rem", lineHeight: 1.7, color: "text.secondary", whiteSpace: "pre-line", fontStyle: "italic" }}
-              >
-                {block.text}
-              </Typography>
-            ) : (
-              <AgentBlockRenderer
-                key={index}
-                block={block}
-                actions={actions ? { onApprovalDecision: actions.onApprovalDecision, onOptionSelection: actions.onOptionSelection } : undefined}
-              />
-            ),
-          )}
+        <Stack id={detailsId} spacing={0.75} sx={{ px: 1.5, py: 1.5, borderTop: (t) => `1px dashed ${t.custom.borders.subtle}` }}>
+          {/* Drop empty reasoning segments — a blank Typography still consumes a
+              Stack gap on each side, which read as uneven spacing between tools. */}
+          {blocks
+            .filter((block) => !(block.kind === "reasoning" && block.text.trim().length === 0))
+            .map((block, index) =>
+              block.kind === "reasoning" ? (
+                <Typography
+                  key={index}
+                  component="div"
+                  sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.76rem", lineHeight: 1.7, color: "text.secondary", whiteSpace: "pre-line", fontStyle: "italic" }}
+                >
+                  {block.text.trim()}
+                </Typography>
+              ) : (
+                <AgentBlockRenderer
+                  key={index}
+                  block={block}
+                  actions={actions ? { onApprovalDecision: actions.onApprovalDecision, onOptionSelection: actions.onOptionSelection } : undefined}
+                />
+              ),
+            )}
         </Stack>
       </Collapse>
     </Box>

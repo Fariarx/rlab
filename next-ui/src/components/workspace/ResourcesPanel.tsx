@@ -1,11 +1,13 @@
 import DescriptionOutlinedIcon from "@mui/icons-material/DescriptionOutlined";
 import ImageOutlinedIcon from "@mui/icons-material/ImageOutlined";
 import InsertDriveFileOutlinedIcon from "@mui/icons-material/InsertDriveFileOutlined";
+import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
 import LinkIcon from "@mui/icons-material/Link";
-import { Box, Stack, Typography } from "@mui/material";
-import { useMemo, useState } from "react";
+import { Box, ButtonBase, Collapse, Stack, Typography } from "@mui/material";
+import { type ReactNode, useMemo, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
-import { type ConversationResource, collectResources } from "../../lib/conversation-resources";
+import type { TranslationKey } from "../../i18n/I18nProvider";
+import { type ConversationResource, type ResourceKind, collectResources } from "../../lib/conversation-resources";
 import { localFileUrl } from "../../lib/external-url";
 import type { ChatMessage } from "../agent";
 import { EmptyState } from "../ui";
@@ -89,11 +91,42 @@ function ResourceCard({ resource, onClick }: { readonly resource: ConversationRe
   );
 }
 
+/** A collapsible section per resource type; open by default so each type shows
+ *  at least its first entry without a click. */
+function ResourceGroup({ title, count, children }: { readonly title: string; readonly count: number; readonly children: ReactNode }) {
+  const [open, setOpen] = useState(true);
+  return (
+    <Box sx={{ borderRadius: (theme) => `${theme.custom.radii.md}px`, border: (theme) => `1px solid ${theme.custom.borders.subtle}`, backgroundColor: (theme) => theme.custom.surfaces.s1, overflow: "hidden" }}>
+      <ButtonBase
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+        sx={{ width: "100%", display: "flex", alignItems: "center", gap: 1, px: 1.25, py: 0.875, textAlign: "left", "&:hover": { backgroundColor: (theme) => theme.custom.surfaces.s3 } }}
+      >
+        <Typography sx={{ flex: 1, minWidth: 0, fontFamily: (theme) => theme.custom.fonts.mono, fontWeight: 700, fontSize: "0.76rem", color: "text.primary" }}>
+          {title}
+        </Typography>
+        <Typography component="span" sx={{ flex: "0 0 auto", fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.7rem", color: "text.secondary" }}>
+          {count}
+        </Typography>
+        <KeyboardArrowDownIcon sx={{ fontSize: 18, color: "text.secondary", transition: "transform 180ms ease", transform: open ? "rotate(180deg)" : "none" }} />
+      </ButtonBase>
+      <Collapse in={open} unmountOnExit>
+        <Box sx={{ px: 1.25, pb: 1.25, pt: 0.5 }}>{children}</Box>
+      </Collapse>
+    </Box>
+  );
+}
+
+const RESOURCE_GROUPS: ReadonlyArray<{ readonly kind: ResourceKind; readonly labelKey: TranslationKey }> = [
+  { kind: "image", labelKey: "resourcesImages" },
+  { kind: "link", labelKey: "resourcesLinks" },
+  { kind: "file", labelKey: "resourcesFiles" },
+];
+
 /**
- * Resources tab — every file, link, and image referenced in the open thread, as
- * a grid of compact cards ordered by when each was first mentioned (not grouped
- * by type). Images open a viewer, links open in the browser Preview, files jump
- * to Git.
+ * Resources tab — files, links, and images referenced in the open thread,
+ * grouped into collapsible sections by type (newest first within each). Images
+ * open a viewer, links open in the browser Preview, files download or jump to Git.
  */
 export function ResourcesPanel({ messages, bottomInset = 0 }: { readonly messages: readonly ChatMessage[]; readonly bottomInset?: number }) {
   const { t } = useI18n();
@@ -137,11 +170,24 @@ export function ResourcesPanel({ messages, bottomInset = 0 }: { readonly message
         </Stack>
       ) : (
         <Box sx={{ flex: 1, minHeight: 0, overflow: "auto", px: 1.5, pt: 1.5, pb: `${16 + bottomInset}px` }}>
-          <Box sx={{ display: "grid", gap: 1, gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))", alignItems: "stretch" }}>
-            {[...resources].reverse().map((resource) => (
-              <ResourceCard key={resource.id} resource={resource} onClick={onResourceClick(resource)} />
-            ))}
-          </Box>
+          <Stack spacing={1}>
+            {RESOURCE_GROUPS.map(({ kind, labelKey }) => {
+              // Newest-first within each type group.
+              const items = resources.filter((resource) => resource.kind === kind).reverse();
+              if (items.length === 0) {
+                return null;
+              }
+              return (
+                <ResourceGroup key={kind} title={t(labelKey)} count={items.length}>
+                  <Box sx={{ display: "grid", gap: 1, gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))", alignItems: "stretch" }}>
+                    {items.map((resource) => (
+                      <ResourceCard key={resource.id} resource={resource} onClick={onResourceClick(resource)} />
+                    ))}
+                  </Box>
+                </ResourceGroup>
+              );
+            })}
+          </Stack>
         </Box>
       )}
 

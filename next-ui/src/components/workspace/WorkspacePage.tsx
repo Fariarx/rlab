@@ -127,6 +127,15 @@ const WORKSPACE_ERROR_ALERT_SX = {
   },
 } as const;
 
+/** The visible text of a sent user message (attachment blocks and file-link
+ *  markdown removed) for ArrowUp history recall. */
+function composerHistoryText(raw: string): string {
+  return raw
+    .replace(/<attachment\s+name="[^"]*"[^>]*>[\s\S]*?<\/attachment>/g, "")
+    .replace(/!?\[([^\]\n]+)\]\(([^)\s]+)\)/g, (whole, _label, target: string) => (/[\\/]/.test(target) || /\.[a-z0-9]{1,8}$/i.test(target) ? "" : whole))
+    .trim();
+}
+
 function abbreviateLabel(label: string): string {
   return label
     .split(/\s+/)
@@ -341,6 +350,17 @@ export function WorkspacePageView({
 
   const selected = composingNew ? null : ws.find(ws.selectedId);
   const messages = ws.threads[ws.selectedId] ?? [];
+  // Sent user messages (oldest first) for ArrowUp/ArrowDown recall in the
+  // composer; attachment blocks / file-link markdown are stripped to the visible
+  // text, and blank entries dropped.
+  const messageHistory = useMemo(
+    () =>
+      messages
+        .filter((message) => message.role === "user")
+        .map((message) => composerHistoryText(message.text ?? ""))
+        .filter((text) => text.length > 0),
+    [messages],
+  );
   const selectedHasActiveWork = conversationHasActiveWork(selected, messages);
   const lastTurnDiffs = useMemo(() => latestAgentDiffBlocks(messages), [messages]);
   const composerDraft = ws.composerDrafts[ws.selectedId] ?? { text: "", attachments: [] };
@@ -504,6 +524,52 @@ export function WorkspacePageView({
       alive = false;
     };
   }, [activeCwd, t, toast]);
+
+  // Detect a redeploy: poll the server's build version and, when it changes,
+  // prompt to reload. A long-lived SPA tab navigates via hash routes and never
+  // re-fetches the bundle on its own, so without this it keeps running stale JS
+  // after a deploy (the source of "still broken" reports after a fix shipped).
+  useEffect(() => {
+    let baseline: string | null = null;
+    let prompted = false;
+    let timer: ReturnType<typeof setInterval> | null = null;
+    const check = async () => {
+      try {
+        const response = await fetch("/api/version", { cache: "no-store" });
+        if (!response.ok) {
+          return;
+        }
+        const { version } = (await response.json()) as { version?: string };
+        if (!version || version === "dev") {
+          return;
+        }
+        if (baseline === null) {
+          baseline = version;
+        } else if (version !== baseline && !prompted) {
+          prompted = true;
+          toast({
+            message: t("newVersionAvailable"),
+            severity: "info",
+            duration: 0,
+            action: (
+              <Button variant="subtle" size="small" onClick={() => window.location.reload()}>
+                {t("reloadApp")}
+              </Button>
+            ),
+          });
+        }
+      } catch {
+        // Offline / transient — ignore and retry on the next tick.
+      }
+    };
+    void check();
+    timer = setInterval(check, 60_000);
+    return () => {
+      if (timer) {
+        clearInterval(timer);
+      }
+    };
+  }, [t, toast]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -1322,6 +1388,7 @@ export function WorkspacePageView({
                 onSendReview={sendReviewComments}
                 onTagsHeightChange={setComposerTagsHeight}
                 onOverlayLiftChange={setComposerOverlayLift}
+                history={messageHistory}
               />
             )}
           </Box>

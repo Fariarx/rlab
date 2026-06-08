@@ -118,9 +118,8 @@ export function collectResources(messages: readonly ChatMessage[]): readonly Con
             harvestText(block.text, origin, time, out);
           }
           break;
-        case "diff":
-          out.add("file", block.file, fileLabel(block.file), origin, time);
-          break;
+        // Files the agent edited (diff blocks) are deliberately NOT collected —
+        // Resources lists only directly-mentioned files/links and client uploads.
         case "search":
           for (const result of block.results) {
             out.addInferred(result.url, result.title, origin, time);

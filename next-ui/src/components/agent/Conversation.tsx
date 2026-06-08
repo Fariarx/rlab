@@ -89,6 +89,7 @@ export function Conversation({
 }) {
   const { t } = useI18n();
   const virtuosoRef = useRef<VirtuosoHandle | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
   // Whether the viewport is pinned to the latest message. Starts pinned so a
   // freshly opened conversation lands at the bottom; flips off when the user
   // scrolls up to read history so streaming updates don't yank them back down.
@@ -107,32 +108,68 @@ export function Conversation({
     [messages, typing],
   );
 
+  const pinToBottom = () => {
+    if (!pinnedToBottom.current) {
+      return;
+    }
+    programmaticScrollUntil.current = performance.now() + 300;
+    virtuosoRef.current?.scrollToIndex({ index: "LAST", align: "end", behavior: "auto" });
+  };
+
   // While pinned, keep the last item's end glued to the viewport bottom. This
   // fires on every streamed blocks update (the messages array is a fresh ref each
   // flush), so the thread sticks to the bottom continuously — not in jumps.
   // `autoscrollToBottom` only nudges followOutput; `scrollToIndex(LAST, end)`
   // actually forces the position, which is what "stick to the bottom" needs.
   useLayoutEffect(() => {
-    if (!pinnedToBottom.current || items.length === 0) {
+    if (items.length === 0) {
       return;
     }
-    const pin = () => {
-      if (!pinnedToBottom.current) {
-        return;
-      }
-      programmaticScrollUntil.current = performance.now() + 300;
-      virtuosoRef.current?.scrollToIndex({ index: "LAST", align: "end", behavior: "auto" });
-    };
-    pin();
-    // Tall messages (big diffs/code) finish measuring after the first paint, so a
-    // single scroll can stop mid-content. Re-pin on the next frame so the thread
-    // lands fully at the bottom.
-    const raf = requestAnimationFrame(pin);
+    pinToBottom();
+    const raf = requestAnimationFrame(pinToBottom);
     return () => cancelAnimationFrame(raf);
   }, [items]);
 
+  // On open (the parent remounts this component per conversation via a key),
+  // Virtuoso lays out with ESTIMATED item heights and lazy images load over the
+  // next few seconds, both of which grow the content AFTER the first scroll — so
+  // a one-shot scroll-to-bottom lands mid-thread. Keep re-pinning until the
+  // scroll height stops changing (images settled) so only the freshest messages
+  // show. This is the fix for "opens in the middle of a long dialog".
+  useLayoutEffect(() => {
+    pinnedToBottom.current = true;
+    let lastHeight = -1;
+    let stableTicks = 0;
+    let elapsed = 0;
+    pinToBottom();
+    const id = setInterval(() => {
+      elapsed += 100;
+      const scroller = containerRef.current?.querySelector('[data-testid="virtuoso-scroller"]') as HTMLElement | null;
+      const height = scroller ? scroller.scrollHeight : -1;
+      if (height !== lastHeight) {
+        // Content grew (real heights measured, an image loaded) — chase the bottom.
+        lastHeight = height;
+        stableTicks = 0;
+        pinToBottom();
+      } else {
+        stableTicks += 1;
+        if (stableTicks <= 2) {
+          pinToBottom();
+        }
+      }
+      if (!pinnedToBottom.current || elapsed >= 6000 || stableTicks >= 8) {
+        clearInterval(id);
+      }
+    }, 100);
+    return () => clearInterval(id);
+    // Run once per mount (conversation open); the parent keys this component by
+    // conversation id so a new conversation gets a fresh convergence pass.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   return (
     <Box
+      ref={containerRef}
       data-testid="conversation-virtual-list"
       data-virtualized="true"
       role="log"

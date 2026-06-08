@@ -229,6 +229,9 @@ interface ComposerProps {
   /** Reports the multiline-overlay lift (px above the single-row baseline) so
    *  the thread can reserve extra space when the textarea expands upward. */
   readonly onOverlayLiftChange?: (lift: number) => void;
+  /** Previously sent user messages (oldest first) recalled with ArrowUp/ArrowDown
+   *  when the caret is at the edge, shell-history style. */
+  readonly history?: readonly string[];
 }
 
 /** Composer — the chat input. Sends on Enter (Shift+Enter for newline). Sticky
@@ -253,6 +256,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     onSendReview,
     onTagsHeightChange,
     onOverlayLiftChange,
+    history = [],
   },
   ref,
 ) {
@@ -272,7 +276,14 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const tagsRef = useRef<HTMLDivElement | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const singleRowRef = useRef(0);
+  // Shell-style history navigation: -1 means "not browsing"; otherwise an index
+  // into `history`. `historyDraftRef` holds the text being composed before the
+  // user started scrolling back, so ArrowDown past the newest restores it.
+  const historyIndexRef = useRef(-1);
+  const historyDraftRef = useRef("");
+  const pendingCaretToEndRef = useRef(false);
   const initialDraftRef = useRef<ComposerDraft>({ text: initialValue, attachments: initialAttachments });
   const localDraftDirtyRef = useRef(false);
   const { t } = useI18n();
@@ -295,6 +306,21 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     setInternalAttachments(nextInitialDraft.attachments);
   }, [attachments, initialAttachments, initialValue, value]);
 
+  // After recalling a history entry, drop the caret at the end of the recalled
+  // text so the next keystroke edits rather than replaces it.
+  useLayoutEffect(() => {
+    if (!pendingCaretToEndRef.current) {
+      return;
+    }
+    pendingCaretToEndRef.current = false;
+    const el = textareaRef.current;
+    if (el) {
+      el.focus();
+      const end = el.value.length;
+      el.setSelectionRange(end, end);
+    }
+  }, [composerValue]);
+
   // Decide whether the input would need more than one row. When it does, the
   // input lifts into an overlay that grows upward (see render) instead of
   // expanding the composer bar in place. Detection is driven by content height
@@ -311,9 +337,16 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     const baseline = singleRowRef.current || 24;
     const needsMultiline = composerValue.length > 0 && (composerValue.includes("\n") || el.scrollHeight > baseline * 1.5);
     setExpanded(needsMultiline);
-    // The expanded overlay (~textarea content + vertical padding) rises above the
-    // bar by its height minus one baseline row; lift the tags by that much.
-    const nextLift = needsMultiline ? Math.max(0, el.scrollHeight + 16 - baseline) : 0;
+    // Lift the floating tags by exactly how far the (already-rendered) overlay's
+    // top rises above the composer box's top — measured from real geometry so it
+    // can't drift out of sync with the textarea like a height estimate would.
+    // When collapsed the textarea sits below the box top, so the lift clamps to 0.
+    const root = rootRef.current;
+    let nextLift = 0;
+    if (needsMultiline && expanded && root) {
+      const overlayTop = el.getBoundingClientRect().top - 8; // overlay padding above the textarea
+      nextLift = Math.max(0, Math.round(root.getBoundingClientRect().top - overlayTop));
+    }
     setOverlayLift(nextLift);
     onOverlayLiftChangeRef.current?.(nextLift);
   }, [composerValue, expanded]);
@@ -364,9 +397,50 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   };
 
   const setComposerValue = (nextValue: string) => {
-    // Typing re-opens suggestions that an earlier Escape dismissed.
+    // Typing re-opens suggestions that an earlier Escape dismissed and exits any
+    // in-progress history browsing so the next ArrowUp starts fresh.
     setSuggestDismissed(false);
+    historyIndexRef.current = -1;
     updateDraft({ text: nextValue, attachments: latestDraftRef.current.attachments });
+  };
+
+  // Recall a history entry without exiting history-browsing mode; the caret is
+  // moved to the end on the next paint so further arrow presses keep navigating.
+  const applyHistoryValue = (nextValue: string) => {
+    pendingCaretToEndRef.current = true;
+    updateDraft({ text: nextValue, attachments: latestDraftRef.current.attachments });
+  };
+
+  const navigateHistory = (direction: "up" | "down"): boolean => {
+    if (history.length === 0) {
+      return false;
+    }
+    const browsing = historyIndexRef.current !== -1;
+    if (direction === "up") {
+      if (!browsing) {
+        historyDraftRef.current = composerValue;
+        historyIndexRef.current = history.length - 1;
+      } else if (historyIndexRef.current > 0) {
+        historyIndexRef.current -= 1;
+      } else {
+        return true; // already at the oldest; swallow the key but don't wrap.
+      }
+      applyHistoryValue(history[historyIndexRef.current] ?? "");
+      return true;
+    }
+    // direction === "down": only meaningful while browsing.
+    if (!browsing) {
+      return false;
+    }
+    if (historyIndexRef.current < history.length - 1) {
+      historyIndexRef.current += 1;
+      applyHistoryValue(history[historyIndexRef.current] ?? "");
+    } else {
+      // Past the newest entry → restore the draft the user was composing.
+      historyIndexRef.current = -1;
+      applyHistoryValue(historyDraftRef.current);
+    }
+    return true;
   };
 
   const setComposerAttachments = (nextAttachments: readonly ComposerAttachmentDraft[]) => {
@@ -417,6 +491,27 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         return;
       }
     }
+    // ArrowUp/ArrowDown recall sent messages (shell history). ArrowUp engages
+    // only when the caret sits at the very start (so multi-line editing's own
+    // vertical movement still works); ArrowDown only while already browsing.
+    if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+      const el = textareaRef.current;
+      const atStart = !el || (el.selectionStart === 0 && el.selectionEnd === 0);
+      const atEnd = !el || (el.selectionStart === composerValue.length && el.selectionEnd === composerValue.length);
+      const browsing = historyIndexRef.current !== -1;
+      if (event.key === "ArrowUp" && (browsing || atStart)) {
+        if (navigateHistory("up")) {
+          event.preventDefault();
+          return;
+        }
+      }
+      if (event.key === "ArrowDown" && browsing && atEnd) {
+        if (navigateHistory("down")) {
+          event.preventDefault();
+          return;
+        }
+      }
+    }
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       send();
@@ -453,16 +548,19 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       return;
     }
     // Pasted files/images (e.g. a screenshot or copied file) become attachments.
-    // Browsers populate either clipboardData.files or clipboardData.items (kind
-    // "file"); collect from both and de-dupe by identity.
-    const rawFiles: File[] = [...Array.from(clipboard.files ?? [])];
-    for (const item of Array.from(clipboard.items ?? [])) {
-      if (item.kind !== "file") {
-        continue;
-      }
-      const file = item.getAsFile();
-      if (file && !rawFiles.includes(file)) {
-        rawFiles.push(file);
+    // Browsers expose the same payload through BOTH clipboardData.files and
+    // clipboardData.items (kind "file"), so read only one source — preferring
+    // .files — to avoid attaching every pasted file twice.
+    const rawFiles: File[] = Array.from(clipboard.files ?? []);
+    if (rawFiles.length === 0) {
+      for (const item of Array.from(clipboard.items ?? [])) {
+        if (item.kind !== "file") {
+          continue;
+        }
+        const file = item.getAsFile();
+        if (file) {
+          rawFiles.push(file);
+        }
       }
     }
     const pastedFiles: File[] = rawFiles.map((file) => {
@@ -529,7 +627,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     // Plain Box (not a spaced Stack): the only in-flow child is the input bar;
     // tags + suggestions are absolutely positioned. A Stack's sibling spacing
     // would otherwise push the bar down once the (absolute) tags row mounts.
-    <Box sx={{ position: "relative" }}>
+    <Box ref={rootRef} sx={{ position: "relative" }}>
       {/* Each enabled mode and each attached file floats as its own pill above
           the divider that tops the input container (overlaying the thread),
           never boxed together and never reflowing the thread. */}

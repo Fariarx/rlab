@@ -48,6 +48,9 @@ export interface ReasoningBlock {
   /** When true, renders the live "thinking" animation instead of a summary. */
   readonly active?: boolean;
   readonly duration?: string;
+  /** Epoch ms when the turn started, so a live elapsed timer shows the real
+   *  wall-clock time even after a page reload (not time-since-mount). */
+  readonly startedAtMs?: number;
 }
 
 export interface TextBlock {

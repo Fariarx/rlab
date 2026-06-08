@@ -694,6 +694,36 @@ Built-in agents:
     ).toEqual([{ type: "approval", id: "approval-1", title: "Approve Bash?", detail: "npm test" }]);
   });
 
+  it("keeps an Edit tool card that settles (running -> ok) alongside its diff", () => {
+    const translate = createClaudeStreamTranslator();
+    const start = translate(
+      JSON.stringify({
+        type: "stream_event",
+        event: {
+          type: "content_block_start",
+          index: 0,
+          content_block: { type: "tool_use", id: "e1", name: "Edit", input: { file_path: "a.ts", old_string: "foo", new_string: "bar" } },
+        },
+      }),
+    );
+    // A running tool card (so the lifecycle has something to settle) plus the diff.
+    // The card's args must NOT carry old_string/new_string, or the client would
+    // build a second, clipped diff from them.
+    const startCard = start.find((event) => event.type === "tool");
+    expect(startCard).toMatchObject({ type: "tool", id: "e1", name: "Edit" });
+    expect((startCard as { args?: Record<string, string> }).args).not.toHaveProperty("old_string");
+    expect(start.some((event) => event.type === "diff" && event.file === "a.ts")).toBe(true);
+
+    const done = translate(
+      JSON.stringify({
+        type: "user",
+        message: { content: [{ type: "tool_result", tool_use_id: "e1", content: "ok" }] },
+      }),
+    );
+    // The card settles via tool_result so it stops showing "running".
+    expect(done.some((event) => event.type === "tool_result" && event.id === "e1" && event.ok === true)).toBe(true);
+  });
+
   it("builds Codex args with the selected model and reasoning effort", () => {
     expect(buildCodexRunArgs({ prompt: "hello", model: "gpt-5.5", reasoning: "high", mode: "default", accessMode: "read-only" })).toEqual([
       "exec",

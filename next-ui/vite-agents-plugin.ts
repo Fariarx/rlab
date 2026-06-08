@@ -1895,23 +1895,17 @@ export function reconcileStaleBackgroundRuns(state: WorkspaceState, activeRunIds
   let changed = false;
   const locale = state.settings.general.locale;
   const staleConversationIds = new Set<string>();
-  const chats = state.chats.map((conversation) => {
+  const reconcile = (conversation: WorkspaceConversation): WorkspaceConversation => {
     const reconciled = reconcileConversationRun(conversation, activeRunIds, locale);
     if (reconciled !== conversation) {
       changed = true;
       staleConversationIds.add(conversation.id);
     }
     return reconciled;
-  });
+  };
+  const chats = state.chats.map(reconcile);
   const projects = state.projects.map((project) => {
-    const conversations = project.conversations.map((conversation) => {
-      const reconciled = reconcileConversationRun(conversation, activeRunIds, locale);
-      if (reconciled !== conversation) {
-        changed = true;
-        staleConversationIds.add(conversation.id);
-      }
-      return reconciled;
-    });
+    const conversations = project.conversations.map(reconcile);
     return conversations === project.conversations ? project : { ...project, conversations };
   });
   if (!changed) {
@@ -3121,6 +3115,21 @@ function handleLocalFile(req: IncomingMessage, res: ServerResponse): void {
     res.end(readFileSync(realPath));
   } catch (error) {
     sendJson(res, 500, { error: errorMessage(error) });
+  }
+}
+
+const DIST_INDEX_FILE = join(PLUGIN_DIR, "dist", "index.html");
+
+/** A build identity derived from the served index.html (it references the hashed
+ *  asset bundles, so it changes exactly when a new build is deployed). The client
+ *  polls this and reloads when it changes, so a long-lived SPA tab can't keep
+ *  running stale JS after a deploy. Falls back to "dev" when there is no dist. */
+function handleVersion(_req: IncomingMessage, res: ServerResponse): void {
+  try {
+    const stat = statSync(DIST_INDEX_FILE);
+    sendJson(res, 200, { version: `${Math.round(stat.mtimeMs)}-${stat.size}` });
+  } catch {
+    sendJson(res, 200, { version: "dev" });
   }
 }
 
@@ -4636,6 +4645,15 @@ function richToolEvents(id: string | undefined, name: string, input: Record<stri
   return events;
 }
 
+/** Tools whose input becomes a file diff. They still need a tool card for the
+ *  running→ok lifecycle (a bare diff carries no state), unlike search/plan/option
+ *  tools which are fully represented by their own stateful block. */
+const DIFF_TOOL_NAMES = new Set(["write", "writefile", "filewrite", "edit", "fileedit", "replace", "multiedit", "applypatch", "patch"]);
+
+function isDiffTool(name: string): boolean {
+  return DIFF_TOOL_NAMES.has(normalizedToolName(name));
+}
+
 function isApprovalDecision(value: unknown): value is ApprovalDecision {
   return value === "approved" || value === "rejected";
 }
@@ -5649,15 +5667,39 @@ function toolInput(tool: StreamedTool): Record<string, unknown> | undefined {
   return tool.inputJson.trim() ? parseJsonRecord(tool.inputJson) ?? tool.input : tool.input;
 }
 
+/** A running card for a diff tool, with the bulky diff-trigger fields stripped
+ *  from its args so the frontend doesn't build a second (clipped) diff from the
+ *  card — the backend's own diff event is the single source of truth. */
+function diffToolCardEvent(tool: StreamedTool): Extract<RunEvent, { type: "tool" }> {
+  const base = toolRunEvent(tool);
+  const { old_string, new_string, content, edits, diff, ...rest } = base.args ?? {};
+  void old_string;
+  void new_string;
+  void content;
+  void edits;
+  void diff;
+  return { ...base, args: rest };
+}
+
 function toolStartEvents(tool: StreamedTool, state: ClaudeStreamState): RunEvent[] {
   state.toolsById.set(tool.id, tool);
   const rich = richToolEvents(tool.id, tool.name, toolInput(tool), "running");
+  // Diff tools (Edit/Write/MultiEdit) need a tool card for the running→ok
+  // lifecycle in addition to their diff — a bare diff carries no state, so the
+  // card used to hang "running". Search/plan/option tools carry their own state.
+  if (isDiffTool(tool.name)) {
+    return [diffToolCardEvent(tool), ...rich];
+  }
   return rich.length > 0 ? rich : [toolRunEvent(tool)];
 }
 
 function toolResultEvents(tool: StreamedTool | undefined, id: string, ok: boolean, output: unknown): RunEvent[] {
   if (tool) {
     const rich = richToolEvents(id, tool.name, toolInput(tool), ok ? "ok" : "error", output);
+    if (isDiffTool(tool.name)) {
+      // Settle the diff tool's running card and refresh its diff.
+      return [{ type: "tool_result", id, ok, output: resultText(output) }, ...rich];
+    }
     if (rich.length > 0) {
       return rich;
     }
@@ -8002,6 +8044,14 @@ function attach(server: ViteDevServer | PreviewServer): void {
       return;
     }
     handleLocalFile(req, res);
+  });
+  server.middlewares.use("/api/version", (req, res) => {
+    if (req.method !== "GET") {
+      res.statusCode = 405;
+      res.end();
+      return;
+    }
+    handleVersion(req, res);
   });
   server.middlewares.use("/api/git-status", (req, res) => {
     if (req.method !== "POST") {
