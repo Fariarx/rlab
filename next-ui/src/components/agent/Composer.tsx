@@ -239,15 +239,24 @@ interface ComposerProps {
   readonly costUsd?: number;
 }
 
+interface RateLimitWindow {
+  readonly kind: "five_hour" | "weekly" | "overage";
+  readonly usedPercent?: number;
+  readonly resetsAt?: number;
+  readonly status?: string;
+}
+
 interface AgentRateLimit {
   readonly updatedAt: number;
   readonly status?: string;
-  readonly windowType?: string;
-  readonly resetsAt?: number;
-  readonly usedPercent?: number;
-  readonly secondaryPercent?: number;
   readonly plan?: string;
+  readonly windows: readonly RateLimitWindow[];
 }
+
+/** Agents whose CLI/SDK does not surface account rate-limit data, so the menu
+ *  shows "not reported" instead of a forever-pending "no data yet". Gemini's
+ *  CLI keeps quota only in its interactive UI; OpenCode doesn't report it. */
+const LIMIT_UNSUPPORTED_AGENTS = new Set<string>(["gemini", "opencode"]);
 
 /** Composer — the chat input. Sends on Enter (Shift+Enter for newline). Sticky
  * at the bottom on mobile; the send button stays a comfortable tap target. */
@@ -661,32 +670,48 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     return lines;
   })();
 
-  // Compact, localized lines describing the agent's account rate-limits.
-  const limitLines: ReadonlyArray<{ readonly label: string; readonly value: string }> = (() => {
+  // Compact, localized lines describing the agent's account rate-limits — one
+  // row per window (5-hour, weekly, …) showing usage % and time-to-reset side
+  // by side, then plan + the most-severe status.
+  const limitLines: ReadonlyArray<{ readonly id: string; readonly label: string; readonly value: string }> = (() => {
     if (!agentLimit) {
       return [];
     }
-    const lines: Array<{ label: string; value: string }> = [];
-    if (agentLimit.windowType) {
-      lines.push({ label: t("limitWindow"), value: agentLimit.windowType === "weekly" ? t("limitWindowWeekly") : t("limitWindow5h") });
-    }
-    if (typeof agentLimit.resetsAt === "number") {
-      const secs = Math.max(0, agentLimit.resetsAt * 1000 - Date.now()) / 1000;
+    const windowLabel = (kind: RateLimitWindow["kind"]): string =>
+      kind === "weekly" ? t("limitWindowWeekly") : kind === "overage" ? t("limitOverage") : t("limitWindow5h");
+    const formatReset = (resetsAt: number): string => {
+      const secs = Math.max(0, resetsAt * 1000 - Date.now()) / 1000;
       const h = Math.floor(secs / 3600);
       const m = Math.floor((secs % 3600) / 60);
-      lines.push({ label: t("limitResets"), value: h > 0 ? `${h}${t("unitHourShort")} ${m}${t("unitMinShort")}` : `${m}${t("unitMinShort")}` });
-    }
-    if (agentLimit.status) {
-      lines.push({ label: t("limitStatus"), value: agentLimit.status === "allowed" ? t("limitStatusOk") : agentLimit.status });
-    }
-    if (typeof agentLimit.usedPercent === "number") {
-      lines.push({ label: t("limitUsedPrimary"), value: `${Math.round(agentLimit.usedPercent)}%` });
-    }
-    if (typeof agentLimit.secondaryPercent === "number") {
-      lines.push({ label: t("limitUsedSecondary"), value: `${Math.round(agentLimit.secondaryPercent)}%` });
+      return h > 0 ? `${h}${t("unitHourShort")} ${m}${t("unitMinShort")}` : `${m}${t("unitMinShort")}`;
+    };
+    const statusLabel = (status: string): string =>
+      status === "allowed"
+        ? t("limitStatusOk")
+        : status === "allowed_warning"
+          ? t("limitStatusWarning")
+          : status === "rejected"
+            ? t("limitStatusRejected")
+            : status;
+
+    const lines: Array<{ id: string; label: string; value: string }> = [];
+    for (const window of agentLimit.windows) {
+      const parts: string[] = [];
+      if (typeof window.usedPercent === "number") {
+        parts.push(`${Math.round(window.usedPercent)}%`);
+      }
+      if (typeof window.resetsAt === "number") {
+        parts.push(formatReset(window.resetsAt));
+      }
+      if (parts.length > 0) {
+        lines.push({ id: window.kind, label: windowLabel(window.kind), value: parts.join(" · ") });
+      }
     }
     if (agentLimit.plan) {
-      lines.push({ label: t("limitPlan"), value: agentLimit.plan });
+      lines.push({ id: "plan", label: t("limitPlan"), value: agentLimit.plan });
+    }
+    if (agentLimit.status) {
+      lines.push({ id: "status", label: t("limitStatus"), value: statusLabel(agentLimit.status) });
     }
     return lines;
   })();
@@ -839,14 +864,16 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             {limitLines.length > 0 ? (
               <Stack spacing={0.25}>
                 {limitLines.map((line) => (
-                  <Stack key={line.label} direction="row" spacing={1} sx={{ justifyContent: "space-between", alignItems: "baseline" }}>
+                  <Stack key={line.id} direction="row" spacing={1} sx={{ justifyContent: "space-between", alignItems: "baseline" }}>
                     <Typography sx={{ fontSize: "0.72rem", color: "text.secondary" }}>{line.label}</Typography>
                     <Typography sx={{ fontFamily: (th) => th.custom.fonts.mono, fontSize: "0.72rem", color: "text.primary" }}>{line.value}</Typography>
                   </Stack>
                 ))}
               </Stack>
             ) : (
-              <Typography sx={{ fontSize: "0.72rem", color: "text.tertiary" }}>{limitLoaded ? t("limitsNoData") : "…"}</Typography>
+              <Typography sx={{ fontSize: "0.72rem", color: "text.tertiary" }}>
+                {!limitLoaded ? "…" : agentId && LIMIT_UNSUPPORTED_AGENTS.has(agentId) ? t("limitsUnavailable") : t("limitsNoData")}
+              </Typography>
             )}
           </Box>
         </Menu>

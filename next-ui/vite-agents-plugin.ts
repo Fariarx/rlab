@@ -3175,7 +3175,11 @@ function handleVersion(_req: IncomingMessage, res: ServerResponse): void {
 /** Returns the latest known account rate-limit snapshot per agent (keyed by
  *  agent id). Empty until an agent reports one during a run. */
 function handleAgentLimits(_req: IncomingMessage, res: ServerResponse): void {
-  sendJson(res, 200, { limits: Object.fromEntries(latestAgentLimits.entries()) });
+  const limits: Record<string, AgentRateLimit> = {};
+  for (const [agent, acc] of latestAgentLimits.entries()) {
+    limits[agent] = serializeAgentLimit(acc);
+  }
+  sendJson(res, 200, { limits });
 }
 
 function handleAgentConfig(req: IncomingMessage, res: ServerResponse): void {
@@ -3828,37 +3832,138 @@ interface RunRequest {
   readonly sessionId?: string;
 }
 
-/** The latest account rate-limit snapshot reported by an agent, surfaced in the
- *  composer. Claude emits `rate_limit` stream events; Codex answers an
- *  `account/rateLimits/read` request. Fields are optional — each agent reports
- *  a different subset. */
-interface AgentRateLimit {
-  readonly updatedAt: number;
-  /** "allowed" while under the limit (Claude). */
-  readonly status?: string;
-  /** Window the snapshot describes, e.g. "five_hour" / "weekly" (Claude). */
-  readonly windowType?: string;
-  /** Epoch seconds when the current window resets (Claude). */
-  readonly resetsAt?: number;
-  /** Percent of the primary/secondary window used (Codex). */
+/** A single rate-limit window. An account can be bounded by several at once —
+ *  e.g. Claude/Codex enforce both a rolling 5-hour window and a weekly one — so
+ *  each is tracked independently and shown side by side in the composer. */
+type RateLimitWindowKind = "five_hour" | "weekly" | "overage";
+
+interface RateLimitWindow {
+  readonly kind: RateLimitWindowKind;
+  /** Percent of this window's allowance used (0–100). */
   readonly usedPercent?: number;
-  readonly secondaryPercent?: number;
-  /** Subscription plan label (Codex). */
-  readonly plan?: string;
+  /** Epoch seconds when this window resets. */
+  readonly resetsAt?: number;
+  /** Per-window status, e.g. "allowed" / "allowed_warning" / "rejected" (Claude). */
+  readonly status?: string;
 }
 
-const latestAgentLimits = new Map<string, AgentRateLimit>();
+/** The latest account rate-limit snapshot reported by an agent, surfaced in the
+ *  composer. Claude emits `rate_limit_event` stream events (one window each);
+ *  Codex pushes `account/rateLimits/updated` notifications and answers an
+ *  `account/rateLimits/read` request (primary + secondary windows). Fields are
+ *  optional — each agent reports a different subset. */
+interface AgentRateLimit {
+  readonly updatedAt: number;
+  /** Most-severe status across all windows. */
+  readonly status?: string;
+  /** Subscription plan label (Codex). */
+  readonly plan?: string;
+  /** Every window currently reported, ordered 5h → weekly → overage. */
+  readonly windows: readonly RateLimitWindow[];
+}
+
+/** Mutable per-agent accumulator. Windows are keyed by kind so repeated events
+ *  (Claude emits one window per event; Codex sends sparse rolling updates)
+ *  merge instead of clobbering each other — the cause of only one window ever
+ *  showing in the UI. */
+interface AgentLimitAccumulator {
+  updatedAt: number;
+  plan?: string;
+  windows: Map<RateLimitWindowKind, RateLimitWindow>;
+}
+
+const latestAgentLimits = new Map<string, AgentLimitAccumulator>();
+
+const WINDOW_ORDER: readonly RateLimitWindowKind[] = ["five_hour", "weekly", "overage"];
+const STATUS_SEVERITY: Record<string, number> = { allowed: 0, allowed_warning: 1, rejected: 2 };
+
+function limitAccumulator(agent: string): AgentLimitAccumulator {
+  let acc = latestAgentLimits.get(agent);
+  if (!acc) {
+    acc = { updatedAt: Date.now(), windows: new Map() };
+    latestAgentLimits.set(agent, acc);
+  }
+  return acc;
+}
+
+/** Merge one window into an agent's accumulator, preferring defined fields so a
+ *  sparse update never wipes a value reported by an earlier one. */
+function upsertLimitWindow(agent: string, window: RateLimitWindow): void {
+  const acc = limitAccumulator(agent);
+  const prev = acc.windows.get(window.kind);
+  acc.windows.set(window.kind, {
+    kind: window.kind,
+    usedPercent: window.usedPercent ?? prev?.usedPercent,
+    resetsAt: window.resetsAt ?? prev?.resetsAt,
+    status: window.status ?? prev?.status,
+  });
+  acc.updatedAt = Date.now();
+}
+
+/** Serialize an accumulator into the API shape: ordered windows + the
+ *  most-severe window status as the overall status. */
+function serializeAgentLimit(acc: AgentLimitAccumulator): AgentRateLimit {
+  const windows = WINDOW_ORDER.map((kind) => acc.windows.get(kind)).filter((w): w is RateLimitWindow => Boolean(w));
+  let status: string | undefined;
+  for (const window of windows) {
+    if (window.status && (status === undefined || (STATUS_SEVERITY[window.status] ?? 0) > (STATUS_SEVERITY[status] ?? 0))) {
+      status = window.status;
+    }
+  }
+  return { updatedAt: acc.updatedAt, plan: acc.plan, status, windows };
+}
 
 function recordClaudeRateLimit(agent: string, info: Record<string, unknown>): void {
   const rateLimitType = typeof info.rateLimitType === "string" ? info.rateLimitType : undefined;
-  latestAgentLimits.set(agent, {
-    updatedAt: Date.now(),
+  if (!rateLimitType) {
+    return;
+  }
+  // Normalize the various weekly windows (seven_day, seven_day_opus, …) to
+  // "weekly"; map five_hour/overage directly. Unknown types are ignored.
+  const kind: RateLimitWindowKind | undefined = rateLimitType === "five_hour"
+    ? "five_hour"
+    : rateLimitType.startsWith("seven_day")
+      ? "weekly"
+      : rateLimitType === "overage"
+        ? "overage"
+        : undefined;
+  if (!kind) {
+    return;
+  }
+  upsertLimitWindow(agent, {
+    kind,
     status: typeof info.status === "string" ? info.status : undefined,
-    // Normalize the various weekly windows to "weekly"; keep five_hour as-is.
-    windowType: rateLimitType ? (rateLimitType.startsWith("seven_day") ? "weekly" : rateLimitType) : undefined,
     resetsAt: typeof info.resetsAt === "number" ? info.resetsAt : undefined,
     usedPercent: typeof info.utilization === "number" ? info.utilization : undefined,
   });
+}
+
+/** Map one Codex window (`primary`/`secondary` of a RateLimitSnapshot) into our
+ *  model. Codex describes windows by duration: ~300min = 5-hour, ~10080min =
+ *  weekly. When the duration is absent we fall back to the slot (primary→5h). */
+function recordCodexRateLimitWindow(agent: string, slot: "primary" | "secondary", raw: unknown): void {
+  if (!isRecord(raw)) {
+    return;
+  }
+  const mins = typeof raw.windowDurationMins === "number" ? raw.windowDurationMins : undefined;
+  const kind: RateLimitWindowKind =
+    mins !== undefined ? (mins <= 360 ? "five_hour" : "weekly") : slot === "primary" ? "five_hour" : "weekly";
+  upsertLimitWindow(agent, {
+    kind,
+    usedPercent: typeof raw.usedPercent === "number" ? raw.usedPercent : undefined,
+    resetsAt: typeof raw.resetsAt === "number" ? raw.resetsAt : undefined,
+  });
+}
+
+/** Record a Codex `RateLimitSnapshot` (from `account/rateLimits/read` or a
+ *  rolling `account/rateLimits/updated` notification). */
+function recordCodexRateLimit(agent: string, snapshot: Record<string, unknown>): void {
+  recordCodexRateLimitWindow(agent, "primary", snapshot.primary);
+  recordCodexRateLimitWindow(agent, "secondary", snapshot.secondary);
+  const plan = typeof snapshot.planType === "string" ? snapshot.planType : undefined;
+  if (plan) {
+    limitAccumulator(agent).plan = plan;
+  }
 }
 
 interface RunArgsRequest {
@@ -7052,7 +7157,10 @@ async function runClaudeSdk(
 // so we drive opencode through a per-run server instead of the CLI run mode.
 
 const OPENCODE_SERVER_TIMEOUT_MS = 20_000;
-const OPENCODE_RUN_TIMEOUT_MS = 5 * 60_000;
+// Heavy agentic tasks (install deps, build, start servers) routinely exceed
+// 5 min and got killed mid-command before producing output — match Codex's
+// 30-min ceiling so long installs/builds aren't aborted prematurely.
+const OPENCODE_RUN_TIMEOUT_MS = 30 * 60_000;
 
 function waitForOpenCodeServerUrl(proc: ReturnType<typeof spawn>, signal: AbortSignal): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -7501,6 +7609,13 @@ async function runCodexAppServer(
         }
         return;
       }
+      case "account/rateLimits/updated": {
+        // Sparse rolling rate-limit update — merge into the cached snapshot.
+        if (isRecord(params.rateLimits)) {
+          recordCodexRateLimit(request.agent, params.rateLimits);
+        }
+        return;
+      }
       case "error": {
         const error = isRecord(params.error) ? params.error : params;
         const text = firstString(error, ["message"]) ?? errorText(params);
@@ -7628,6 +7743,18 @@ async function runCodexAppServer(
       turnParams.effort = params.effort;
     }
     await sendRequest("turn/start", turnParams);
+
+    // Fetch the account rate limits once, fire-and-forget, so the composer has
+    // 5-hour + weekly windows even before a rolling `updated` notification.
+    void sendRequest("account/rateLimits/read", {})
+      .then((result) => {
+        if (isRecord(result.rateLimits)) {
+          recordCodexRateLimit(request.agent, result.rateLimits);
+        }
+      })
+      .catch(() => {
+        // Older codex builds may not implement this method — ignore.
+      });
 
     await turnSettled;
   } catch (error) {
