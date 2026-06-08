@@ -1347,6 +1347,7 @@ export function WorkspacePageView({
                 onAttachmentError={(message) => toast({ message, severity: "error", duration: 3000 })}
                 onTagsHeightChange={setComposerTagsHeight}
                 onOverlayLiftChange={setComposerOverlayLift}
+                agentId={profile.agent}
               />
               </Stack>
             ) : (
@@ -1389,6 +1390,7 @@ export function WorkspacePageView({
                 onTagsHeightChange={setComposerTagsHeight}
                 onOverlayLiftChange={setComposerOverlayLift}
                 history={messageHistory}
+                agentId={profile.agent}
               />
             )}
           </Box>

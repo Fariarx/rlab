@@ -154,7 +154,9 @@ export function Conversation({
       const sc = scrollerEl();
       const distance = sc ? sc.scrollHeight - sc.clientHeight - sc.scrollTop : 0;
       atBottomTicks = distance <= 4 ? atBottomTicks + 1 : 0;
-      if (!pinnedToBottom.current || elapsed >= 6000 || atBottomTicks >= 5) {
+      // Stop early once it's been at the bottom for ~300ms; the 4s cap only
+      // matters when images keep loading. A shorter cap keeps the open snappy.
+      if (!pinnedToBottom.current || elapsed >= 4000 || atBottomTicks >= 3) {
         clearInterval(id);
       }
     }, 100);

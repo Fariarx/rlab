@@ -74,6 +74,22 @@ function workspaceConversations(state: WorkspaceState): ConversationSummary[] {
   return [...state.chats, ...state.projects.flatMap((project) => project.conversations)];
 }
 
+/** The attachment-block portion of a sent user message (inline text-file blocks
+ *  and path-based file links), so editing+resending keeps the attachments. */
+function extractAttachmentBlocks(text: string): string {
+  const blocks: string[] = [];
+  for (const match of text.matchAll(/<attachment\s+name="[^"]*"[^>]*>[\s\S]*?<\/attachment>/g)) {
+    blocks.push(match[0]);
+  }
+  for (const match of text.matchAll(/!?\[[^\]\n]+\]\(([^)\s]+)\)/g)) {
+    const target = match[1] ?? "";
+    if (/[\\/]/.test(target) || /\.[a-z0-9]{1,8}$/i.test(target)) {
+      blocks.push(match[0]);
+    }
+  }
+  return blocks.join("\n\n");
+}
+
 function serializableEqual(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
@@ -1194,8 +1210,13 @@ class WorkspaceStore implements Workspace {
     if (index < 0) {
       return;
     }
+    // The edit textarea holds only the visible text (attachments were stripped
+    // for display), so re-append the original attachment blocks — otherwise
+    // editing + resending silently drops the attached files.
+    const attachmentBlocks = extractAttachmentBlocks(thread[index].text ?? "");
+    const nextText = attachmentBlocks ? `${trimmed}\n\n${attachmentBlocks}` : trimmed;
     // Replace the edited user message, drop everything after it, and re-run.
-    const userMsg: ChatMessage = { ...thread[index], text: trimmed, time: nowLabel() };
+    const userMsg: ChatMessage = { ...thread[index], text: nextText, time: nowLabel() };
     this.setState((current) => ({ ...current, threads: { ...current.threads, [id]: [...thread.slice(0, index), userMsg] } }));
     this.runTurn(id, userMsg);
   }

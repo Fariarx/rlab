@@ -7,12 +7,13 @@ import RateReviewOutlinedIcon from "@mui/icons-material/RateReviewOutlined";
 import SendIcon from "@mui/icons-material/Send";
 import StopCircleIcon from "@mui/icons-material/StopCircle";
 import TuneRoundedIcon from "@mui/icons-material/TuneRounded";
-import { Box, InputBase, Menu, MenuItem, Stack, Switch, type SxProps, type Theme, Typography } from "@mui/material";
+import { Box, Divider, InputBase, Menu, MenuItem, Stack, Switch, type SxProps, type Theme, Typography } from "@mui/material";
 import { type ChangeEvent, type ClipboardEvent, forwardRef, type KeyboardEvent, type MouseEvent, type ReactNode, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import { localFileUrl } from "../../lib/external-url";
 import { ImageLightbox } from "../workspace/ImageLightbox";
 import { Button, IconButton, KeyHint } from "../ui";
+import { AttachmentTile } from "./AttachmentTile";
 import type { ComposerAttachmentDraft, ComposerDraft } from "./types";
 
 /** Pastes longer than this become a text-file attachment instead of flooding the input. */
@@ -133,13 +134,6 @@ function composerDraftsEqual(left: ComposerDraft, right: ComposerDraft): boolean
   return left.text === right.text && composerAttachmentsEqual(left.attachments, right.attachments);
 }
 
-function attachmentIcon(type: string): ReactNode {
-  if (type.startsWith("image/")) {
-    return <ImageOutlinedIcon sx={{ fontSize: 14 }} />;
-  }
-  return <DescriptionOutlinedIcon sx={{ fontSize: 14 }} />;
-}
-
 /**
  * FloatingTag — a single rounded pill that "floats" above the composer (its own
  * shadow, not boxed into a shared container). Used for each attached file and
@@ -198,51 +192,6 @@ function FloatingTag({
   );
 }
 
-/** An image attachment shown as a small square preview that opens full-screen on
- *  click, with a corner remove button. Non-image files keep the pill chip. */
-function AttachmentThumb({ attachment, onRemove, onOpen, removeLabel }: { readonly attachment: ComposerAttachmentDraft; readonly onRemove: () => void; readonly onOpen: () => void; readonly removeLabel: string }) {
-  return (
-    <Box sx={{ position: "relative", width: 48, height: 48, flex: "0 0 auto" }}>
-      <Box
-        component="button"
-        type="button"
-        onClick={onOpen}
-        aria-label={attachment.name}
-        sx={{
-          p: 0,
-          width: "100%",
-          height: "100%",
-          display: "block",
-          cursor: "pointer",
-          borderRadius: (t) => `${t.custom.radii.md}px`,
-          overflow: "hidden",
-          border: (t) => `1px solid ${t.custom.borders.strong}`,
-          backgroundColor: (t) => t.custom.surfaces.s3,
-          "&:hover": { borderColor: (t) => t.palette.status.info.main },
-        }}
-      >
-        <Box component="img" src={localFileUrl(attachment.path ?? "")} alt={attachment.name} loading="lazy" sx={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
-      </Box>
-      <IconButton
-        aria-label={removeLabel}
-        onClick={onRemove}
-        sx={{
-          position: "absolute",
-          top: -6,
-          right: -6,
-          p: 0.125,
-          color: "#fff",
-          backgroundColor: (t) => t.palette.status.error.main,
-          border: (t) => `1px solid ${t.custom.surfaces.s1}`,
-          "&:hover": { backgroundColor: (t) => t.palette.status.error.main, opacity: 0.85 },
-        }}
-      >
-        <CloseRoundedIcon sx={{ fontSize: 12 }} />
-      </IconButton>
-    </Box>
-  );
-}
-
 /** Imperative handle so a parent drop-zone (the whole chat pane) can hand files
  *  to the composer's attachment pipeline. */
 export interface ComposerHandle {
@@ -279,6 +228,18 @@ interface ComposerProps {
   /** Previously sent user messages (oldest first) recalled with ArrowUp/ArrowDown
    *  when the caret is at the edge, shell-history style. */
   readonly history?: readonly string[];
+  /** Current agent id, used to show its account rate-limits in the options menu. */
+  readonly agentId?: string;
+}
+
+interface AgentRateLimit {
+  readonly updatedAt: number;
+  readonly status?: string;
+  readonly windowType?: string;
+  readonly resetsAt?: number;
+  readonly usedPercent?: number;
+  readonly secondaryPercent?: number;
+  readonly plan?: string;
 }
 
 /** Composer — the chat input. Sends on Enter (Shift+Enter for newline). Sticky
@@ -304,6 +265,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     onTagsHeightChange,
     onOverlayLiftChange,
     history = [],
+    agentId,
   },
   ref,
 ) {
@@ -313,11 +275,24 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const [activeSuggestion, setActiveSuggestion] = useState(0);
   const [suggestDismissed, setSuggestDismissed] = useState(false);
   const [modeMenuAnchor, setModeMenuAnchor] = useState<null | HTMLElement>(null);
+  // True when the input needs more than one row; it then lifts into an upward-
+  // growing overlay (so the bar height never changes), and the floating tags
+  // rise above it by `overlayLift`.
+  const [expanded, setExpanded] = useState(false);
+  const [overlayLift, setOverlayLift] = useState(0);
+  const onOverlayLiftChangeRef = useRef(onOverlayLiftChange);
+  onOverlayLiftChangeRef.current = onOverlayLiftChange;
   // An image attachment opened full-screen (click a thumbnail to view).
   const [previewAttachment, setPreviewAttachment] = useState<ComposerAttachmentDraft | null>(null);
+  // The current agent's account rate-limits, fetched when the options menu opens.
+  const [agentLimit, setAgentLimit] = useState<AgentRateLimit | null>(null);
+  const [limitLoaded, setLimitLoaded] = useState(false);
   const activeModeOption = modes.find((mode) => mode.id === activeMode) ?? null;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const tagsRef = useRef<HTMLDivElement | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const singleRowRef = useRef(0);
   // Shell-style history navigation: -1 means "not browsing"; otherwise an index
   // into `history`. `historyDraftRef` holds the text being composed before the
   // user started scrolling back, so ArrowDown past the newest restores it.
@@ -361,14 +336,47 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     }
   }, [composerValue]);
 
-  // The composer now sits in normal flow and grows downward via the textarea's
-  // maxRows, so the thread above simply shrinks — no floating tags/overlay to
-  // position. Reset any previously-reported insets to zero so the thread doesn't
-  // reserve phantom space.
+  // Detect multiline and measure how far the upward overlay rises above the bar
+  // so the floating tags clear it. Geometry-based (not an estimate) so it can't
+  // drift out of sync with the textarea.
+  useLayoutEffect(() => {
+    const el = textareaRef.current;
+    if (!el) {
+      return;
+    }
+    if (singleRowRef.current === 0 && !expanded) {
+      singleRowRef.current = el.scrollHeight;
+    }
+    const baseline = singleRowRef.current || 24;
+    const needsMultiline = composerValue.length > 0 && (composerValue.includes("\n") || el.scrollHeight > baseline * 1.5);
+    setExpanded(needsMultiline);
+    const root = rootRef.current;
+    let nextLift = 0;
+    if (needsMultiline && expanded && root) {
+      const overlayTop = el.getBoundingClientRect().top - 8;
+      nextLift = Math.max(0, Math.round(root.getBoundingClientRect().top - overlayTop));
+    }
+    setOverlayLift(nextLift);
+    onOverlayLiftChangeRef.current?.(nextLift);
+  }, [composerValue, expanded]);
+
+  // Report the floating tags row height so the thread/Git content reserves
+  // matching bottom space (the row floats over the content).
   useEffect(() => {
-    onTagsHeightChange?.(0);
-    onOverlayLiftChange?.(0);
-  }, [onTagsHeightChange, onOverlayLiftChange]);
+    const el = tagsRef.current;
+    if (!el || typeof ResizeObserver === "undefined") {
+      onTagsHeightChange?.(0);
+      return;
+    }
+    const report = () => onTagsHeightChange?.(el.offsetHeight);
+    report();
+    const observer = new ResizeObserver(report);
+    observer.observe(el);
+    return () => {
+      observer.disconnect();
+      onTagsHeightChange?.(0);
+    };
+  }, [onTagsHeightChange]);
 
   const slashCommands = useMemo<readonly SlashCommand[]>(
     () => [
@@ -624,56 +632,84 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const modeMenuItemSx: SxProps<Theme> = { display: "flex", gap: 1, fontSize: "0.8rem", minHeight: 0, pl: 2, pr: 1, width: "100%" };
   const modeSwitchSx: SxProps<Theme> = { ml: "auto", mr: 0, pointerEvents: "none" };
 
-  const hasChips = reviewCount > 0 || activeModeOption !== null || composerAttachments.length > 0;
+  // Compact, localized lines describing the agent's account rate-limits.
+  const limitLines: ReadonlyArray<{ readonly label: string; readonly value: string }> = (() => {
+    if (!agentLimit) {
+      return [];
+    }
+    const lines: Array<{ label: string; value: string }> = [];
+    if (agentLimit.windowType) {
+      lines.push({ label: t("limitWindow"), value: agentLimit.windowType === "weekly" ? t("limitWindowWeekly") : t("limitWindow5h") });
+    }
+    if (typeof agentLimit.resetsAt === "number") {
+      const secs = Math.max(0, agentLimit.resetsAt * 1000 - Date.now()) / 1000;
+      const h = Math.floor(secs / 3600);
+      const m = Math.floor((secs % 3600) / 60);
+      lines.push({ label: t("limitResets"), value: h > 0 ? `${h}${t("unitHourShort")} ${m}${t("unitMinShort")}` : `${m}${t("unitMinShort")}` });
+    }
+    if (agentLimit.status) {
+      lines.push({ label: t("limitStatus"), value: agentLimit.status === "allowed" ? t("limitStatusOk") : agentLimit.status });
+    }
+    if (typeof agentLimit.usedPercent === "number") {
+      lines.push({ label: t("limitUsedPrimary"), value: `${Math.round(agentLimit.usedPercent)}%` });
+    }
+    if (typeof agentLimit.secondaryPercent === "number") {
+      lines.push({ label: t("limitUsedSecondary"), value: `${Math.round(agentLimit.secondaryPercent)}%` });
+    }
+    if (agentLimit.plan) {
+      lines.push({ label: t("limitPlan"), value: agentLimit.plan });
+    }
+    return lines;
+  })();
 
   return (
-    // A normal-flow column: the chips/attachments row sits directly above the
-    // input bar (no absolute positioning, no geometry to drift), and the input
-    // grows downward via maxRows — so the thread above just shrinks.
-    <Box sx={{ position: "relative", display: "flex", flexDirection: "column", gap: 0.75 }}>
-      {hasChips && (
-        <Box sx={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 0.75 }}>
-          {reviewCount > 0 && (
-            <FloatingTag
-              tone="accent"
-              icon={<RateReviewOutlinedIcon sx={{ fontSize: 14 }} />}
-              label={t("reviewPending", { count: reviewCount })}
+    // Plain relative Box: the only in-flow child is the input bar. The tags +
+    // image thumbnails float above it (absolute, each with its own shadow), and
+    // the multiline input lifts into an upward overlay — nothing reflows the thread.
+    <Box ref={rootRef} sx={{ position: "relative" }}>
+      {/* Floating row, always mounted so its height can be measured. Aligned with
+          the input field (pl clears the options button) so it floats right above
+          the text input, and lifted above the multiline overlay by overlayLift. */}
+      <Box
+        ref={tagsRef}
+        sx={{ position: "absolute", left: 0, right: 0, bottom: `calc(100% + ${16 + overlayLift}px)`, pl: "46px", display: "flex", flexWrap: "wrap", alignItems: "flex-end", gap: 0.75, pointerEvents: "none", zIndex: 6 }}
+      >
+        {reviewCount > 0 && (
+          <FloatingTag
+            tone="accent"
+            icon={<RateReviewOutlinedIcon sx={{ fontSize: 14 }} />}
+            label={t("reviewPending", { count: reviewCount })}
+          />
+        )}
+        {activeModeOption && (
+          <FloatingTag
+            tone="accent"
+            icon={<AutoAwesomeRoundedIcon sx={{ fontSize: 14 }} />}
+            label={activeModeOption.label}
+            removeLabel={t("disableMode", { mode: activeModeOption.label })}
+            onRemove={() => onModeChange?.("default")}
+          />
+        )}
+        {composerAttachments.map((attachment) => {
+          const isImage = isImageMime(attachment.type) && Boolean(attachment.path);
+          return (
+            <AttachmentTile
+              key={attachment.id}
+              name={attachment.name}
+              mime={attachment.type}
+              sizeBytes={attachment.size}
+              previewSrc={isImage ? localFileUrl(attachment.path ?? "") : undefined}
+              removeLabel={t("removeAttachment", { name: attachment.name })}
+              onRemove={() => setComposerAttachments(composerAttachments.filter((item) => item.id !== attachment.id))}
+              onOpen={isImage ? () => setPreviewAttachment(attachment) : undefined}
             />
-          )}
-          {activeModeOption && (
-            <FloatingTag
-              tone="accent"
-              icon={<AutoAwesomeRoundedIcon sx={{ fontSize: 14 }} />}
-              label={activeModeOption.label}
-              removeLabel={t("disableMode", { mode: activeModeOption.label })}
-              onRemove={() => onModeChange?.("default")}
-            />
-          )}
-          {composerAttachments.map((attachment) =>
-            isImageMime(attachment.type) && attachment.path ? (
-              <AttachmentThumb
-                key={attachment.id}
-                attachment={attachment}
-                removeLabel={t("removeAttachment", { name: attachment.name })}
-                onRemove={() => setComposerAttachments(composerAttachments.filter((item) => item.id !== attachment.id))}
-                onOpen={() => setPreviewAttachment(attachment)}
-              />
-            ) : (
-              <FloatingTag
-                key={attachment.id}
-                icon={attachmentIcon(attachment.type)}
-                label={attachment.name}
-                removeLabel={t("removeAttachment", { name: attachment.name })}
-                onRemove={() => setComposerAttachments(composerAttachments.filter((item) => item.id !== attachment.id))}
-              />
-            ),
-          )}
-        </Box>
-      )}
+          );
+        })}
+      </Box>
       <Box
         sx={{
           display: "flex",
-          alignItems: "flex-end",
+          alignItems: "center",
           gap: 1,
           p: 1,
           borderRadius: (t) => `${t.custom.radii.lg}px`,
@@ -698,7 +734,28 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         />
         {/* One options control: attach files + per-chat work modes. Opens upward.
             Its colour never changes with the active mode (that lives in a tag). */}
-        <IconButton data-testid="composer-options-button" aria-label={t("composerOptions")} sx={{ flex: "0 0 auto" }} onClick={(event: MouseEvent<HTMLElement>) => setModeMenuAnchor(event.currentTarget)}>
+        <IconButton
+          data-testid="composer-options-button"
+          aria-label={t("composerOptions")}
+          sx={{ flex: "0 0 auto" }}
+          onClick={(event: MouseEvent<HTMLElement>) => {
+            setModeMenuAnchor(event.currentTarget);
+            // Refresh the agent's account rate-limits each time the menu opens.
+            void (async () => {
+              try {
+                const response = await fetch("/api/agent-limits", { cache: "no-store" });
+                if (response.ok) {
+                  const { limits } = (await response.json()) as { limits?: Record<string, AgentRateLimit> };
+                  setAgentLimit((agentId && limits ? limits[agentId] : null) ?? null);
+                }
+              } catch {
+                // Offline / unavailable — leave as no-data.
+              } finally {
+                setLimitLoaded(true);
+              }
+            })();
+          }}
+        >
           <TuneRoundedIcon sx={{ fontSize: 18 }} />
         </IconButton>
         <Menu
@@ -726,11 +783,32 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               <Switch size="small" checked={mode.id === activeMode} onChange={() => undefined} tabIndex={-1} sx={modeSwitchSx} />
             </MenuItem>
           ))}
+          {/* Actions above; the agent's account limits sit below a divider. */}
+          <Divider sx={{ my: 0.5 }} />
+          <Box sx={{ px: 2, py: 0.75, cursor: "default" }} onClick={(event) => event.stopPropagation()}>
+            <Typography variant="microLabel" sx={{ color: "text.secondary", display: "block", mb: 0.5 }}>
+              {t("limitsLabel")}
+            </Typography>
+            {limitLines.length > 0 ? (
+              <Stack spacing={0.25}>
+                {limitLines.map((line) => (
+                  <Stack key={line.label} direction="row" spacing={1} sx={{ justifyContent: "space-between", alignItems: "baseline" }}>
+                    <Typography sx={{ fontSize: "0.72rem", color: "text.secondary" }}>{line.label}</Typography>
+                    <Typography sx={{ fontFamily: (th) => th.custom.fonts.mono, fontSize: "0.72rem", color: "text.primary" }}>{line.value}</Typography>
+                  </Stack>
+                ))}
+              </Stack>
+            ) : (
+              <Typography sx={{ fontSize: "0.72rem", color: "text.tertiary" }}>{limitLoaded ? t("limitsNoData") : "…"}</Typography>
+            )}
+          </Box>
         </Menu>
-        {/* The input grows in-flow (downward) via the textarea's maxRows; the
-            composer column expands and the thread above shrinks. */}
+        {/* The input column keeps a fixed single-row height so the bar never
+            grows. When multiline is needed the same input lifts into an overlay
+            (position: absolute) that grows upward over the thread. */}
         <Box
           data-testid="composer-input-area"
+          data-expanded={expanded ? "true" : "false"}
           sx={{ position: "relative", flex: 1, minWidth: 0, minHeight: 30, display: "flex", alignItems: "center" }}
         >
           {/* The suggestion dropdown is anchored to the input column, so it is
@@ -776,12 +854,25 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             inputProps={{ "aria-label": placeholder, "data-testid": "composer-input" }}
             multiline
             minRows={1}
-            maxRows={8}
+            maxRows={expanded ? 8 : 1}
             sx={{
               width: "100%",
               fontSize: "0.9rem",
               lineHeight: 1.5,
               py: 0.5,
+              ...(expanded && {
+                position: "absolute",
+                left: 0,
+                right: 0,
+                bottom: 0,
+                zIndex: 5,
+                px: 1,
+                py: 0.75,
+                borderRadius: (t) => `${t.custom.radii.md}px`,
+                backgroundColor: (t) => t.custom.surfaces.s2,
+                border: (t) => `1px solid ${t.custom.borders.strong}`,
+                boxShadow: "0 -10px 28px rgba(0, 0, 0, 0.45)",
+              }),
             }}
           />
         </Box>

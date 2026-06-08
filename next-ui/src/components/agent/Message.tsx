@@ -9,8 +9,11 @@ import CloseIcon from "@mui/icons-material/Close";
 import { Box, ButtonBase, Collapse, Stack, Typography } from "@mui/material";
 import { type ChangeEvent, type KeyboardEvent, type ReactNode, useEffect, useId, useRef, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
+import { localFileUrl } from "../../lib/external-url";
+import { ImageLightbox } from "../workspace/ImageLightbox";
 import { Button, IconButton, Tooltip } from "../ui";
 import { AgentBlockRenderer } from "./AgentBlockRenderer";
+import { AttachmentTile } from "./AttachmentTile";
 import { DiffCard } from "./DiffCard";
 import { DEFAULT_AGENT_OPTION_ID, agentProfileLabels, getAgent, resolveAgentReasoningValue, type AgentProfile } from "./agents";
 import { rise } from "./anim";
@@ -19,54 +22,54 @@ import { AgentAvatar, TypingDots, UserAvatar } from "./parts";
 import type { AgentBlock, ChatMessage, DiffBlock } from "./types";
 import { formatCostUsd, formatTokenUsage } from "./usage-cost";
 
+interface MessageAttachment {
+  readonly name: string;
+  /** Path/URL for path-based file links (used to preview images); absent for
+   *  inline text-file blocks. */
+  readonly target?: string;
+  readonly isImage: boolean;
+}
+
+const MESSAGE_IMAGE_RE = /\.(png|jpe?g|gif|webp|svg|avif|bmp)(\?|#|$)/i;
+
 /**
- * Split a sent user message into its visible text and the attachments that the
- * composer appended (inline text-file blocks and path-based file links). Files
- * are shown as compact tags instead of dumping their contents into the thread.
+ * Split a sent user message into its visible text and the attachments the
+ * composer appended (inline text-file blocks and path-based file links), so each
+ * attachment can render as a tile instead of dumping its contents into the thread.
  */
-function splitUserContent(raw: string): { readonly text: string; readonly attachments: readonly string[] } {
-  const names: string[] = [];
-  let text = raw.replace(/<attachment\s+name="([^"]*)"[^>]*>[\s\S]*?<\/attachment>/g, (_match, name: string) => {
-    names.push(name);
-    return "";
-  });
-  text = text.replace(/!?\[([^\]\n]+)\]\(([^)\s]+)\)/g, (whole: string, label: string, target: string) => {
+function splitUserContent(raw: string): { readonly text: string; readonly attachments: readonly MessageAttachment[] } {
+  const attachments: MessageAttachment[] = [];
+  let text = raw.replace(/(!?)\[([^\]\n]+)\]\(([^)\s]+)\)/g, (whole: string, bang: string, label: string, target: string) => {
     if (/[\\/]/.test(target) || /\.[a-z0-9]{1,8}$/i.test(target)) {
-      names.push(label);
+      attachments.push({ name: label, target, isImage: bang === "!" || MESSAGE_IMAGE_RE.test(target) });
       return "";
     }
     return whole;
   });
-  return { text: text.trim(), attachments: names };
+  text = text.replace(/<attachment\s+name="([^"]*)"[^>]*>[\s\S]*?<\/attachment>/g, (_match, name: string) => {
+    attachments.push({ name, isImage: false });
+    return "";
+  });
+  return { text: text.trim(), attachments };
 }
 
-function MessageAttachments({ names }: { readonly names: readonly string[] }) {
+function MessageAttachments({ attachments, onOpenImage }: { readonly attachments: readonly MessageAttachment[]; readonly onOpenImage: (attachment: MessageAttachment) => void }) {
   return (
-    <Stack direction="row" sx={{ flexWrap: "wrap", gap: 0.5, justifyContent: "flex-end" }}>
-      {names.map((name, index) => (
-        <Box
-          key={`${name}-${index}`}
-          component="span"
-          sx={{
-            display: "inline-flex",
-            alignItems: "center",
-            gap: 0.5,
-            maxWidth: 240,
-            px: 0.875,
-            py: 0.25,
-            borderRadius: (t) => `${t.custom.radii.pill}px`,
-            fontSize: "0.72rem",
-            fontWeight: 600,
-            color: "text.primary",
-            backgroundColor: (t) => t.custom.surfaces.s3,
-            border: (t) => `1px solid ${t.custom.borders.strong}`,
-          }}
-        >
-          <DescriptionOutlinedIcon sx={{ fontSize: 13, color: "text.secondary", flex: "0 0 auto" }} />
-          <Box component="span" sx={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            {name}
-          </Box>
-        </Box>
+    <Stack direction="row" sx={{ flexWrap: "wrap", gap: 0.75, justifyContent: "flex-end" }}>
+      {attachments.map((attachment, index) => (
+        <AttachmentTile
+          key={`${attachment.name}-${index}`}
+          name={attachment.name}
+          mime={attachment.isImage ? "image/*" : undefined}
+          previewSrc={attachment.isImage && attachment.target ? localFileUrl(attachment.target) : undefined}
+          onOpen={
+            attachment.isImage && attachment.target
+              ? () => onOpenImage(attachment)
+              : attachment.target && /^([/]|[a-zA-Z]:[\\/])/.test(attachment.target)
+                ? () => window.open(`${localFileUrl(attachment.target ?? "")}&download=1`, "_blank", "noopener,noreferrer")
+                : undefined
+          }
+        />
       ))}
     </Stack>
   );
@@ -116,6 +119,7 @@ function UserMessage({ message, delay, actions }: { readonly message: ChatMessag
   const reviewBlocks = (message.blocks ?? []).filter((block) => block.kind === "review");
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(displayText);
+  const [previewImage, setPreviewImage] = useState<MessageAttachment | null>(null);
   const { t } = useI18n();
 
   const submitEdit = () => {
@@ -204,7 +208,7 @@ function UserMessage({ message, delay, actions }: { readonly message: ChatMessag
                 </Typography>
               </Box>
             )}
-            {attachments.length > 0 && <MessageAttachments names={attachments} />}
+            {attachments.length > 0 && <MessageAttachments attachments={attachments} onOpenImage={setPreviewImage} />}
             {reviewBlocks.map((block, index) => (
               <AgentBlockRenderer key={`review-${index}`} block={block} />
             ))}
@@ -235,6 +239,7 @@ function UserMessage({ message, delay, actions }: { readonly message: ChatMessag
         )}
       </Stack>
       <UserAvatar />
+      <ImageLightbox src={previewImage?.target ?? null} label={previewImage?.name} onClose={() => setPreviewImage(null)} />
     </Stack>
   );
 }
@@ -337,8 +342,10 @@ function AgentDetails({ blocks, actions, autoExpand = false, live = false, showS
   const reasoning = blocks.find((block) => block.kind === "reasoning");
   const reasoningDuration = reasoning?.kind === "reasoning" ? reasoning.duration : undefined;
   // The turn's real wall-clock start (epoch ms) so the live timer shows actual
-  // elapsed time, surviving page reloads, instead of counting from mount.
-  const startedAtMs = reasoning?.kind === "reasoning" ? reasoning.startedAtMs : undefined;
+  // elapsed time, surviving page reloads, instead of counting from mount. It's
+  // carried by the ACTIVE (last) reasoning block, not necessarily the first, so
+  // scan all reasoning blocks for it.
+  const startedAtMs = blocks.reduce<number | undefined>((found, block) => found ?? (block.kind === "reasoning" ? block.startedAtMs : undefined), undefined);
   // Parse the persisted "17s" duration string into seconds for a tidy m/s label.
   const doneSeconds = reasoningDuration ? Number.parseInt(reasoningDuration, 10) : Number.NaN;
   // Re-render once per second so the live elapsed label ticks.
@@ -433,11 +440,21 @@ function AgentDetails({ blocks, actions, autoExpand = false, live = false, showS
               ) : (
                 <AgentBlockRenderer
                   key={index}
-                  block={block}
+                  // Strip `streaming` from narration text so it doesn't render its
+                  // own bare dots — the single live indicator below carries the timer.
+                  block={block.kind === "text" ? { ...block, streaming: false } : block}
                   actions={actions ? { onApprovalDecision: actions.onApprovalDecision, onOptionSelection: actions.onOptionSelection } : undefined}
                 />
               ),
             )}
+          {/* Live "thinking" indicator inside the body, with the same elapsed
+              timer as the header (single instance — no duplicate). */}
+          {showSpinner && (
+            <Stack direction="row" spacing={0.75} sx={{ alignItems: "center" }}>
+              <TypingDots />
+              <Typography component="span" sx={durationLabelSx}>{fmtDuration(liveSeconds)}</Typography>
+            </Stack>
+          )}
         </Stack>
       </Collapse>
     </Box>
@@ -505,18 +522,18 @@ function AgentMessage({
               place until the first block streams in (no separate typing bubble). */}
           {blocks.length === 0 && <TypingDots />}
           {detailBlocks.length > 0 && (
-            <Box sx={rise(delay + 120)}>
+            <Box sx={rise(delay + 40)}>
               <AgentDetails blocks={detailBlocks} actions={actions} autoExpand={displayPrefs.reasoningAutoExpand ?? false} live={live} showSpinner={showDetailSpinner} />
             </Box>
           )}
           {/* Plan stays pinned and visible under the message, even mid-run. */}
           {planBlocks.map((block, index) => (
-            <Box key={`plan-${index}`} sx={rise(delay + 160)}>
+            <Box key={`plan-${index}`} sx={rise(delay + 60)}>
               <AgentBlockRenderer block={block} />
             </Box>
           ))}
           {answerBlocks.map((block, index) => (
-            <Box key={index} sx={rise(delay + 200 + index * 90)}>
+            <Box key={index} sx={rise(delay + 80 + Math.min(index, 3) * 40)}>
               <AgentBlockRenderer
                 block={block}
                 actions={actions ? { onApprovalDecision: actions.onApprovalDecision, onOptionSelection: actions.onOptionSelection } : undefined}
@@ -529,7 +546,7 @@ function AgentMessage({
         {!live && diffBlocks.length > 0 && (
           <Stack spacing={1} sx={{ mt: 1.25 }}>
             {diffBlocks.map((block, index) => (
-              <Box key={`diff-${index}`} sx={rise(delay + 260 + index * 90)}>
+              <Box key={`diff-${index}`} sx={rise(delay + 100 + Math.min(index, 3) * 40)}>
                 <DiffCard block={block} />
               </Box>
             ))}
@@ -554,7 +571,10 @@ export function Message({
   readonly displayPrefs?: MessageDisplayPrefs;
   readonly agentProfile?: AgentProfile;
 }) {
-  const delay = index * 120;
+  // No per-index cascade: in a long thread `index` is large, so `index * 120`
+  // delayed message 30 by 3.6s on open. Every message fades in immediately; only
+  // the blocks within a message stagger slightly (see AgentMessage).
+  const delay = 0;
   return message.role === "user" ? (
     <UserMessage message={message} delay={delay} actions={actions} />
   ) : (

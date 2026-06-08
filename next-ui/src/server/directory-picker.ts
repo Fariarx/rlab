@@ -102,6 +102,12 @@ export function pickDirectoryPathFromSystemDialog(options: PickDirectoryPathFrom
   }
 
   if (platform === "linux") {
+    // Headless server (no X11/Wayland): spawning zenity/kdialog only prints a
+    // Gtk "Failed to open display" warning and fails. Skip it and tell the user
+    // to type the path — the dialog's text field accepts it directly.
+    if (!process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) {
+      throw new Error("No graphical display is available on the server — type the project folder path instead.");
+    }
     const candidates: DirectoryPickerCommandCandidate[] = [
       {
         command: "zenity",

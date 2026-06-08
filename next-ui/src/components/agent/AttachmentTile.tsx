@@ -1,0 +1,142 @@
+import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
+import CodeOutlinedIcon from "@mui/icons-material/CodeOutlined";
+import DescriptionOutlinedIcon from "@mui/icons-material/DescriptionOutlined";
+import ImageOutlinedIcon from "@mui/icons-material/ImageOutlined";
+import InsertDriveFileOutlinedIcon from "@mui/icons-material/InsertDriveFileOutlined";
+import { Box, Stack, Typography } from "@mui/material";
+import { useState } from "react";
+import { IconButton } from "../ui";
+
+function extOf(name: string): string {
+  const dot = name.lastIndexOf(".");
+  return dot > 0 && dot < name.length - 1 ? name.slice(dot + 1).toUpperCase() : "";
+}
+
+function formatBytes(bytes?: number): string {
+  if (!bytes || bytes <= 0) {
+    return "";
+  }
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value >= 10 || unit === 0 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`;
+}
+
+const CODE_RE = /\.(ts|tsx|js|jsx|mjs|cjs|py|rb|go|rs|java|kt|c|h|cpp|hpp|cc|cs|php|sh|bash|sql|json|ya?ml|toml|xml|html|css|scss)$/i;
+
+function FileGlyph({ name, mime }: { readonly name: string; readonly mime?: string }) {
+  if (mime?.startsWith("image/")) {
+    return <ImageOutlinedIcon sx={{ fontSize: 24, color: "text.secondary" }} />;
+  }
+  if (CODE_RE.test(name)) {
+    return <CodeOutlinedIcon sx={{ fontSize: 24, color: "text.secondary" }} />;
+  }
+  if (mime?.startsWith("text/") || /\.(txt|md|log|csv)$/i.test(name)) {
+    return <DescriptionOutlinedIcon sx={{ fontSize: 24, color: "text.secondary" }} />;
+  }
+  return <InsertDriveFileOutlinedIcon sx={{ fontSize: 24, color: "text.secondary" }} />;
+}
+
+export interface AttachmentTileProps {
+  readonly name: string;
+  readonly mime?: string;
+  readonly sizeBytes?: number;
+  /** Resolved URL for an image preview; when set the tile shows the picture. */
+  readonly previewSrc?: string;
+  readonly onOpen?: () => void;
+  readonly onRemove?: () => void;
+  readonly removeLabel?: string;
+}
+
+/**
+ * A compact square tile for a single attachment — image preview or a file glyph
+ * with its extension, plus a name + size caption. Shared by the composer (with a
+ * remove button) and sent messages (read-only), so both look identical.
+ */
+export function AttachmentTile({ name, mime, sizeBytes, previewSrc, onOpen, onRemove, removeLabel }: AttachmentTileProps) {
+  const [imgFailed, setImgFailed] = useState(false);
+  const ext = extOf(name);
+  const size = formatBytes(sizeBytes);
+  const showImage = Boolean(previewSrc) && !imgFailed;
+  return (
+    <Box
+      sx={{
+        position: "relative",
+        width: showImage ? 72 : 84,
+        flex: "0 0 auto",
+        pointerEvents: "auto",
+        borderRadius: (t) => `${t.custom.radii.md}px`,
+        overflow: "hidden",
+        border: (t) => `1px solid ${t.custom.borders.strong}`,
+        backgroundColor: (t) => t.custom.surfaces.s2,
+        boxShadow: "0 1px 4px rgba(0, 0, 0, 0.18)",
+      }}
+    >
+      <Box
+        component={onOpen ? "button" : "div"}
+        type={onOpen ? "button" : undefined}
+        onClick={onOpen}
+        aria-label={onOpen ? name : undefined}
+        sx={{
+          display: "block",
+          width: "100%",
+          p: 0,
+          border: 0,
+          textAlign: "left",
+          cursor: onOpen ? "pointer" : "default",
+          backgroundColor: "transparent",
+        }}
+      >
+        {showImage ? (
+          /* Image: just the preview, no caption (a square thumbnail). */
+          <Box component="img" src={previewSrc} alt={name} loading="lazy" onError={() => setImgFailed(true)} sx={{ width: 72, height: 72, objectFit: "cover", display: "block" }} />
+        ) : (
+          <>
+            {/* File: a glyph + extension badge over a name + size caption. */}
+            <Box sx={{ height: 46, display: "flex", alignItems: "center", justifyContent: "center", gap: 0.5, backgroundColor: (t) => t.custom.surfaces.s3 }}>
+              <FileGlyph name={name} mime={mime} />
+              {ext && (
+                <Typography sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.58rem", fontWeight: 700, letterSpacing: "0.04em", color: "text.secondary" }}>
+                  {ext}
+                </Typography>
+              )}
+            </Box>
+            <Box sx={{ px: 0.625, py: 0.375, minWidth: 0 }}>
+              <Typography noWrap sx={{ fontSize: "0.66rem", fontWeight: 600, color: "text.primary" }}>
+                {name}
+              </Typography>
+              {size && (
+                <Typography noWrap sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.58rem", color: "text.secondary" }}>
+                  {size}
+                </Typography>
+              )}
+            </Box>
+          </>
+        )}
+      </Box>
+      {onRemove && (
+        <IconButton
+          aria-label={removeLabel ?? ""}
+          onClick={onRemove}
+          sx={{
+            // Subtle by default; a background only appears on hover (no red).
+            position: "absolute",
+            top: 3,
+            right: 3,
+            p: 0.25,
+            color: "text.secondary",
+            backgroundColor: "transparent",
+            transition: "background-color 120ms ease, color 120ms ease",
+            "&:hover": { color: "text.primary", backgroundColor: (t) => t.custom.surfaces.s1 },
+          }}
+        >
+          <CloseRoundedIcon sx={{ fontSize: 13 }} />
+        </IconButton>
+      )}
+    </Box>
+  );
+}

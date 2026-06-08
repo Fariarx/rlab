@@ -3022,6 +3022,35 @@ function handleFolderInfo(req: IncomingMessage, res: ServerResponse): void {
   });
 }
 
+/** Lists immediate subdirectories of a folder so the project dialog can offer an
+ *  in-app folder browser — the OS file dialog (zenity) can't open on a headless
+ *  server. Defaults to the home directory. */
+function handleListDirectories(req: IncomingMessage, res: ServerResponse): void {
+  readJsonBody(req, res, (body) => {
+    try {
+      const raw = isRecord(body) && typeof body.path === "string" ? body.path.trim() : "";
+      const base = raw ? resolve(raw) : homedir();
+      if (!existsSync(base) || !statSync(base).isDirectory()) {
+        sendJson(res, 400, { error: `Not a directory: ${base}` });
+        return;
+      }
+      let entries: Array<{ readonly name: string; readonly path: string }> = [];
+      try {
+        entries = readdirSync(base, { withFileTypes: true })
+          .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
+          .map((entry) => ({ name: entry.name, path: join(base, entry.name) }))
+          .sort((a, b) => a.name.localeCompare(b.name));
+      } catch {
+        // Unreadable (permission denied) — show the folder with no children.
+      }
+      const parent = dirname(base);
+      sendJson(res, 200, { path: base, parent: parent !== base ? parent : null, name: directoryName(base), entries });
+    } catch (error) {
+      sendJson(res, 500, { error: errorMessage(error) });
+    }
+  });
+}
+
 function handleProjectFiles(req: IncomingMessage, res: ServerResponse): void {
   readJsonBody(req, res, (body) => {
     try {
@@ -3131,6 +3160,12 @@ function handleVersion(_req: IncomingMessage, res: ServerResponse): void {
   } catch {
     sendJson(res, 200, { version: "dev" });
   }
+}
+
+/** Returns the latest known account rate-limit snapshot per agent (keyed by
+ *  agent id). Empty until an agent reports one during a run. */
+function handleAgentLimits(_req: IncomingMessage, res: ServerResponse): void {
+  sendJson(res, 200, { limits: Object.fromEntries(latestAgentLimits.entries()) });
 }
 
 function handleAgentConfig(req: IncomingMessage, res: ServerResponse): void {
@@ -3781,6 +3816,39 @@ interface RunRequest {
   /** Server-assigned session id for a NEW session (agents that let us set it,
    *  e.g. Gemini `--session-id`). Agents that mint their own id ignore this. */
   readonly sessionId?: string;
+}
+
+/** The latest account rate-limit snapshot reported by an agent, surfaced in the
+ *  composer. Claude emits `rate_limit` stream events; Codex answers an
+ *  `account/rateLimits/read` request. Fields are optional — each agent reports
+ *  a different subset. */
+interface AgentRateLimit {
+  readonly updatedAt: number;
+  /** "allowed" while under the limit (Claude). */
+  readonly status?: string;
+  /** Window the snapshot describes, e.g. "five_hour" / "weekly" (Claude). */
+  readonly windowType?: string;
+  /** Epoch seconds when the current window resets (Claude). */
+  readonly resetsAt?: number;
+  /** Percent of the primary/secondary window used (Codex). */
+  readonly usedPercent?: number;
+  readonly secondaryPercent?: number;
+  /** Subscription plan label (Codex). */
+  readonly plan?: string;
+}
+
+const latestAgentLimits = new Map<string, AgentRateLimit>();
+
+function recordClaudeRateLimit(agent: string, info: Record<string, unknown>): void {
+  const rateLimitType = typeof info.rateLimitType === "string" ? info.rateLimitType : undefined;
+  latestAgentLimits.set(agent, {
+    updatedAt: Date.now(),
+    status: typeof info.status === "string" ? info.status : undefined,
+    // Normalize the various weekly windows to "weekly"; keep five_hour as-is.
+    windowType: rateLimitType ? (rateLimitType.startsWith("seven_day") ? "weekly" : rateLimitType) : undefined,
+    resetsAt: typeof info.resetsAt === "number" ? info.resetsAt : undefined,
+    usedPercent: typeof info.utilization === "number" ? info.utilization : undefined,
+  });
 }
 
 interface RunArgsRequest {
@@ -4652,6 +4720,15 @@ const DIFF_TOOL_NAMES = new Set(["write", "writefile", "filewrite", "edit", "fil
 
 function isDiffTool(name: string): boolean {
   return DIFF_TOOL_NAMES.has(normalizedToolName(name));
+}
+
+/** AskUserQuestion is owned end-to-end by the canUseTool input handler (it
+ *  registers the pending request and emits the interactive options block). The
+ *  stream must NOT also translate it, or the user gets a duplicate question whose
+ *  answer has no pending request, plus an orphaned "running" tool card. */
+function isInputTool(name: string): boolean {
+  const normalized = normalizedToolName(name);
+  return normalized === "askuserquestion" || normalized === "question";
 }
 
 function isApprovalDecision(value: unknown): value is ApprovalDecision {
@@ -5684,6 +5761,10 @@ function diffToolCardEvent(tool: StreamedTool): Extract<RunEvent, { type: "tool"
 
 function toolStartEvents(tool: StreamedTool, state: ClaudeStreamState): RunEvent[] {
   state.toolsById.set(tool.id, tool);
+  // The interactive input handler renders this tool; emit nothing from the stream.
+  if (isInputTool(tool.name)) {
+    return [];
+  }
   const rich = richToolEvents(tool.id, tool.name, toolInput(tool), "running");
   // Diff tools (Edit/Write/MultiEdit) need a tool card for the running→ok
   // lifecycle in addition to their diff — a bare diff carries no state, so the
@@ -5695,6 +5776,10 @@ function toolStartEvents(tool: StreamedTool, state: ClaudeStreamState): RunEvent
 }
 
 function toolResultEvents(tool: StreamedTool | undefined, id: string, ok: boolean, output: unknown): RunEvent[] {
+  if (tool && isInputTool(tool.name)) {
+    // Owned by the input handler — no stream-side card/result to settle.
+    return [];
+  }
   if (tool) {
     const rich = richToolEvents(id, tool.name, toolInput(tool), ok ? "ok" : "error", output);
     if (isDiffTool(tool.name)) {
@@ -6904,6 +6989,11 @@ async function runClaudeSdk(
 
   try {
     for await (const message of query({ prompt: request.prompt, options: buildClaudeSdkOptions(request, cwd, abortController, canUseTool) })) {
+      // Capture account rate-limit snapshots Claude emits in the stream so the
+      // composer can show the current 5-hour / weekly window state.
+      if (message.type === "rate_limit_event" && isRecord(message.rate_limit_info)) {
+        recordClaudeRateLimit(request.agent, message.rate_limit_info);
+      }
       for (const event of translateSdkMessage(translate, message)) {
         send(event);
       }
@@ -8014,6 +8104,14 @@ function attach(server: ViteDevServer | PreviewServer): void {
     }
     handleFolderPicker(req, res);
   });
+  server.middlewares.use("/api/list-directories", (req, res) => {
+    if (req.method !== "POST") {
+      res.statusCode = 405;
+      res.end();
+      return;
+    }
+    handleListDirectories(req, res);
+  });
   server.middlewares.use("/api/folder-info", (req, res) => {
     if (req.method !== "POST") {
       res.statusCode = 405;
@@ -8053,6 +8151,14 @@ function attach(server: ViteDevServer | PreviewServer): void {
       return;
     }
     handleVersion(req, res);
+  });
+  server.middlewares.use("/api/agent-limits", (req, res) => {
+    if (req.method !== "GET") {
+      res.statusCode = 405;
+      res.end();
+      return;
+    }
+    handleAgentLimits(req, res);
   });
   server.middlewares.use("/api/git-status", (req, res) => {
     if (req.method !== "POST") {
