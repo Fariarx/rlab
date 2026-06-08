@@ -297,7 +297,9 @@ export function WorkspacePageView({
   // Height of the composer's floating tags row; the thread/Git content reserves
   // matching bottom space so the (still-floating) tags never hide content.
   const [composerTagsHeight, setComposerTagsHeight] = useState(0);
-  const contentBottomInset = composerTagsHeight > 0 ? composerTagsHeight + 22 : 0;
+  // How far the multiline-input overlay rises above the single-row baseline.
+  const [composerOverlayLift, setComposerOverlayLift] = useState(0);
+  const contentBottomInset = (composerTagsHeight > 0 ? composerTagsHeight + 22 : 0) + composerOverlayLift;
   const showTerminal = ws.settings.appearance.showTerminal ?? false;
   const showView = (next: WorkspaceView) => setView(next);
   // Pending code-review comments, attached to diff lines in the Git view and sent
@@ -1278,6 +1280,7 @@ export function WorkspacePageView({
                 onModeChange={handleModeChange}
                 onAttachmentError={(message) => toast({ message, severity: "error", duration: 3000 })}
                 onTagsHeightChange={setComposerTagsHeight}
+                onOverlayLiftChange={setComposerOverlayLift}
               />
               </Stack>
             ) : (
@@ -1318,6 +1321,7 @@ export function WorkspacePageView({
                 reviewCount={reviewComments.length}
                 onSendReview={sendReviewComments}
                 onTagsHeightChange={setComposerTagsHeight}
+                onOverlayLiftChange={setComposerOverlayLift}
               />
             )}
           </Box>

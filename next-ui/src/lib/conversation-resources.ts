@@ -31,7 +31,7 @@ function looksLikeFilePath(value: string): boolean {
 }
 
 function classify(value: string): ResourceKind | null {
-  if (isImageUrl(value)) {
+  if (isImageUrl(value) && isHttpish(value)) {
     return "image";
   }
   if (isHttpish(value)) {
@@ -67,9 +67,9 @@ class ResourceCollector {
     this.items.push({ id: `res-${++this.seq}`, kind, url: trimmed, label: label.trim() || fileLabel(trimmed), origin, time });
   }
 
-  /** Adds a value by inferring its kind; forces image when from `![]()` syntax. */
+  /** Adds a value by inferring its kind; forces image only for web image URLs. */
   addInferred(url: string, label: string, origin: "user" | "agent", time?: string, forceImage = false): void {
-    const kind = forceImage ? "image" : classify(url);
+    const kind = (forceImage && isHttpish(url)) ? "image" : classify(url);
     if (kind) {
       this.add(kind, url, label, origin, time);
     }
@@ -113,18 +113,14 @@ export function collectResources(messages: readonly ChatMessage[]): readonly Con
     for (const block of message.blocks ?? []) {
       switch (block.kind) {
         case "text":
-          harvestText(block.text, origin, time, out);
+          // Skip narration text (inside the reasoning container); only harvest result text.
+          if (block.result !== false) {
+            harvestText(block.text, origin, time, out);
+          }
           break;
         case "diff":
           out.add("file", block.file, fileLabel(block.file), origin, time);
           break;
-        case "tool": {
-          const path = block.args?.path ?? (block.summary && looksLikeFilePath(block.summary) ? block.summary : undefined);
-          if (path) {
-            out.add("file", path, fileLabel(path), origin, time);
-          }
-          break;
-        }
         case "search":
           for (const result of block.results) {
             out.addInferred(result.url, result.title, origin, time);

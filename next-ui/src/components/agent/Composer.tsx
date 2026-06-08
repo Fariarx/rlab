@@ -226,6 +226,9 @@ interface ComposerProps {
   /** Reports the height of the floating tags row so the thread/Git content above
    *  can reserve matching bottom space (the tags still float over the content). */
   readonly onTagsHeightChange?: (height: number) => void;
+  /** Reports the multiline-overlay lift (px above the single-row baseline) so
+   *  the thread can reserve extra space when the textarea expands upward. */
+  readonly onOverlayLiftChange?: (lift: number) => void;
 }
 
 /** Composer — the chat input. Sends on Enter (Shift+Enter for newline). Sticky
@@ -249,6 +252,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     reviewCount = 0,
     onSendReview,
     onTagsHeightChange,
+    onOverlayLiftChange,
   },
   ref,
 ) {
@@ -262,6 +266,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // How far the multiline input overlay rises above the bar, so the floating
   // tags row can sit above it instead of overlapping the typed lines.
   const [overlayLift, setOverlayLift] = useState(0);
+  const onOverlayLiftChangeRef = useRef(onOverlayLiftChange);
+  onOverlayLiftChangeRef.current = onOverlayLiftChange;
   const activeModeOption = modes.find((mode) => mode.id === activeMode) ?? null;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -307,7 +313,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     setExpanded(needsMultiline);
     // The expanded overlay (~textarea content + vertical padding) rises above the
     // bar by its height minus one baseline row; lift the tags by that much.
-    setOverlayLift(needsMultiline ? Math.max(0, el.scrollHeight + 16 - baseline) : 0);
+    const nextLift = needsMultiline ? Math.max(0, el.scrollHeight + 16 - baseline) : 0;
+    setOverlayLift(nextLift);
+    onOverlayLiftChangeRef.current?.(nextLift);
   }, [composerValue, expanded]);
 
   // Report the floating tags row height so the thread/Git content can reserve

@@ -20,22 +20,8 @@ function KindIcon({ kind }: { readonly kind: ConversationResource["kind"] }) {
   );
 }
 
-/** Small banner thumbnail for image cards, with a graceful fallback. */
-function ImageBanner({ resource }: { readonly resource: ConversationResource }) {
-  const [failed, setFailed] = useState(false);
-  return (
-    <Box sx={{ width: "100%", aspectRatio: "16 / 9", borderRadius: (theme) => `${theme.custom.radii.sm}px`, overflow: "hidden", backgroundColor: (theme) => theme.custom.surfaces.s3, display: "flex", alignItems: "center", justifyContent: "center" }}>
-      {failed ? (
-        <ImageOutlinedIcon sx={{ fontSize: 22, color: "text.tertiary" }} />
-      ) : (
-        <Box component="img" src={resource.url} alt={resource.label} loading="lazy" onError={() => setFailed(true)} sx={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
-      )}
-    </Box>
-  );
-}
 
-/** A compact resource card: image cards lead with a thumbnail, link/file cards
- *  with a kind icon. Each shows the time it was first mentioned. */
+/** A compact resource card with uniform height. Kind icon always shown. */
 function ResourceCard({ resource, onClick }: { readonly resource: ConversationResource; readonly onClick?: () => void }) {
   const showSecondary = resource.url !== resource.label;
   return (
@@ -45,6 +31,7 @@ function ResourceCard({ resource, onClick }: { readonly resource: ConversationRe
       sx={{
         p: 1,
         minWidth: 0,
+        height: "100%",
         borderRadius: (theme) => `${theme.custom.radii.md}px`,
         border: (theme) => `1px solid ${theme.custom.borders.subtle}`,
         backgroundColor: (theme) => theme.custom.surfaces.s2,
@@ -53,9 +40,8 @@ function ResourceCard({ resource, onClick }: { readonly resource: ConversationRe
         "&:hover": onClick ? { backgroundColor: (theme) => theme.custom.surfaces.s3, borderColor: (theme) => theme.custom.borders.strong } : undefined,
       }}
     >
-      {resource.kind === "image" && <ImageBanner resource={resource} />}
       <Stack direction="row" spacing={0.75} sx={{ alignItems: "center", minWidth: 0 }}>
-        {resource.kind !== "image" && <KindIcon kind={resource.kind} />}
+        <KindIcon kind={resource.kind} />
         <Typography
           sx={{
             flex: 1,
@@ -127,8 +113,8 @@ export function ResourcesPanel({ messages, bottomInset = 0 }: { readonly message
         </Stack>
       ) : (
         <Box sx={{ flex: 1, minHeight: 0, overflow: "auto", px: 1.5, pt: 1.5, pb: `${16 + bottomInset}px` }}>
-          <Box sx={{ display: "grid", gap: 1, gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))", alignItems: "start" }}>
-            {resources.map((resource) => (
+          <Box sx={{ display: "grid", gap: 1, gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))", alignItems: "stretch" }}>
+            {[...resources].reverse().map((resource) => (
               <ResourceCard key={resource.id} resource={resource} onClick={onResourceClick(resource)} />
             ))}
           </Box>
