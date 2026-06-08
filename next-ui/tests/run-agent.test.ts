@@ -270,7 +270,15 @@ describe("runConversation", () => {
       onBlocks: (nextBlocks) => blocks.push(nextBlocks),
     });
 
+    // Block order follows rebuild(): timeline items (search) render first, then
+    // the pinned plan, then diffs — regardless of the order events arrived in.
     expect(blocks.at(-1)).toEqual([
+      {
+        kind: "search",
+        query: "vibe kanban",
+        state: "ok",
+        results: [{ title: "Vibe Kanban", url: "https://github.com/BloopAI/vibe-kanban" }],
+      },
       {
         kind: "plan",
         steps: [
@@ -287,12 +295,6 @@ describe("runConversation", () => {
           { type: "del", text: "old" },
           { type: "add", text: "new" },
         ],
-      },
-      {
-        kind: "search",
-        query: "vibe kanban",
-        state: "ok",
-        results: [{ title: "Vibe Kanban", url: "https://github.com/BloopAI/vibe-kanban" }],
       },
     ]);
   });
