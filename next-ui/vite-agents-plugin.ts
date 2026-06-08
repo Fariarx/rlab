@@ -5059,7 +5059,8 @@ function backgroundBlocks(accumulator: BackgroundRunAccumulator): AgentBlock[] {
   });
   timeline.forEach((item, idx) => {
     if (item.kind === "reasoning") {
-      blocks.push({ kind: "reasoning", text: item.text, active: !accumulator.done && idx === lastReasoningIdx, duration: accumulator.done && idx === firstReasoningIdx ? reasoningDuration : undefined });
+      const active = !accumulator.done && idx === lastReasoningIdx;
+      blocks.push({ kind: "reasoning", text: item.text, active, duration: accumulator.done && idx === firstReasoningIdx ? reasoningDuration : undefined, ...(active ? { startedAtMs: accumulator.start } : {}) });
     } else if (item.kind === "text") {
       blocks.push({ kind: "text", text: item.text, streaming: !accumulator.done && idx === lastTextIdx, result: idx > lastNonTextIdx });
     } else if (item.kind === "search") {
@@ -5073,7 +5074,7 @@ function backgroundBlocks(accumulator: BackgroundRunAccumulator): AgentBlock[] {
     }
   });
   if (timeline.length === 0 && accumulator.started && !accumulator.done) {
-    blocks.push({ kind: "reasoning", text: "", active: true });
+    blocks.push({ kind: "reasoning", text: "", active: true, startedAtMs: accumulator.start });
   }
   for (const plan of plans) {
     blocks.push({ kind: "plan", steps: plan.steps });

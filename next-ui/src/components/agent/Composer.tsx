@@ -10,6 +10,8 @@ import TuneRoundedIcon from "@mui/icons-material/TuneRounded";
 import { Box, InputBase, Menu, MenuItem, Stack, Switch, type SxProps, type Theme, Typography } from "@mui/material";
 import { type ChangeEvent, type ClipboardEvent, forwardRef, type KeyboardEvent, type MouseEvent, type ReactNode, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
+import { localFileUrl } from "../../lib/external-url";
+import { ImageLightbox } from "../workspace/ImageLightbox";
 import { Button, IconButton, KeyHint } from "../ui";
 import type { ComposerAttachmentDraft, ComposerDraft } from "./types";
 
@@ -196,6 +198,51 @@ function FloatingTag({
   );
 }
 
+/** An image attachment shown as a small square preview that opens full-screen on
+ *  click, with a corner remove button. Non-image files keep the pill chip. */
+function AttachmentThumb({ attachment, onRemove, onOpen, removeLabel }: { readonly attachment: ComposerAttachmentDraft; readonly onRemove: () => void; readonly onOpen: () => void; readonly removeLabel: string }) {
+  return (
+    <Box sx={{ position: "relative", width: 48, height: 48, flex: "0 0 auto" }}>
+      <Box
+        component="button"
+        type="button"
+        onClick={onOpen}
+        aria-label={attachment.name}
+        sx={{
+          p: 0,
+          width: "100%",
+          height: "100%",
+          display: "block",
+          cursor: "pointer",
+          borderRadius: (t) => `${t.custom.radii.md}px`,
+          overflow: "hidden",
+          border: (t) => `1px solid ${t.custom.borders.strong}`,
+          backgroundColor: (t) => t.custom.surfaces.s3,
+          "&:hover": { borderColor: (t) => t.palette.status.info.main },
+        }}
+      >
+        <Box component="img" src={localFileUrl(attachment.path ?? "")} alt={attachment.name} loading="lazy" sx={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+      </Box>
+      <IconButton
+        aria-label={removeLabel}
+        onClick={onRemove}
+        sx={{
+          position: "absolute",
+          top: -6,
+          right: -6,
+          p: 0.125,
+          color: "#fff",
+          backgroundColor: (t) => t.palette.status.error.main,
+          border: (t) => `1px solid ${t.custom.surfaces.s1}`,
+          "&:hover": { backgroundColor: (t) => t.palette.status.error.dark ?? t.palette.status.error.main, opacity: 0.9 },
+        }}
+      >
+        <CloseRoundedIcon sx={{ fontSize: 12 }} />
+      </IconButton>
+    </Box>
+  );
+}
+
 /** Imperative handle so a parent drop-zone (the whole chat pane) can hand files
  *  to the composer's attachment pipeline. */
 export interface ComposerHandle {
@@ -263,21 +310,14 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const [internalValue, setInternalValue] = useState(initialValue);
   const [internalAttachments, setInternalAttachments] = useState<readonly ComposerAttachmentDraft[]>(initialAttachments);
   const [sending, setSending] = useState(false);
-  const [expanded, setExpanded] = useState(false);
   const [activeSuggestion, setActiveSuggestion] = useState(0);
   const [suggestDismissed, setSuggestDismissed] = useState(false);
   const [modeMenuAnchor, setModeMenuAnchor] = useState<null | HTMLElement>(null);
-  // How far the multiline input overlay rises above the bar, so the floating
-  // tags row can sit above it instead of overlapping the typed lines.
-  const [overlayLift, setOverlayLift] = useState(0);
-  const onOverlayLiftChangeRef = useRef(onOverlayLiftChange);
-  onOverlayLiftChangeRef.current = onOverlayLiftChange;
+  // An image attachment opened full-screen (click a thumbnail to view).
+  const [previewAttachment, setPreviewAttachment] = useState<ComposerAttachmentDraft | null>(null);
   const activeModeOption = modes.find((mode) => mode.id === activeMode) ?? null;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
-  const tagsRef = useRef<HTMLDivElement | null>(null);
-  const rootRef = useRef<HTMLDivElement | null>(null);
-  const singleRowRef = useRef(0);
   // Shell-style history navigation: -1 means "not browsing"; otherwise an index
   // into `history`. `historyDraftRef` holds the text being composed before the
   // user started scrolling back, so ArrowDown past the newest restores it.
@@ -321,53 +361,14 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     }
   }, [composerValue]);
 
-  // Decide whether the input would need more than one row. When it does, the
-  // input lifts into an overlay that grows upward (see render) instead of
-  // expanding the composer bar in place. Detection is driven by content height
-  // (wrapped long lines) and explicit newlines, so it works regardless of how
-  // the text reached multiple rows.
-  useLayoutEffect(() => {
-    const el = textareaRef.current;
-    if (!el) {
-      return;
-    }
-    if (singleRowRef.current === 0 && !expanded) {
-      singleRowRef.current = el.scrollHeight;
-    }
-    const baseline = singleRowRef.current || 24;
-    const needsMultiline = composerValue.length > 0 && (composerValue.includes("\n") || el.scrollHeight > baseline * 1.5);
-    setExpanded(needsMultiline);
-    // Lift the floating tags by exactly how far the (already-rendered) overlay's
-    // top rises above the composer box's top — measured from real geometry so it
-    // can't drift out of sync with the textarea like a height estimate would.
-    // When collapsed the textarea sits below the box top, so the lift clamps to 0.
-    const root = rootRef.current;
-    let nextLift = 0;
-    if (needsMultiline && expanded && root) {
-      const overlayTop = el.getBoundingClientRect().top - 8; // overlay padding above the textarea
-      nextLift = Math.max(0, Math.round(root.getBoundingClientRect().top - overlayTop));
-    }
-    setOverlayLift(nextLift);
-    onOverlayLiftChangeRef.current?.(nextLift);
-  }, [composerValue, expanded]);
-
-  // Report the floating tags row height so the thread/Git content can reserve
-  // matching bottom space (the row keeps floating over the content).
+  // The composer now sits in normal flow and grows downward via the textarea's
+  // maxRows, so the thread above simply shrinks — no floating tags/overlay to
+  // position. Reset any previously-reported insets to zero so the thread doesn't
+  // reserve phantom space.
   useEffect(() => {
-    const el = tagsRef.current;
-    if (!el || typeof ResizeObserver === "undefined") {
-      onTagsHeightChange?.(0);
-      return;
-    }
-    const report = () => onTagsHeightChange?.(el.offsetHeight);
-    report();
-    const observer = new ResizeObserver(report);
-    observer.observe(el);
-    return () => {
-      observer.disconnect();
-      onTagsHeightChange?.(0);
-    };
-  }, [onTagsHeightChange]);
+    onTagsHeightChange?.(0);
+    onOverlayLiftChange?.(0);
+  }, [onTagsHeightChange, onOverlayLiftChange]);
 
   const slashCommands = useMemo<readonly SlashCommand[]>(
     () => [
@@ -623,49 +624,56 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const modeMenuItemSx: SxProps<Theme> = { display: "flex", gap: 1, fontSize: "0.8rem", minHeight: 0, pl: 2, pr: 1, width: "100%" };
   const modeSwitchSx: SxProps<Theme> = { ml: "auto", mr: 0, pointerEvents: "none" };
 
+  const hasChips = reviewCount > 0 || activeModeOption !== null || composerAttachments.length > 0;
+
   return (
-    // Plain Box (not a spaced Stack): the only in-flow child is the input bar;
-    // tags + suggestions are absolutely positioned. A Stack's sibling spacing
-    // would otherwise push the bar down once the (absolute) tags row mounts.
-    <Box ref={rootRef} sx={{ position: "relative" }}>
-      {/* Each enabled mode and each attached file floats as its own pill above
-          the divider that tops the input container (overlaying the thread),
-          never boxed together and never reflowing the thread. */}
-      {/* Always mounted (even when empty) so its height can be measured and the
-          content above can reserve matching space. */}
-      {/* No `bottom` transition: the textarea overlay grows instantly, so an eased
-          tags move would lag a frame behind and briefly overlap the typed lines. */}
-      <Box ref={tagsRef} sx={{ position: "absolute", left: 0, right: 0, bottom: `calc(100% + ${22 + overlayLift}px)`, display: "flex", flexWrap: "wrap", gap: 0.75, pointerEvents: "none", zIndex: 6 }}>
-        {reviewCount > 0 && (
-          <FloatingTag
-            tone="accent"
-            icon={<RateReviewOutlinedIcon sx={{ fontSize: 14 }} />}
-            label={t("reviewPending", { count: reviewCount })}
-          />
-        )}
-        {activeModeOption && (
-          <FloatingTag
-            tone="accent"
-            icon={<AutoAwesomeRoundedIcon sx={{ fontSize: 14 }} />}
-            label={activeModeOption.label}
-            removeLabel={t("disableMode", { mode: activeModeOption.label })}
-            onRemove={() => onModeChange?.("default")}
-          />
-        )}
-        {composerAttachments.map((attachment) => (
-          <FloatingTag
-            key={attachment.id}
-            icon={attachmentIcon(attachment.type)}
-            label={attachment.name}
-            removeLabel={t("removeAttachment", { name: attachment.name })}
-            onRemove={() => setComposerAttachments(composerAttachments.filter((item) => item.id !== attachment.id))}
-          />
-        ))}
-      </Box>
+    // A normal-flow column: the chips/attachments row sits directly above the
+    // input bar (no absolute positioning, no geometry to drift), and the input
+    // grows downward via maxRows — so the thread above just shrinks.
+    <Box sx={{ position: "relative", display: "flex", flexDirection: "column", gap: 0.75 }}>
+      {hasChips && (
+        <Box sx={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 0.75 }}>
+          {reviewCount > 0 && (
+            <FloatingTag
+              tone="accent"
+              icon={<RateReviewOutlinedIcon sx={{ fontSize: 14 }} />}
+              label={t("reviewPending", { count: reviewCount })}
+            />
+          )}
+          {activeModeOption && (
+            <FloatingTag
+              tone="accent"
+              icon={<AutoAwesomeRoundedIcon sx={{ fontSize: 14 }} />}
+              label={activeModeOption.label}
+              removeLabel={t("disableMode", { mode: activeModeOption.label })}
+              onRemove={() => onModeChange?.("default")}
+            />
+          )}
+          {composerAttachments.map((attachment) =>
+            isImageMime(attachment.type) && attachment.path ? (
+              <AttachmentThumb
+                key={attachment.id}
+                attachment={attachment}
+                removeLabel={t("removeAttachment", { name: attachment.name })}
+                onRemove={() => setComposerAttachments(composerAttachments.filter((item) => item.id !== attachment.id))}
+                onOpen={() => setPreviewAttachment(attachment)}
+              />
+            ) : (
+              <FloatingTag
+                key={attachment.id}
+                icon={attachmentIcon(attachment.type)}
+                label={attachment.name}
+                removeLabel={t("removeAttachment", { name: attachment.name })}
+                onRemove={() => setComposerAttachments(composerAttachments.filter((item) => item.id !== attachment.id))}
+              />
+            ),
+          )}
+        </Box>
+      )}
       <Box
         sx={{
           display: "flex",
-          alignItems: "center",
+          alignItems: "flex-end",
           gap: 1,
           p: 1,
           borderRadius: (t) => `${t.custom.radii.lg}px`,
@@ -719,12 +727,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             </MenuItem>
           ))}
         </Menu>
-        {/* The input column keeps a fixed single-row height so the composer bar
-            never grows. When multiline is needed the same input lifts into an
-            overlay (position: absolute) that grows upward over the thread. */}
+        {/* The input grows in-flow (downward) via the textarea's maxRows; the
+            composer column expands and the thread above shrinks. */}
         <Box
           data-testid="composer-input-area"
-          data-expanded={expanded ? "true" : "false"}
           sx={{ position: "relative", flex: 1, minWidth: 0, minHeight: 30, display: "flex", alignItems: "center" }}
         >
           {/* The suggestion dropdown is anchored to the input column, so it is
@@ -770,25 +776,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             inputProps={{ "aria-label": placeholder, "data-testid": "composer-input" }}
             multiline
             minRows={1}
-            maxRows={expanded ? 8 : 1}
+            maxRows={8}
             sx={{
               width: "100%",
               fontSize: "0.9rem",
               lineHeight: 1.5,
               py: 0.5,
-              ...(expanded && {
-                position: "absolute",
-                left: 0,
-                right: 0,
-                bottom: 0,
-                zIndex: 5,
-                px: 1,
-                py: 0.75,
-                borderRadius: (t) => `${t.custom.radii.md}px`,
-                backgroundColor: (t) => t.custom.surfaces.s2,
-                border: (t) => `1px solid ${t.custom.borders.strong}`,
-                boxShadow: "0 -10px 28px rgba(0, 0, 0, 0.45)",
-              }),
             }}
           />
         </Box>
@@ -814,6 +807,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           </Button>
         </Stack>
       </Box>
+      {/* Full-screen preview of a clicked image attachment; closes on the X or a
+          backdrop click (ImageLightbox's Backdrop handles both). */}
+      <ImageLightbox
+        src={previewAttachment?.path ?? null}
+        label={previewAttachment?.name}
+        onClose={() => setPreviewAttachment(null)}
+      />
     </Box>
   );
 });

@@ -416,6 +416,8 @@ export async function runConversation(opts: {
   let detached = false;
   let accepted = false;
   const start = performance.now();
+  // Wall-clock start so the live reasoning timer shows real elapsed time.
+  const startedAtMs = Date.now();
 
   const rebuild = (): AgentBlock[] => {
     const blocks: AgentBlock[] = [];
@@ -442,7 +444,8 @@ export async function runConversation(opts: {
     });
     timeline.forEach((item, idx) => {
       if (item.kind === "reasoning") {
-        blocks.push({ kind: "reasoning", text: item.text, active: !done && idx === lastReasoningIdx, duration: done && idx === firstReasoningIdx ? duration : undefined });
+        const active = !done && idx === lastReasoningIdx;
+        blocks.push({ kind: "reasoning", text: item.text, active, duration: done && idx === firstReasoningIdx ? duration : undefined, ...(active ? { startedAtMs } : {}) });
       } else if (item.kind === "text") {
         blocks.push({ kind: "text", text: item.text, streaming: !done && idx === lastTextIdx, result: idx > lastNonTextIdx });
       } else if (item.kind === "search") {
@@ -457,7 +460,7 @@ export async function runConversation(opts: {
     });
     // Before anything streams in, show the empty "thinking" placeholder.
     if (timeline.length === 0 && started && !done) {
-      blocks.push({ kind: "reasoning", text: "", active: true });
+      blocks.push({ kind: "reasoning", text: "", active: true, startedAtMs });
     }
     for (const plan of plans) {
       blocks.push({ kind: "plan", steps: plan.steps });
