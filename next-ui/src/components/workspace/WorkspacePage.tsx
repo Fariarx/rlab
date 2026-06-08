@@ -31,6 +31,7 @@ import {
 import { type DragEvent, type MouseEvent as ReactMouseEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { I18nProvider, useI18n } from "../../i18n/I18nProvider";
 import { normalizeExternalUrl } from "../../lib/external-url";
+import { contextWindowForModel } from "../../lib/model-context";
 import type { HashRoute } from "../../lib/use-hash-route";
 import {
   type AgentProfile,
@@ -1391,6 +1392,9 @@ export function WorkspacePageView({
                 onOverlayLiftChange={setComposerOverlayLift}
                 history={messageHistory}
                 agentId={profile.agent}
+                contextTokens={selected?.usage?.contextTokens}
+                contextWindow={contextWindowForModel(profile.model)}
+                costUsd={selected?.costUsd}
               />
             )}
           </Box>

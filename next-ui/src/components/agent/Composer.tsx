@@ -11,6 +11,7 @@ import { Box, Divider, InputBase, Menu, MenuItem, Stack, Switch, type SxProps, t
 import { type ChangeEvent, type ClipboardEvent, forwardRef, type KeyboardEvent, type MouseEvent, type ReactNode, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import { localFileUrl } from "../../lib/external-url";
+import { formatTokens } from "../../lib/model-context";
 import { ImageLightbox } from "../workspace/ImageLightbox";
 import { Button, IconButton, KeyHint } from "../ui";
 import { AttachmentTile } from "./AttachmentTile";
@@ -230,6 +231,12 @@ interface ComposerProps {
   readonly history?: readonly string[];
   /** Current agent id, used to show its account rate-limits in the options menu. */
   readonly agentId?: string;
+  /** The selected conversation's latest-turn context-window fill (tokens) and the
+   *  model's window size, for the context gauge in the options menu. */
+  readonly contextTokens?: number;
+  readonly contextWindow?: number;
+  /** The selected conversation's cumulative cost (USD), shown in the menu. */
+  readonly costUsd?: number;
 }
 
 interface AgentRateLimit {
@@ -266,6 +273,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     onOverlayLiftChange,
     history = [],
     agentId,
+    contextTokens,
+    contextWindow,
+    costUsd,
   },
   ref,
 ) {
@@ -632,6 +642,25 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const modeMenuItemSx: SxProps<Theme> = { display: "flex", gap: 1, fontSize: "0.8rem", minHeight: 0, pl: 2, pr: 1, width: "100%" };
   const modeSwitchSx: SxProps<Theme> = { ml: "auto", mr: 0, pointerEvents: "none" };
 
+  // The selected conversation's context-window fill + cost (per-conversation,
+  // distinct from the account rate-limits below).
+  const contextLines: ReadonlyArray<{ readonly label: string; readonly value: string }> = (() => {
+    const lines: Array<{ label: string; value: string }> = [];
+    if (typeof contextTokens === "number" && contextTokens > 0) {
+      const used = formatTokens(contextTokens);
+      if (typeof contextWindow === "number" && contextWindow > 0) {
+        const pct = Math.min(100, Math.round((contextTokens / contextWindow) * 100));
+        lines.push({ label: t("contextUsage"), value: `${used} / ${formatTokens(contextWindow)} · ${pct}%` });
+      } else {
+        lines.push({ label: t("contextUsage"), value: used });
+      }
+    }
+    if (typeof costUsd === "number" && costUsd > 0) {
+      lines.push({ label: t("conversationCost"), value: costUsd < 1 ? `$${costUsd.toFixed(3)}` : `$${costUsd.toFixed(2)}` });
+    }
+    return lines;
+  })();
+
   // Compact, localized lines describing the agent's account rate-limits.
   const limitLines: ReadonlyArray<{ readonly label: string; readonly value: string }> = (() => {
     if (!agentLimit) {
@@ -783,7 +812,25 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               <Switch size="small" checked={mode.id === activeMode} onChange={() => undefined} tabIndex={-1} sx={modeSwitchSx} />
             </MenuItem>
           ))}
-          {/* Actions above; the agent's account limits sit below a divider. */}
+          {/* Actions above; per-conversation context, then account limits below. */}
+          {contextLines.length > 0 && (
+            <>
+              <Divider sx={{ my: 0.5 }} />
+              <Box sx={{ px: 2, py: 0.75, cursor: "default" }} onClick={(event) => event.stopPropagation()}>
+                <Typography variant="microLabel" sx={{ color: "text.secondary", display: "block", mb: 0.5 }}>
+                  {t("contextLabel")}
+                </Typography>
+                <Stack spacing={0.25}>
+                  {contextLines.map((line) => (
+                    <Stack key={line.label} direction="row" spacing={1} sx={{ justifyContent: "space-between", alignItems: "baseline" }}>
+                      <Typography sx={{ fontSize: "0.72rem", color: "text.secondary" }}>{line.label}</Typography>
+                      <Typography sx={{ fontFamily: (th) => th.custom.fonts.mono, fontSize: "0.72rem", color: "text.primary" }}>{line.value}</Typography>
+                    </Stack>
+                  ))}
+                </Stack>
+              </Box>
+            </>
+          )}
           <Divider sx={{ my: 0.5 }} />
           <Box sx={{ px: 2, py: 0.75, cursor: "default" }} onClick={(event) => event.stopPropagation()}>
             <Typography variant="microLabel" sx={{ color: "text.secondary", display: "block", mb: 0.5 }}>

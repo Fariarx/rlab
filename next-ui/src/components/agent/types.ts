@@ -195,6 +195,10 @@ export interface RunUsage {
   readonly reasoningTokens?: number;
   readonly cacheReadTokens?: number;
   readonly cacheWriteTokens?: number;
+  /** Tokens occupying the model's context window on the turn's final model call
+   *  (input + cache reads/writes of that one call — NOT summed across the turn's
+   *  tool round-trips). Used to show how full the context window is. */
+  readonly contextTokens?: number;
 }
 
 export interface ConversationSummary {

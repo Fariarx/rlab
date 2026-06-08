@@ -233,7 +233,7 @@ function isRunUsage(value: unknown): value is RunUsage {
   if (!isRecord(value)) {
     return false;
   }
-  return ["totalTokens", "inputTokens", "outputTokens", "reasoningTokens", "cacheReadTokens", "cacheWriteTokens"].every(
+  return ["totalTokens", "inputTokens", "outputTokens", "reasoningTokens", "cacheReadTokens", "cacheWriteTokens", "contextTokens"].every(
     (key) => value[key] === undefined || typeof value[key] === "number",
   );
 }

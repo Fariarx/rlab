@@ -3028,7 +3028,17 @@ function handleFolderInfo(req: IncomingMessage, res: ServerResponse): void {
 function handleListDirectories(req: IncomingMessage, res: ServerResponse): void {
   readJsonBody(req, res, (body) => {
     try {
-      const raw = isRecord(body) && typeof body.path === "string" ? body.path.trim() : "";
+      // `body` is the raw request string — parse it (the sibling folder handlers
+      // go through parseProjectDirectoryPayload, which does this). Without the
+      // parse, isRecord() on a string was always false, so `path` was ignored and
+      // every request fell back to homedir() — folder navigation never moved.
+      let parsed: unknown = {};
+      try {
+        parsed = JSON.parse(body || "{}");
+      } catch {
+        parsed = {};
+      }
+      const raw = isRecord(parsed) && typeof parsed.path === "string" ? parsed.path.trim() : "";
       const base = raw ? resolve(raw) : homedir();
       if (!existsSync(base) || !statSync(base).isDirectory()) {
         sendJson(res, 400, { error: `Not a directory: ${base}` });
@@ -4185,6 +4195,13 @@ export function buildClaudeSdkOptions(request: RunRequest, cwd: string, abortCon
     // Stream partial messages so the chat renders token-by-token; without this the
     // SDK only emits complete turns and the UI updates in one jump per turn.
     includePartialMessages: true,
+    // Auto-compact the conversation when the context window fills, exactly like
+    // the interactive Claude CLI (which enables this by default). Headless SDK
+    // runs don't load user settings, so without this a resumed session re-reads
+    // the full uncompacted history on every tool round-trip — millions of
+    // cache-read tokens per message on long threads. Keeps the active context
+    // bounded so per-message limit usage stays sane.
+    settings: { autoCompactEnabled: true },
     permissionMode: claudePermissionModeForRequest(request),
     systemPrompt: { type: "preset", preset: "claude_code", append: CLAUDE_CHAT_UI_SYSTEM_PROMPT },
     tools: claudeToolsForRequest(request),
@@ -5723,6 +5740,10 @@ interface ClaudeStreamState {
   sawPartialAssistantContent: boolean;
   readonly toolsByIndex: Map<number, StreamedTool>;
   readonly toolsById: Map<string, StreamedTool>;
+  /** input + cache tokens of the most recent assistant model call = how full the
+   *  context window is at the end of the turn (the per-call figure, not the
+   *  turn-summed usage the result message reports). */
+  lastContextTokens?: number;
 }
 
 function parseJsonRecord(value: string): Record<string, unknown> | null {
@@ -5881,6 +5902,16 @@ function translateClaudeMessage(msg: Record<string, unknown>, state: ClaudeStrea
   } else if (type === "stream_event") {
     events.push(...translateClaudeStreamEvent(msg, state));
   } else if (type === "assistant") {
+    // Capture context-window fullness from this call's usage (even when partial
+    // deltas already streamed the content) before the early return below.
+    const message = isRecord(msg.message) ? msg.message : undefined;
+    const usageRec = message && isRecord(message.usage) ? message.usage : undefined;
+    if (usageRec) {
+      const ctx = (firstNumber(usageRec, ["input_tokens"]) ?? 0) + (firstNumber(usageRec, ["cache_read_input_tokens"]) ?? 0) + (firstNumber(usageRec, ["cache_creation_input_tokens"]) ?? 0);
+      if (ctx > 0) {
+        state.lastContextTokens = ctx;
+      }
+    }
     if (state.sawPartialAssistantContent) {
       return events;
     }
@@ -5912,7 +5943,9 @@ function translateClaudeMessage(msg: Record<string, unknown>, state: ClaudeStrea
     if (msg.is_error === true) {
       events.push({ type: "error", text: typeof msg.result === "string" ? msg.result : String(msg.subtype ?? "run failed") });
     }
-    events.push({ type: "done", costUsd: typeof msg.total_cost_usd === "number" ? msg.total_cost_usd : undefined, usage: runUsageFromRecord(msg.usage) });
+    const baseUsage = runUsageFromRecord(msg.usage);
+    const usage = state.lastContextTokens !== undefined ? { ...(baseUsage ?? {}), contextTokens: state.lastContextTokens } : baseUsage;
+    events.push({ type: "done", costUsd: typeof msg.total_cost_usd === "number" ? msg.total_cost_usd : undefined, usage });
   }
   return events;
 }
