@@ -160,13 +160,15 @@ describe("WorkspacePage", () => {
     expect(screen.getByRole("tab", { name: "Внешний вид" })).toBeInTheDocument();
   });
 
-  it("starts a new chat draft and creates it on first send", async () => {
+  it("creates a new chat immediately from the new-conversation menu", async () => {
     renderWithThemeAndVirtuoso(<WorkspacePage />);
 
     fireEvent.click(screen.getByRole("button", { name: "Новый диалог" }));
 
-    // Draft mode: no agent-picker confirmation, conversation isn't created until
-    // the first message is sent (then it uses the default agent).
+    // The "+" opens a menu to pick where the chat lives; "Простой чат" creates a
+    // standalone conversation right away (no draft/prelude), with the default agent.
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Простой чат" }));
+
     const input = await screen.findByPlaceholderText("Написать: CC");
     fireEvent.change(input, { target: { value: "Set up CI" } });
     fireEvent.keyDown(input, { key: "Enter" });

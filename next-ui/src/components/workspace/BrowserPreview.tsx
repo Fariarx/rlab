@@ -132,6 +132,9 @@ interface BrowserPreviewProps {
   /** External request to open a URL (e.g. from a chat link's "open in preview").
    *  The nonce changes per request so re-opening the same URL re-triggers. */
   readonly openRequest?: { readonly url: string; readonly nonce: number };
+  /** Optional host[:port] to rewrite loopback dev URLs to (Settings override).
+   *  Empty ⇒ route loopback URLs through rlab's same-origin proxy instead. */
+  readonly serverHostOverride?: string;
 }
 
 interface BrowserSyncRequest {
@@ -368,6 +371,65 @@ function normalizeBrowserPreviewUrl(value: string): string {
     throw new Error("Browser URL must be an absolute http(s) URL or about:blank.");
   }
   return parsed.toString();
+}
+
+const localPreviewHosts = new Set(["localhost", "127.0.0.1", "0.0.0.0", "::1", "[::1]"]);
+const previewProxyPrefix = "/preview-proxy";
+
+/** True for loopback hosts the user's browser can't reach when rlab is remote. */
+function isLocalPreviewHost(hostname: string): boolean {
+  return localPreviewHosts.has(hostname.toLowerCase());
+}
+
+/** The URL the live iframe should load. Loopback dev URLs the agent opens are
+ *  unreachable from the user's browser when rlab is remote, so they're rewritten
+ *  to a configured host (override) or routed through rlab's same-origin proxy.
+ *  Non-loopback URLs (and about:blank) pass through untouched. Idempotent. */
+function resolvePreviewFrameUrl(rawUrl: string, serverHostOverride: string): string {
+  if (rawUrl === browserPreviewDefaultUrl) {
+    return rawUrl;
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return rawUrl;
+  }
+  if (!isLocalPreviewHost(parsed.hostname)) {
+    return rawUrl;
+  }
+  const override = serverHostOverride.trim();
+  if (override) {
+    const hostPort = override.replace(/^[a-z]+:\/\//i, "").replace(/\/.*$/, "").trim();
+    if (!hostPort) {
+      return rawUrl;
+    }
+    if (hostPort.includes(":")) {
+      parsed.host = hostPort;
+    } else {
+      parsed.hostname = hostPort;
+    }
+    return parsed.toString();
+  }
+  // No override: only route through the same-origin proxy when rlab itself is
+  // served from a remote host. A locally-served rlab can reach loopback dev
+  // servers directly, so the URL is left untouched.
+  if (typeof window === "undefined" || isLocalPreviewHost(window.location.hostname)) {
+    return rawUrl;
+  }
+  const port = parsed.port || (parsed.protocol === "https:" ? "443" : "80");
+  return `${window.location.origin}${previewProxyPrefix}/${port}${parsed.pathname}${parsed.search}${parsed.hash}`;
+}
+
+/** Maps a frame URL back to a form the server-side Playwright mirror can load.
+ *  Same-origin proxy URLs become a direct loopback URL (the mirror runs on the
+ *  same machine as the dev server); everything else is already reachable. */
+function resolvePreviewMirrorUrl(frameUrl: string): string {
+  const proxyMatch = /\/preview-proxy\/(\d{1,5})(\/.*)?$/.exec(frameUrl);
+  if (proxyMatch && typeof window !== "undefined" && frameUrl.startsWith(window.location.origin)) {
+    return `http://127.0.0.1:${proxyMatch[1]}${proxyMatch[2] ?? "/"}`;
+  }
+  return frameUrl;
 }
 
 function pushFrameHistory(current: FrameHistoryState, nextUrl: string): FrameHistoryState {
@@ -1034,7 +1096,7 @@ function isReplayableBrowserActivityEvent(event: BrowserActivityEvent): boolean 
   );
 }
 
-export function BrowserPreview({ sessionId, active, onSendAnnotation, bottomInset = 0, openRequest }: BrowserPreviewProps) {
+export function BrowserPreview({ sessionId, active, onSendAnnotation, bottomInset = 0, openRequest, serverHostOverride = "" }: BrowserPreviewProps) {
   const { t } = useI18n();
   const { toast } = useToast();
   const frameRef = useRef<HTMLIFrameElement | null>(null);
@@ -1126,7 +1188,7 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, bottomInse
                 : t("browserPreviewPlaywrightStatusIdle");
 
   const adoptBrowserUrl = (nextUrl: string) => {
-    const normalizedUrl = normalizeBrowserPreviewUrl(nextUrl);
+    const normalizedUrl = resolvePreviewFrameUrl(normalizeBrowserPreviewUrl(nextUrl), serverHostOverride);
     setUrl(normalizedUrl === browserPreviewDefaultUrl ? "" : normalizedUrl);
     if (liveUrlRef.current === normalizedUrl) {
       return;
@@ -1310,7 +1372,10 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, bottomInse
     setError(null);
     try {
       const syncRequest = browserSyncRequest(frameRef.current, sessionId, targetUrl);
-      const next = await postBrowserSnapshot("/api/browser/sync", syncRequest.request, t("browserPreviewInvalidResponse"));
+      // The frame loads a proxied/rewritten URL, but the server-side mirror reaches
+      // the dev server most reliably over loopback — map it back before syncing.
+      const mirrorBody = { ...syncRequest.request, url: resolvePreviewMirrorUrl(syncRequest.request.url) };
+      const next = await postBrowserSnapshot("/api/browser/sync", mirrorBody, t("browserPreviewInvalidResponse"));
       applySnapshot(next);
       setLiveReplayBlocked(false);
       if (syncRequest.blockedReason) {
@@ -1322,6 +1387,22 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, bottomInse
       setError(t("browserPreviewOpenError", { error: message }));
     }
   };
+
+  // Auto-sync: when the live iframe drifts from the mirror (the user interacted
+  // with the page), push the change to the Playwright mirror on a short debounce
+  // instead of waiting for a manual Sync click. Held in a ref so the effect can
+  // depend on the dirty signal alone without re-subscribing every render.
+  const syncMirrorRef = useRef(syncMirror);
+  syncMirrorRef.current = syncMirror;
+  useEffect(() => {
+    if (!active || mirrorStatus !== "dirty" || !liveUrl) {
+      return;
+    }
+    const handle = window.setTimeout(() => {
+      void syncMirrorRef.current(liveUrl);
+    }, 600);
+    return () => window.clearTimeout(handle);
+  }, [active, mirrorStatus, liveUrl]);
 
   const detachFrameListeners = () => {
     frameListenerCleanupRef.current?.();
@@ -1396,7 +1477,7 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, bottomInse
 
   const openTarget = (rawUrl: string) => {
     try {
-      const normalizedUrl = normalizeBrowserPreviewUrl(rawUrl);
+      const normalizedUrl = resolvePreviewFrameUrl(normalizeBrowserPreviewUrl(rawUrl), serverHostOverride);
       userLiveNavigationStartedRef.current = true;
       liveUrlRef.current = normalizedUrl;
       setLiveUrl(normalizedUrl);
@@ -1501,11 +1582,12 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, bottomInse
         t("browserPreviewInvalidResponse"),
       );
       applySnapshot(next);
+      const tabUrl = resolvePreviewFrameUrl(tab.url, serverHostOverride);
       userLiveNavigationStartedRef.current = true;
-      liveUrlRef.current = tab.url;
-      setLiveUrl(tab.url);
-      setUrl(tab.url === browserPreviewDefaultUrl ? "" : tab.url);
-      setFrameHistory((current) => pushFrameHistory(current, tab.url));
+      liveUrlRef.current = tabUrl;
+      setLiveUrl(tabUrl);
+      setUrl(tabUrl === browserPreviewDefaultUrl ? "" : tabUrl);
+      setFrameHistory((current) => pushFrameHistory(current, tabUrl));
       setFrameKey((current) => current + 1);
       setLiveReplayBlocked(false);
       setError(null);

@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { appendFileSync, chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import type { IncomingMessage, ServerResponse } from "node:http";
+import { request as httpRequest, type IncomingMessage, type ServerResponse } from "node:http";
 import { homedir, tmpdir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import process from "node:process";
@@ -8438,7 +8438,104 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
   });
 }
 
+const PREVIEW_PROXY_PREFIX = "/preview-proxy";
+
+/** Strips a `frame-ancestors` directive so a proxied page can be iframed. */
+function stripFrameAncestors(csp: string): string {
+  return csp
+    .split(";")
+    .map((directive) => directive.trim())
+    .filter((directive) => directive.length > 0 && !/^frame-ancestors\b/i.test(directive))
+    .join("; ");
+}
+
+/** Keeps an upstream redirect inside the proxy prefix when it points back at the
+ *  proxied dev server (root-relative, or an absolute localhost URL). */
+function rewritePreviewProxyLocation(location: string, port: number): string {
+  if (location.startsWith(`${PREVIEW_PROXY_PREFIX}/${port}/`)) {
+    return location;
+  }
+  if (location.startsWith("/")) {
+    return `${PREVIEW_PROXY_PREFIX}/${port}${location}`;
+  }
+  try {
+    const parsed = new URL(location);
+    if (LOCALHOST_PROXY_HOSTS.has(parsed.hostname) && parsed.port === String(port)) {
+      return `${PREVIEW_PROXY_PREFIX}/${port}${parsed.pathname}${parsed.search}`;
+    }
+  } catch {
+    // Not an absolute URL — leave it untouched.
+  }
+  return location;
+}
+
+const LOCALHOST_PROXY_HOSTS = new Set(["localhost", "127.0.0.1", "0.0.0.0", "::1", "[::1]"]);
+
+/** Reverse-proxies `/preview-proxy/<port>/<path>` to `127.0.0.1:<port>` so the
+ *  agent's local dev servers are reachable from the user's browser over rlab's
+ *  own (same) origin — no extra firewall ports, and no mixed-content blocking
+ *  when rlab itself is served over HTTPS. HTML responses get a injected <base>
+ *  so root-relative... (relative) asset URLs resolve back through the proxy. */
+function handlePreviewProxy(req: IncomingMessage, res: ServerResponse): void {
+  const fullPath = (req as IncomingMessage & { originalUrl?: string }).originalUrl ?? req.url ?? "";
+  const match = /^\/preview-proxy\/(\d{1,5})(\/.*)?$/.exec(fullPath.split("?")[0] ?? "");
+  if (!match) {
+    sendJson(res, 400, { error: "Preview proxy path must be /preview-proxy/<port>/<path>." });
+    return;
+  }
+  const port = Number.parseInt(match[1] ?? "", 10);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    sendJson(res, 400, { error: "Preview proxy port is out of range." });
+    return;
+  }
+  const queryIndex = fullPath.indexOf("?");
+  const search = queryIndex >= 0 ? fullPath.slice(queryIndex) : "";
+  const targetPath = `${match[2] ?? "/"}${search}`;
+  const basePrefix = `${PREVIEW_PROXY_PREFIX}/${port}`;
+
+  // Point Host at the upstream so dev servers with host checks accept it, and
+  // request identity encoding so HTML can be rewritten without gunzipping first.
+  const headers: Record<string, string | string[] | undefined> = { ...req.headers, host: `127.0.0.1:${port}`, "accept-encoding": "identity" };
+
+  const proxyReq = httpRequest({ host: "127.0.0.1", port, method: req.method, path: targetPath, headers }, (proxyRes) => {
+    const outHeaders: Record<string, string | string[]> = { ...proxyRes.headers } as Record<string, string | string[]>;
+    delete outHeaders["x-frame-options"];
+    delete outHeaders["content-security-policy-report-only"];
+    if (typeof outHeaders["content-security-policy"] === "string") {
+      outHeaders["content-security-policy"] = stripFrameAncestors(outHeaders["content-security-policy"]);
+    }
+    if (typeof proxyRes.headers.location === "string") {
+      outHeaders.location = rewritePreviewProxyLocation(proxyRes.headers.location, port);
+    }
+    const contentType = String(proxyRes.headers["content-type"] ?? "");
+    if (contentType.includes("text/html")) {
+      const chunks: Buffer[] = [];
+      proxyRes.on("data", (chunk: Buffer) => chunks.push(chunk));
+      proxyRes.on("end", () => {
+        let html = Buffer.concat(chunks).toString("utf8");
+        if (!/<base\b/i.test(html)) {
+          const baseTag = `<base href="${basePrefix}/">`;
+          html = /<head[^>]*>/i.test(html) ? html.replace(/<head[^>]*>/i, (open) => `${open}${baseTag}`) : `${baseTag}${html}`;
+        }
+        const body = Buffer.from(html, "utf8");
+        delete outHeaders["content-length"];
+        outHeaders["content-length"] = String(body.byteLength);
+        res.writeHead(proxyRes.statusCode ?? 200, outHeaders);
+        res.end(body);
+      });
+      return;
+    }
+    res.writeHead(proxyRes.statusCode ?? 200, outHeaders);
+    proxyRes.pipe(res);
+  });
+  proxyReq.on("error", (error) => {
+    sendJson(res, 502, { error: `Preview proxy could not reach 127.0.0.1:${port} — ${error instanceof Error ? error.message : String(error)}` });
+  });
+  req.pipe(proxyReq);
+}
+
 function attach(server: ViteDevServer | PreviewServer): void {
+  server.middlewares.use(PREVIEW_PROXY_PREFIX, handlePreviewProxy);
   server.middlewares.use("/api/health", (_req, res) => {
     const health = storageHealthSnapshot();
     sendJson(res, health.storage.ok ? 200 : 500, health);

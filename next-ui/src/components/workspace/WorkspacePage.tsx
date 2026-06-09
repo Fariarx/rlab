@@ -19,6 +19,7 @@ import {
   DialogContent,
   DialogContentText,
   DialogTitle,
+  Divider,
   Drawer,
   Menu,
   MenuItem,
@@ -283,10 +284,10 @@ export function WorkspacePageView({
   const [searchOpen, setSearchOpen] = useState(false);
   const [profile, setProfile] = useState<AgentProfile>(ws.settings.agents.defaultProfile ?? DEFAULT_PROFILE);
   const [pickerOpen, setPickerOpen] = useState(false);
-  // A pending new chat that exists only in the composer until the user sends
-  // the first message (then it's created with the current/default agent).
-  const [composingNew, setComposingNew] = useState<{ readonly projectId?: string } | null>(null);
-  const [projectMenuAnchor, setProjectMenuAnchor] = useState<HTMLElement | null>(null);
+  // The "+" button opens this menu to pick where a new chat lives (a standalone
+  // simple chat, or one of the projects). The chat is created immediately on
+  // pick — there's no draft/prelude step.
+  const [newChatMenuAnchor, setNewChatMenuAnchor] = useState<HTMLElement | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
@@ -306,8 +307,16 @@ export function WorkspacePageView({
   const [composerTagsHeight, setComposerTagsHeight] = useState(0);
   // How far the multiline-input overlay rises above the single-row baseline.
   const [composerOverlayLift, setComposerOverlayLift] = useState(0);
-  const contentBottomInset = (composerTagsHeight > 0 ? composerTagsHeight + 22 : 0) + composerOverlayLift;
+  // Measured height of the floating composer dock (input bar + its outer gap).
+  // The thread/Git content reserves matching bottom space so nothing hides
+  // behind the now-floating composer.
+  const [composerDockHeight, setComposerDockHeight] = useState(0);
+  const composerDockRef = useRef<HTMLDivElement | null>(null);
+  const contentBottomInset = composerDockHeight + (composerTagsHeight > 0 ? composerTagsHeight + 22 : 0) + composerOverlayLift;
   const showTerminal = ws.settings.appearance.showTerminal ?? false;
+  // The terminal and browser-preview tabs have their own controls, so the
+  // floating agent composer (and its tags) is hidden there.
+  const composerVisible = view !== "terminal" && view !== "preview";
   const showView = (next: WorkspaceView) => setView(next);
   // Pending code-review comments, attached to diff lines in the Git view and sent
   // to the thread as one block (without starting an agent run).
@@ -346,7 +355,7 @@ export function WorkspacePageView({
   const pendingDraftSaves = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const pendingDraftValues = useRef(new Map<string, ComposerDraft>());
 
-  const selected = composingNew ? null : ws.find(ws.selectedId);
+  const selected = ws.find(ws.selectedId);
   const messages = ws.threads[ws.selectedId] ?? [];
   // Sent user messages (oldest first) for ArrowUp/ArrowDown recall in the
   // composer; attachment blocks / file-link markdown are stripped to the visible
@@ -389,9 +398,8 @@ export function WorkspacePageView({
     }),
     [],
   );
-  const draftProject = composingNew?.projectId ? ws.projects.find((p) => p.id === composingNew.projectId) ?? null : null;
-  const activeCwd = composingNew ? draftProject?.path : selectedCwd;
-  const headerTitle = composingNew ? t("newChat") : selected?.title ?? t("noConversation");
+  const activeCwd = selectedCwd;
+  const headerTitle = selected?.title ?? t("noConversation");
   const accessMode = ws.settings.agents.accessMode;
   const selectedBasePath = ws.basePathOf(ws.selectedId);
   // Worktree controls for the Git tab. Only in unrestricted mode, only for a
@@ -483,6 +491,25 @@ export function WorkspacePageView({
       setProfile(ws.settings.agents.defaultProfile);
     }
   }, [selected, ws.settings.agents.defaultProfile]);
+
+  // Track the floating composer's height so the thread reserves matching bottom
+  // space (it scrolls behind the composer instead of being pushed up by it). The
+  // composer is unmounted in the terminal/preview views, where the inset is 0.
+  useLayoutEffect(() => {
+    const node = composerDockRef.current;
+    if (!composerVisible || !node) {
+      setComposerDockHeight(0);
+      return;
+    }
+    const update = () => setComposerDockHeight(node.offsetHeight);
+    update();
+    if (typeof ResizeObserver === "undefined") {
+      return;
+    }
+    const observer = new ResizeObserver(update);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [composerVisible]);
 
   useEffect(() => {
     if (!showTerminal) {
@@ -621,7 +648,7 @@ export function WorkspacePageView({
         // A plain "done" on the conversation you're already looking at is just
         // noise — you can see the result. Only surface done for background runs;
         // keep error / needs-input notifications everywhere (they're actionable).
-        const isForeground = !composingNew && conversation.id === ws.selectedId;
+        const isForeground = conversation.id === ws.selectedId;
         const skip = conversation.status === "done" && isForeground;
         if (!skip) {
           const runToast = runToastForStatus(conversation.status, conversation.title, t);
@@ -633,10 +660,9 @@ export function WorkspacePageView({
       }
     }
     previousStatuses.current = nextStatuses;
-  }, [ws.chats, ws.projects, ws.selectedId, composingNew, ws.settings.general.desktopNotifications, t, toast]);
+  }, [ws.chats, ws.projects, ws.selectedId, ws.settings.general.desktopNotifications, t, toast]);
 
   const openConversation = (id: string, updateRoute = true) => {
-    setComposingNew(null);
     ws.select(id);
     const conv = ws.find(id);
     if (conv) {
@@ -649,15 +675,20 @@ export function WorkspacePageView({
     setRunKey((k) => k + 1);
   };
 
-  // Start a new chat using the default agent without a confirmation dialog. The
-  // conversation isn't created until the user sends the first message.
-  const startNewChat = () => {
-    setProfile(ws.settings.agents.defaultProfile ?? DEFAULT_PROFILE);
-    // Inherit the project only when the user is explicitly on a project route;
-    // otherwise start standalone (don't silently fall back to the selected
-    // conversation's project). The draft's picker lets the user change it.
-    setComposingNew({ projectId: routeProjectId });
+  // Create a new conversation immediately (no draft/prelude step) and focus the
+  // composer so the user can start typing right away. `projectId` undefined ⇒ a
+  // standalone simple chat; otherwise the chat is created inside that project.
+  const createConversation = (projectId?: string) => {
+    const newProfile = ws.settings.agents.defaultProfile ?? DEFAULT_PROFILE;
+    setProfile(newProfile);
+    const id = projectId ? ws.newProjectChat(projectId, newProfile) : ws.newChat(newProfile);
+    setNewChatMenuAnchor(null);
     setDrawerOpen(false);
+    setView("chat");
+    setRunKey((k) => k + 1);
+    onNavigate?.(routeForConversation(ws, id));
+    // Defer focus until the freshly-created conversation's composer has mounted.
+    requestAnimationFrame(() => composerRef.current?.focus());
   };
 
   const openPicker = () => {
@@ -677,7 +708,7 @@ export function WorkspacePageView({
   // conversation); new chats default to the configured agent.
   const handlePicked = (picked: AgentProfile) => {
     setProfile(picked);
-    if (!composingNew && selected) {
+    if (selected) {
       ws.setConversationProfile(ws.selectedId, picked);
     }
   };
@@ -687,7 +718,7 @@ export function WorkspacePageView({
   const handleModeChange = (modeId: string) => {
     const next = normalizeAgentProfile({ ...profile, mode: modeId });
     setProfile(next);
-    if (!composingNew && selected) {
+    if (selected) {
       ws.setConversationProfile(ws.selectedId, next);
     }
   };
@@ -794,7 +825,6 @@ export function WorkspacePageView({
   const handleCreateProject = (input: Parameters<typeof ws.createProject>[0]) => {
     try {
       const created = ws.createProject(input);
-      setComposingNew(null);
       onNavigate?.({ kind: "project", projectId: created.projectId, conversationId: created.conversationId });
       setRunKey((k) => k + 1);
       toast({ message: t("newProjectChatWith", { agent: input.profile.agent, project: input.name }), severity: "info", duration: 2500 });
@@ -891,7 +921,7 @@ export function WorkspacePageView({
       label: t("commandNewConversation"),
       keywords: [t("newConversation"), t("newChat")],
       shortcut: ["Ctrl", "N"],
-      action: startNewChat,
+      action: () => createConversation(),
     },
     {
       id: "search-conversations",
@@ -990,10 +1020,30 @@ export function WorkspacePageView({
             </IconButton>
           </Tooltip>
           <Tooltip title={t("newConversation")}>
-            <IconButton aria-label={t("newConversation")} onClick={startNewChat}>
+            <IconButton aria-label={t("newConversation")} onClick={(event) => setNewChatMenuAnchor(event.currentTarget)}>
               <AddIcon sx={{ fontSize: 18 }} />
             </IconButton>
           </Tooltip>
+          <Menu
+            anchorEl={newChatMenuAnchor}
+            open={Boolean(newChatMenuAnchor)}
+            onClose={() => setNewChatMenuAnchor(null)}
+            anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+            transformOrigin={{ vertical: "top", horizontal: "right" }}
+            slotProps={{ list: { dense: true } }}
+          >
+            <MenuItem onClick={() => createConversation()} sx={{ gap: 1, fontSize: "0.8rem" }}>
+              <ChatBubbleOutlineIcon sx={{ fontSize: 16, color: "text.secondary" }} />
+              <Box component="span">{t("simpleChatOption")}</Box>
+            </MenuItem>
+            {ws.projects.length > 0 && <Divider sx={{ my: 0.5 }} />}
+            {ws.projects.map((project) => (
+              <MenuItem key={project.id} onClick={() => createConversation(project.id)} sx={{ gap: 1, fontSize: "0.8rem" }}>
+                <FolderOutlinedIcon sx={{ fontSize: 16, color: "text.secondary" }} />
+                <Box component="span" sx={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{project.name}</Box>
+              </MenuItem>
+            ))}
+          </Menu>
         </Stack>
       </Stack>
 
@@ -1115,7 +1165,7 @@ export function WorkspacePageView({
               </Box>
             </Stack>
             <Stack direction="row" spacing={0.75} sx={{ alignItems: "center", flex: "0 0 auto", "& .MuiIconButton-root": { width: 30, height: 30 } }}>
-              {(selected || composingNew) && <AgentBadge profile={profile} onClick={openPicker} compact />}
+              {selected && <AgentBadge profile={profile} onClick={openPicker} compact />}
               <ToggleButtonGroup
                 size="small"
                 exclusive
@@ -1221,21 +1271,13 @@ export function WorkspacePageView({
               {/* Chat and Git are both kept mounted; only the active one is shown,
                   so the Git view keeps its scroll/expanded state across chat switches. */}
               <Box sx={{ position: "absolute", inset: 0, display: view === "chat" ? "block" : "none" }}>
-                {composingNew ? (
-                  <Stack sx={{ height: "100%", justifyContent: "center", alignItems: "center", px: THREAD_PADDING_X }}>
-                    <EmptyState
-                      icon={<ChatBubbleOutlineIcon />}
-                      title={t("startConversation")}
-                      description={t(accessMode === "unrestricted" ? "messageAgentAccess" : "messageAgentReadOnlyAccess", { title: draftProject?.name ?? t("newChat") })}
-                    />
-                  </Stack>
-                ) : !selected ? (
+                {!selected ? (
                   <Stack sx={{ height: "100%", justifyContent: "center", alignItems: "center", px: THREAD_PADDING_X }}>
                     <EmptyState
                       icon={<ChatBubbleOutlineIcon />}
                       title={t("noConversationSelected")}
                       description={t("pickConversation")}
-                      action={<Button variant="contained" onClick={startNewChat}>{t("newChat")}</Button>}
+                      action={<Button variant="contained" onClick={() => createConversation()}>{t("newChat")}</Button>}
                     />
                   </Stack>
                 ) : messages.length === 0 ? (
@@ -1283,7 +1325,7 @@ export function WorkspacePageView({
                 </Box>
               )}
               <Box sx={{ position: "absolute", inset: 0, display: view === "preview" ? "block" : "none" }}>
-                {selected ? <BrowserPreview sessionId={selected.id} active={view === "preview"} onSendAnnotation={sendBrowserAnnotation} openRequest={browserOpenRequest} /> : null}
+                {selected ? <BrowserPreview sessionId={selected.id} active={view === "preview"} onSendAnnotation={sendBrowserAnnotation} openRequest={browserOpenRequest} serverHostOverride={ws.settings.general.previewServerHost} /> : null}
               </Box>
               {/* Keyed by folder so each project's terminal keeps its own scrollback. */}
               {showTerminal && (
@@ -1295,72 +1337,27 @@ export function WorkspacePageView({
           </Box>
         </Box>
 
-        {/* The terminal and browser-preview tabs have their own controls, so the
-            agent composer (and its tags) is hidden there. */}
-        {view !== "terminal" && view !== "preview" && (
-        <Box sx={{ flex: "0 0 auto", borderTop: (t) => `1px solid ${t.custom.borders.subtle}`, backgroundColor: (t) => t.custom.surfaces.s1 }}>
-          <Box sx={{ width: "100%", maxWidth: THREAD_MAX_WIDTH, mx: "auto", px: THREAD_PADDING_X, py: 1.5 }}>
+        {/* The composer floats over the thread (absolute) with a soft fade behind
+            it and a gap below, rather than sitting in a bordered bar that pushes
+            the thread up. Hidden in the terminal/preview views (composerVisible). */}
+        {composerVisible && (
+        <Box
+          sx={{
+            position: "absolute",
+            left: 0,
+            right: 0,
+            bottom: 0,
+            zIndex: 8,
+            pointerEvents: "none",
+            background: (t) => `linear-gradient(to top, ${t.palette.background.default} 46%, ${t.palette.background.default}00)`,
+          }}
+        >
+          <Box
+            ref={composerDockRef}
+            sx={{ width: "100%", maxWidth: THREAD_MAX_WIDTH, mx: "auto", px: THREAD_PADDING_X, pt: 2.5, pb: 2, pointerEvents: "auto" }}
+          >
             {workspaceHydrating ? (
-              <Box aria-busy="true" sx={{ minHeight: 52 }} />
-            ) : composingNew ? (
-              <Stack spacing={1}>
-                <Box>
-                  <Button
-                    variant="text"
-                    size="small"
-                    startIcon={<FolderOutlinedIcon sx={{ fontSize: 15 }} />}
-                    aria-label={t("chatProjectLabel")}
-                    onClick={(event) => setProjectMenuAnchor(event.currentTarget)}
-                    sx={{ color: "text.secondary", textTransform: "none", fontSize: "0.74rem" }}
-                  >
-                    {composingNew.projectId ? (ws.projects.find((p) => p.id === composingNew.projectId)?.name ?? t("noProjectOption")) : t("noProjectOption")}
-                  </Button>
-                  <Menu anchorEl={projectMenuAnchor} open={Boolean(projectMenuAnchor)} onClose={() => setProjectMenuAnchor(null)}>
-                    <MenuItem
-                      selected={!composingNew.projectId}
-                      onClick={() => {
-                        setComposingNew({ projectId: undefined });
-                        setProjectMenuAnchor(null);
-                      }}
-                    >
-                      {t("noProjectOption")}
-                    </MenuItem>
-                    {ws.projects.map((project) => (
-                      <MenuItem
-                        key={project.id}
-                        selected={composingNew.projectId === project.id}
-                        onClick={() => {
-                          setComposingNew({ projectId: project.id });
-                          setProjectMenuAnchor(null);
-                        }}
-                      >
-                        {project.name}
-                      </MenuItem>
-                    ))}
-                  </Menu>
-                </Box>
-              <Composer
-                key="new-draft"
-                ref={composerRef}
-                placeholder={t("messagePlaceholder", { title: buildComposerLabel(profile) })}
-                onSend={(text) => {
-                  const id = composingNew.projectId ? ws.newProjectChat(composingNew.projectId, profile) : ws.newChat(profile);
-                  setComposingNew(null);
-                  notifiableRuns.current.add(id);
-                  ws.sendMessage(id, text);
-                  setRunKey((k) => k + 1);
-                  onNavigate?.(routeForConversation(ws, id));
-                }}
-                mentionableFiles={mentionableFiles}
-                modes={supportedModes}
-                activeMode={profile.mode}
-                onModeChange={handleModeChange}
-                onAttachmentError={(message) => toast({ message, severity: "error", duration: 3000 })}
-                onTagsHeightChange={setComposerTagsHeight}
-                onOverlayLiftChange={setComposerOverlayLift}
-                agentId={profile.agent}
-              />
-              </Stack>
+              <Box aria-busy="true" sx={{ minHeight: 44 }} />
             ) : (
               <Composer
                 key={ws.selectedId}

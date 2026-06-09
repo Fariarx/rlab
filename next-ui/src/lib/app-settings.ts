@@ -26,6 +26,11 @@ export interface GeneralSettings {
   readonly desktopNotifications: boolean;
   readonly locale: Locale;
   readonly telemetry: boolean;
+  /** Optional override for where the Preview reaches the agent's dev servers.
+   *  When set, localhost/127.0.0.1 URLs the agent opens are rewritten to this
+   *  host (e.g. "203.0.113.10" or "dev.example.com:8080"). Empty ⇒ route such
+   *  URLs through rlab's same-origin /preview-proxy instead. */
+  readonly previewServerHost: string;
 }
 
 export interface AgentSettings {
@@ -61,6 +66,7 @@ export const defaultAppSettings: AppSettings = {
     desktopNotifications: true,
     locale: "ru",
     telemetry: false,
+    previewServerHost: "",
   },
   agents: {
     // Default to unrestricted: each agent receives its own "do anything" CLI flag
@@ -164,6 +170,7 @@ export function isAppSettings(value: unknown): value is AppSettings {
     typeof general.desktopNotifications === "boolean" &&
     typeof general.confirmDestructiveActions === "boolean" &&
     typeof general.telemetry === "boolean" &&
+    (general.previewServerHost === undefined || typeof general.previewServerHost === "string") &&
     (agents.accessMode === undefined || isAgentAccessMode(agents.accessMode)) &&
     isAgentProfile(agents.defaultProfile)
   );

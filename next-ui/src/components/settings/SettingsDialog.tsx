@@ -636,6 +636,20 @@ function GeneralSection({ settings, onSettingsChange }: Pick<SettingsDialogProps
       <SettingRow title={t("desktopNotifications")} description={t("desktopNotificationsDescription")} control={<Switch checked={settings.general.desktopNotifications} onChange={(e) => onSettingsChange({ general: { desktopNotifications: e.target.checked } })} />} />
       <SettingRow title={t("confirmDestructive")} description={t("confirmDestructiveDescription")} control={<Switch checked={settings.general.confirmDestructiveActions} onChange={(e) => onSettingsChange({ general: { confirmDestructiveActions: e.target.checked } })} />} />
       <SettingRow title={t("telemetry")} description={t("telemetryDescription")} control={<Switch checked={settings.general.telemetry} onChange={(e) => onSettingsChange({ general: { telemetry: e.target.checked } })} />} />
+      <SettingRow
+        title={t("previewServerHost")}
+        description={t("previewServerHostDescription")}
+        control={
+          <TextField
+            size="small"
+            value={settings.general.previewServerHost}
+            placeholder={t("previewServerHostPlaceholder")}
+            onChange={(e) => onSettingsChange({ general: { previewServerHost: e.target.value } })}
+            slotProps={{ htmlInput: { "aria-label": t("previewServerHost"), spellCheck: false, autoCapitalize: "none", autoCorrect: "off" } }}
+            sx={{ minWidth: 240, "& .MuiInputBase-root": { fontFamily: (th) => th.custom.fonts.mono, fontSize: "0.82rem" } }}
+          />
+        }
+      />
     </Stack>
   );
 }

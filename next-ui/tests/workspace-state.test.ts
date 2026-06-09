@@ -32,6 +32,7 @@ describe("workspace state", () => {
         desktopNotifications: true,
         locale: "ru",
         telemetry: false,
+        previewServerHost: "",
       },
       agents: {
         accessMode: "unrestricted",

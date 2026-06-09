@@ -208,10 +208,44 @@ function FloatingTag({
   );
 }
 
+/**
+ * MeterRow — a labeled stat with an optional thin progress bar. Used in the
+ * options menu for the conversation's context-window fill and the agent's
+ * account-limit windows (5-hour / weekly). The bar colour climbs from calm
+ * (blue) through warning (amber) to critical (red) so a glance reads how close
+ * a limit is; rows without a percent (cost, plan, status) render label + value
+ * only, keeping the whole section visually consistent.
+ */
+function MeterRow({ label, value, percent }: { readonly label: string; readonly value: string; readonly percent?: number }) {
+  const clamped = typeof percent === "number" ? Math.max(0, Math.min(100, percent)) : null;
+  return (
+    <Box sx={{ display: "flex", flexDirection: "column", gap: 0.5 }}>
+      <Stack direction="row" spacing={1} sx={{ justifyContent: "space-between", alignItems: "baseline" }}>
+        <Typography sx={{ fontSize: "0.72rem", color: "text.secondary" }}>{label}</Typography>
+        <Typography sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.72rem", color: "text.primary" }}>{value}</Typography>
+      </Stack>
+      {clamped !== null && (
+        <Box sx={{ height: 5, borderRadius: (t) => `${t.custom.radii.pill}px`, backgroundColor: (t) => t.custom.surfaces.s4, overflow: "hidden" }}>
+          <Box
+            sx={{
+              height: "100%",
+              width: `${clamped}%`,
+              borderRadius: (t) => `${t.custom.radii.pill}px`,
+              transition: "width 220ms ease",
+              backgroundColor: (t) => (clamped >= 90 ? t.palette.status.error.main : clamped >= 70 ? t.palette.status.warn.main : t.palette.status.running.main),
+            }}
+          />
+        </Box>
+      )}
+    </Box>
+  );
+}
+
 /** Imperative handle so a parent drop-zone (the whole chat pane) can hand files
  *  to the composer's attachment pipeline. */
 export interface ComposerHandle {
   readonly addFiles: (files: readonly File[]) => Promise<void>;
+  readonly focus: () => void;
 }
 
 interface ComposerProps {
@@ -649,7 +683,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 
   // The whole chat pane is the drop zone (see WorkspacePage); it hands dropped
   // files here through this imperative handle.
-  useImperativeHandle(ref, () => ({ addFiles }), [addFiles]);
+  useImperativeHandle(ref, () => ({ addFiles, focus: () => textareaRef.current?.focus() }), [addFiles]);
 
   const insertMention = (file: string) => {
     setComposerValue(composerValue.replace(/@([^\s@/]*)$/, `@${file} `));
@@ -672,6 +706,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     setActiveSuggestion(0);
   }, [suggestionKey]);
 
+  const hasAttachments = composerAttachments.length > 0;
   const canSend = (composerValue.trim().length > 0 || composerAttachments.length > 0 || reviewCount > 0) && !sending;
   const sendLabel = reviewCount > 0 ? t("reviewSendComments") : t("send");
 
@@ -688,13 +723,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 
   // The selected conversation's context-window fill + cost (per-conversation,
   // distinct from the account rate-limits below).
-  const contextLines: ReadonlyArray<{ readonly label: string; readonly value: string }> = (() => {
-    const lines: Array<{ label: string; value: string }> = [];
+  const contextLines: ReadonlyArray<{ readonly label: string; readonly value: string; readonly percent?: number }> = (() => {
+    const lines: Array<{ label: string; value: string; percent?: number }> = [];
     if (typeof contextTokens === "number" && contextTokens > 0) {
       const used = formatTokens(contextTokens);
       if (typeof contextWindow === "number" && contextWindow > 0) {
         const pct = Math.min(100, Math.round((contextTokens / contextWindow) * 100));
-        lines.push({ label: t("contextUsage"), value: `${used} / ${formatTokens(contextWindow)} · ${pct}%` });
+        lines.push({ label: t("contextUsage"), value: `${used} / ${formatTokens(contextWindow)} · ${pct}%`, percent: pct });
       } else {
         lines.push({ label: t("contextUsage"), value: used });
       }
@@ -714,7 +749,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // Compact, localized lines describing the agent's account rate-limits — one
   // row per window (5-hour, weekly, …) showing usage % and time-to-reset side
   // by side, then plan + the most-severe status.
-  const limitLines: ReadonlyArray<{ readonly id: string; readonly label: string; readonly value: string }> = (() => {
+  const limitLines: ReadonlyArray<{ readonly id: string; readonly label: string; readonly value: string; readonly percent?: number }> = (() => {
     if (!agentLimit) {
       return [];
     }
@@ -735,7 +770,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             ? t("limitStatusRejected")
             : status;
 
-    const lines: Array<{ id: string; label: string; value: string }> = [];
+    const lines: Array<{ id: string; label: string; value: string; percent?: number }> = [];
     for (const window of agentLimit.windows) {
       const parts: string[] = [];
       if (typeof window.usedPercent === "number") {
@@ -745,7 +780,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         parts.push(formatReset(window.resetsAt));
       }
       if (parts.length > 0) {
-        lines.push({ id: window.kind, label: windowLabel(window.kind), value: parts.join(" · ") });
+        lines.push({ id: window.kind, label: windowLabel(window.kind), value: parts.join(" · "), percent: typeof window.usedPercent === "number" ? window.usedPercent : undefined });
       }
     }
     if (agentLimit.plan) {
@@ -787,7 +822,20 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           the text input, and lifted above the multiline overlay by overlayLift. */}
       <Box
         ref={tagsRef}
-        sx={{ position: "absolute", left: 0, right: 0, bottom: `calc(100% + ${16 + overlayLift}px)`, pl: "46px", display: "flex", flexWrap: "wrap", alignItems: "flex-end", gap: 0.75, pointerEvents: "none", zIndex: 6 }}
+        sx={{
+          position: "absolute",
+          left: 0,
+          right: 0,
+          bottom: `calc(100% + ${8 + overlayLift}px)`,
+          px: 0.5,
+          pt: hasAttachments ? 1 : 0,
+          display: "flex",
+          flexWrap: "wrap",
+          alignItems: "flex-end",
+          gap: 0.75,
+          pointerEvents: "none",
+          zIndex: 6,
+        }}
       >
         {contextOverLimit && (
           <Tooltip title={t("contextOverLimitHint")}>
@@ -859,12 +907,15 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         sx={{
           display: "flex",
           alignItems: "center",
-          gap: 1,
-          p: 1,
+          gap: 0.5,
+          p: 0.5,
           borderRadius: (t) => `${t.custom.radii.lg}px`,
           backgroundColor: (t) => t.custom.surfaces.s2,
           border: (t) => `1px solid ${t.custom.borders.subtle}`,
           transition: "border-color 140ms ease",
+          // Compact, miniature bar: small inner buttons so the floating composer
+          // stays low-profile over the thread.
+          "& .MuiIconButton-root": { width: 30, height: 30 },
           // Soft focus: just brighten the border. No outer glow ring (it clipped
           // against the surrounding padding and read as harsh).
           "&:focus-within": {
@@ -889,7 +940,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           sx={{ flex: "0 0 auto" }}
           onClick={(event: MouseEvent<HTMLElement>) => openOptionsMenu(event.currentTarget)}
         >
-          <TuneRoundedIcon sx={{ fontSize: 18 }} />
+          <TuneRoundedIcon sx={{ fontSize: 16 }} />
         </IconButton>
         {hasContextGauge && (
           <ContextGauge
@@ -931,12 +982,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 <Typography variant="microLabel" sx={{ color: "text.secondary", display: "block", mb: 0.5 }}>
                   {t("contextLabel")}
                 </Typography>
-                <Stack spacing={0.25}>
+                <Stack spacing={1}>
                   {contextLines.map((line) => (
-                    <Stack key={line.label} direction="row" spacing={1} sx={{ justifyContent: "space-between", alignItems: "baseline" }}>
-                      <Typography sx={{ fontSize: "0.72rem", color: "text.secondary" }}>{line.label}</Typography>
-                      <Typography sx={{ fontFamily: (th) => th.custom.fonts.mono, fontSize: "0.72rem", color: "text.primary" }}>{line.value}</Typography>
-                    </Stack>
+                    <MeterRow key={line.label} label={line.label} value={line.value} percent={line.percent} />
                   ))}
                 </Stack>
               </Box>
@@ -961,16 +1009,20 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               <Stack direction="row" spacing={1} sx={{ justifyContent: "space-between", alignItems: "center" }}>
                 <Typography sx={{ fontSize: "0.72rem", color: "text.tertiary", pl: 3.25 }}>{t("compactionWindow")}</Typography>
                 <TextField
-                  type="number"
+                  /* A plain text field with numeric keypad — NOT type="number",
+                     whose focus-time spinner arrows looked broken in this dense
+                     menu. Non-digits are stripped so the value stays a token count. */
+                  type="text"
+                  inputMode="numeric"
                   size="small"
                   value={typeof compactWindow === "number" ? String(compactWindow) : ""}
                   placeholder={typeof contextWindow === "number" ? String(contextWindow) : t("compactionWindowAuto")}
                   onChange={(event) => {
-                    const raw = event.target.value.trim();
-                    const parsed = Number.parseInt(raw, 10);
-                    onCompactWindowChange?.(raw === "" || Number.isNaN(parsed) || parsed <= 0 ? undefined : parsed);
+                    const digits = event.target.value.replace(/\D/g, "");
+                    const parsed = Number.parseInt(digits, 10);
+                    onCompactWindowChange?.(digits === "" || Number.isNaN(parsed) || parsed <= 0 ? undefined : parsed);
                   }}
-                  slotProps={{ htmlInput: { min: 0, "aria-label": t("compactionWindow"), style: { padding: "4px 8px", fontSize: "0.72rem", textAlign: "right" } } }}
+                  slotProps={{ htmlInput: { inputMode: "numeric", pattern: "[0-9]*", "aria-label": t("compactionWindow"), style: { padding: "4px 8px", fontSize: "0.72rem", textAlign: "right" } } }}
                   sx={{ width: 132, "& .MuiInputBase-root": { fontFamily: (th) => th.custom.fonts.mono } }}
                 />
               </Stack>
@@ -993,12 +1045,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               {t("limitsLabel")}
             </Typography>
             {limitLines.length > 0 ? (
-              <Stack spacing={0.25}>
+              <Stack spacing={1}>
                 {limitLines.map((line) => (
-                  <Stack key={line.id} direction="row" spacing={1} sx={{ justifyContent: "space-between", alignItems: "baseline" }}>
-                    <Typography sx={{ fontSize: "0.72rem", color: "text.secondary" }}>{line.label}</Typography>
-                    <Typography sx={{ fontFamily: (th) => th.custom.fonts.mono, fontSize: "0.72rem", color: "text.primary" }}>{line.value}</Typography>
-                  </Stack>
+                  <MeterRow key={line.id} label={line.label} value={line.value} percent={line.percent} />
                 ))}
               </Stack>
             ) : (
@@ -1014,7 +1063,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         <Box
           data-testid="composer-input-area"
           data-expanded={expanded ? "true" : "false"}
-          sx={{ position: "relative", flex: 1, minWidth: 0, minHeight: 30, display: "flex", alignItems: "center" }}
+          sx={{ position: "relative", flex: 1, minWidth: 0, minHeight: 26, display: "flex", alignItems: "center" }}
         >
           {/* The suggestion dropdown is anchored to the input column, so it is
               never wider than the field it completes. */}
@@ -1062,9 +1111,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             maxRows={expanded ? 8 : 1}
             sx={{
               width: "100%",
-              fontSize: "0.9rem",
-              lineHeight: 1.5,
-              py: 0.5,
+              fontSize: "0.84rem",
+              lineHeight: 1.45,
+              py: 0.25,
               ...(expanded && {
                 position: "absolute",
                 left: 0,
@@ -1095,11 +1144,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             variant="contained"
             onClick={() => void send()}
             disabled={!canSend}
-            sx={{ minWidth: 0, px: 1.25, py: 1, borderRadius: (t) => `${t.custom.radii.md}px` }}
+            sx={{ minWidth: 0, px: 1, py: 0.5, borderRadius: (t) => `${t.custom.radii.md}px` }}
             aria-label={sendLabel}
             data-testid="composer-send-button"
           >
-            <SendIcon sx={{ fontSize: 18 }} />
+            <SendIcon sx={{ fontSize: 16 }} />
           </Button>
         </Stack>
       </Box>
