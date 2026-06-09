@@ -897,7 +897,10 @@ export function WorkspacePageView({
       id: "search-conversations",
       label: t("searchConversations"),
       keywords: [t("chats"), t("projects"), "search"],
-      action: () => setSearchOpen(true),
+      action: () => {
+        void ws.loadAllThreads();
+        setSearchOpen(true);
+      },
     },
     {
       id: "open-settings",
@@ -966,7 +969,13 @@ export function WorkspacePageView({
         </Stack>
         <Stack direction="row" spacing={0.25}>
           <Tooltip title={t("searchConversations")}>
-            <IconButton aria-label={t("searchConversations")} onClick={() => setSearchOpen(true)}>
+            <IconButton
+              aria-label={t("searchConversations")}
+              onClick={() => {
+                void ws.loadAllThreads();
+                setSearchOpen(true);
+              }}
+            >
               <SearchIcon sx={{ fontSize: 18 }} />
             </IconButton>
           </Tooltip>

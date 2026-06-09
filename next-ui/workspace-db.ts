@@ -98,12 +98,16 @@ export function workspaceDbHasState(): boolean {
   return row.present === 1;
 }
 
-/** Reassemble the full WorkspaceState tree from the normalized tables. */
-export function readWorkspaceStateFromDb(): WorkspaceState {
+/** Reassemble the WorkspaceState tree from the normalized tables. With
+ *  `includeThreadIds` only those conversations' message threads are loaded (the
+ *  lazy "shell" the client gets first); omit it to load every thread. */
+export function readWorkspaceStateFromDb(includeThreadIds?: ReadonlySet<string>): WorkspaceState {
   const handle = database();
   const projectRows = handle.prepare("SELECT id, data FROM projects ORDER BY position").all() as Array<{ id: string; data: string }>;
   const convRows = handle.prepare("SELECT project_id AS projectId, data FROM conversations ORDER BY position").all() as Array<{ projectId: string | null; data: string }>;
-  const msgRows = handle.prepare("SELECT conversation_id AS conversationId, data FROM messages ORDER BY conversation_id, position").all() as Array<{ conversationId: string; data: string }>;
+  const msgRows = (includeThreadIds
+    ? [...includeThreadIds].flatMap((id) => handle.prepare("SELECT conversation_id AS conversationId, data FROM messages WHERE conversation_id = ? ORDER BY position").all(id))
+    : handle.prepare("SELECT conversation_id AS conversationId, data FROM messages ORDER BY conversation_id, position").all()) as Array<{ conversationId: string; data: string }>;
   const draftRows = handle.prepare("SELECT conversation_id AS conversationId, data FROM composer_drafts").all() as Array<{ conversationId: string; data: string }>;
   const kvRows = handle.prepare("SELECT key, value FROM kv").all() as Array<{ key: string; value: string }>;
 
@@ -189,6 +193,56 @@ export function readConversation(conversationId: string): ConversationSummary | 
 /** Update a single conversation's summary in place (keeps its position/project). */
 export function updateConversationData(conversation: ConversationSummary): void {
   database().prepare("UPDATE conversations SET data = ? WHERE id = ?").run(JSON.stringify(conversation), conversation.id);
+}
+
+/** The persisted selected conversation id (so the client shell can ship its
+ *  thread eagerly). Cheap single-row read. */
+export function readSelectedConversationId(): string {
+  const row = database().prepare("SELECT value FROM kv WHERE key = 'selectedId'").get() as { value: string } | undefined;
+  return row ? (JSON.parse(row.value) as string) : "";
+}
+
+/** Load a single conversation's full message thread (lazy-load on open). */
+export function readThreadFromDb(conversationId: string): ChatMessage[] {
+  return (database().prepare("SELECT data FROM messages WHERE conversation_id = ? ORDER BY position").all(conversationId) as Array<{ data: string }>).map(
+    (row) => JSON.parse(row.data) as ChatMessage,
+  );
+}
+
+/** Write the shell (projects/conversations/composer_drafts/kv) in full, replace
+ *  messages only for the threads PRESENT in `state.threads`, and PRESERVE threads
+ *  the caller didn't include (the client only holds lazily-loaded ones). Messages
+ *  of conversations that no longer exist in the shell are dropped. Used by the
+ *  client `PUT /api/workspace` so a partial client never clobbers unopened chats. */
+export function writeWorkspaceShellPreservingThreads(state: WorkspaceState): void {
+  const handle = database();
+  transaction(() => {
+    handle.exec("DELETE FROM projects; DELETE FROM conversations; DELETE FROM composer_drafts; DELETE FROM kv;");
+    const insProject = handle.prepare("INSERT INTO projects(id, position, data) VALUES(?, ?, ?)");
+    const insConv = handle.prepare("INSERT INTO conversations(id, project_id, position, data) VALUES(?, ?, ?, ?)");
+    const insDraft = handle.prepare("INSERT INTO composer_drafts(conversation_id, data) VALUES(?, ?)");
+    const insKv = handle.prepare("INSERT INTO kv(key, value) VALUES(?, ?)");
+    state.chats.forEach((conversation, index) => insConv.run(conversation.id, null, index, JSON.stringify(conversation)));
+    state.projects.forEach((project, projectIndex) => {
+      const { conversations, ...meta } = project;
+      insProject.run(project.id, projectIndex, JSON.stringify(meta));
+      conversations.forEach((conversation, index) => insConv.run(conversation.id, project.id, index, JSON.stringify(conversation)));
+    });
+    for (const [conversationId, draft] of Object.entries(state.composerDrafts)) {
+      insDraft.run(conversationId, JSON.stringify(draft));
+    }
+    insKv.run("selectedId", JSON.stringify(state.selectedId));
+    insKv.run("settings", JSON.stringify(state.settings));
+    const delMsgs = handle.prepare("DELETE FROM messages WHERE conversation_id = ?");
+    const insMsg = handle.prepare("INSERT INTO messages(id, conversation_id, position, data) VALUES(?, ?, ?, ?)");
+    for (const [conversationId, messages] of Object.entries(state.threads)) {
+      delMsgs.run(conversationId);
+      messages.forEach((message, index) => insMsg.run(message.id, conversationId, index, JSON.stringify(message)));
+    }
+    // Drop messages whose conversation was deleted (not in the new shell), while
+    // leaving lazily-unloaded threads (their conversation IS still in the shell).
+    handle.exec("DELETE FROM messages WHERE conversation_id NOT IN (SELECT id FROM conversations)");
+  });
 }
 
 export function closeWorkspaceDb(): void {

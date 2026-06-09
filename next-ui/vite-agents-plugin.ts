@@ -20,7 +20,7 @@ import {
   type Locale,
 } from "./src/lib/app-settings";
 import { buildEmptyWorkspaceState, buildInitialWorkspaceState, cloneWorkspaceState, type WorkspaceState } from "./src/lib/workspace-state";
-import { initWorkspaceDb, readConversation, readMessageBlocks, readWorkspaceStateFromDb, updateConversationData, upsertMessage, workspaceDbHasState, writeWorkspaceStateToDb } from "./workspace-db";
+import { initWorkspaceDb, readConversation, readMessageBlocks, readSelectedConversationId, readThreadFromDb, readWorkspaceStateFromDb, updateConversationData, upsertMessage, workspaceDbHasState, writeWorkspaceShellPreservingThreads, writeWorkspaceStateToDb } from "./workspace-db";
 import {
   agentProfileEquals,
   claudeAgentNameFromMode,
@@ -2035,6 +2035,29 @@ function readWorkspaceState(): WorkspaceState {
   return reconcileStaleBackgroundRuns(normalizeSeedProjectPaths(migrateSeedWorkspaceState(cloneWorkspaceState(raw))), new Set(backgroundRunHandles.keys()));
 }
 
+/** The lightweight state the client `GET /api/workspace` returns: the full shell
+ *  (conversation summaries, projects, drafts, settings) but only the SELECTED
+ *  conversation's message thread. Other threads load lazily via GET /api/thread,
+ *  so a giant history is no longer a giant initial payload. */
+function readWorkspaceShellForClient(): WorkspaceState {
+  ensureWorkspaceDb();
+  if (!workspaceDbHasState()) {
+    const initial = normalizeSeedProjectPaths(isDemoWorkspaceEnabled() ? buildInitialWorkspaceState() : buildEmptyWorkspaceState());
+    writeWorkspaceState(initial);
+    return initial;
+  }
+  const selectedId = readSelectedConversationId();
+  const shell = readWorkspaceStateFromDb(selectedId ? new Set([selectedId]) : new Set<string>());
+  cachedWorkspaceLocale = shell.settings?.general?.locale ?? cachedWorkspaceLocale;
+  return reconcileStaleBackgroundRuns(normalizeSeedProjectPaths(shell), new Set(backgroundRunHandles.keys()));
+}
+
+/** A single conversation's full message thread, for lazy loading on open. */
+function readClientThread(conversationId: string): { readonly messages: ChatMessage[] } {
+  ensureWorkspaceDb();
+  return { messages: readThreadFromDb(conversationId) };
+}
+
 let atomicJsonWriteSeq = 0;
 
 function atomicJsonTempFile(file: string): string {
@@ -3006,7 +3029,7 @@ function handleBrowserEvents(req: IncomingMessage, res: ServerResponse): void {
 function handleWorkspace(req: IncomingMessage, res: ServerResponse): void {
   if (req.method === "GET") {
     try {
-      sendJson(res, 200, readWorkspaceState());
+      sendJson(res, 200, readWorkspaceShellForClient());
     } catch (error) {
       sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) });
     }
@@ -3021,8 +3044,10 @@ function handleWorkspace(req: IncomingMessage, res: ServerResponse): void {
           sendJson(res, 400, { error: "Invalid workspace state payload." });
           return;
         }
+        // The client only holds lazily-loaded threads, so the merged write must
+        // PRESERVE threads it didn't send (writeWorkspaceShellPreservingThreads).
         const normalized = mergeWorkspacePutState(normalizeSeedProjectPaths(cloneWorkspaceState(parsed)), readWorkspaceState());
-        writeWorkspaceState(normalized);
+        writeWorkspaceShellPreservingThreads(normalized);
         sendJson(res, 200, normalized);
       } catch (error) {
         sendJson(res, workspacePutErrorStatus(error), { error: error instanceof Error ? error.message : String(error) });
@@ -8491,6 +8516,23 @@ function attach(server: ViteDevServer | PreviewServer): void {
     handleBrowserEvents(req, res);
   });
   server.middlewares.use("/api/workspace", handleWorkspace);
+  server.middlewares.use("/api/thread", (req, res) => {
+    if (req.method !== "GET") {
+      res.statusCode = 405;
+      res.end();
+      return;
+    }
+    try {
+      const conversationId = new URL(req.url ?? "/", "http://localhost").searchParams.get("conversationId") ?? "";
+      if (!conversationId) {
+        sendJson(res, 400, { error: "Missing conversationId." });
+        return;
+      }
+      sendJson(res, 200, readClientThread(conversationId));
+    } catch (error) {
+      sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) });
+    }
+  });
   server.middlewares.use("/api/agents", (_req, res) => {
     res.setHeader("Content-Type", "application/json");
     res.setHeader("Cache-Control", "no-store");

@@ -9,10 +9,12 @@ import {
   initWorkspaceDb,
   readConversation,
   readMessageBlocks,
+  readThreadFromDb,
   readWorkspaceStateFromDb,
   updateConversationData,
   upsertMessage,
   workspaceDbHasState,
+  writeWorkspaceShellPreservingThreads,
   writeWorkspaceStateToDb,
 } from "../workspace-db";
 
@@ -78,5 +80,34 @@ describe("workspace-db", () => {
     expect(after.chats[0].status).toBe("done");
     expect(after.chats[0].snippet).toBe("answer");
     expect(after.threads.c1).toHaveLength(2);
+  });
+
+  it("filtered read loads only the requested threads; readThreadFromDb loads one", () => {
+    writeWorkspaceStateToDb({ ...buildEmptyWorkspaceState(), chats: [conv("c1"), conv("c2")], threads: { c1: [msg("m1", "a")], c2: [msg("m2", "b")] }, selectedId: "c1" });
+    const shell = readWorkspaceStateFromDb(new Set(["c1"]));
+    expect(shell.threads.c1).toHaveLength(1);
+    expect(shell.threads.c2).toBeUndefined();
+    expect(readThreadFromDb("c2").map((m) => m.id)).toEqual(["m2"]);
+  });
+
+  it("partial shell write preserves unsent threads, replaces sent ones, drops deleted convs", () => {
+    writeWorkspaceStateToDb({
+      ...buildEmptyWorkspaceState(),
+      chats: [conv("c1"), conv("c2"), conv("c3")],
+      threads: { c1: [msg("m1", "a")], c2: [msg("m2", "b")], c3: [msg("m3", "c")] },
+      selectedId: "c1",
+    });
+    // Client holds only c1 (loaded), leaves c2 lazy (absent), and deletes c3.
+    writeWorkspaceShellPreservingThreads({
+      ...buildEmptyWorkspaceState(),
+      chats: [conv("c1"), conv("c2")],
+      threads: { c1: [msg("m1", "a2"), msg("m1b", "x")] },
+      selectedId: "c1",
+    });
+    const read = readWorkspaceStateFromDb();
+    expect(read.chats.map((c) => c.id)).toEqual(["c1", "c2"]);
+    expect(read.threads.c1.map((m) => m.id)).toEqual(["m1", "m1b"]); // replaced
+    expect(read.threads.c2.map((m) => m.id)).toEqual(["m2"]); // preserved (lazy, not sent)
+    expect(read.threads.c3).toBeUndefined(); // deleted conversation → messages dropped
   });
 });

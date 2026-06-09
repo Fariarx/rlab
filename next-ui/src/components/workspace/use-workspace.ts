@@ -454,6 +454,8 @@ export interface Workspace {
   readonly updateComposerDraft: (id: string, draft: ComposerDraft) => void;
   readonly updateSettings: (patch: AppSettingsPatch) => void;
   readonly reloadWorkspace: () => void;
+  readonly loadThread: (id: string) => Promise<void>;
+  readonly loadAllThreads: () => Promise<void>;
   readonly find: (id: string) => ConversationSummary | null;
   readonly cwdOf: (id: string) => string | undefined;
   readonly basePathOf: (id: string) => string | undefined;
@@ -505,6 +507,14 @@ class WorkspaceStore implements Workspace {
   // already appended to the (persisted) thread for visibility.
   private readonly pendingMessages = new Map<string, ChatMessage[]>();
 
+  // The GET shell ships only the selected conversation's thread; the rest load
+  // lazily on open. `fullyLoadedThreadIds` tracks which threads the client fully
+  // holds (a run streaming into an unloaded thread does NOT mark it loaded, so
+  // opening it still fetches the full history). `threadLoads` dedupes in-flight
+  // fetches and lets `loadAllThreads` await them.
+  private readonly fullyLoadedThreadIds = new Set<string>();
+  private readonly threadLoads = new Map<string, Promise<void>>();
+
   constructor() {
     makeAutoObservable<
       WorkspaceStore,
@@ -521,6 +531,8 @@ class WorkspaceStore implements Workspace {
       | "pollTimer"
       | "loadRetryTimer"
       | "skipNextSave"
+      | "fullyLoadedThreadIds"
+      | "threadLoads"
     >(
       this,
       {
@@ -537,6 +549,8 @@ class WorkspaceStore implements Workspace {
         pollTimer: false,
         loadRetryTimer: false,
         skipNextSave: false,
+        fullyLoadedThreadIds: false,
+        threadLoads: false,
       },
       { autoBind: true },
     );
@@ -568,10 +582,56 @@ class WorkspaceStore implements Workspace {
 
   private applyServerState(state: WorkspaceState): void {
     syncGeneratedIdSequence(state);
+    // The shell ships only some threads (the selected one); those it does ship
+    // are fully loaded. Reset the tracking to match the freshly loaded shell.
+    this.fullyLoadedThreadIds.clear();
+    this.threadLoads.clear();
+    for (const id of Object.keys(state.threads)) {
+      this.fullyLoadedThreadIds.add(id);
+    }
     if (this.state !== state) {
       this.skipNextSave = true;
       this.state = state;
     }
+  }
+
+  /** Lazily fetch a conversation's full message thread (the GET shell omits all
+   *  but the selected one). No-op once fully held; never triggers a save. */
+  loadThread(id: string): Promise<void> {
+    if (!id || this.fullyLoadedThreadIds.has(id)) {
+      return Promise.resolve();
+    }
+    const existing = this.threadLoads.get(id);
+    if (existing) {
+      return existing;
+    }
+    const promise = (async () => {
+      try {
+        const response = await fetch(`/api/thread?conversationId=${encodeURIComponent(id)}`, { cache: "no-store" });
+        if (!response.ok) {
+          return;
+        }
+        const { messages } = (await response.json()) as { messages: ChatMessage[] };
+        runInAction(() => {
+          this.fullyLoadedThreadIds.add(id);
+          this.skipNextSave = true;
+          this.state = { ...this.state, threads: { ...this.state.threads, [id]: messages } };
+        });
+      } catch {
+        // offline / unavailable — leave unloaded; opening again retries
+      } finally {
+        this.threadLoads.delete(id);
+      }
+    })();
+    this.threadLoads.set(id, promise);
+    return promise;
+  }
+
+  /** Ensure every conversation's thread is loaded — used before full-text search,
+   *  which scans across all threads. */
+  async loadAllThreads(): Promise<void> {
+    const ids = [...this.state.chats, ...this.state.projects.flatMap((project) => project.conversations)].map((conversation) => conversation.id);
+    await Promise.all(ids.map((id) => this.loadThread(id)));
   }
 
   mount(): void {
@@ -918,6 +978,7 @@ class WorkspaceStore implements Workspace {
 
   select(id: string): void {
     this.setState((current) => patchConversation({ ...current, selectedId: id }, id, { unread: false }));
+    void this.loadThread(id);
   }
 
   newChat(profile: AgentProfile): string {
