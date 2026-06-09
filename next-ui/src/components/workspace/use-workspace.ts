@@ -313,6 +313,14 @@ function finishBlocks(blocks: readonly AgentBlock[], runState: "ok" | "error"): 
   return blocks.map((block) => finishLiveBlock(block, runState));
 }
 
+function cloneMessageForFork(message: ChatMessage): ChatMessage {
+  return {
+    ...message,
+    profile: message.profile ? normalizeAgentProfile(message.profile, message.profile.agent) : undefined,
+    blocks: message.blocks?.map((block) => finishLiveBlock(JSON.parse(JSON.stringify(block)) as AgentBlock, "ok")),
+  };
+}
+
 function blocksHaveStatus(blocks: readonly AgentBlock[]): boolean {
   return blocks.some((block) => block.kind === "status");
 }
@@ -379,6 +387,23 @@ function patchAgentMessageUsage(
   };
 }
 
+function upsertAgentMessageForUserTurn(messages: readonly ChatMessage[], userMessageId: string | undefined, message: ChatMessage): ChatMessage[] {
+  const existingIndex = messages.findIndex((item) => item.id === message.id);
+  if (!userMessageId) {
+    return existingIndex >= 0 ? messages.map((item) => (item.id === message.id ? message : item)) : [...messages, message];
+  }
+  const withoutCurrent = messages.filter((item) => item.id !== message.id);
+  const userIndex = withoutCurrent.findIndex((item) => item.id === userMessageId && item.role === "user");
+  if (userIndex < 0) {
+    return existingIndex >= 0 ? messages.map((item) => (item.id === message.id ? message : item)) : [...messages, message];
+  }
+  const nextUserIndex = withoutCurrent.findIndex((item, index) => index > userIndex && item.role === "user");
+  const staleReplyEnd = nextUserIndex < 0 ? withoutCurrent.length : nextUserIndex;
+  const before = withoutCurrent.slice(0, userIndex + 1);
+  const after = withoutCurrent.slice(staleReplyEnd);
+  return [...before, message, ...after];
+}
+
 function isLiveRunStatus(status: ConversationStatus): boolean {
   return status === "running" || status === "waiting";
 }
@@ -401,9 +426,7 @@ function patchActiveRunUpdate(state: WorkspaceState, update: ActiveRunUpdate): W
   };
   const threads = {
     ...state.threads,
-    [update.conversationId]: messages.some((item) => item.id === update.agentMessageId)
-      ? messages.map((item) => (item.id === update.agentMessageId ? message : item))
-      : [...messages, message],
+    [update.conversationId]: upsertAgentMessageForUserTurn(messages, update.userMessageId, message),
   };
   return patchConversation({ ...state, threads }, update.conversationId, {
     activeRunId: update.done || !isLiveRunStatus(update.status) ? undefined : update.runId,
@@ -448,6 +471,7 @@ export interface Workspace {
   readonly addReviewComments: (id: string, comments: readonly ReviewCommentEntry[]) => void;
   readonly stopRun: (id: string) => void;
   readonly retryMessage: (id: string, messageId: string) => void;
+  readonly forkConversationFromMessage: (id: string, messageId: string) => string | null;
   readonly editAndResendMessage: (id: string, messageId: string, text: string) => void;
   readonly decideApproval: (id: string, approvalId: string, decision: ApprovalDecision) => void;
   readonly selectOptions: (id: string, optionBlockId: string, selectedLabels: readonly string[]) => void;
@@ -1288,7 +1312,7 @@ class WorkspaceStore implements Workspace {
       if (arr.some((m) => m.id === aId)) {
         return current;
       }
-      return { ...current, threads: { ...current.threads, [id]: [...arr, { id: aId, role: "agent", time: agentTime, profile, blocks: [] }] } };
+      return { ...current, threads: { ...current.threads, [id]: upsertAgentMessageForUserTurn(arr, userMsg.id, { id: aId, role: "agent", time: agentTime, profile, blocks: [] }) } };
     });
     const applyBlocks = (blocks: AgentBlock[]) => {
       let shouldFlush = false;
@@ -1306,7 +1330,7 @@ class WorkspaceStore implements Workspace {
           ...current,
           threads: {
             ...current.threads,
-            [id]: arr.some((m) => m.id === aId) ? arr.map((m) => (m.id === aId ? message : m)) : [...arr, message],
+            [id]: upsertAgentMessageForUserTurn(arr, userMsg.id, message),
           },
         };
         // After cancellation, still let the final blocks settle (so the message
@@ -1444,6 +1468,57 @@ class WorkspaceStore implements Workspace {
     // it in place — no duplicate user turn.
     this.setState((current) => ({ ...current, threads: { ...current.threads, [id]: thread.slice(0, userIndex + 1) } }));
     this.runTurn(id, userMsg);
+  }
+
+  forkConversationFromMessage(id: string, messageId: string): string | null {
+    let forkId: string | null = null;
+    this.setState((current) => {
+      const source = findConversation(current, id);
+      const thread = current.threads[id] ?? [];
+      const messageIndex = thread.findIndex((message) => message.id === messageId && message.role === "agent");
+      const message = messageIndex >= 0 ? thread[messageIndex] : undefined;
+      if (!source || !message || message.role !== "agent") {
+        return current;
+      }
+
+      forkId = nextId("chat");
+      const locale = current.settings.general.locale;
+      const profile = normalizeAgentProfile(message.profile ?? source.profile, message.profile?.agent ?? source.agent);
+      const conversation: ConversationSummary = {
+        ...source,
+        id: forkId,
+        title: truncate(translate(locale, "forkedConversationTitle", { title: source.title }), 80),
+        snippet: snippetFromBlocks(message.blocks, locale),
+        time: nowLabel(),
+        status: "idle",
+        agent: profile.agent,
+        profile,
+        activeRunId: undefined,
+        unread: false,
+        pinned: false,
+        costUsd: undefined,
+        usage: undefined,
+        agentSessions: undefined,
+        sessionId: undefined,
+        sessionAgent: undefined,
+      };
+      this.fullyLoadedThreadIds.add(forkId);
+      const forkThread = thread.slice(0, messageIndex + 1).map(cloneMessageForFork);
+      const projects = current.projects.map((project) =>
+        project.conversations.some((item) => item.id === id)
+          ? { ...project, conversations: [conversation, ...project.conversations] }
+          : project,
+      );
+      const inProject = projects.some((project) => project.conversations[0]?.id === forkId);
+      return {
+        ...current,
+        chats: inProject ? current.chats : [conversation, ...current.chats],
+        projects,
+        threads: { ...current.threads, [forkId]: forkThread },
+        selectedId: forkId,
+      };
+    });
+    return forkId;
   }
 
   editAndResendMessage(id: string, messageId: string, text: string): void {

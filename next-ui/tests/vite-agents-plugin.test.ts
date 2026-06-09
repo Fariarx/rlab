@@ -2720,6 +2720,73 @@ Built-in agents:
     expect(merged.threads["c-flaky"]).toEqual(serverState.threads["c-flaky"]);
   });
 
+  it("preserves a current thread when a stale workspace PUT sends it as empty", () => {
+    const current = buildInitialWorkspaceState();
+    const staleClientState = {
+      ...current,
+      chats: current.chats.map((conversation) => (conversation.id === "chat-2" ? { ...conversation, title: "Renamed" } : conversation)),
+      threads: {
+        ...current.threads,
+        "chat-2": [],
+      },
+    };
+
+    const merged = mergeWorkspacePutState(staleClientState, current);
+
+    expect(merged.chats.find((conversation) => conversation.id === "chat-2")?.title).toBe("Renamed");
+    expect(merged.threads["chat-2"]).toEqual(current.threads["chat-2"]);
+  });
+
+  it("preserves a current thread when a stale workspace PUT sends only messages appended before lazy history loaded", () => {
+    const current = buildInitialWorkspaceState();
+    const staleClientState = {
+      ...current,
+      threads: {
+        ...current.threads,
+        "chat-2": [{ id: "u-new", role: "user" as const, text: "continue", time: "10:10" }],
+      },
+    };
+
+    const merged = mergeWorkspacePutState(staleClientState, current);
+
+    expect(merged.threads["chat-2"]).toEqual(current.threads["chat-2"]);
+  });
+
+  it("accepts a loaded workspace PUT that appends to a current thread", () => {
+    const current = buildInitialWorkspaceState();
+    const appended = [
+      ...current.threads["chat-2"],
+      { id: "u-new", role: "user" as const, text: "continue", time: "10:10" },
+    ];
+    const clientState = {
+      ...current,
+      threads: {
+        ...current.threads,
+        "chat-2": appended,
+      },
+    };
+
+    const merged = mergeWorkspacePutState(clientState, current);
+
+    expect(merged.threads["chat-2"]).toEqual(appended);
+  });
+
+  it("accepts a loaded workspace PUT that truncates a thread prefix for retry or edit", () => {
+    const current = buildInitialWorkspaceState();
+    const prefix = current.threads["chat-2"].slice(0, 1);
+    const clientState = {
+      ...current,
+      threads: {
+        ...current.threads,
+        "chat-2": prefix,
+      },
+    };
+
+    const merged = mergeWorkspacePutState(clientState, current);
+
+    expect(merged.threads["chat-2"]).toEqual(prefix);
+  });
+
   it("builds Claude SDK options with a live permission handler for unrestricted runs", () => {
     const controller = new AbortController();
     const canUseTool = (() => Promise.resolve({ behavior: "deny", message: "test" })) satisfies CanUseTool;
@@ -2899,6 +2966,7 @@ Built-in agents:
     expect(activeBackgroundRunUpdateFromState(runningState, binding, false)).toEqual({
       runId: binding.runId,
       conversationId: binding.conversationId,
+      userMessageId: binding.userMessageId,
       agentMessageId: binding.agentMessageId,
       status: "running",
       snippet: "Working",
@@ -2950,10 +3018,48 @@ Built-in agents:
     expect(activeBackgroundRunUpdateFromState(runningState, binding, false)).toMatchObject({
       runId: binding.runId,
       conversationId: binding.conversationId,
+      userMessageId: binding.userMessageId,
       agentMessageId: binding.agentMessageId,
       costUsd: 0.0173,
       usage: { totalTokens: 9653 },
     });
+  });
+
+  it("replaces stale agent replies when rerunning the same bound user message", () => {
+    const state = buildInitialWorkspaceState();
+    const binding: BackgroundRunBinding = {
+      conversationId: "chat-2",
+      runId: "run-rerun",
+      userMessageId: "u-repeat",
+      userMessageTime: "10:00",
+      agentMessageId: "a-repeat-new",
+      agentMessageTime: "10:01",
+    };
+    const withStaleReply = {
+      ...state,
+      threads: {
+        ...state.threads,
+        "chat-2": [
+          ...state.threads["chat-2"],
+          { id: "u-repeat", role: "user" as const, text: "Try again", time: "10:00" },
+          { id: "a-repeat-old", role: "agent" as const, time: "10:00", blocks: [{ kind: "status" as const, level: "error" as const, text: "old failure" }] },
+          { id: "u-later", role: "user" as const, text: "Later turn", time: "10:02" },
+          { id: "a-later", role: "agent" as const, time: "10:03", blocks: [{ kind: "text" as const, text: "later answer" }] },
+        ],
+      },
+    };
+
+    const settled = settleEarlyBackgroundRunState(
+      withStaleReply,
+      binding,
+      { agent: "codex", model: "default", reasoning: "default", mode: "default", prompt: "Try again", accessMode: "read-only" },
+      [{ type: "text", text: "new answer" }],
+    );
+    const ids = settled.threads["chat-2"].map((message) => message.id);
+
+    expect(ids).not.toContain("a-repeat-old");
+    expect(ids.slice(ids.indexOf("u-repeat"), ids.indexOf("u-later") + 1)).toEqual(["u-repeat", "a-repeat-new", "u-later"]);
+    expect(settled.threads["chat-2"].find((message) => message.id === "a-later")).toBeDefined();
   });
 
   it("settles bound background runs that fail before an agent process starts", () => {

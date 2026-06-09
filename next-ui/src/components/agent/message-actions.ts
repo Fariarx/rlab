@@ -4,6 +4,7 @@ import type { AgentBlock, ApprovalDecision, ChatMessage } from "./types";
 export interface MessageActionHandlers {
   readonly onCopy?: (message: ChatMessage) => void;
   readonly onRetry?: (message: ChatMessage) => void;
+  readonly onFork?: (message: ChatMessage) => void;
   readonly onEditAndResend?: (message: ChatMessage, text: string) => void;
   readonly onApprovalDecision?: (approvalId: string, decision: ApprovalDecision) => void | Promise<void>;
   readonly onOptionSelection?: (optionBlockId: string, selectedLabels: readonly string[]) => void | Promise<void>;

@@ -17,6 +17,7 @@ function Probe() {
       <div data-testid="error">{workspace.loadError ?? "none"}</div>
       <div data-testid="cost">{selected?.costUsd ?? "none"}</div>
       <div data-testid="usage">{selected?.usage?.totalTokens ?? "none"}</div>
+      <div data-testid="thread-ids">{(workspace.threads[workspace.selectedId] ?? []).map((message) => message.id).join(",")}</div>
       <button type="button" onClick={() => workspace.sendMessage(workspace.selectedId, "Persist this message")}>
         send
       </button>
@@ -37,6 +38,9 @@ function Probe() {
       </button>
       <button type="button" onClick={() => workspace.retryMessage(workspace.selectedId, "u1")}>
         retry
+      </button>
+      <button type="button" onClick={() => workspace.forkConversationFromMessage(workspace.selectedId, "a1")}>
+        fork-a1
       </button>
       <button type="button" onClick={() => workspace.editAndResendMessage(workspace.selectedId, "u1", "Edited resend text")}>
         edit-resend
@@ -836,6 +840,51 @@ describe("useWorkspace", () => {
     expect(workspaceSavesAfterAttachUpdate).toBe(workspaceSavesBeforeAttachUpdate);
   });
 
+  it("places attached run updates next to their bound user message", async () => {
+    state = {
+      ...state,
+      chats: state.chats.map((chat) => (chat.id === "chat-2" ? { ...chat, activeRunId: "run-existing", status: "running" } : chat)),
+      threads: {
+        ...state.threads,
+        "chat-2": [
+          ...state.threads["chat-2"],
+          { id: "u-repeat", role: "user", text: "First queued turn", time: "14:00" },
+          { id: "u-later", role: "user", text: "Later queued turn", time: "14:01" },
+        ],
+      },
+    };
+    render(<Probe />);
+
+    await screen.findByText("chat-2");
+    await waitFor(() => {
+      expect(attachRunRequests).toEqual(["/api/run-attach?runId=run-existing"]);
+    });
+
+    attachRunController?.enqueue(
+      new TextEncoder().encode(
+        `${JSON.stringify({
+          type: "update",
+          update: {
+            runId: "run-existing",
+            conversationId: "chat-2",
+            userMessageId: "u-repeat",
+            agentMessageId: "a-repeat",
+            status: "running",
+            snippet: "streamed token",
+            time: "14:02",
+            done: false,
+            blocks: [{ kind: "text", text: "streamed token", streaming: true }],
+          },
+        })}\n`,
+      ),
+    );
+
+    await waitFor(() => {
+      const ids = screen.getByTestId("thread-ids").textContent?.split(",") ?? [];
+      expect(ids.slice(ids.indexOf("u-repeat"), ids.indexOf("u-later") + 1)).toEqual(["u-repeat", "a-repeat", "u-later"]);
+    });
+  });
+
   it("does not save accepted local background run stream updates back through the workspace API", async () => {
     vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -1047,6 +1096,47 @@ describe("useWorkspace", () => {
       const repeated = state.threads["chat-2"].filter((message) => message.text === "Собери черновик release notes для 0.1.69 по merged PR.");
       expect(repeated).toHaveLength(1);
     });
+  });
+
+  it("forks a conversation from an agent message without reusing the parent native session", async () => {
+    state = {
+      ...state,
+      chats: state.chats.map((chat) =>
+        chat.id === "chat-2"
+          ? {
+              ...chat,
+              agentSessions: { codex: "source-session" },
+              sessionAgent: "codex",
+              sessionId: "source-session",
+            }
+          : chat,
+      ),
+    };
+    render(<Probe />);
+
+    await screen.findByText("chat-2");
+    screen.getByRole("button", { name: "fork-a1" }).click();
+
+    await waitFor(() => {
+      expect(screen.getByTestId("selected")).not.toHaveTextContent("chat-2");
+      expect(state.selectedId).not.toBe("chat-2");
+    });
+
+    const fork = state.chats.find((chat) => chat.id === state.selectedId);
+    expect(fork).toMatchObject({
+      title: "Форк: Release notes для 0.1.69",
+      status: "idle",
+      agent: "codex",
+      profile: { agent: "codex", model: "default", reasoning: "default", mode: "default" },
+    });
+    expect(fork?.agentSessions).toBeUndefined();
+    expect(fork?.sessionId).toBeUndefined();
+    expect(fork?.sessionAgent).toBeUndefined();
+    expect(state.threads[state.selectedId]).toHaveLength(2);
+    const forkedAgentMessage = state.threads[state.selectedId][1];
+    expect(forkedAgentMessage?.role).toBe("agent");
+    const streamingText = forkedAgentMessage?.blocks?.find((block) => block.kind === "text" && block.text.includes("Открыть PR"));
+    expect(streamingText).toMatchObject({ kind: "text", streaming: false });
   });
 
   it("resends a user message with edited text", async () => {

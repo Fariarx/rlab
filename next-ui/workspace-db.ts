@@ -170,6 +170,13 @@ export function readMessageBlocks(messageId: string): readonly AgentBlock[] | un
   return row ? (JSON.parse(row.data) as ChatMessage).blocks : undefined;
 }
 
+/** A single message row in full — for building a run-update without loading the
+ *  whole workspace (the per-event notify hot path). */
+export function readMessage(messageId: string): ChatMessage | undefined {
+  const row = database().prepare("SELECT data FROM messages WHERE id = ?").get(messageId) as { data: string } | undefined;
+  return row ? (JSON.parse(row.data) as ChatMessage) : undefined;
+}
+
 /** Upsert one message row (the streaming hot path). New messages append at the
  *  end of their conversation; existing ones update in place. */
 export function upsertMessage(conversationId: string, message: ChatMessage): void {

@@ -817,9 +817,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     // image thumbnails float above it (absolute, each with its own shadow), and
     // the multiline input lifts into an upward overlay — nothing reflows the thread.
     <Box ref={rootRef} sx={{ position: "relative" }}>
-      {/* Floating row, always mounted so its height can be measured. Aligned with
-          the input field (pl clears the options button) so it floats right above
-          the text input, and lifted above the multiline overlay by overlayLift. */}
+      {/* Floating row — pills (mode, review, over-limit) + attachment tiles,
+          always mounted so height can be measured. */}
       <Box
         ref={tagsRef}
         sx={{
@@ -827,8 +826,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           left: 0,
           right: 0,
           bottom: `calc(100% + ${8 + overlayLift}px)`,
-          px: 0.5,
-          pt: hasAttachments ? 1 : 0,
+          // pl aligns the tile row's left edge with the text-input column start:
+          // 1px bar-border + 4px bar-padding + 30px TuneRounded btn + 4px flex-gap = 39px
+          pl: "39px",
+          pr: "5px",
           display: "flex",
           flexWrap: "wrap",
           alignItems: "flex-end",
@@ -913,11 +914,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           backgroundColor: (t) => t.custom.surfaces.s2,
           border: (t) => `1px solid ${t.custom.borders.subtle}`,
           transition: "border-color 140ms ease",
-          // Compact, miniature bar: small inner buttons so the floating composer
-          // stays low-profile over the thread.
           "& .MuiIconButton-root": { width: 30, height: 30 },
-          // Soft focus: just brighten the border. No outer glow ring (it clipped
-          // against the surrounding padding and read as harsh).
           "&:focus-within": {
             borderColor: (t) => t.custom.borders.strong,
           },
@@ -942,13 +939,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         >
           <TuneRoundedIcon sx={{ fontSize: 16 }} />
         </IconButton>
-        {hasContextGauge && (
-          <ContextGauge
-            tokens={contextTokens as number}
-            window={contextWindow as number}
-            onClick={(event) => openOptionsMenu(event.currentTarget)}
-          />
-        )}
         <Menu
           anchorEl={modeMenuAnchor}
           open={Boolean(modeMenuAnchor)}
@@ -974,7 +964,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               <Switch size="small" checked={mode.id === activeMode} onChange={() => undefined} tabIndex={-1} sx={modeSwitchSx} />
             </MenuItem>
           ))}
-          {/* Actions above; per-conversation context, then account limits below. */}
+          {/* Conversation context (БЕСЕДА) */}
           {contextLines.length > 0 && (
             <>
               <Divider sx={{ my: 0.5 }} />
@@ -990,10 +980,25 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               </Box>
             </>
           )}
-          {/* Compaction — modeled as action rows (auto toggle + compact-now)
-              like the Attach/work-mode items above, instead of a heavy boxed
-              control panel, so the menu reads as one consistent list. The window
-              override is an advanced inline field, shown only when auto is on. */}
+          {/* Account rate limits (ЛИМИТЫ АККАУНТА) */}
+          <Divider sx={{ my: 0.5 }} />
+          <Box sx={{ px: 2, py: 0.75, cursor: "default" }} onClick={(event) => event.stopPropagation()}>
+            <Typography variant="microLabel" sx={{ color: "text.secondary", display: "block", mb: 0.5 }}>
+              {t("limitsLabel")}
+            </Typography>
+            {limitLines.length > 0 ? (
+              <Stack spacing={1}>
+                {limitLines.map((line) => (
+                  <MeterRow key={line.id} label={line.label} value={line.value} percent={line.percent} />
+                ))}
+              </Stack>
+            ) : (
+              <Typography sx={{ fontSize: "0.72rem", color: "text.tertiary" }}>
+                {!limitLoaded ? "…" : agentId && LIMIT_UNSUPPORTED_AGENTS.has(agentId) ? t("limitsUnavailable") : t("limitsNoData")}
+              </Typography>
+            )}
+          </Box>
+          {/* Compaction — below both conversation info sections */}
           <Divider sx={{ my: 0.5 }} />
           <MenuItem onClick={() => onAutoCompactChange?.(!autoCompact)} sx={modeMenuItemSx}>
             <CompressRoundedIcon sx={{ fontSize: 15, color: "text.secondary" }} />
@@ -1009,9 +1014,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               <Stack direction="row" spacing={1} sx={{ justifyContent: "space-between", alignItems: "center" }}>
                 <Typography sx={{ fontSize: "0.72rem", color: "text.tertiary", pl: 3.25 }}>{t("compactionWindow")}</Typography>
                 <TextField
-                  /* A plain text field with numeric keypad — NOT type="number",
-                     whose focus-time spinner arrows looked broken in this dense
-                     menu. Non-digits are stripped so the value stays a token count. */
                   type="text"
                   inputMode="numeric"
                   size="small"
@@ -1039,34 +1041,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             <CompressRoundedIcon sx={{ fontSize: 16, color: "text.secondary" }} />
             <Box component="span">{t("compactNow")}</Box>
           </MenuItem>
-          <Divider sx={{ my: 0.5 }} />
-          <Box sx={{ px: 2, py: 0.75, cursor: "default" }} onClick={(event) => event.stopPropagation()}>
-            <Typography variant="microLabel" sx={{ color: "text.secondary", display: "block", mb: 0.5 }}>
-              {t("limitsLabel")}
-            </Typography>
-            {limitLines.length > 0 ? (
-              <Stack spacing={1}>
-                {limitLines.map((line) => (
-                  <MeterRow key={line.id} label={line.label} value={line.value} percent={line.percent} />
-                ))}
-              </Stack>
-            ) : (
-              <Typography sx={{ fontSize: "0.72rem", color: "text.tertiary" }}>
-                {!limitLoaded ? "…" : agentId && LIMIT_UNSUPPORTED_AGENTS.has(agentId) ? t("limitsUnavailable") : t("limitsNoData")}
-              </Typography>
-            )}
-          </Box>
         </Menu>
-        {/* The input column keeps a fixed single-row height so the bar never
-            grows. When multiline is needed the same input lifts into an overlay
-            (position: absolute) that grows upward over the thread. */}
         <Box
           data-testid="composer-input-area"
           data-expanded={expanded ? "true" : "false"}
           sx={{ position: "relative", flex: 1, minWidth: 0, minHeight: 26, display: "flex", alignItems: "center" }}
         >
-          {/* The suggestion dropdown is anchored to the input column, so it is
-              never wider than the field it completes. */}
           {suggestionsOpen && (
             <Box role="listbox" aria-label={t("suggestions")} sx={{ position: "absolute", left: 0, right: 0, bottom: "100%", mb: 1, zIndex: 7, ...floatingPanelSx }}>
               <Stack spacing={0.25}>
@@ -1130,7 +1110,14 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             }}
           />
         </Box>
-        <Stack direction="row" spacing={1} sx={{ alignItems: "center", flex: "0 0 auto" }}>
+        <Stack direction="row" spacing={0.5} sx={{ alignItems: "center", flex: "0 0 auto" }}>
+          {hasContextGauge && (
+            <ContextGauge
+              tokens={contextTokens as number}
+              window={contextWindow as number}
+              onClick={(event) => openOptionsMenu(event.currentTarget)}
+            />
+          )}
           {running ? (
             <IconButton data-testid="composer-stop-button" aria-label={t("stopRun")} tone="danger" onClick={onStop}>
               <StopCircleIcon sx={{ fontSize: 19 }} />

@@ -875,6 +875,20 @@ export function WorkspacePageView({
           notifiableRuns.current.add(ws.selectedId);
           ws.retryMessage(ws.selectedId, message.id);
         },
+    onFork: (message: ChatMessage) => {
+      const forkId = ws.forkConversationFromMessage(ws.selectedId, message.id);
+      if (!forkId) {
+        return;
+      }
+      const fork = ws.find(forkId);
+      if (fork) {
+        setProfile(conversationProfile(fork));
+      }
+      setView("chat");
+      setRunKey((k) => k + 1);
+      onNavigate?.(routeForConversation(ws, forkId));
+      toast({ message: t("forkedConversationCreated"), severity: "success", duration: 2200 });
+    },
     onEditAndResend: (message: ChatMessage, text: string) => {
       notifiableRuns.current.add(ws.selectedId);
       ws.editAndResendMessage(ws.selectedId, message.id, text);

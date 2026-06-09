@@ -182,6 +182,7 @@ export interface ActiveRunSnapshot {
 export interface ActiveRunUpdate {
   readonly runId: string;
   readonly conversationId: string;
+  readonly userMessageId?: string;
   readonly agentMessageId: string;
   readonly status: ConversationStatus;
   readonly snippet: string;
@@ -244,6 +245,7 @@ function isActiveRunUpdate(value: unknown): value is ActiveRunUpdate {
     isRecord(value) &&
     typeof value.runId === "string" &&
     typeof value.conversationId === "string" &&
+    (value.userMessageId === undefined || typeof value.userMessageId === "string") &&
     typeof value.agentMessageId === "string" &&
     isConversationStatus(value.status) &&
     typeof value.snippet === "string" &&

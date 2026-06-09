@@ -32,6 +32,21 @@ describe("Message", () => {
     expect(onRetry).toHaveBeenCalledWith(message);
   });
 
+  it("renders fork action for agent messages", () => {
+    const onFork = vi.fn();
+    const message: ChatMessage = {
+      id: "agent-fork",
+      role: "agent",
+      blocks: [{ kind: "text", text: "Готово" }],
+    };
+
+    renderMessage(message, { onFork });
+
+    fireEvent.click(screen.getByRole("button", { name: "Форкнуть диалог" }));
+
+    expect(onFork).toHaveBeenCalledWith(message);
+  });
+
   it("renders agent details header as an accessible expandable button", () => {
     const message: ChatMessage = {
       id: "agent-2",

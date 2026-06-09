@@ -605,6 +605,16 @@ describe("WorkspacePage", () => {
     });
   });
 
+  it("forks the conversation from an agent message action", async () => {
+    renderWithThemeAndVirtuoso(<WorkspacePage />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Форкнуть диалог" }));
+
+    expect(await screen.findByText("Форк диалога создан")).toBeInTheDocument();
+    expect(screen.getAllByText("Форк: Release notes для 0.1.69").length).toBeGreaterThan(0);
+    expect(screen.getByPlaceholderText("Написать: CX")).toBeInTheDocument();
+  });
+
   it("posts approval decisions from streamed approval cards", async () => {
     const workspace = {
       ...buildInitialWorkspaceState(),
@@ -1074,7 +1084,7 @@ describe("WorkspacePage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
     fireEvent.click(await screen.findByRole("tab", { name: /Последний ход 1/i }));
 
-    expect(await screen.findByText("test/auth/login.test.ts")).toBeInTheDocument();
+    expect((await screen.findAllByText("test/auth/login.test.ts")).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/useFakeTimers/).length).toBeGreaterThan(0);
     expect(fetch).not.toHaveBeenCalledWith("/api/git-diff", expect.anything());
   });

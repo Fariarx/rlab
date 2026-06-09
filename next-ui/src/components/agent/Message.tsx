@@ -1,6 +1,7 @@
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import DescriptionOutlinedIcon from "@mui/icons-material/DescriptionOutlined";
 import EditIcon from "@mui/icons-material/Edit";
+import AccountTreeIcon from "@mui/icons-material/AccountTree";
 import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
 import PsychologyIcon from "@mui/icons-material/Psychology";
 import RefreshIcon from "@mui/icons-material/Refresh";
@@ -92,21 +93,36 @@ function MessageActionBar({
   readonly actions?: MessageActionHandlers;
 }) {
   const { t } = useI18n();
-  if (!actions?.onCopy && !actions?.onRetry) {
+  const showFork = Boolean(actions?.onFork);
+  if (!actions?.onCopy && !actions?.onRetry && !showFork) {
     return null;
   }
 
   return (
-    <Stack className="msg-actions" direction="row" spacing={0.25} sx={{ justifyContent: "flex-start", mt: 1, ...messageActionRowSx }}>
-      <Tooltip title={t("copy")}>
-        <IconButton aria-label={t("copyMessage")} onClick={() => actions.onCopy?.(message)} sx={messageActionButtonSx}>
-          <ContentCopyIcon sx={{ fontSize: 14 }} />
-        </IconButton>
-      </Tooltip>
+    <Stack
+      className="msg-actions"
+      direction="row"
+      spacing={0.25}
+      sx={{ justifyContent: "flex-start", mt: 1, ...messageActionRowSx, ...(showFork ? { opacity: 0.72 } : {}) }}
+    >
+      {actions?.onCopy && (
+        <Tooltip title={t("copy")}>
+          <IconButton aria-label={t("copyMessage")} onClick={() => actions.onCopy?.(message)} sx={messageActionButtonSx}>
+            <ContentCopyIcon sx={{ fontSize: 14 }} />
+          </IconButton>
+        </Tooltip>
+      )}
       {actions?.onRetry && (
         <Tooltip title={t("retryMessage")}>
           <IconButton aria-label={t("retryMessage")} onClick={() => actions.onRetry?.(message)} sx={messageActionButtonSx}>
             <RefreshIcon sx={{ fontSize: 14 }} />
+          </IconButton>
+        </Tooltip>
+      )}
+      {showFork && (
+        <Tooltip title={t("forkConversation")}>
+          <IconButton aria-label={t("forkConversation")} onClick={() => actions?.onFork?.(message)} sx={messageActionButtonSx}>
+            <AccountTreeIcon sx={{ fontSize: 14 }} />
           </IconButton>
         </Tooltip>
       )}
@@ -552,7 +568,7 @@ function AgentMessage({
             ))}
           </Stack>
         )}
-        <MessageActionBar message={message} actions={actions ? { onCopy: actions.onCopy, onRetry: actions.onRetry } : undefined} />
+        <MessageActionBar message={message} actions={actions ? { onCopy: actions.onCopy, onRetry: actions.onRetry, onFork: actions.onFork } : undefined} />
       </Box>
     </Stack>
   );

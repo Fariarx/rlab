@@ -20,7 +20,7 @@ import {
   type Locale,
 } from "./src/lib/app-settings";
 import { buildEmptyWorkspaceState, buildInitialWorkspaceState, cloneWorkspaceState, type WorkspaceState } from "./src/lib/workspace-state";
-import { initWorkspaceDb, readConversation, readMessageBlocks, readSelectedConversationId, readThreadFromDb, readWorkspaceStateFromDb, updateConversationData, upsertMessage, workspaceDbHasState, writeWorkspaceShellPreservingThreads, writeWorkspaceStateToDb } from "./workspace-db";
+import { initWorkspaceDb, readConversation, readMessage, readMessageBlocks, readSelectedConversationId, readThreadFromDb, readWorkspaceStateFromDb, updateConversationData, upsertMessage, workspaceDbHasState, writeWorkspaceShellPreservingThreads, writeWorkspaceStateToDb } from "./workspace-db";
 import {
   agentProfileEquals,
   claudeAgentNameFromMode,
@@ -3046,7 +3046,15 @@ function handleWorkspace(req: IncomingMessage, res: ServerResponse): void {
         }
         // The client only holds lazily-loaded threads, so the merged write must
         // PRESERVE threads it didn't send (writeWorkspaceShellPreservingThreads).
-        const normalized = mergeWorkspacePutState(normalizeSeedProjectPaths(cloneWorkspaceState(parsed)), readWorkspaceState());
+        const incoming = normalizeSeedProjectPaths(cloneWorkspaceState(parsed));
+        // The merge only reads `current` threads for the conversations the client
+        // SENT plus those with a live server-owned run — so load just those, not
+        // all 147 messages. Parsing the whole workspace on every save is what
+        // blocks the event loop and flickers 502s under 2+ concurrent agents.
+        ensureWorkspaceDb();
+        const relevantThreadIds = new Set<string>([...Object.keys(incoming.threads), ...[...backgroundRunHandles.values()].map((handle) => handle.binding.conversationId)]);
+        const current = reconcileStaleBackgroundRuns(normalizeSeedProjectPaths(readWorkspaceStateFromDb(relevantThreadIds)), new Set(backgroundRunHandles.keys()));
+        const normalized = mergeWorkspacePutState(incoming, current);
         writeWorkspaceShellPreservingThreads(normalized);
         sendJson(res, 200, normalized);
       } catch (error) {
@@ -4126,6 +4134,7 @@ export interface ActiveBackgroundRunSnapshot {
 export interface ActiveBackgroundRunUpdate {
   readonly runId: string;
   readonly conversationId: string;
+  readonly userMessageId: string;
   readonly agentMessageId: string;
   readonly status: ConversationStatus;
   readonly snippet: string;
@@ -5340,10 +5349,15 @@ function notifyBackgroundRunUpdate(binding: BackgroundRunBinding, done: boolean)
   if (!handle?.subscribers || handle.subscribers.size === 0) {
     return;
   }
-  const update = activeBackgroundRunUpdateFromState(readWorkspaceState(), binding, done);
-  if (!update) {
+  // Build the update from just this run's conversation + agent message — never
+  // parse the whole workspace (147+ messages) per event, or 2+ concurrent
+  // streams block the event loop and surface as flickering 502s.
+  ensureWorkspaceDb();
+  const conversation = readConversation(binding.conversationId);
+  if (!conversation) {
     return;
   }
+  const update = buildActiveRunUpdate(conversation, readMessage(binding.agentMessageId), binding, done);
   for (const subscriber of handle.subscribers) {
     subscriber(update);
   }
@@ -5531,18 +5545,52 @@ function workspaceConversationMap(state: WorkspaceState): Map<string, WorkspaceC
   return new Map([...state.chats, ...state.projects.flatMap((project) => project.conversations)].map((conversation) => [conversation.id, conversation]));
 }
 
-export function activeBackgroundRunUpdateFromState(state: WorkspaceState, binding: BackgroundRunBinding, done: boolean): ActiveBackgroundRunUpdate | null {
-  const conversation = workspaceConversationMap(state).get(binding.conversationId);
-  if (!conversation) {
-    return null;
+function threadHasEveryCurrentMessage(incomingThread: readonly ChatMessage[], currentThread: readonly ChatMessage[]): boolean {
+  if (currentThread.length === 0) {
+    return true;
   }
-  const agentMessage = (state.threads[binding.conversationId] ?? []).find((message) => message.id === binding.agentMessageId);
+  let cursor = 0;
+  for (const message of incomingThread) {
+    if (message.id === currentThread[cursor]?.id) {
+      cursor += 1;
+      if (cursor === currentThread.length) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function isPrefixThreadReplacement(incomingThread: readonly ChatMessage[], currentThread: readonly ChatMessage[]): boolean {
+  if (incomingThread.length === 0 || incomingThread.length >= currentThread.length) {
+    return false;
+  }
+  return incomingThread.every((message, index) => message.id === currentThread[index]?.id);
+}
+
+function shouldPreserveCurrentThreadFromWorkspacePut(incomingThreads: WorkspaceState["threads"], current: WorkspaceState, conversationId: string): boolean {
+  if (!Object.prototype.hasOwnProperty.call(incomingThreads, conversationId)) {
+    return false;
+  }
+  const incomingThread = incomingThreads[conversationId] ?? [];
+  const currentThread = current.threads[conversationId] ?? [];
+  if (currentThread.length === 0) {
+    return false;
+  }
+  if (threadHasEveryCurrentMessage(incomingThread, currentThread) || isPrefixThreadReplacement(incomingThread, currentThread)) {
+    return false;
+  }
+  return true;
+}
+
+function buildActiveRunUpdate(conversation: WorkspaceConversation, agentMessage: ChatMessage | undefined, binding: BackgroundRunBinding, done: boolean): ActiveBackgroundRunUpdate {
   const blocks = agentMessage?.blocks ?? [];
   const costUsd = conversation.costUsd ?? agentMessage?.costUsd;
   const usage = conversation.usage ?? agentMessage?.usage;
   return {
     runId: binding.runId,
     conversationId: binding.conversationId,
+    userMessageId: binding.userMessageId,
     agentMessageId: binding.agentMessageId,
     status: conversation.status,
     snippet: conversation.snippet,
@@ -5552,6 +5600,15 @@ export function activeBackgroundRunUpdateFromState(state: WorkspaceState, bindin
     ...(costUsd === undefined ? {} : { costUsd }),
     ...(usage === undefined ? {} : { usage }),
   };
+}
+
+export function activeBackgroundRunUpdateFromState(state: WorkspaceState, binding: BackgroundRunBinding, done: boolean): ActiveBackgroundRunUpdate | null {
+  const conversation = workspaceConversationMap(state).get(binding.conversationId);
+  if (!conversation) {
+    return null;
+  }
+  const agentMessage = (state.threads[binding.conversationId] ?? []).find((message) => message.id === binding.agentMessageId);
+  return buildActiveRunUpdate(conversation, agentMessage, binding, done);
 }
 
 function mergeServerOwnedRunFields(incoming: WorkspaceConversation, current: WorkspaceConversation): WorkspaceConversation {
@@ -5618,6 +5675,11 @@ export function mergeWorkspacePutState(incoming: WorkspaceState, current: Worksp
   const threads = { ...incoming.threads };
   for (const conversationId of serverOwnedConversationIds) {
     threads[conversationId] = current.threads[conversationId] ?? threads[conversationId] ?? [];
+  }
+  for (const conversationId of incomingConversationIds) {
+    if (shouldPreserveCurrentThreadFromWorkspacePut(threads, current, conversationId)) {
+      threads[conversationId] = current.threads[conversationId] ?? threads[conversationId] ?? [];
+    }
   }
   return {
     ...incoming,
@@ -5700,6 +5762,18 @@ function ensureBackgroundUserMessage(state: WorkspaceState, binding: BackgroundR
   };
 }
 
+function upsertBoundAgentMessage(messages: readonly ChatMessage[], binding: BackgroundRunBinding, message: ChatMessage): ChatMessage[] {
+  const existingIndex = messages.findIndex((item) => item.id === binding.agentMessageId);
+  const withoutCurrent = messages.filter((item) => item.id !== binding.agentMessageId);
+  const userIndex = withoutCurrent.findIndex((item) => item.id === binding.userMessageId && item.role === "user");
+  if (userIndex < 0) {
+    return existingIndex >= 0 ? messages.map((item) => (item.id === binding.agentMessageId ? message : item)) : [...messages, message];
+  }
+  const nextUserIndex = withoutCurrent.findIndex((item, index) => index > userIndex && item.role === "user");
+  const staleReplyEnd = nextUserIndex < 0 ? withoutCurrent.length : nextUserIndex;
+  return [...withoutCurrent.slice(0, userIndex + 1), message, ...withoutCurrent.slice(staleReplyEnd)];
+}
+
 function putBackgroundAgentMessage(
   state: WorkspaceState,
   binding: BackgroundRunBinding,
@@ -5721,9 +5795,7 @@ function putBackgroundAgentMessage(
     ...state,
     threads: {
       ...state.threads,
-      [binding.conversationId]: messages.some((item) => item.id === binding.agentMessageId)
-        ? messages.map((item) => (item.id === binding.agentMessageId ? message : item))
-        : [...messages, message],
+      [binding.conversationId]: upsertBoundAgentMessage(messages, binding, message),
     },
   };
 }
@@ -5822,9 +5894,47 @@ function startBackgroundRunState(state: WorkspaceState, binding: BackgroundRunBi
   return putBackgroundAgentMessage(withSession, binding, backgroundBlocks(accumulator));
 }
 
+/** A settings object carrying just the persisted locale (the run lifecycle only
+ *  reads `settings.general.locale`), so the run start/finish never parse the
+ *  whole workspace to learn it. */
+function minimalLocaleSettings(): WorkspaceState["settings"] {
+  const settings = cloneAppSettings(defaultAppSettings);
+  return { ...settings, general: { ...settings.general, locale: cachedWorkspaceLocale } };
+}
+
+/** Write back only the ONE conversation + its (single-conversation) thread that a
+ *  run-lifecycle step changed — never DELETE+INSERT every message. This is what
+ *  keeps run start/finish off the event-loop-blocking full-state rewrite path. */
+function persistConversationDelta(state: WorkspaceState, conversationId: string): void {
+  const conversation = workspaceConversationMap(state).get(conversationId);
+  if (conversation) {
+    updateConversationData(conversation);
+  }
+  for (const message of state.threads[conversationId] ?? []) {
+    upsertMessage(conversationId, message);
+  }
+}
+
+/** Build a minimal WorkspaceState holding just one conversation + the given
+ *  messages of its thread — enough for the run-lifecycle helpers, which only
+ *  touch the binding's conversation/messages and the locale. */
+function minimalRunState(conversation: WorkspaceConversation | undefined, conversationId: string, messages: ChatMessage[]): WorkspaceState {
+  return {
+    chats: conversation ? [conversation] : [],
+    projects: [],
+    threads: { [conversationId]: messages },
+    composerDrafts: {},
+    selectedId: "",
+    settings: minimalLocaleSettings(),
+  };
+}
+
 function startPersistedBackgroundRun(binding: BackgroundRunBinding, request: RunRequest): BackgroundRunAccumulator {
   const accumulator = createBackgroundAccumulator();
-  writeWorkspaceState(startBackgroundRunState(readWorkspaceState(), binding, request, accumulator));
+  ensureWorkspaceDb();
+  const existing = [readMessage(binding.userMessageId), readMessage(binding.agentMessageId)].filter((message): message is ChatMessage => message !== undefined);
+  const minimal = minimalRunState(readConversation(binding.conversationId), binding.conversationId, existing);
+  persistConversationDelta(startBackgroundRunState(minimal, binding, request, accumulator), binding.conversationId);
   accumulator.lastPersistedAt = Date.now();
   return accumulator;
 }
@@ -6045,7 +6155,15 @@ export function finishBackgroundRunState(state: WorkspaceState, binding: Backgro
 
 function finishPersistedBackgroundRun(binding: BackgroundRunBinding, accumulator: BackgroundRunAccumulator, canceled: boolean): void {
   clearBackgroundRunPersistTimer(accumulator);
-  writeWorkspaceState(finishBackgroundRunState(readWorkspaceState(), binding, accumulator, canceled));
+  ensureWorkspaceDb();
+  const conversation = readConversation(binding.conversationId);
+  if (!conversation) {
+    accumulator.lastPersistedAt = Date.now();
+    return;
+  }
+  const agentMessage = readMessage(binding.agentMessageId);
+  const minimal = minimalRunState(conversation, binding.conversationId, agentMessage ? [agentMessage] : []);
+  persistConversationDelta(finishBackgroundRunState(minimal, binding, accumulator, canceled), binding.conversationId);
   accumulator.lastPersistedAt = Date.now();
 }
 
@@ -8103,7 +8221,9 @@ function handleRunAttach(req: IncomingMessage, res: ServerResponse): void {
     sendJson(res, 404, { error: `No active run for ${runId}.` });
     return;
   }
-  const initial = activeBackgroundRunUpdateFromState(readWorkspaceState(), handle.binding, false);
+  ensureWorkspaceDb();
+  const attachConversation = readConversation(handle.binding.conversationId);
+  const initial = attachConversation ? buildActiveRunUpdate(attachConversation, readMessage(handle.binding.agentMessageId), handle.binding, false) : null;
   if (!initial) {
     sendJson(res, 409, { error: `Active run ${runId} has no persisted workspace state.` });
     return;
