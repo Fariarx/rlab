@@ -614,8 +614,14 @@ class WorkspaceStore implements Workspace {
         const { messages } = (await response.json()) as { messages: ChatMessage[] };
         runInAction(() => {
           this.fullyLoadedThreadIds.add(id);
+          // Preserve any messages the client appended WHILE this fetch was in
+          // flight — a freshly sent user message and its streaming agent reply
+          // must never be clobbered by the loaded history (otherwise the message
+          // vanishes mid-run and the agent appears not to respond).
+          const fetchedIds = new Set(messages.map((message) => message.id));
+          const inFlight = (this.state.threads[id] ?? []).filter((message) => !fetchedIds.has(message.id));
           this.skipNextSave = true;
-          this.state = { ...this.state, threads: { ...this.state.threads, [id]: messages } };
+          this.state = { ...this.state, threads: { ...this.state.threads, [id]: [...messages, ...inFlight] } };
         });
       } catch {
         // offline / unavailable — leave unloaded; opening again retries
@@ -724,6 +730,21 @@ class WorkspaceStore implements Workspace {
     void this.flushPendingSave();
   }
 
+  /** Build the PUT body, persisting ONLY threads we hold in full. A partial
+   *  thread (lazily not yet loaded, or freshly populated by a run before its
+   *  history arrived) must never be sent — the server replaces threads it
+   *  receives, so a partial one would delete the unopened history. Omitted
+   *  threads are preserved server-side; run messages persist via the run binding. */
+  private putPayload(state: WorkspaceState): WorkspaceState {
+    const threads: Record<string, ChatMessage[]> = {};
+    for (const [id, messages] of Object.entries(state.threads)) {
+      if (this.fullyLoadedThreadIds.has(id)) {
+        threads[id] = messages;
+      }
+    }
+    return { ...state, threads };
+  }
+
   private async flushPendingSave(): Promise<void> {
     if (this.saveTimer !== null) {
       clearTimeout(this.saveTimer);
@@ -747,7 +768,7 @@ class WorkspaceStore implements Workspace {
     this.inFlightSaveState = state;
     let saveFailed = false;
     try {
-      await saveWorkspaceState(state);
+      await saveWorkspaceState(this.putPayload(state));
       runInAction(() => {
         if (this.loadError?.startsWith("Workspace save failed")) {
           this.loadError = null;
@@ -983,6 +1004,7 @@ class WorkspaceStore implements Workspace {
 
   newChat(profile: AgentProfile): string {
     const id = nextId("chat");
+    this.fullyLoadedThreadIds.add(id);
     this.setState((current) => {
       const locale = current.settings.general.locale;
       const conv: ConversationSummary = {
@@ -1015,6 +1037,7 @@ class WorkspaceStore implements Workspace {
     }
     const projectId = projectIdFromName(name);
     const conversationId = nextId("chat");
+    this.fullyLoadedThreadIds.add(conversationId);
     const conversation: ConversationSummary = {
       id: conversationId,
       title: translate(this.state.settings.general.locale, "newChat"),
@@ -1045,6 +1068,7 @@ class WorkspaceStore implements Workspace {
       throw new Error(`Project ${projectId} was not found.`);
     }
     const id = nextId("chat");
+    this.fullyLoadedThreadIds.add(id);
     this.setState((current) => {
       const locale = current.settings.general.locale;
       const conv: ConversationSummary = {
