@@ -5,9 +5,11 @@ import DescriptionOutlinedIcon from "@mui/icons-material/DescriptionOutlined";
 import ImageOutlinedIcon from "@mui/icons-material/ImageOutlined";
 import RateReviewOutlinedIcon from "@mui/icons-material/RateReviewOutlined";
 import SendIcon from "@mui/icons-material/Send";
+import CompressRoundedIcon from "@mui/icons-material/CompressRounded";
 import StopCircleIcon from "@mui/icons-material/StopCircle";
 import TuneRoundedIcon from "@mui/icons-material/TuneRounded";
-import { Box, Divider, InputBase, Menu, MenuItem, Stack, Switch, type SxProps, type Theme, Typography } from "@mui/material";
+import WarningAmberRoundedIcon from "@mui/icons-material/WarningAmberRounded";
+import { Box, Divider, InputBase, Menu, MenuItem, Stack, Switch, type SxProps, TextField, type Theme, Tooltip, Typography } from "@mui/material";
 import { type ChangeEvent, type ClipboardEvent, forwardRef, type KeyboardEvent, type MouseEvent, type ReactNode, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import { localFileUrl } from "../../lib/external-url";
@@ -15,6 +17,7 @@ import { formatTokens } from "../../lib/model-context";
 import { ImageLightbox } from "../workspace/ImageLightbox";
 import { Button, IconButton, KeyHint } from "../ui";
 import { AttachmentTile } from "./AttachmentTile";
+import { ContextGauge } from "./ContextGauge";
 import type { ComposerAttachmentDraft, ComposerDraft } from "./types";
 
 /** Pastes longer than this become a text-file attachment instead of flooding the input. */
@@ -237,6 +240,14 @@ interface ComposerProps {
   readonly contextWindow?: number;
   /** The selected conversation's cumulative cost (USD), shown in the menu. */
   readonly costUsd?: number;
+  /** Compaction controls (per conversation). `autoCompact` defaults to true;
+   *  `compactWindow` is the token override (undefined = the model's full window). */
+  readonly autoCompact?: boolean;
+  readonly compactWindow?: number;
+  readonly onAutoCompactChange?: (enabled: boolean) => void;
+  readonly onCompactWindowChange?: (window: number | undefined) => void;
+  /** Force a compaction of the conversation now (best-effort per agent). */
+  readonly onCompactNow?: () => void;
 }
 
 interface RateLimitWindow {
@@ -285,6 +296,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     contextTokens,
     contextWindow,
     costUsd,
+    autoCompact = true,
+    compactWindow,
+    onAutoCompactChange,
+    onCompactWindowChange,
+    onCompactNow,
   },
   ref,
 ) {
@@ -670,6 +686,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     return lines;
   })();
 
+  // How full the context window is (raw ratio, may exceed 1 once the thread has
+  // outgrown the window). Drives the gauge next to the options button and the
+  // over-limit warning that offers compaction.
+  const hasContextGauge = typeof contextTokens === "number" && contextTokens > 0 && typeof contextWindow === "number" && contextWindow > 0;
+  const contextOverLimit = hasContextGauge && (contextTokens as number) / (contextWindow as number) >= 1;
+
   // Compact, localized lines describing the agent's account rate-limits — one
   // row per window (5-hour, weekly, …) showing usage % and time-to-reset side
   // by side, then plan + the most-severe status.
@@ -716,6 +738,26 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     return lines;
   })();
 
+  // Opens the options menu anchored to the clicked element and refreshes the
+  // agent's account rate-limits. Shared by the options button and the context
+  // gauge (clicking the ring opens the same menu).
+  const openOptionsMenu = (anchorEl: HTMLElement) => {
+    setModeMenuAnchor(anchorEl);
+    void (async () => {
+      try {
+        const response = await fetch("/api/agent-limits", { cache: "no-store" });
+        if (response.ok) {
+          const { limits } = (await response.json()) as { limits?: Record<string, AgentRateLimit> };
+          setAgentLimit((agentId && limits ? limits[agentId] : null) ?? null);
+        }
+      } catch {
+        // Offline / unavailable — leave as no-data.
+      } finally {
+        setLimitLoaded(true);
+      }
+    })();
+  };
+
   return (
     // Plain relative Box: the only in-flow child is the input bar. The tags +
     // image thumbnails float above it (absolute, each with its own shadow), and
@@ -728,6 +770,38 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         ref={tagsRef}
         sx={{ position: "absolute", left: 0, right: 0, bottom: `calc(100% + ${16 + overlayLift}px)`, pl: "46px", display: "flex", flexWrap: "wrap", alignItems: "flex-end", gap: 0.75, pointerEvents: "none", zIndex: 6 }}
       >
+        {contextOverLimit && (
+          <Tooltip title={t("contextOverLimitHint")}>
+            <Box
+              component="button"
+              type="button"
+              data-testid="context-over-limit"
+              onClick={() => onCompactNow?.()}
+              sx={{
+                pointerEvents: "auto",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 0.5,
+                pl: 0.875,
+                pr: 1,
+                py: 0.25,
+                borderRadius: (t) => `${t.custom.radii.pill}px`,
+                fontSize: "0.74rem",
+                fontWeight: 600,
+                cursor: "pointer",
+                color: (t) => t.palette.status.error.main,
+                backgroundColor: (t) => t.custom.surfaces.s3,
+                border: (t) => `1px solid ${t.palette.status.error.main}`,
+                boxShadow: "0 1px 4px rgba(0, 0, 0, 0.18)",
+                transition: "box-shadow 120ms ease",
+                "&:hover": { boxShadow: "0 2px 6px rgba(0, 0, 0, 0.24)" },
+              }}
+            >
+              <WarningAmberRoundedIcon sx={{ fontSize: 14 }} />
+              <Box component="span">{t("contextOverLimit")}</Box>
+            </Box>
+          </Tooltip>
+        )}
         {reviewCount > 0 && (
           <FloatingTag
             tone="accent"
@@ -792,26 +866,17 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           data-testid="composer-options-button"
           aria-label={t("composerOptions")}
           sx={{ flex: "0 0 auto" }}
-          onClick={(event: MouseEvent<HTMLElement>) => {
-            setModeMenuAnchor(event.currentTarget);
-            // Refresh the agent's account rate-limits each time the menu opens.
-            void (async () => {
-              try {
-                const response = await fetch("/api/agent-limits", { cache: "no-store" });
-                if (response.ok) {
-                  const { limits } = (await response.json()) as { limits?: Record<string, AgentRateLimit> };
-                  setAgentLimit((agentId && limits ? limits[agentId] : null) ?? null);
-                }
-              } catch {
-                // Offline / unavailable — leave as no-data.
-              } finally {
-                setLimitLoaded(true);
-              }
-            })();
-          }}
+          onClick={(event: MouseEvent<HTMLElement>) => openOptionsMenu(event.currentTarget)}
         >
           <TuneRoundedIcon sx={{ fontSize: 18 }} />
         </IconButton>
+        {hasContextGauge && (
+          <ContextGauge
+            tokens={contextTokens as number}
+            window={contextWindow as number}
+            onClick={(event) => openOptionsMenu(event.currentTarget)}
+          />
+        )}
         <Menu
           anchorEl={modeMenuAnchor}
           open={Boolean(modeMenuAnchor)}
@@ -856,6 +921,59 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               </Box>
             </>
           )}
+          {/* Compaction — auto toggle, the compaction window (defaults to the
+              model's full context window), and a force-compact-now action. */}
+          <Divider sx={{ my: 0.5 }} />
+          <Box
+            sx={{ px: 2, py: 0.75, cursor: "default" }}
+            onClick={(event) => event.stopPropagation()}
+            onKeyDown={(event) => event.stopPropagation()}
+          >
+            <Typography variant="microLabel" sx={{ color: "text.secondary", display: "block", mb: 0.5 }}>
+              {t("compactionLabel")}
+            </Typography>
+            <Stack spacing={0.75}>
+              <Stack direction="row" spacing={1} sx={{ justifyContent: "space-between", alignItems: "center" }}>
+                <Typography sx={{ fontSize: "0.72rem", color: "text.secondary" }}>{t("compactionAuto")}</Typography>
+                <Switch
+                  size="small"
+                  checked={autoCompact}
+                  onChange={(event) => onAutoCompactChange?.(event.target.checked)}
+                  slotProps={{ input: { "aria-label": t("compactionAuto") } }}
+                  sx={{ mr: -0.5 }}
+                />
+              </Stack>
+              <Stack direction="row" spacing={1} sx={{ justifyContent: "space-between", alignItems: "center" }}>
+                <Typography sx={{ fontSize: "0.72rem", color: "text.secondary" }}>{t("compactionWindow")}</Typography>
+                <TextField
+                  type="number"
+                  size="small"
+                  value={typeof compactWindow === "number" ? String(compactWindow) : ""}
+                  placeholder={typeof contextWindow === "number" ? String(contextWindow) : t("compactionWindowAuto")}
+                  onChange={(event) => {
+                    const raw = event.target.value.trim();
+                    const parsed = Number.parseInt(raw, 10);
+                    onCompactWindowChange?.(raw === "" || Number.isNaN(parsed) || parsed <= 0 ? undefined : parsed);
+                  }}
+                  slotProps={{ htmlInput: { min: 0, "aria-label": t("compactionWindow"), style: { padding: "4px 8px", fontSize: "0.72rem", textAlign: "right" } } }}
+                  sx={{ width: 116, "& .MuiInputBase-root": { fontFamily: (th) => th.custom.fonts.mono } }}
+                />
+              </Stack>
+              <Button
+                variant="outlined"
+                size="small"
+                fullWidth
+                startIcon={<CompressRoundedIcon sx={{ fontSize: 15 }} />}
+                onClick={() => {
+                  setModeMenuAnchor(null);
+                  onCompactNow?.();
+                }}
+                sx={{ mt: 0.25, textTransform: "none", fontSize: "0.74rem" }}
+              >
+                {t("compactNow")}
+              </Button>
+            </Stack>
+          </Box>
           <Divider sx={{ my: 0.5 }} />
           <Box sx={{ px: 2, py: 0.75, cursor: "default" }} onClick={(event) => event.stopPropagation()}>
             <Typography variant="microLabel" sx={{ color: "text.secondary", display: "block", mb: 0.5 }}>

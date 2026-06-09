@@ -1646,6 +1646,12 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, bottomInse
           px: 1,
           borderBottom: (theme) => `1px solid ${theme.custom.borders.subtle}`,
           backgroundColor: (theme) => theme.custom.surfaces.s2,
+          // On narrow phones the fixed controls + URL field exceed the width.
+          // Let the bar scroll horizontally (hidden scrollbar) so nothing is
+          // clipped/unreachable instead of overflowing the viewport.
+          overflowX: "auto",
+          scrollbarWidth: "none",
+          "&::-webkit-scrollbar": { display: "none" },
         }}
       >
         {controlTooltip(
@@ -1673,7 +1679,7 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, bottomInse
           inputProps={{ "aria-label": t("browserPreviewUrlLabel"), "data-testid": "browser-preview-url-input" }}
           sx={{
             flex: "1 1 auto",
-            minWidth: 80,
+            minWidth: 0,
             height: 30,
             maxHeight: 30,
             px: 1.25,

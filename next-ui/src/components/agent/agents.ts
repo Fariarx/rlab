@@ -10,6 +10,7 @@ export {
   STATIC_AGENT_CLI_INFO,
   agentProfileEquals,
   agentProfileLabels,
+  compactCommandForAgent,
   defaultProfileForAgent,
   getAgent,
   getAgentStatus,

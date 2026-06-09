@@ -215,11 +215,11 @@ export function SearchCard({ block }: { readonly block: SearchBlock }) {
       icon={<SearchIcon sx={{ fontSize: 16 }} />}
       state={block.state}
       title={
-        <Stack direction="row" spacing={1} sx={{ alignItems: "baseline", flexWrap: "wrap" }}>
-          <Typography component="span" sx={titleSx}>
+        <Stack direction="row" spacing={1} sx={{ alignItems: "baseline", flexWrap: "nowrap", minWidth: 0, overflow: "hidden" }}>
+          <Typography component="span" noWrap sx={{ ...titleSx, flex: "0 0 auto" }}>
             {t("webSearch")}
           </Typography>
-          <Typography component="span" sx={{ fontSize: "0.78rem", color: "text.secondary" }}>
+          <Typography component="span" noWrap sx={{ fontSize: "0.78rem", color: "text.secondary", minWidth: 0 }}>
             “{block.query}”
           </Typography>
         </Stack>

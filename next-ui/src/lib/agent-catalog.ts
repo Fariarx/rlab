@@ -334,6 +334,15 @@ export function defaultProfileForAgent(agent: AgentId): AgentProfile {
   return { agent, model: DEFAULT_AGENT_OPTION_ID, reasoning: DEFAULT_AGENT_OPTION_ID, mode: "default" };
 }
 
+/** Best-effort slash command that tells an agent to compact/summarize its own
+ *  conversation, sent as a normal turn on the resumed session. Claude processes
+ *  `/compact` natively (SDK slash commands); Codex/OpenCode use the same verb,
+ *  Gemini uses `/compress`. Other agents may treat it as a literal message —
+ *  acceptable as a best-effort manual compaction trigger. */
+export function compactCommandForAgent(agent: AgentId): string {
+  return agent === "gemini" ? "/compress" : "/compact";
+}
+
 export function normalizeAgentProfile(value: unknown, fallbackAgent: AgentId = DEFAULT_PROFILE.agent): AgentProfile {
   const activeFallbackAgent = isAgentId(fallbackAgent) ? fallbackAgent : DEFAULT_PROFILE.agent;
   if (!isRecord(value)) {

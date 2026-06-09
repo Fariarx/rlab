@@ -201,6 +201,18 @@ export interface RunUsage {
   readonly contextTokens?: number;
 }
 
+/** Per-conversation compaction preferences. Both fields are overrides: when
+ *  unset, auto-compaction stays on and the window defaults to the model's full
+ *  context window. Mirrors the Claude SDK `autoCompactEnabled`/`autoCompactWindow`
+ *  settings; sent to the backend on every run for this conversation. */
+export interface CompactionSettings {
+  /** Auto-compact the conversation when its context window fills. Default true. */
+  readonly auto?: boolean;
+  /** Token budget the agent compacts down toward. Unset = the model's full
+   *  context window (see contextWindowForModel). */
+  readonly window?: number;
+}
+
 export interface ConversationSummary {
   readonly id: string;
   readonly title: string;
@@ -209,6 +221,8 @@ export interface ConversationSummary {
   readonly status: ConversationStatus;
   readonly agent: AgentId;
   readonly profile?: AgentProfile;
+  /** Per-conversation auto-/manual-compaction preferences. */
+  readonly compaction?: CompactionSettings;
   readonly activeRunId?: string;
   readonly unread?: boolean;
   /** Pinned conversations surface in a dedicated top group and are hidden from

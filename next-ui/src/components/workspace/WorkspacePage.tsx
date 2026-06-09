@@ -840,10 +840,14 @@ export function WorkspacePageView({
         toast({ message: t("clipboardUnavailable"), severity: "error", duration: 2500 });
       }
     },
-    onRetry: (message: ChatMessage) => {
-      notifiableRuns.current.add(ws.selectedId);
-      ws.retryMessage(ws.selectedId, message.id);
-    },
+    // Hide retry while the agent is working (no retrying an in-flight turn);
+    // an undefined handler removes the button in MessageActionBar.
+    onRetry: selectedHasActiveWork
+      ? undefined
+      : (message: ChatMessage) => {
+          notifiableRuns.current.add(ws.selectedId);
+          ws.retryMessage(ws.selectedId, message.id);
+        },
     onEditAndResend: (message: ChatMessage, text: string) => {
       notifiableRuns.current.add(ws.selectedId);
       ws.editAndResendMessage(ws.selectedId, message.id, text);
@@ -1395,6 +1399,26 @@ export function WorkspacePageView({
                 contextTokens={selected?.usage?.contextTokens}
                 contextWindow={contextWindowForModel(profile.model)}
                 costUsd={selected?.costUsd}
+                autoCompact={selected?.compaction?.auto ?? true}
+                compactWindow={selected?.compaction?.window}
+                onAutoCompactChange={(enabled) => {
+                  if (selected) {
+                    ws.setCompaction(selected.id, { auto: enabled });
+                  }
+                }}
+                onCompactWindowChange={(window) => {
+                  if (selected) {
+                    ws.setCompaction(selected.id, { window });
+                  }
+                }}
+                onCompactNow={() => {
+                  if (!selected) {
+                    return;
+                  }
+                  if (!ws.compactConversation(selected.id)) {
+                    toast({ message: t("compactionNoSession"), severity: "info", duration: 3000 });
+                  }
+                }}
               />
             )}
           </Box>

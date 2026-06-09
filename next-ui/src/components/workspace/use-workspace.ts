@@ -1,6 +1,6 @@
 import { type IReactionDisposer, makeAutoObservable, reaction, runInAction } from "mobx";
 import { useEffect, useState } from "react";
-import { normalizeAgentProfile, type AgentBlock, type AgentProfile, type ApprovalDecision, type ChatMessage, type ComposerDraft, type ConversationStatus, type ConversationSummary, type Project, type ReviewCommentEntry } from "../agent";
+import { compactCommandForAgent, normalizeAgentProfile, type AgentBlock, type AgentProfile, type ApprovalDecision, type ChatMessage, type CompactionSettings, type ComposerDraft, type ConversationStatus, type ConversationSummary, type Project, type ReviewCommentEntry } from "../agent";
 import { translate } from "../../i18n/I18nProvider";
 import { attachRunUpdates, cancelRun, loadActiveRuns, runConversation, type ActiveRunSnapshot, type ActiveRunUpdate, type RunConversationResult } from "./run-agent";
 import { nowLabel, starterThread, truncate } from "./sample-data";
@@ -432,6 +432,8 @@ export interface Workspace {
   readonly togglePin: (id: string) => void;
   readonly remove: (id: string) => void;
   readonly sendMessage: (id: string, text: string) => void;
+  readonly setCompaction: (id: string, patch: Partial<CompactionSettings>) => void;
+  readonly compactConversation: (id: string) => boolean;
   readonly addReviewComments: (id: string, comments: readonly ReviewCommentEntry[]) => void;
   readonly stopRun: (id: string) => void;
   readonly retryMessage: (id: string, messageId: string) => void;
@@ -484,6 +486,11 @@ class WorkspaceStore implements Workspace {
   private skipNextSave = false;
 
   private readonly runs = new Map<string, RunHandle>();
+  // User messages sent while a run is in flight wait here (per conversation) and
+  // are dispatched one-by-one as each run settles, so a new message never
+  // interrupts the agent mid-turn. Kept in memory; the queued user messages are
+  // already appended to the (persisted) thread for visibility.
+  private readonly pendingMessages = new Map<string, ChatMessage[]>();
 
   constructor() {
     makeAutoObservable<
@@ -787,7 +794,18 @@ class WorkspaceStore implements Workspace {
         loadedConversation.activeRunId === currentConversation.activeRunId &&
         (loadedConversation.status === "running" || loadedConversation.status === "waiting")
       ) {
-        throw new Error(`Workspace API returned stale active run ${currentConversation.activeRunId}.`);
+        // The server no longer tracks this run and it never wrote a terminal
+        // state — it was interrupted (e.g. the process was restarted mid-run).
+        // Stop the dialog: settle live blocks + clear the run so the stop button
+        // and spinners disappear instead of hanging forever. Safe because a
+        // genuinely-live run re-asserts `running` on its next streamed event
+        // (backgroundRunStatusPatch), which would re-list it in activeRunIds.
+        next = patchConversation(settleThreadLiveBlocks(next, id), id, {
+          activeRunId: undefined,
+          status: "error",
+          snippet: translate(loaded.settings.general.locale, "runInterruptedSnippet"),
+        });
+        continue;
       }
       if (!serializableEqual(currentConversation, loadedConversation)) {
         next = patchConversation(next, id, loadedConversation);
@@ -989,7 +1007,75 @@ class WorkspaceStore implements Workspace {
       ...current,
       threads: { ...current.threads, [id]: [...(current.threads[id] ?? []), userMsg] },
     }));
+    // If the agent is still working, queue this turn instead of cancelling it —
+    // it dispatches automatically when the current run settles (see drainPendingMessages).
+    if (this.runs.has(id)) {
+      const queue = this.pendingMessages.get(id) ?? [];
+      queue.push(userMsg);
+      this.pendingMessages.set(id, queue);
+      this.persistCurrentStateNow();
+      return;
+    }
     this.runTurn(id, userMsg);
+  }
+
+  /** Dispatch the next queued user message for a conversation, if any. Called
+   *  when a run settles so queued turns run in order without interrupting. */
+  private drainPendingMessages(id: string): void {
+    if (this.runs.has(id)) {
+      return;
+    }
+    const queue = this.pendingMessages.get(id);
+    if (!queue || queue.length === 0) {
+      return;
+    }
+    const next = queue.shift();
+    if (queue.length === 0) {
+      this.pendingMessages.delete(id);
+    }
+    if (next) {
+      this.runTurn(id, next);
+    }
+  }
+
+  /** Update this conversation's compaction preferences (auto on/off + window
+   *  override). Stores only non-default values to keep persisted state tidy. */
+  setCompaction(id: string, patch: Partial<CompactionSettings>): void {
+    this.setState((current) => {
+      const merged: CompactionSettings = { ...(findConversation(current, id)?.compaction ?? {}), ...patch };
+      // Keep `auto` only when explicitly off (true is the default) and `window`
+      // only when a positive override is set — otherwise drop back to undefined.
+      const cleaned: CompactionSettings = {
+        ...(merged.auto === false ? { auto: false } : {}),
+        ...(typeof merged.window === "number" && merged.window > 0 ? { window: merged.window } : {}),
+      };
+      return patchConversation(current, id, { compaction: Object.keys(cleaned).length > 0 ? cleaned : undefined });
+    });
+    this.persistCurrentStateNow();
+  }
+
+  /** Force a compaction of the conversation now. Best-effort per agent: sends the
+   *  agent's compact command (`/compact`, Gemini `/compress`) as a turn on the
+   *  resumed session. Returns false when there is no live same-agent session to
+   *  compact (nothing has run yet), so the caller can surface a hint. */
+  compactConversation(id: string): boolean {
+    const conv = this.find(id);
+    const profile = conversationProfile(conv);
+    if (!conv?.sessionId || conv.sessionAgent !== profile.agent) {
+      return false;
+    }
+    const userMsg: ChatMessage = {
+      id: nextId("u"),
+      role: "user",
+      text: translate(this.state.settings.general.locale, "compactionRequested"),
+      time: nowLabel(),
+    };
+    this.setState((current) => ({
+      ...current,
+      threads: { ...current.threads, [id]: [...(current.threads[id] ?? []), userMsg] },
+    }));
+    this.runTurn(id, userMsg, { promptOverride: compactCommandForAgent(profile.agent) });
+    return true;
   }
 
   /** Appends the batched review comments as a single block to the thread without
@@ -1005,8 +1091,11 @@ class WorkspaceStore implements Workspace {
     }));
   }
 
-  /** Run (or re-run) the agent for an existing user message in the thread. */
-  private runTurn(id: string, userMsg: ChatMessage): void {
+  /** Run (or re-run) the agent for an existing user message in the thread.
+   *  `promptOverride` sends a different prompt to the agent than the message text
+   *  shows (used by manual compaction, where the bubble reads "Compact context"
+   *  but the agent receives its `/compact` command). */
+  private runTurn(id: string, userMsg: ChatMessage, options?: { readonly promptOverride?: string }): void {
     const conv = this.find(id);
     const profile = conversationProfile(conv);
     const isDefaultTitle = isDefaultConversationTitle(conv?.title);
@@ -1018,7 +1107,9 @@ class WorkspaceStore implements Workspace {
     const canResume = Boolean(conv?.sessionId && conv.sessionAgent === profile.agent);
     const resume = canResume ? conv?.sessionId : undefined;
     let prompt: string;
-    if (canResume) {
+    if (options?.promptOverride !== undefined) {
+      prompt = options.promptOverride;
+    } else if (canResume) {
       prompt = text;
     } else {
       const thread = this.state.threads[id] ?? [];
@@ -1106,6 +1197,7 @@ class WorkspaceStore implements Workspace {
       profile,
       prompt,
       resume,
+      compaction: conv?.compaction,
       cwd: this.cwdOf(id),
       accessMode: this.state.settings.agents.accessMode,
       locale: this.state.settings.general.locale,
@@ -1150,6 +1242,11 @@ class WorkspaceStore implements Workspace {
         if (this.runs.get(id) === runHandle) {
           this.runs.delete(id);
         }
+        // Dispatch the next queued turn once this run is fully cleared. Skip if
+        // the run was cancelled (the user stopped, or a newer turn took over).
+        if (!runHandle.canceled) {
+          this.drainPendingMessages(id);
+        }
       });
   }
 
@@ -1189,14 +1286,27 @@ class WorkspaceStore implements Workspace {
 
   retryMessage(id: string, messageId: string): void {
     const thread = this.state.threads[id] ?? [];
-    const index = thread.findIndex((message) => message.role === "user" && message.id === messageId);
-    if (index < 0) {
+    // Retry is triggered from the AGENT reply (its message id), so locate that
+    // message and walk back to the user turn that produced it. (Also works when
+    // invoked directly on a user message.)
+    const target = thread.findIndex((message) => message.id === messageId);
+    if (target < 0) {
       return;
     }
-    const userMsg = thread[index];
+    let userIndex = -1;
+    for (let cursor = target; cursor >= 0; cursor -= 1) {
+      if (thread[cursor].role === "user") {
+        userIndex = cursor;
+        break;
+      }
+    }
+    if (userIndex < 0) {
+      return;
+    }
+    const userMsg = thread[userIndex];
     // Drop everything after this user message (the stale agent reply) and re-run
     // it in place — no duplicate user turn.
-    this.setState((current) => ({ ...current, threads: { ...current.threads, [id]: thread.slice(0, index + 1) } }));
+    this.setState((current) => ({ ...current, threads: { ...current.threads, [id]: thread.slice(0, userIndex + 1) } }));
     this.runTurn(id, userMsg);
   }
 

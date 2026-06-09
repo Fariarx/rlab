@@ -26,7 +26,16 @@ export function DiffCard({ block }: { readonly block: DiffBlock }) {
         sx={{ alignItems: "center", px: 1.5, py: 1, cursor: "pointer", "&:hover": { backgroundColor: (t) => t.custom.surfaces.s3 } }}
       >
         <DescriptionIcon sx={{ fontSize: 16, color: "text.secondary" }} />
-        <Typography component="span" sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.8rem", fontWeight: 600, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
+        {/* Truncate from the LEFT so the filename (right side) stays visible when
+            the path is too long — `direction: rtl` moves the ellipsis to the
+            start; the LRM (‎) keeps the latin path itself left-to-right. */}
+        <Typography
+          component="span"
+          noWrap
+          dir="rtl"
+          sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.8rem", fontWeight: 600, flex: 1, minWidth: 0, textAlign: "left" }}
+        >
+          {"‎"}
           {block.file}
         </Typography>
         <Typography component="span" sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.72rem", color: (t) => t.palette.status.ok.main }}>

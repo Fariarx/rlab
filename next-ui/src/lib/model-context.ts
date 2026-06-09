@@ -23,6 +23,21 @@ export function contextWindowForModel(model: string | undefined): number | undef
   return undefined;
 }
 
+export type ContextSeverity = "ok" | "warn" | "full";
+
+/** Classify how full a context window is, for the composer gauge + over-limit
+ *  warning. `warn` once ≥80% full; `full` at/past 100% — the conversation has
+ *  outgrown the window and should be compacted. */
+export function contextSeverity(ratio: number): ContextSeverity {
+  if (ratio >= 1) {
+    return "full";
+  }
+  if (ratio >= 0.8) {
+    return "warn";
+  }
+  return "ok";
+}
+
 /** Compact token count for display, e.g. 152_340 → "152k", 1_240 → "1.2k". */
 export function formatTokens(tokens: number): string {
   if (tokens < 1000) {

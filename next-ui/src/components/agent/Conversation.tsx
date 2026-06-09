@@ -1,5 +1,5 @@
 import { Box, Stack } from "@mui/material";
-import { useLayoutEffect, useMemo, useRef } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import { useI18n } from "../../i18n/I18nProvider";
 import { type MessageDisplayPrefs, Message } from "./Message";
@@ -102,6 +102,10 @@ export function Conversation({
   // Timestamp until which scroll activity is our own (programmatic) autoscroll,
   // so it isn't mistaken for a user scroll-up.
   const programmaticScrollUntil = useRef(0);
+  // The open-time convergence interval, kept so a user interaction can cancel it
+  // immediately (otherwise it keeps yanking the viewport back to the bottom while
+  // the user is trying to scroll up — the "won't let me scroll" bug).
+  const convergenceTimer = useRef<number | null>(null);
   const hasLiveContent = typing === true || messages.some(hasLiveAgentBlock);
   const items = useMemo<readonly ConversationItem[]>(
     () => (typing ? [...messages.map((message) => ({ kind: "message" as const, message })), { kind: "typing" as const }] : messages.map((message) => ({ kind: "message" as const, message }))),
@@ -122,6 +126,19 @@ export function Conversation({
     const sc = scrollerEl();
     if (sc) {
       sc.scrollTop = sc.scrollHeight;
+    }
+  };
+
+  // A deliberate user scroll-up takes control immediately: unpin so streaming
+  // stops following, and cancel the open-time convergence loop so it stops
+  // yanking the viewport back down. This is the reliable cross-device signal
+  // (wheel / touchmove / nav keys) — Virtuoso's own isScrolling/atBottom
+  // callbacks fire too late on touch, which is why scroll-up felt stuck.
+  const releaseToUser = () => {
+    pinnedToBottom.current = false;
+    if (convergenceTimer.current !== null) {
+      clearInterval(convergenceTimer.current);
+      convergenceTimer.current = null;
     }
   };
 
@@ -147,22 +164,78 @@ export function Conversation({
     pinnedToBottom.current = true;
     let atBottomTicks = 0;
     let elapsed = 0;
+    let lastHeight = -1;
     pinToBottom();
-    const id = setInterval(() => {
+    convergenceTimer.current = window.setInterval(() => {
       elapsed += 100;
       pinToBottom();
       const sc = scrollerEl();
+      const height = sc ? sc.scrollHeight : 0;
       const distance = sc ? sc.scrollHeight - sc.clientHeight - sc.scrollTop : 0;
-      atBottomTicks = distance <= 4 ? atBottomTicks + 1 : 0;
-      // Stop early once it's been at the bottom for ~300ms; the 4s cap only
-      // matters when images keep loading. A shorter cap keeps the open snappy.
-      if (!pinnedToBottom.current || elapsed >= 4000 || atBottomTicks >= 3) {
-        clearInterval(id);
+      // Only count "at bottom" ticks once the content height has STOPPED growing
+      // — lazy images / tall messages settle after the first scroll (slower on
+      // mobile), and declaring success too early leaves the thread mid-scroll.
+      const stable = height === lastHeight;
+      lastHeight = height;
+      atBottomTicks = distance <= 4 && stable ? atBottomTicks + 1 : 0;
+      // 6s hard cap (was 4s) gives slow mobile image loads time to settle.
+      if (convergenceTimer.current === null || elapsed >= 6000 || atBottomTicks >= 3) {
+        if (convergenceTimer.current !== null) {
+          clearInterval(convergenceTimer.current);
+          convergenceTimer.current = null;
+        }
       }
     }, 100);
-    return () => clearInterval(id);
+    return () => {
+      if (convergenceTimer.current !== null) {
+        clearInterval(convergenceTimer.current);
+        convergenceTimer.current = null;
+      }
+    };
     // Run once per mount (conversation open); the parent keys this component by
     // conversation id so a new conversation gets a fresh convergence pass.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Wire deliberate user-scroll signals to releaseToUser. Listeners live on the
+  // outer container (always present; wheel/touch events bubble up from Virtuoso's
+  // scroller) so we never miss them due to the scroller mounting late.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) {
+      return;
+    }
+    const onWheel = (event: WheelEvent) => {
+      if (event.deltaY < 0) {
+        releaseToUser();
+      }
+    };
+    const onTouchMove = () => {
+      // During the open-convergence phase any touch means "stop pulling me down".
+      // Once settled, only a drag that actually leaves the bottom unpins, so a
+      // tap-drag while pinned at the bottom doesn't stop streaming from following.
+      if (convergenceTimer.current !== null) {
+        releaseToUser();
+        return;
+      }
+      const sc = scrollerEl();
+      if (sc && sc.scrollHeight - sc.clientHeight - sc.scrollTop > 24) {
+        releaseToUser();
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "ArrowUp" || event.key === "PageUp" || event.key === "Home") {
+        releaseToUser();
+      }
+    };
+    el.addEventListener("wheel", onWheel, { passive: true });
+    el.addEventListener("touchmove", onTouchMove, { passive: true });
+    el.addEventListener("keydown", onKeyDown);
+    return () => {
+      el.removeEventListener("wheel", onWheel);
+      el.removeEventListener("touchmove", onTouchMove);
+      el.removeEventListener("keydown", onKeyDown);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

@@ -73,6 +73,9 @@ const WORKSPACE_STATE_LOCK_FILE = join(WORKSPACE_STATE_DIR, "workspace-state.loc
 const RUN_AUDIT_FILE = join(WORKSPACE_STATE_DIR, "run-audit.ndjson");
 const ATTACHMENTS_DIR = join(WORKSPACE_STATE_DIR, "attachments");
 const AMP_READ_ONLY_SETTINGS_FILE = join(WORKSPACE_STATE_DIR, "amp-read-only-settings.json");
+// Account rate-limit snapshots survive restarts here so the composer keeps
+// showing the last-known 5h/weekly windows instead of going blank on reboot.
+const AGENT_LIMITS_FILE = join(WORKSPACE_STATE_DIR, "agent-limits.json");
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 export const MAX_JSON_BODY_BYTES = 40 * 1024 * 1024;
 export const JSON_CONTENT_TYPE = "application/json; charset=utf-8";
@@ -3830,6 +3833,12 @@ interface RunRequest {
   /** Server-assigned session id for a NEW session (agents that let us set it,
    *  e.g. Gemini `--session-id`). Agents that mint their own id ignore this. */
   readonly sessionId?: string;
+  /** Auto-compact the conversation when its context window fills (Claude
+   *  `autoCompactEnabled`). Defaults to true when unset. */
+  readonly autoCompact?: boolean;
+  /** Compaction window override in tokens (Claude `autoCompactWindow`); unset =
+   *  the model's full context window. */
+  readonly compactWindow?: number;
 }
 
 /** A single rate-limit window. An account can be bounded by several at once —
@@ -3875,6 +3884,62 @@ interface AgentLimitAccumulator {
 const latestAgentLimits = new Map<string, AgentLimitAccumulator>();
 
 const WINDOW_ORDER: readonly RateLimitWindowKind[] = ["five_hour", "weekly", "overage"];
+const RATE_LIMIT_WINDOW_KINDS: ReadonlySet<string> = new Set(WINDOW_ORDER);
+
+/** Load persisted rate-limit snapshots into the in-memory store on boot, so a
+ *  restart doesn't blank the composer's limits until the next run. */
+function loadPersistedAgentLimits(): void {
+  if (!existsSync(AGENT_LIMITS_FILE)) {
+    return;
+  }
+  try {
+    const parsed = JSON.parse(readFileSync(AGENT_LIMITS_FILE, "utf8").replace(/^﻿/, "")) as unknown;
+    if (!isRecord(parsed)) {
+      return;
+    }
+    for (const [agent, value] of Object.entries(parsed)) {
+      if (!isRecord(value)) {
+        continue;
+      }
+      const windows = new Map<RateLimitWindowKind, RateLimitWindow>();
+      for (const window of Array.isArray(value.windows) ? value.windows : []) {
+        if (isRecord(window) && typeof window.kind === "string" && RATE_LIMIT_WINDOW_KINDS.has(window.kind)) {
+          windows.set(window.kind as RateLimitWindowKind, window as unknown as RateLimitWindow);
+        }
+      }
+      latestAgentLimits.set(agent, {
+        updatedAt: typeof value.updatedAt === "number" ? value.updatedAt : Date.now(),
+        plan: typeof value.plan === "string" ? value.plan : undefined,
+        windows,
+      });
+    }
+  } catch {
+    // Corrupt/partial file — start fresh; it rewrites on the next event.
+  }
+}
+
+let agentLimitsSaveTimer: ReturnType<typeof setTimeout> | null = null;
+/** Debounced write-through of the limits store (events arrive in bursts). */
+function persistAgentLimits(): void {
+  if (agentLimitsSaveTimer !== null) {
+    return;
+  }
+  agentLimitsSaveTimer = setTimeout(() => {
+    agentLimitsSaveTimer = null;
+    try {
+      mkdirSync(WORKSPACE_STATE_DIR, { recursive: true });
+      const out: Record<string, AgentRateLimit> = {};
+      for (const [agent, acc] of latestAgentLimits.entries()) {
+        out[agent] = serializeAgentLimit(acc);
+      }
+      writeFileSync(AGENT_LIMITS_FILE, JSON.stringify(out), "utf8");
+    } catch {
+      // Best-effort; limits repopulate from live events regardless.
+    }
+  }, 1000);
+}
+
+loadPersistedAgentLimits();
 const STATUS_SEVERITY: Record<string, number> = { allowed: 0, allowed_warning: 1, rejected: 2 };
 
 function limitAccumulator(agent: string): AgentLimitAccumulator {
@@ -3898,6 +3963,7 @@ function upsertLimitWindow(agent: string, window: RateLimitWindow): void {
     status: window.status ?? prev?.status,
   });
   acc.updatedAt = Date.now();
+  persistAgentLimits();
 }
 
 /** Serialize an accumulator into the API shape: ordered windows + the
@@ -3934,7 +4000,9 @@ function recordClaudeRateLimit(agent: string, info: Record<string, unknown>): vo
     kind,
     status: typeof info.status === "string" ? info.status : undefined,
     resetsAt: typeof info.resetsAt === "number" ? info.resetsAt : undefined,
-    usedPercent: typeof info.utilization === "number" ? info.utilization : undefined,
+    // Claude reports utilization as a 0–1 fraction (e.g. 0.8 = 80%); our model
+    // stores 0–100 like Codex's usedPercent, so scale it up.
+    usedPercent: typeof info.utilization === "number" ? info.utilization * 100 : undefined,
   });
 }
 
@@ -4193,6 +4261,8 @@ interface ParsedRunRequestSuccess {
   readonly requestedCwd: string;
   readonly accessMode: AgentAccessMode;
   readonly resume: string | undefined;
+  readonly autoCompact: boolean | undefined;
+  readonly compactWindow: number | undefined;
   readonly accessModeValid: boolean;
   readonly profileValid: boolean;
   readonly profileError: string;
@@ -4242,6 +4312,9 @@ export function parseRunRequestPayload(body: string): ParsedRunRequestPayload {
   }
   prompt = typeof parsed.prompt === "string" ? parsed.prompt.trim() : "";
   const resume = typeof parsed.resume === "string" && parsed.resume.trim().length > 0 ? parsed.resume.trim() : undefined;
+  const autoCompact = typeof parsed.autoCompact === "boolean" ? parsed.autoCompact : undefined;
+  const compactWindow =
+    typeof parsed.compactWindow === "number" && Number.isFinite(parsed.compactWindow) && parsed.compactWindow > 0 ? Math.floor(parsed.compactWindow) : undefined;
   requestedCwd = typeof parsed.cwd === "string" ? parsed.cwd : "";
   const parsedAccessMode = parseAccessMode(parsed.accessMode);
   if (parsedAccessMode) {
@@ -4263,6 +4336,8 @@ export function parseRunRequestPayload(body: string): ParsedRunRequestPayload {
     requestedCwd,
     accessMode,
     resume,
+    autoCompact,
+    compactWindow,
     accessModeValid,
     profileValid,
     profileError,
@@ -4305,8 +4380,12 @@ export function buildClaudeSdkOptions(request: RunRequest, cwd: string, abortCon
     // runs don't load user settings, so without this a resumed session re-reads
     // the full uncompacted history on every tool round-trip — millions of
     // cache-read tokens per message on long threads. Keeps the active context
-    // bounded so per-message limit usage stays sane.
-    settings: { autoCompactEnabled: true },
+    // bounded so per-message limit usage stays sane. The user can toggle this and
+    // set the compaction window per conversation from the composer options menu.
+    settings: {
+      autoCompactEnabled: request.autoCompact ?? true,
+      ...(typeof request.compactWindow === "number" && request.compactWindow > 0 ? { autoCompactWindow: request.compactWindow } : {}),
+    },
     permissionMode: claudePermissionModeForRequest(request),
     systemPrompt: { type: "preset", preset: "claude_code", append: CLAUDE_CHAT_UI_SYSTEM_PROMPT },
     tools: claudeToolsForRequest(request),
@@ -7248,8 +7327,10 @@ async function runOpenCodeServer(
       },
     });
   }
+  let timedOut = false;
   const runTimeout = setTimeout(() => {
     if (!abortController.signal.aborted) {
+      timedOut = true;
       abortController.abort();
     }
   }, OPENCODE_RUN_TIMEOUT_MS);
@@ -7313,7 +7394,11 @@ async function runOpenCodeServer(
     const info = isRecord(parsed.info) ? parsed.info : undefined;
     send({ type: "done", costUsd: info && typeof info.cost === "number" ? info.cost : undefined, usage: info ? runUsageFromRecord(info.tokens) : undefined });
   } catch (error) {
-    if (!abortController.signal.aborted) {
+    if (timedOut) {
+      // Surface the timeout as an error in the chat — otherwise the abort
+      // silently swallows it and the agent message hangs empty forever.
+      send({ type: "error", text: `opencode timed out after ${Math.round(OPENCODE_RUN_TIMEOUT_MS / 60000)} min.` });
+    } else if (!abortController.signal.aborted) {
       send({ type: "error", text: error instanceof Error ? error.message : String(error) });
     }
   } finally {
@@ -7495,8 +7580,10 @@ async function runCodexAppServer(
       },
     });
   }
+  let timedOut = false;
   const runTimeout = setTimeout(() => {
     if (!abortController.signal.aborted) {
+      timedOut = true;
       abortController.abort();
     }
   }, CODEX_RUN_TIMEOUT_MS);
@@ -7758,7 +7845,9 @@ async function runCodexAppServer(
 
     await turnSettled;
   } catch (error) {
-    if (!abortController.signal.aborted) {
+    if (timedOut) {
+      send({ type: "error", text: `codex timed out after ${Math.round(CODEX_RUN_TIMEOUT_MS / 60000)} min.` });
+    } else if (!abortController.signal.aborted) {
       send({ type: "error", text: error instanceof Error ? error.message : String(error) });
     }
   } finally {
@@ -7898,7 +7987,7 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
       sender.end();
       return;
     }
-    const { agent, model, reasoning, mode, prompt, requestedCwd, accessMode, resume, accessModeValid, profileValid, profileError, bindingInvalid } = parsedPayload;
+    const { agent, model, reasoning, mode, prompt, requestedCwd, accessMode, resume, autoCompact, compactWindow, accessModeValid, profileValid, profileError, bindingInvalid } = parsedPayload;
     binding = parsedPayload.binding;
 
     if (!prompt) {
@@ -7918,7 +8007,7 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
     // can resume it later. Claude/Codex/OpenCode mint their own and report it back
     // via a "session" event from their stream translators.
     const assignedSessionId = !resume && agent === "gemini" ? randomUUID() : undefined;
-    const request: RunRequest = { agent, model, reasoning, mode, prompt, accessMode, resume, sessionId: assignedSessionId };
+    const request: RunRequest = { agent, model, reasoning, mode, prompt, accessMode, resume, sessionId: assignedSessionId, autoCompact, compactWindow };
     if (assignedSessionId) {
       send({ type: "session", id: assignedSessionId });
     }

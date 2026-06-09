@@ -2,6 +2,7 @@ import type {
   AgentBlock,
   AgentProfile,
   CodeBlockData,
+  CompactionSettings,
   ConversationStatus,
   DiffBlock,
   PlanBlock,
@@ -328,6 +329,7 @@ async function streamRun(
   accessMode: AgentAccessMode,
   binding: RunPersistenceBinding | undefined,
   resume: string | undefined,
+  compaction: CompactionSettings | undefined,
   onEvent: (e: RunEvent) => void,
   onAccepted: () => void,
   signal?: AbortSignal,
@@ -335,7 +337,19 @@ async function streamRun(
   const res = await fetch("/api/run", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ agent: profile.agent, model: profile.model, reasoning: profile.reasoning, mode: profile.mode, prompt, cwd, accessMode, ...(resume ? { resume } : {}), ...binding }),
+    body: JSON.stringify({
+      agent: profile.agent,
+      model: profile.model,
+      reasoning: profile.reasoning,
+      mode: profile.mode,
+      prompt,
+      cwd,
+      accessMode,
+      ...(resume ? { resume } : {}),
+      ...(compaction?.auto !== undefined ? { autoCompact: compaction.auto } : {}),
+      ...(typeof compaction?.window === "number" ? { compactWindow: compaction.window } : {}),
+      ...binding,
+    }),
     signal,
   });
   if (!res.ok || !res.body) {
@@ -378,6 +392,9 @@ export async function runConversation(opts: {
   readonly signal?: AbortSignal;
   /** Native session id to resume (same agent continuing the conversation). */
   readonly resume?: string;
+  /** Per-conversation compaction preferences (auto on/off + window override),
+   *  forwarded to the backend so the agent compacts to the user's settings. */
+  readonly compaction?: CompactionSettings;
   readonly onAccepted?: () => void;
   /** Fires as soon as the agent reports its session id, so it can be persisted
    *  immediately (even if the run later detaches or errors). */
@@ -671,6 +688,7 @@ export async function runConversation(opts: {
       opts.accessMode,
       opts.binding,
       opts.resume,
+      opts.compaction,
       onEvent,
       () => {
         accepted = true;

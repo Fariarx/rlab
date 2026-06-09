@@ -1,6 +1,6 @@
 import CheckIcon from "@mui/icons-material/Check";
-import { Box, Stack, Typography } from "@mui/material";
-import { useState } from "react";
+import { Box, Collapse, Stack, Typography } from "@mui/material";
+import { useEffect, useRef, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import { Button } from "../ui";
 import { pop } from "./anim";
@@ -23,7 +23,19 @@ export function OptionSelect({
   const [confirmed, setConfirmed] = useState(Boolean(block.selected?.length));
   const [pending, setPending] = useState(false);
   const [selectionError, setSelectionError] = useState<string | null>(null);
+  // A question already answered in a previous session (reload) is hidden right
+  // away; one answered live lingers a few seconds then gracefully collapses.
+  const preAnswered = useRef(Boolean(block.selected?.length));
+  const [dismissed, setDismissed] = useState(preAnswered.current);
   const { t } = useI18n();
+
+  useEffect(() => {
+    if (!confirmed || dismissed) {
+      return;
+    }
+    const timer = window.setTimeout(() => setDismissed(true), 3000);
+    return () => window.clearTimeout(timer);
+  }, [confirmed, dismissed]);
 
   const toggle = (id: string) => {
     if (confirmed) {
@@ -54,14 +66,18 @@ export function OptionSelect({
   };
 
   return (
-    <Box
-      sx={{
-        borderRadius: (t) => `${t.custom.radii.md}px`,
-        border: (t) => `1px solid ${t.custom.borders.subtle}`,
-        backgroundColor: (t) => t.custom.surfaces.s2,
-        p: 1.5,
-      }}
-    >
+    <Collapse in={!dismissed} timeout={500} unmountOnExit>
+      <Box
+        sx={{
+          borderRadius: (t) => `${t.custom.radii.md}px`,
+          border: (t) => `1px solid ${t.custom.borders.subtle}`,
+          backgroundColor: (t) => t.custom.surfaces.s2,
+          p: 1.5,
+          // Fade in concert with the height collapse for a graceful exit.
+          opacity: dismissed ? 0 : 1,
+          transition: "opacity 450ms ease",
+        }}
+      >
       <Typography sx={{ fontSize: "0.86rem", mb: 1.25, color: "text.primary" }}>{block.prompt}</Typography>
       <Stack spacing={1}>
         {block.options.map((option) => {
@@ -127,6 +143,7 @@ export function OptionSelect({
           </Box>
         )}
       </Box>
-    </Box>
+      </Box>
+    </Collapse>
   );
 }
