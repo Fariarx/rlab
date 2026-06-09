@@ -387,11 +387,8 @@ function patchAgentMessageUsage(
   };
 }
 
-function upsertAgentMessageForUserTurn(messages: readonly ChatMessage[], userMessageId: string | undefined, message: ChatMessage): ChatMessage[] {
+function upsertAgentMessageForUserTurn(messages: readonly ChatMessage[], userMessageId: string, message: ChatMessage): ChatMessage[] {
   const existingIndex = messages.findIndex((item) => item.id === message.id);
-  if (!userMessageId) {
-    return existingIndex >= 0 ? messages.map((item) => (item.id === message.id ? message : item)) : [...messages, message];
-  }
   const withoutCurrent = messages.filter((item) => item.id !== message.id);
   const userIndex = withoutCurrent.findIndex((item) => item.id === userMessageId && item.role === "user");
   if (userIndex < 0) {
@@ -633,7 +630,7 @@ class WorkspaceStore implements Workspace {
       try {
         const response = await fetch(`/api/thread?conversationId=${encodeURIComponent(id)}`, { cache: "no-store" });
         if (!response.ok) {
-          return;
+          throw new Error(`Thread load failed (${response.status})`);
         }
         const { messages } = (await response.json()) as { messages: ChatMessage[] };
         runInAction(() => {
@@ -647,8 +644,10 @@ class WorkspaceStore implements Workspace {
           this.skipNextSave = true;
           this.state = { ...this.state, threads: { ...this.state.threads, [id]: [...messages, ...inFlight] } };
         });
-      } catch {
-        // offline / unavailable — leave unloaded; opening again retries
+      } catch (error) {
+        runInAction(() => {
+          this.loadError = error instanceof Error ? error.message : String(error);
+        });
       } finally {
         this.threadLoads.delete(id);
       }
@@ -883,7 +882,15 @@ class WorkspaceStore implements Workspace {
     let active: ActiveRunSnapshot[];
     try {
       active = await loadActiveRuns();
-    } catch {
+    } catch (error) {
+      if (seq !== this.loadSeq) {
+        return;
+      }
+      if (this.runs.size > 0) {
+        runInAction(() => {
+          this.loadError = error instanceof Error ? error.message : String(error);
+        });
+      }
       return;
     }
     if (seq !== this.loadSeq) {
@@ -976,6 +983,8 @@ class WorkspaceStore implements Workspace {
     const controller = new AbortController();
     const runHandle: RunHandle = { controller, runId: run.runId, serverOwned: true, canceled: false };
     this.runs.set(run.conversationId, runHandle);
+    let terminalUpdateReceived = false;
+    let attachErrorMessage: string | null = null;
     attachRunUpdates({
       runId: run.runId,
       signal: controller.signal,
@@ -983,6 +992,7 @@ class WorkspaceStore implements Workspace {
         if (this.runs.get(run.conversationId) !== runHandle) {
           return;
         }
+        terminalUpdateReceived = terminalUpdateReceived || update.done || !isLiveRunStatus(update.status);
         runInAction(() => {
           this.skipNextSave = true;
           this.state = patchActiveRunUpdate(this.state, update);
@@ -994,13 +1004,20 @@ class WorkspaceStore implements Workspace {
         if (controller.signal.aborted || runHandle.canceled) {
           return;
         }
+        attachErrorMessage = error instanceof Error ? error.message : String(error);
         runInAction(() => {
-          this.loadError = error instanceof Error ? error.message : String(error);
+          this.loadError = attachErrorMessage;
         });
       })
       .finally(() => {
         if (this.runs.get(run.conversationId) === runHandle) {
           this.runs.delete(run.conversationId);
+        }
+        if (!controller.signal.aborted && !runHandle.canceled && !terminalUpdateReceived) {
+          runInAction(() => {
+            this.loadError = attachErrorMessage ?? translate(this.state.settings.general.locale, "runUpdateStreamDisconnected");
+          });
+          void this.refreshBackgroundRuns();
         }
       });
   }

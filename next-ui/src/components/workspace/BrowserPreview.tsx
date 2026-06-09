@@ -39,7 +39,7 @@ interface BrowserTab {
   readonly active: boolean;
 }
 
-type BrowserActivityEventType =
+export type BrowserActivityEventType =
   | "session.created"
   | "tab.created"
   | "tab.selected"
@@ -77,7 +77,7 @@ type BrowserActionTarget =
   | (BrowserActionFrameTarget & { readonly text: string })
   | (BrowserActionFrameTarget & { readonly label: string });
 
-interface BrowserActivityEvent {
+export interface BrowserActivityEvent {
   readonly id: number;
   readonly sessionId: string;
   readonly tabId: string;
@@ -128,6 +128,7 @@ interface BrowserPreviewProps {
   readonly sessionId: string;
   readonly active: boolean;
   readonly onSendAnnotation?: (message: string) => void;
+  readonly onActivityEventsChange?: (events: readonly BrowserActivityEvent[]) => void;
   readonly bottomInset?: number;
   /** External request to open a URL (e.g. from a chat link's "open in preview").
    *  The nonce changes per request so re-opening the same URL re-triggers. */
@@ -653,19 +654,6 @@ function appendBrowserActivityEvent(events: readonly BrowserActivityEvent[], eve
   return [...withoutDuplicate, event].sort((a, b) => a.id - b.id).slice(-8);
 }
 
-function browserEventTone(type: BrowserActivityEventType): "info" | "success" | "warning" | "error" {
-  if (type === "console.error" || type === "page.error" || type === "network.failed") {
-    return "error";
-  }
-  if (type === "navigation.done" || type === "tab.selected") {
-    return "success";
-  }
-  if (type === "navigation.started") {
-    return "warning";
-  }
-  return "info";
-}
-
 function browserTabLabel(tab: BrowserTab): string {
   if (tab.title.trim()) {
     return tab.title.trim();
@@ -1096,7 +1084,7 @@ function isReplayableBrowserActivityEvent(event: BrowserActivityEvent): boolean 
   );
 }
 
-export function BrowserPreview({ sessionId, active, onSendAnnotation, bottomInset = 0, openRequest, serverHostOverride = "" }: BrowserPreviewProps) {
+export function BrowserPreview({ sessionId, active, onSendAnnotation, onActivityEventsChange, bottomInset = 0, openRequest, serverHostOverride = "" }: BrowserPreviewProps) {
   const { t } = useI18n();
   const { toast } = useToast();
   const frameRef = useRef<HTMLIFrameElement | null>(null);
@@ -1202,6 +1190,14 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, bottomInse
   useEffect(() => {
     liveUrlRef.current = liveUrl;
   }, [liveUrl]);
+
+  useEffect(() => {
+    setActivityEvents([]);
+  }, [sessionId]);
+
+  useEffect(() => {
+    onActivityEventsChange?.(activityEvents);
+  }, [activityEvents, onActivityEventsChange]);
 
   useEffect(() => {
     if (!active || browserInstalled !== null) {
@@ -2043,93 +2039,6 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, bottomInse
                     pointerEvents: "none",
                   }}
                 />
-              )}
-              {activityEvents.length > 0 && (
-                <Box
-                  data-testid="browser-preview-activity"
-                  aria-label={t("browserPreviewActivityLabel")}
-                  sx={{
-                    position: "absolute",
-                    right: 10,
-                    bottom: 10,
-                    zIndex: 3,
-                    width: "min(380px, calc(100% - 20px))",
-                    maxHeight: 150,
-                    overflow: "hidden",
-                    display: "flex",
-                    flexDirection: "column",
-                    gap: 0.5,
-                    p: 0.75,
-                    borderRadius: 1,
-                    border: (theme) => `1px solid ${theme.custom.borders.subtle}`,
-                    backgroundColor: (theme) => theme.custom.surfaces.s2,
-                    boxShadow: "0 4px 12px rgba(0, 0, 0, 0.14)",
-                    pointerEvents: "none",
-                  }}
-                >
-                  <Typography
-                    sx={{
-                      fontFamily: (theme) => theme.custom.fonts.mono,
-                      fontSize: "0.66rem",
-                      fontWeight: 800,
-                      color: "text.secondary",
-                      textTransform: "uppercase",
-                    }}
-                  >
-                    {t("browserPreviewActivityTitle")}
-                  </Typography>
-                  {[...activityEvents].reverse().slice(0, 4).map((event) => {
-                    const tone = browserEventTone(event.type);
-                    return (
-                      <Box
-                        key={event.id}
-                        sx={{
-                          minWidth: 0,
-                          display: "grid",
-                          gridTemplateColumns: "8px minmax(0, 1fr)",
-                          alignItems: "baseline",
-                          columnGap: 0.75,
-                        }}
-                      >
-                        <Box
-                          component="span"
-                          aria-hidden="true"
-                          sx={{
-                            width: 7,
-                            height: 7,
-                            borderRadius: "50%",
-                            backgroundColor: (theme) =>
-                              tone === "error"
-                                ? theme.palette.status.error.main
-                                : tone === "warning"
-                                  ? theme.palette.status.running.main
-                                  : tone === "success"
-                                    ? theme.palette.status.ok.main
-                                    : theme.palette.status.info.main,
-                          }}
-                        />
-                        <Typography
-                          noWrap
-                          title={event.detail ? `${event.label}: ${event.detail}` : event.label}
-                          sx={{
-                            minWidth: 0,
-                            fontFamily: (theme) => theme.custom.fonts.mono,
-                            fontSize: "0.72rem",
-                            color: "text.primary",
-                          }}
-                        >
-                          {event.label}
-                          {event.detail ? (
-                            <Box component="span" sx={{ color: "text.secondary" }}>
-                              {" · "}
-                              {event.detail}
-                            </Box>
-                          ) : null}
-                        </Typography>
-                      </Box>
-                    );
-                  })}
-                </Box>
               )}
             </Box>
             {panelState && panelPosition && (

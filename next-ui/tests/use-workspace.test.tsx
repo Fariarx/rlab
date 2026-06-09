@@ -602,6 +602,7 @@ describe("useWorkspace", () => {
             activeRunController = controller;
             controller.enqueue(new TextEncoder().encode(`${JSON.stringify({ type: "session", id: sessionId })}\n`));
             controller.enqueue(new TextEncoder().encode(`${JSON.stringify({ type: "text", text: "ok" })}\n`));
+            controller.enqueue(new TextEncoder().encode(`${JSON.stringify({ type: "done" })}\n`));
             controller.close();
           },
         });
@@ -707,6 +708,7 @@ describe("useWorkspace", () => {
           update: {
             runId: "run-existing",
             conversationId: "chat-2",
+            userMessageId: "test-user-message",
             agentMessageId: "test-agent-message",
             status: "done",
             snippet: "finished",
@@ -723,6 +725,26 @@ describe("useWorkspace", () => {
       expect(screen.getByTestId("status")).toHaveTextContent("done");
     });
     expect(screen.getByTestId("loading")).toHaveTextContent("false");
+  });
+
+  it("reattaches when a background run attach stream closes before a terminal update", async () => {
+    state = {
+      ...state,
+      chats: state.chats.map((chat) => (chat.id === "chat-2" ? { ...chat, activeRunId: "run-existing", status: "running" } : chat)),
+    };
+    render(<Probe />);
+
+    await screen.findByText("chat-2");
+    await waitFor(() => {
+      expect(attachRunRequests).toEqual(["/api/run-attach?runId=run-existing"]);
+    });
+
+    attachRunController?.close();
+
+    await waitFor(() => {
+      expect(attachRunRequests).toEqual(["/api/run-attach?runId=run-existing", "/api/run-attach?runId=run-existing"]);
+    });
+    expect(screen.getByTestId("status")).toHaveTextContent("running");
   });
 
   it("reattaches to a server-active run the persisted status missed (e.g. after a reload)", async () => {
@@ -779,6 +801,7 @@ describe("useWorkspace", () => {
           update: {
             runId: "run-live",
             conversationId: "chat-2",
+            userMessageId: "test-user-message",
             agentMessageId: "test-agent-message",
             status: "waiting",
             snippet: "Waiting for input",
@@ -822,6 +845,7 @@ describe("useWorkspace", () => {
           update: {
             runId: "run-existing",
             conversationId: "chat-2",
+            userMessageId: "test-user-message",
             agentMessageId: "test-agent-message",
             status: "running",
             snippet: "streamed token",
@@ -1017,6 +1041,7 @@ describe("useWorkspace", () => {
           update: {
             runId: "run-existing",
             conversationId: "chat-2",
+            userMessageId: "test-user-message",
             agentMessageId: "test-agent-message",
             status: "done",
             snippet: "attached finished",

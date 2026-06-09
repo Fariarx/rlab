@@ -276,8 +276,9 @@ describe("BrowserPreview", () => {
     MockEventSource.instances = [];
     vi.stubGlobal("EventSource", MockEventSource);
     vi.stubGlobal("fetch", vi.fn(async () => Response.json(browserSnapshot({ url: "http://localhost:3000/", title: "Local app" }))));
+    const onActivityEventsChange = vi.fn();
 
-    renderWithTheme(<BrowserPreview sessionId="test-session" active />);
+    renderWithTheme(<BrowserPreview sessionId="test-session" active onActivityEventsChange={onActivityEventsChange} />);
 
     fireEvent.change(screen.getByLabelText("URL для просмотра"), { target: { value: "http://localhost:3000/" } });
     fireEvent.click(screen.getByRole("button", { name: "Открыть" }));
@@ -295,8 +296,8 @@ describe("BrowserPreview", () => {
       at: "2026-06-07T09:00:01.000Z",
     });
 
-    expect(await screen.findByTestId("browser-preview-activity")).toHaveTextContent("Click");
-    expect(screen.getByTestId("browser-preview-activity")).toHaveTextContent("x=160 y=120");
+    await waitFor(() => expect(onActivityEventsChange).toHaveBeenCalledWith([expect.objectContaining({ label: "Click", detail: "x=160 y=120" })]));
+    expect(screen.queryByTestId("browser-preview-activity")).not.toBeInTheDocument();
     expect(screen.getByTestId("browser-preview-action-marker")).toBeInTheDocument();
   });
 
@@ -364,11 +365,12 @@ describe("BrowserPreview", () => {
     });
     const { screenshot: _screenshot, ...bridgeState } = state;
     vi.stubGlobal("fetch", vi.fn(async () => Response.json(bridgeState)));
+    const onActivityEventsChange = vi.fn();
 
-    renderWithTheme(<BrowserPreview sessionId="test-session" active />);
+    renderWithTheme(<BrowserPreview sessionId="test-session" active onActivityEventsChange={onActivityEventsChange} />);
 
-    expect(await screen.findByTestId("browser-preview-activity")).toHaveTextContent("Click");
-    expect(screen.getByTestId("browser-preview-activity")).toHaveTextContent("x=555 y=222");
+    await waitFor(() => expect(onActivityEventsChange).toHaveBeenCalledWith([expect.objectContaining({ label: "Click", detail: "x=555 y=222" })]));
+    expect(screen.queryByTestId("browser-preview-activity")).not.toBeInTheDocument();
     expect(screen.getByTestId("browser-preview-action-marker")).toBeInTheDocument();
     expect(screen.getByTitle("Живой просмотр страницы")).toHaveAttribute("src", "http://localhost:3000/agent");
     expect(screen.getByLabelText("URL для просмотра")).toHaveValue("http://localhost:3000/agent");

@@ -108,6 +108,46 @@ describe("runConversation", () => {
     expect(blocks.at(-1)).toEqual([{ kind: "status", level: "ok", text: "Done" }]);
   });
 
+  it("surfaces a foreground stream that closes before done as an explicit error", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => streamResponse([{ type: "start" }])));
+    const blocks: AgentBlock[][] = [];
+
+    const result = await runConversation({
+      profile: DEFAULT_PROFILE,
+      prompt: "answer",
+      accessMode: "read-only",
+      locale: "en",
+      onBlocks: (nextBlocks) => blocks.push(nextBlocks),
+    });
+
+    expect(result.status).toBe("error");
+    expect(blocks.at(-1)).toContainEqual({ kind: "status", level: "error", text: "Run stream closed before completion" });
+  });
+
+  it("detaches a server-owned stream that closes before done", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => streamResponse([{ type: "start" }])));
+    const blocks: AgentBlock[][] = [];
+
+    const result = await runConversation({
+      profile: DEFAULT_PROFILE,
+      prompt: "answer",
+      accessMode: "read-only",
+      locale: "ru",
+      binding: {
+        conversationId: "chat-1",
+        runId: "run-1",
+        userMessageId: "user-1",
+        userMessageTime: "10:00",
+        agentMessageId: "agent-1",
+        agentMessageTime: "10:00",
+      },
+      onBlocks: (nextBlocks) => blocks.push(nextBlocks),
+    });
+
+    expect(result.status).toBe("detached");
+    expect(blocks.at(-1)).toContainEqual({ kind: "status", level: "info", text: "Запуск продолжается в фоне; идёт синхронизация с сервером" });
+  });
+
   it("maps Edit tool calls to diff blocks", async () => {
     vi.stubGlobal(
       "fetch",
@@ -559,6 +599,7 @@ describe("runConversation", () => {
     const update = {
       runId: "run-1",
       conversationId: "chat-1",
+      userMessageId: "user-1",
       agentMessageId: "agent-1",
       status: "done",
       snippet: "done",
@@ -576,5 +617,26 @@ describe("runConversation", () => {
     });
 
     expect(updates).toEqual([update]);
+  });
+
+  it("rejects attach stream updates without a bound user message id", async () => {
+    const update = {
+      runId: "run-1",
+      conversationId: "chat-1",
+      agentMessageId: "agent-1",
+      status: "done",
+      snippet: "done",
+      time: "10:00",
+      done: true,
+      blocks: [{ kind: "text", text: "done", streaming: false }],
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => rawChunkResponse(JSON.stringify({ type: "update", update }))));
+
+    await expect(
+      attachRunUpdates({
+        runId: "run-1",
+        onUpdate: vi.fn(),
+      }),
+    ).rejects.toThrow("Malformed run attach event");
   });
 });

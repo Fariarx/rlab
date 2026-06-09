@@ -190,6 +190,48 @@ export function upsertMessage(conversationId: string, message: ChatMessage): voi
     .run(message.id, conversationId, position, JSON.stringify(message));
 }
 
+/** Upsert a bound agent reply immediately after its user message. Any stale
+ *  non-user messages between that user turn and the next user turn are removed,
+ *  which makes retries/reattached background runs converge in SQLite exactly the
+ *  way the live in-memory thread does. */
+export function upsertAgentMessageForUserTurn(conversationId: string, userMessageId: string, message: ChatMessage): void {
+  const handle = database();
+  if (message.role !== "agent") {
+    throw new Error("Only agent messages can be upserted for a user turn.");
+  }
+  const existingAgent = handle.prepare("SELECT conversation_id AS conversationId FROM messages WHERE id = ?").get(message.id) as { conversationId: string } | undefined;
+  if (existingAgent && existingAgent.conversationId !== conversationId) {
+    throw new Error(`Message ${message.id} belongs to a different conversation.`);
+  }
+  const userRow = handle.prepare("SELECT position, data FROM messages WHERE conversation_id = ? AND id = ?").get(conversationId, userMessageId) as
+    | { position: number; data: string }
+    | undefined;
+  if (!userRow) {
+    throw new Error(`User message ${userMessageId} is missing from conversation ${conversationId}.`);
+  }
+  const userMessage = JSON.parse(userRow.data) as ChatMessage;
+  if (userMessage.role !== "user") {
+    throw new Error(`Message ${userMessageId} is not a user message.`);
+  }
+  const laterRows = handle.prepare("SELECT position, data FROM messages WHERE conversation_id = ? AND position > ? ORDER BY position").all(conversationId, userRow.position) as Array<{
+    position: number;
+    data: string;
+  }>;
+  const nextUserPosition = laterRows.find((row) => (JSON.parse(row.data) as ChatMessage).role === "user")?.position;
+  transaction(() => {
+    handle.prepare("DELETE FROM messages WHERE id = ?").run(message.id);
+    if (nextUserPosition === undefined) {
+      handle.prepare("DELETE FROM messages WHERE conversation_id = ? AND position > ?").run(conversationId, userRow.position);
+    } else {
+      handle.prepare("DELETE FROM messages WHERE conversation_id = ? AND position > ? AND position < ?").run(conversationId, userRow.position, nextUserPosition);
+      if (nextUserPosition === userRow.position + 1) {
+        handle.prepare("UPDATE messages SET position = position + 1 WHERE conversation_id = ? AND position >= ?").run(conversationId, nextUserPosition);
+      }
+    }
+    handle.prepare("INSERT INTO messages(id, conversation_id, position, data) VALUES(?, ?, ?, ?)").run(message.id, conversationId, userRow.position + 1, JSON.stringify(message));
+  });
+}
+
 /** Read a single conversation summary (hot path: patch status without loading
  *  the whole workspace). */
 export function readConversation(conversationId: string): ConversationSummary | undefined {

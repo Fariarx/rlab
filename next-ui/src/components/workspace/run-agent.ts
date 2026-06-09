@@ -182,7 +182,7 @@ export interface ActiveRunSnapshot {
 export interface ActiveRunUpdate {
   readonly runId: string;
   readonly conversationId: string;
-  readonly userMessageId?: string;
+  readonly userMessageId: string;
   readonly agentMessageId: string;
   readonly status: ConversationStatus;
   readonly snippet: string;
@@ -245,7 +245,7 @@ function isActiveRunUpdate(value: unknown): value is ActiveRunUpdate {
     isRecord(value) &&
     typeof value.runId === "string" &&
     typeof value.conversationId === "string" &&
-    (value.userMessageId === undefined || typeof value.userMessageId === "string") &&
+    typeof value.userMessageId === "string" &&
     typeof value.agentMessageId === "string" &&
     isConversationStatus(value.status) &&
     typeof value.snippet === "string" &&
@@ -431,6 +431,7 @@ export async function runConversation(opts: {
   let costUsd: number | undefined;
   let usage: RunUsage | undefined;
   let done = false;
+  let doneEventReceived = false;
   let canceled = false;
   let detached = false;
   let accepted = false;
@@ -676,6 +677,7 @@ export async function runConversation(opts: {
         opts.onSession?.(e.id);
         break;
       case "done":
+        doneEventReceived = true;
         costUsd = e.costUsd;
         usage = e.usage;
         break;
@@ -700,6 +702,13 @@ export async function runConversation(opts: {
       },
       opts.signal,
     );
+    if (!doneEventReceived) {
+      if (opts.binding && accepted) {
+        detached = true;
+      } else {
+        statuses.push({ level: "error", text: translate(opts.locale, "runStreamClosedError") });
+      }
+    }
   } catch (err) {
     if (isAbortError(err, opts.signal)) {
       canceled = true;

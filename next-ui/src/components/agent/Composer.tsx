@@ -3,6 +3,7 @@ import AutoAwesomeRoundedIcon from "@mui/icons-material/AutoAwesomeRounded";
 import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
 import DescriptionOutlinedIcon from "@mui/icons-material/DescriptionOutlined";
 import ImageOutlinedIcon from "@mui/icons-material/ImageOutlined";
+import OpenInBrowserIcon from "@mui/icons-material/OpenInBrowser";
 import RateReviewOutlinedIcon from "@mui/icons-material/RateReviewOutlined";
 import SendIcon from "@mui/icons-material/Send";
 import CompressRoundedIcon from "@mui/icons-material/CompressRounded";
@@ -241,6 +242,26 @@ function MeterRow({ label, value, percent }: { readonly label: string; readonly 
   );
 }
 
+interface ComposerBrowserActivityEvent {
+  readonly id: number;
+  readonly type: string;
+  readonly label: string;
+  readonly detail?: string;
+}
+
+function browserActivityTone(type: string): "info" | "success" | "warning" | "error" {
+  if (type === "console.error" || type === "page.error" || type === "network.failed") {
+    return "error";
+  }
+  if (type === "navigation.done" || type === "tab.selected") {
+    return "success";
+  }
+  if (type === "navigation.started") {
+    return "warning";
+  }
+  return "info";
+}
+
 /** Imperative handle so a parent drop-zone (the whole chat pane) can hand files
  *  to the composer's attachment pipeline. */
 export interface ComposerHandle {
@@ -294,6 +315,8 @@ interface ComposerProps {
   readonly onCompactWindowChange?: (window: number | undefined) => void;
   /** Force a compaction of the conversation now (best-effort per agent). */
   readonly onCompactNow?: () => void;
+  /** Browser Preview activity, shown inside the input options menu. */
+  readonly browserActivityEvents?: readonly ComposerBrowserActivityEvent[];
 }
 
 interface RateLimitWindow {
@@ -347,6 +370,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     onAutoCompactChange,
     onCompactWindowChange,
     onCompactNow,
+    browserActivityEvents,
   },
   ref,
 ) {
@@ -385,6 +409,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const { t } = useI18n();
   const composerValue = value ?? internalValue;
   const composerAttachments = attachments ?? internalAttachments;
+  const showBrowserActivitySection = browserActivityEvents !== undefined;
   const latestDraftRef = useRef<ComposerDraft>({ text: composerValue, attachments: composerAttachments });
   latestDraftRef.current = { text: composerValue, attachments: composerAttachments };
 
@@ -964,6 +989,82 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               <Switch size="small" checked={mode.id === activeMode} onChange={() => undefined} tabIndex={-1} sx={modeSwitchSx} />
             </MenuItem>
           ))}
+          {showBrowserActivitySection && (
+            <>
+              <Divider sx={{ my: 0.5 }} />
+              <Box
+                data-testid="composer-browser-activity-section"
+                sx={{ px: 2, py: 0.75, cursor: "default" }}
+                onClick={(event) => event.stopPropagation()}
+              >
+                <Stack direction="row" spacing={0.75} sx={{ alignItems: "center", mb: 0.75 }}>
+                  <OpenInBrowserIcon sx={{ fontSize: 15, color: "text.secondary" }} />
+                  <Typography variant="microLabel" sx={{ color: "text.secondary", display: "block" }}>
+                    {t("browserPreviewActivityTitle")}
+                  </Typography>
+                </Stack>
+                {browserActivityEvents.length > 0 ? (
+                  <Stack spacing={0.65}>
+                    {[...browserActivityEvents].reverse().slice(0, 4).map((event) => {
+                      const tone = browserActivityTone(event.type);
+                      return (
+                        <Box
+                          key={event.id}
+                          sx={{
+                            minWidth: 0,
+                            display: "grid",
+                            gridTemplateColumns: "8px minmax(0, 1fr)",
+                            alignItems: "baseline",
+                            columnGap: 0.75,
+                          }}
+                        >
+                          <Box
+                            component="span"
+                            aria-hidden="true"
+                            sx={{
+                              width: 7,
+                              height: 7,
+                              borderRadius: "50%",
+                              backgroundColor: (theme) =>
+                                tone === "error"
+                                  ? theme.palette.status.error.main
+                                  : tone === "warning"
+                                    ? theme.palette.status.running.main
+                                    : tone === "success"
+                                      ? theme.palette.status.ok.main
+                                      : theme.palette.status.info.main,
+                            }}
+                          />
+                          <Typography
+                            noWrap
+                            title={event.detail ? `${event.label}: ${event.detail}` : event.label}
+                            sx={{
+                              minWidth: 0,
+                              fontFamily: (theme) => theme.custom.fonts.mono,
+                              fontSize: "0.72rem",
+                              color: "text.primary",
+                            }}
+                          >
+                            {event.label}
+                            {event.detail ? (
+                              <Box component="span" sx={{ color: "text.secondary" }}>
+                                {" · "}
+                                {event.detail}
+                              </Box>
+                            ) : null}
+                          </Typography>
+                        </Box>
+                      );
+                    })}
+                  </Stack>
+                ) : (
+                  <Typography sx={{ fontSize: "0.72rem", color: "text.tertiary" }}>
+                    {t("browserPreviewActivityEmpty")}
+                  </Typography>
+                )}
+              </Box>
+            </>
+          )}
           {/* Conversation context (БЕСЕДА) */}
           {contextLines.length > 0 && (
             <>

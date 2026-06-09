@@ -2893,7 +2893,12 @@ Built-in agents:
     // not an empty patch — otherwise a prior "interrupted" reconcile leaves it
     // stuck at "error" while the agent keeps working.
     const streaming = backgroundRunStatusPatch(binding, [{ kind: "text", text: "working" }], "en");
-    expect(streaming).toEqual({ status: "running", activeRunId: "run-live", time: "2026-06-06T14:00:01.000Z" });
+    expect(streaming).toEqual({ status: "running", activeRunId: "run-live", snippet: "working", time: "2026-06-06T14:00:01.000Z" });
+
+    // Tool-only runs still overwrite stale interrupted snippets while the turn
+    // is alive, even before any assistant text arrives.
+    const toolOnly = backgroundRunStatusPatch(binding, [{ kind: "tool", name: "Shell", summary: "npm run dev", state: "running" }], "en");
+    expect(toolOnly).toEqual({ status: "running", activeRunId: "run-live", snippet: "npm run dev", time: "2026-06-06T14:00:01.000Z" });
 
     // A block awaiting input pins it to "waiting" but still keeps the runId.
     const waiting = backgroundRunStatusPatch(binding, [{ kind: "approval", title: "Run cmd" }], "en");

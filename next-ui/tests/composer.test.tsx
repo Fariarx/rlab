@@ -150,6 +150,33 @@ describe("Composer", () => {
     expect(menuPaper).toHaveStyle({ boxShadow: "0 4px 12px rgba(0, 0, 0, 0.14)" });
   });
 
+  it("shows browser agent activity in the options menu only when provided", () => {
+    const { unmount } = renderWithTheme(<Composer placeholder="Написать" />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Опции" }));
+    expect(screen.queryByTestId("composer-browser-activity-section")).not.toBeInTheDocument();
+
+    unmount();
+    renderWithTheme(
+      <Composer
+        placeholder="Написать"
+        browserActivityEvents={[
+          {
+            id: 1,
+            type: "navigation.done",
+            label: "Navigation finished",
+            detail: "https://example.com/",
+          },
+        ]}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Опции" }));
+
+    expect(screen.getByTestId("composer-browser-activity-section")).toHaveTextContent("Агент в браузере");
+    expect(screen.getByTestId("composer-browser-activity-section")).toHaveTextContent("Navigation finished");
+    expect(screen.getByTestId("composer-browser-activity-section")).toHaveTextContent("https://example.com/");
+  });
+
   it("uses a light shadow for floating work-mode tags", () => {
     renderWithTheme(
       <Composer

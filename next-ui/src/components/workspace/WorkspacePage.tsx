@@ -68,7 +68,7 @@ import { SettingsDialog } from "../settings/SettingsDialog";
 import { Button, EmptyState, IconButton, useToast } from "../ui";
 import { CommandPalette, type CommandPaletteItem } from "./CommandPalette";
 import { CreateProjectDialog } from "./CreateProjectDialog";
-import { BrowserPreview } from "./BrowserPreview";
+import { BrowserPreview, type BrowserActivityEvent } from "./BrowserPreview";
 import { type DiffCommentApi, GitView } from "./GitPanel";
 import { ResourcesPanel } from "./ResourcesPanel";
 import { TerminalView } from "./TerminalView";
@@ -314,9 +314,10 @@ export function WorkspacePageView({
   const composerDockRef = useRef<HTMLDivElement | null>(null);
   const contentBottomInset = composerDockHeight + (composerTagsHeight > 0 ? composerTagsHeight + 22 : 0) + composerOverlayLift;
   const showTerminal = ws.settings.appearance.showTerminal ?? false;
-  // The terminal and browser-preview tabs have their own controls, so the
-  // floating agent composer (and its tags) is hidden there.
-  const composerVisible = view !== "terminal" && view !== "preview";
+  // The terminal has its own command input; the browser preview still uses the
+  // composer menu for browser-agent activity.
+  const composerVisible = view !== "terminal";
+  const [browserActivityEvents, setBrowserActivityEvents] = useState<readonly BrowserActivityEvent[]>([]);
   const showView = (next: WorkspaceView) => setView(next);
   // Pending code-review comments, attached to diff lines in the Git view and sent
   // to the thread as one block (without starting an agent run).
@@ -1339,7 +1340,17 @@ export function WorkspacePageView({
                 </Box>
               )}
               <Box sx={{ position: "absolute", inset: 0, display: view === "preview" ? "block" : "none" }}>
-                {selected ? <BrowserPreview sessionId={selected.id} active={view === "preview"} onSendAnnotation={sendBrowserAnnotation} openRequest={browserOpenRequest} serverHostOverride={ws.settings.general.previewServerHost} /> : null}
+                {selected ? (
+                  <BrowserPreview
+                    sessionId={selected.id}
+                    active={view === "preview"}
+                    onSendAnnotation={sendBrowserAnnotation}
+                    onActivityEventsChange={setBrowserActivityEvents}
+                    openRequest={browserOpenRequest}
+                    serverHostOverride={ws.settings.general.previewServerHost}
+                    bottomInset={view === "preview" ? contentBottomInset : 0}
+                  />
+                ) : null}
               </Box>
               {/* Keyed by folder so each project's terminal keeps its own scrollback. */}
               {showTerminal && (
@@ -1430,6 +1441,7 @@ export function WorkspacePageView({
                     toast({ message: t("compactionNoSession"), severity: "info", duration: 3000 });
                   }
                 }}
+                browserActivityEvents={view === "preview" ? browserActivityEvents : undefined}
               />
             )}
           </Box>

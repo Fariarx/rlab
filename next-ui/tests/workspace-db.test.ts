@@ -12,6 +12,7 @@ import {
   readThreadFromDb,
   readWorkspaceStateFromDb,
   updateConversationData,
+  upsertAgentMessageForUserTurn,
   upsertMessage,
   workspaceDbHasState,
   writeWorkspaceShellPreservingThreads,
@@ -28,6 +29,7 @@ const conv = (id: string, extra: Partial<ConversationSummary> = {}): Conversatio
   ...extra,
 });
 const msg = (id: string, text: string): ChatMessage => ({ id, role: "agent", blocks: [{ kind: "text", text }] });
+const userMsg = (id: string, text: string): ChatMessage => ({ id, role: "user", text, time: "12:00" });
 
 let dir: string;
 beforeEach(() => {
@@ -80,6 +82,44 @@ describe("workspace-db", () => {
     expect(after.chats[0].status).toBe("done");
     expect(after.chats[0].snippet).toBe("answer");
     expect(after.threads.c1).toHaveLength(2);
+  });
+
+  it("upserts a bound agent reply after its user turn and deletes stale replies", () => {
+    writeWorkspaceStateToDb({
+      ...buildEmptyWorkspaceState(),
+      chats: [conv("c1")],
+      threads: {
+        c1: [userMsg("u1", "try again"), msg("a-stale-1", "old failure"), msg("a-stale-2", "old duplicate"), userMsg("u2", "later"), msg("a-later", "later answer")],
+      },
+      selectedId: "c1",
+    });
+
+    upsertAgentMessageForUserTurn("c1", "u1", msg("a-new", "new answer"));
+    expect(readThreadFromDb("c1").map((message) => message.id)).toEqual(["u1", "a-new", "u2", "a-later"]);
+
+    upsertAgentMessageForUserTurn("c1", "u1", msg("a-new", "final answer"));
+    const thread = readThreadFromDb("c1");
+    expect(thread.map((message) => message.id)).toEqual(["u1", "a-new", "u2", "a-later"]);
+    expect(thread[1].blocks).toEqual([{ kind: "text", text: "final answer" }]);
+  });
+
+  it("inserts a bound agent reply before an immediate next user turn", () => {
+    writeWorkspaceStateToDb({
+      ...buildEmptyWorkspaceState(),
+      chats: [conv("c1")],
+      threads: { c1: [userMsg("u1", "first"), userMsg("u2", "second")] },
+      selectedId: "c1",
+    });
+
+    upsertAgentMessageForUserTurn("c1", "u1", msg("a1", "answer"));
+
+    expect(readThreadFromDb("c1").map((message) => message.id)).toEqual(["u1", "a1", "u2"]);
+  });
+
+  it("rejects a bound agent reply when the user turn is missing", () => {
+    writeWorkspaceStateToDb({ ...buildEmptyWorkspaceState(), chats: [conv("c1")], threads: { c1: [msg("a1", "answer")] }, selectedId: "c1" });
+
+    expect(() => upsertAgentMessageForUserTurn("c1", "u-missing", msg("a-new", "new answer"))).toThrow("User message u-missing is missing");
   });
 
   it("filtered read loads only the requested threads; readThreadFromDb loads one", () => {

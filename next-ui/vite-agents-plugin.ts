@@ -20,7 +20,7 @@ import {
   type Locale,
 } from "./src/lib/app-settings";
 import { buildEmptyWorkspaceState, buildInitialWorkspaceState, cloneWorkspaceState, type WorkspaceState } from "./src/lib/workspace-state";
-import { initWorkspaceDb, readConversation, readMessage, readMessageBlocks, readSelectedConversationId, readThreadFromDb, readWorkspaceStateFromDb, updateConversationData, upsertMessage, workspaceDbHasState, writeWorkspaceShellPreservingThreads, writeWorkspaceStateToDb } from "./workspace-db";
+import { initWorkspaceDb, readConversation, readMessage, readMessageBlocks, readSelectedConversationId, readThreadFromDb, readWorkspaceStateFromDb, updateConversationData, upsertAgentMessageForUserTurn, upsertMessage, workspaceDbHasState, writeWorkspaceShellPreservingThreads, writeWorkspaceStateToDb } from "./workspace-db";
 import {
   agentProfileEquals,
   claudeAgentNameFromMode,
@@ -86,6 +86,7 @@ export const BROWSER_ACTION_TIMEOUT_MS = 5000;
 const BROWSER_EVAL_SCRIPT_MAX_CHARS = 8000;
 const AGENT_CONFIG_FILE = join(WORKSPACE_STATE_DIR, "agent-config.json");
 const BACKGROUND_RUN_PERSIST_INTERVAL_MS = 1000;
+const STREAM_HEARTBEAT_INTERVAL_MS = 10_000;
 
 interface Detect {
   readonly bins: readonly string[];
@@ -5505,6 +5506,44 @@ function snippetFromBlocks(blocks: readonly AgentBlock[], locale: Locale): strin
   return clip(snippetSource.replace(/\s+/g, " "), 60);
 }
 
+function liveSnippetSource(block: AgentBlock): string {
+  switch (block.kind) {
+    case "text":
+    case "reasoning":
+    case "status":
+      return block.text;
+    case "tool":
+      return block.summary || block.name;
+    case "command":
+      return block.command;
+    case "search":
+      return block.query;
+    case "plan":
+      return block.steps.find((step) => step.state === "running")?.label ?? block.steps.at(-1)?.label ?? "";
+    case "diff":
+      return block.file;
+    case "code":
+      return block.language ? `${block.language} code` : "code";
+    case "approval":
+      return block.title;
+    case "options":
+      return block.prompt;
+    case "suggested":
+      return block.actions[0]?.label ?? "";
+    case "citation":
+      return block.sources[0]?.label ?? "";
+    case "review":
+      return block.comments[0]?.file ?? "";
+    default:
+      return "";
+  }
+}
+
+function liveSnippetFromBlocks(blocks: readonly AgentBlock[], locale: Locale): string {
+  const snippetSource = [...blocks].reverse().map(liveSnippetSource).find((text) => text.trim().length > 0) ?? serverRunSnippet(locale, "runDoneSnippet");
+  return clip(snippetSource.replace(/\s+/g, " "), 60);
+}
+
 function patchWorkspaceConversation(state: WorkspaceState, id: string, patch: Partial<WorkspaceState["chats"][number]>): WorkspaceState {
   return {
     ...state,
@@ -5814,7 +5853,7 @@ function persistBackgroundRunSnapshot(binding: BackgroundRunBinding, accumulator
     ...(accumulator.costUsd === undefined ? {} : { costUsd: accumulator.costUsd }),
     ...(accumulator.usage === undefined ? {} : { usage: accumulator.usage }),
   };
-  upsertMessage(binding.conversationId, message);
+  upsertAgentMessageForUserTurn(binding.conversationId, binding.userMessageId, message);
   const conversation = readConversation(binding.conversationId);
   if (conversation) {
     const patched = { ...conversation, ...backgroundRunStatusPatch(binding, blocks, cachedWorkspaceLocale) };
@@ -5905,13 +5944,17 @@ function minimalLocaleSettings(): WorkspaceState["settings"] {
 /** Write back only the ONE conversation + its (single-conversation) thread that a
  *  run-lifecycle step changed — never DELETE+INSERT every message. This is what
  *  keeps run start/finish off the event-loop-blocking full-state rewrite path. */
-function persistConversationDelta(state: WorkspaceState, conversationId: string): void {
+function persistConversationDelta(state: WorkspaceState, conversationId: string, binding?: BackgroundRunBinding): void {
   const conversation = workspaceConversationMap(state).get(conversationId);
   if (conversation) {
     updateConversationData(conversation);
   }
   for (const message of state.threads[conversationId] ?? []) {
-    upsertMessage(conversationId, message);
+    if (binding && message.id === binding.agentMessageId) {
+      upsertAgentMessageForUserTurn(conversationId, binding.userMessageId, message);
+    } else {
+      upsertMessage(conversationId, message);
+    }
   }
 }
 
@@ -5934,7 +5977,7 @@ function startPersistedBackgroundRun(binding: BackgroundRunBinding, request: Run
   ensureWorkspaceDb();
   const existing = [readMessage(binding.userMessageId), readMessage(binding.agentMessageId)].filter((message): message is ChatMessage => message !== undefined);
   const minimal = minimalRunState(readConversation(binding.conversationId), binding.conversationId, existing);
-  persistConversationDelta(startBackgroundRunState(minimal, binding, request, accumulator), binding.conversationId);
+  persistConversationDelta(startBackgroundRunState(minimal, binding, request, accumulator), binding.conversationId, binding);
   accumulator.lastPersistedAt = Date.now();
   return accumulator;
 }
@@ -6090,7 +6133,7 @@ export function backgroundRunStatusPatch(
 ): Partial<WorkspaceState["chats"][number]> {
   return blocksNeedInput(blocks)
     ? { status: "waiting", activeRunId: binding.runId, snippet: serverRunSnippet(locale, "runNeedsInputSnippet"), time: binding.agentMessageTime }
-    : { status: "running", activeRunId: binding.runId, time: binding.agentMessageTime };
+    : { status: "running", activeRunId: binding.runId, snippet: liveSnippetFromBlocks(blocks, locale), time: binding.agentMessageTime };
 }
 
 function applyBackgroundRunEvent(binding: BackgroundRunBinding, accumulator: BackgroundRunAccumulator, event: RunEvent): void {
@@ -6163,7 +6206,7 @@ function finishPersistedBackgroundRun(binding: BackgroundRunBinding, accumulator
   }
   const agentMessage = readMessage(binding.agentMessageId);
   const minimal = minimalRunState(conversation, binding.conversationId, agentMessage ? [agentMessage] : []);
-  persistConversationDelta(finishBackgroundRunState(minimal, binding, accumulator, canceled), binding.conversationId);
+  persistConversationDelta(finishBackgroundRunState(minimal, binding, accumulator, canceled), binding.conversationId, binding);
   accumulator.lastPersistedAt = Date.now();
 }
 
@@ -7448,11 +7491,38 @@ export function createOpenCodeStreamTranslator(): (line: string) => RunEvent[] {
   };
 }
 
+function setNdjsonStreamHeaders(res: ServerResponse): void {
+  res.setHeader("Content-Type", "application/x-ndjson");
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+}
+
+function startNdjsonHeartbeat(res: ServerResponse): () => void {
+  let stopped = false;
+  const timer = setInterval(() => {
+    if (!stopped && !res.writableEnded) {
+      res.write("\n");
+    }
+  }, STREAM_HEARTBEAT_INTERVAL_MS);
+  const cleanup = () => {
+    if (stopped) {
+      return;
+    }
+    stopped = true;
+    clearInterval(timer);
+  };
+  res.on("close", cleanup);
+  return cleanup;
+}
+
 function createRunEventSender(res: ServerResponse): { readonly send: (event: RunEvent) => void; readonly sendDone: () => void; readonly end: () => void; readonly isClosed: () => boolean } {
   let doneSent = false;
   let closed = false;
+  const stopHeartbeat = startNdjsonHeartbeat(res);
   res.on("close", () => {
     closed = true;
+    stopHeartbeat();
   });
   const send = (event: RunEvent) => {
     if (event.type === "done") {
@@ -7469,6 +7539,7 @@ function createRunEventSender(res: ServerResponse): { readonly send: (event: Run
     send,
     sendDone: () => send({ type: "done" }),
     end: () => {
+      stopHeartbeat();
       if (!closed && !res.writableEnded) {
         res.end();
       }
@@ -8229,8 +8300,7 @@ function handleRunAttach(req: IncomingMessage, res: ServerResponse): void {
     return;
   }
 
-  res.setHeader("Content-Type", "application/x-ndjson");
-  res.setHeader("Cache-Control", "no-store");
+  setNdjsonStreamHeaders(res);
   const sendUpdate = (update: ActiveBackgroundRunUpdate) => {
     if (res.writableEnded) {
       return;
@@ -8238,7 +8308,10 @@ function handleRunAttach(req: IncomingMessage, res: ServerResponse): void {
     res.write(`${JSON.stringify({ type: "update", update })}\n`);
   };
   let unsubscribe: (() => void) | null = null;
+  let stopHeartbeat: (() => void) | null = null;
   const cleanup = () => {
+    stopHeartbeat?.();
+    stopHeartbeat = null;
     unsubscribe?.();
     unsubscribe = null;
   };
@@ -8254,7 +8327,9 @@ function handleRunAttach(req: IncomingMessage, res: ServerResponse): void {
     sendJson(res, 404, { error: `No active run for ${runId}.` });
     return;
   }
+  stopHeartbeat = startNdjsonHeartbeat(res);
   res.on("close", cleanup);
+  res.flushHeaders();
   sendUpdate(initial);
 }
 
@@ -8272,8 +8347,7 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
     }
   });
   req.on("end", () => {
-    res.setHeader("Content-Type", "application/x-ndjson");
-    res.setHeader("Cache-Control", "no-store");
+    setNdjsonStreamHeaders(res);
     const sender = createRunEventSender(res);
     let accumulator: BackgroundRunAccumulator | null = null;
     let binding: BackgroundRunBinding | null = null;
