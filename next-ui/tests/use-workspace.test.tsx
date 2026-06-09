@@ -20,6 +20,12 @@ function Probe() {
       <button type="button" onClick={() => workspace.sendMessage(workspace.selectedId, "Persist this message")}>
         send
       </button>
+      <button type="button" onClick={() => workspace.setConversationProfile(workspace.selectedId, { agent: "claude-code", model: "default", reasoning: "default", mode: "default" })}>
+        agent-claude
+      </button>
+      <button type="button" onClick={() => workspace.setConversationProfile(workspace.selectedId, { agent: "codex", model: "default", reasoning: "default", mode: "default" })}>
+        agent-codex
+      </button>
       <button type="button" onClick={() => workspace.updateComposerDraft(workspace.selectedId, { text: "a", attachments: [] })}>
         draft-a
       </button>
@@ -77,6 +83,20 @@ function activeRunsPayloadFromState(state: WorkspaceState) {
   };
 }
 
+interface RunRequestRecord {
+  readonly accessMode?: string;
+  readonly agent?: string;
+  readonly agentMessageId?: string;
+  readonly conversationId?: string;
+  readonly prompt?: string;
+  readonly model?: string;
+  readonly reasoning?: string;
+  readonly resume?: string;
+  readonly runId?: string;
+  readonly userMessageId?: string;
+  readonly mode?: string;
+}
+
 describe("useWorkspace", () => {
   let state: WorkspaceState;
   let localStorageSetItem: ReturnType<typeof vi.fn>;
@@ -86,18 +106,7 @@ describe("useWorkspace", () => {
   let attachRunSignal: AbortSignal | undefined;
   let attachRunController: ReadableStreamDefaultController<Uint8Array> | undefined;
   let attachRunRequests: string[] = [];
-  let runRequests: Array<{
-    readonly accessMode?: string;
-    readonly agent?: string;
-    readonly agentMessageId?: string;
-    readonly conversationId?: string;
-    readonly prompt?: string;
-    readonly model?: string;
-    readonly reasoning?: string;
-    readonly runId?: string;
-    readonly userMessageId?: string;
-    readonly mode?: string;
-  }> = [];
+  let runRequests: RunRequestRecord[] = [];
   let runCancelRequests: Array<{ readonly runId?: string }> = [];
 
   beforeEach(() => {
@@ -142,18 +151,7 @@ describe("useWorkspace", () => {
           });
         }
         if (url === "/api/run") {
-          runRequests.push(JSON.parse(String(init?.body ?? "{}")) as {
-            accessMode?: string;
-            agent?: string;
-            agentMessageId?: string;
-            conversationId?: string;
-            prompt?: string;
-            model?: string;
-            reasoning?: string;
-            runId?: string;
-            userMessageId?: string;
-            mode?: string;
-          });
+          runRequests.push(JSON.parse(String(init?.body ?? "{}")) as RunRequestRecord);
           activeRunSignal = init?.signal as AbortSignal | undefined;
           const stream = new ReadableStream<Uint8Array>({
             start(controller) {
@@ -311,6 +309,58 @@ describe("useWorkspace", () => {
     expect(savesAfter).toHaveLength(savesBefore + 1);
     expect(state.composerDrafts["chat-2"]?.text).toBe("ab");
     expect(localStorageSetItem).not.toHaveBeenCalledWith(expect.stringContaining("rlab-workspace"), expect.any(String));
+  });
+
+  it("retries transient workspace save failures and clears the save error after success", async () => {
+    vi.useFakeTimers();
+    let saveAttempts = 0;
+    vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/workspace" && (!init || init.method === "GET")) {
+        return Response.json(state);
+      }
+      if (url === "/api/workspace" && init?.method === "PUT") {
+        saveAttempts += 1;
+        if (saveAttempts === 1) {
+          return new Response("bad gateway", { status: 502 });
+        }
+        state = JSON.parse(String(init.body)) as WorkspaceState;
+        return Response.json(state);
+      }
+      if (url === "/api/runs") {
+        return Response.json(activeRunsPayloadFromState(state));
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    render(<Probe />);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByText("chat-2")).toBeInTheDocument();
+
+    await act(async () => {
+      screen.getByRole("button", { name: "draft-a" }).click();
+      await vi.advanceTimersByTimeAsync(250);
+    });
+
+    expect(saveAttempts).toBe(1);
+    expect(screen.getByTestId("error")).toHaveTextContent("Workspace save failed (502)");
+    expect(state.composerDrafts["chat-2"]?.text).not.toBe("a");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_999);
+    });
+    expect(saveAttempts).toBe(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+
+    expect(saveAttempts).toBe(2);
+    expect(state.composerDrafts["chat-2"]?.text).toBe("a");
+    expect(screen.getByTestId("error")).toHaveTextContent("none");
   });
 
   it("persists application settings to the server instead of localStorage", async () => {
@@ -514,6 +564,82 @@ describe("useWorkspace", () => {
         reasoning: "high",
         mode: "default",
       });
+    });
+  });
+
+  it("keeps native session forks per agent and resumes the selected agent's branch", async () => {
+    state = {
+      ...state,
+      chats: state.chats.map((chat) =>
+        chat.id === "chat-2"
+          ? { ...chat, activeRunId: undefined, status: "idle", agent: "codex", profile: { agent: "codex", model: "default", reasoning: "default", mode: "default" } }
+          : chat,
+      ),
+    };
+    vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/workspace" && (!init || init.method === "GET")) {
+        return Response.json(state);
+      }
+      if (url === "/api/workspace" && init?.method === "PUT") {
+        state = JSON.parse(String(init.body)) as WorkspaceState;
+        return Response.json(state);
+      }
+      if (url === "/api/runs") {
+        return Response.json(activeRunsPayloadFromState(state));
+      }
+      if (url === "/api/run") {
+        const request = JSON.parse(String(init?.body ?? "{}")) as RunRequestRecord;
+        runRequests.push(request);
+        const sessionId = `${request.agent ?? "agent"}-session-${runRequests.length}`;
+        activeRunSignal = init?.signal as AbortSignal | undefined;
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            activeRunController = controller;
+            controller.enqueue(new TextEncoder().encode(`${JSON.stringify({ type: "session", id: sessionId })}\n`));
+            controller.enqueue(new TextEncoder().encode(`${JSON.stringify({ type: "text", text: "ok" })}\n`));
+            controller.close();
+          },
+        });
+        return new Response(stream, {
+          headers: { "Content-Type": "application/x-ndjson" },
+        });
+      }
+      if (url === "/api/run-cancel") {
+        runCancelRequests.push(JSON.parse(String(init?.body ?? "{}")) as { runId?: string });
+        return Response.json({ canceled: true });
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    render(<Probe />);
+
+    await screen.findByText("chat-2");
+    screen.getByRole("button", { name: "send" }).click();
+    await waitFor(() => expect(runRequests).toHaveLength(1));
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("done"));
+    expect(runRequests[0]).toMatchObject({ agent: "codex", prompt: expect.stringContaining("Persist this message") });
+    expect(runRequests[0]?.resume).toBeUndefined();
+    expect(state.chats.find((chat) => chat.id === "chat-2")?.agentSessions).toEqual({ codex: "codex-session-1" });
+
+    screen.getByRole("button", { name: "agent-claude" }).click();
+    screen.getByRole("button", { name: "send" }).click();
+    await waitFor(() => expect(runRequests).toHaveLength(2));
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("done"));
+    expect(runRequests[1]).toMatchObject({ agent: "claude-code", prompt: expect.stringContaining("This is a continuing conversation") });
+    expect(runRequests[1]?.resume).toBeUndefined();
+    expect(state.chats.find((chat) => chat.id === "chat-2")?.agentSessions).toEqual({
+      "claude-code": "claude-code-session-2",
+      codex: "codex-session-1",
+    });
+
+    screen.getByRole("button", { name: "agent-codex" }).click();
+    screen.getByRole("button", { name: "send" }).click();
+    await waitFor(() => expect(runRequests).toHaveLength(3));
+    expect(runRequests[2]).toMatchObject({
+      agent: "codex",
+      prompt: "Persist this message",
+      resume: "codex-session-1",
     });
   });
 

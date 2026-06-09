@@ -425,7 +425,7 @@ export async function runConversation(opts: {
   const suggested: SuggestedActionsBlock[] = [];
   const approvals: Array<{ id: string; title: string; detail?: string }> = [];
   const options: Array<{ id: string; prompt: string; multi?: boolean; options: ReadonlyArray<{ readonly id: string; readonly label: string; readonly description?: string }> }> = [];
-  const statuses: Array<{ level: "warn" | "error"; text: string }> = [];
+  const statuses: Array<{ level: "ok" | "warn" | "error"; text: string }> = [];
   let costUsd: number | undefined;
   let usage: RunUsage | undefined;
   let done = false;
@@ -653,7 +653,9 @@ export async function runConversation(opts: {
         break;
       case "status":
         started = true;
-        if (e.level === "warn" || e.level === "error") {
+        // "info" stays ephemeral (model/cwd/access diagnostics); "ok" is a
+        // meaningful success note (e.g. context compaction) and renders.
+        if (e.level === "ok" || e.level === "warn" || e.level === "error") {
           statuses.push({ level: e.level, text: e.text });
           emitBlocks();
         }
@@ -735,6 +737,11 @@ export async function runConversation(opts: {
   // before the cancel, show an explicit "stopped" note instead of an empty bubble.
   if (canceled && finalBlocks.length === 0) {
     finalBlocks = [{ kind: "status", level: "warn", text: translate(opts.locale, "runCanceledSnippet") }];
+  } else if (!canceled && finalBlocks.length === 0) {
+    // A turn that settled without emitting any block (e.g. a slash command the
+    // agent handled internally) must not leave the agent bubble stuck on the
+    // empty "thinking" placeholder — surface an explicit "done" note instead.
+    finalBlocks = [{ kind: "status", level: "ok", text: translate(opts.locale, "runDoneSnippet") }];
   }
   opts.onBlocks(finalBlocks);
 

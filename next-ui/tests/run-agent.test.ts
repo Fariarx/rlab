@@ -68,6 +68,46 @@ describe("runConversation", () => {
     vi.unstubAllGlobals();
   });
 
+  it("renders an `ok` status (e.g. compaction) and settles the turn", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        streamResponse([
+          { type: "status", level: "ok", text: "context compacted · 120k → 38k tokens" },
+          { type: "done" },
+        ]),
+      ),
+    );
+    const blocks: AgentBlock[][] = [];
+
+    const result = await runConversation({
+      profile: DEFAULT_PROFILE,
+      prompt: "/compact",
+      accessMode: "read-only",
+      locale: "ru",
+      onBlocks: (nextBlocks) => blocks.push(nextBlocks),
+    });
+
+    expect(result.status).toBe("done");
+    expect(blocks.at(-1)).toEqual([{ kind: "status", level: "ok", text: "context compacted · 120k → 38k tokens" }]);
+  });
+
+  it("never leaves a settled turn with zero blocks (no hung thinking bubble)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => streamResponse([{ type: "done" }])));
+    const blocks: AgentBlock[][] = [];
+
+    const result = await runConversation({
+      profile: DEFAULT_PROFILE,
+      prompt: "/compact",
+      accessMode: "read-only",
+      locale: "en",
+      onBlocks: (nextBlocks) => blocks.push(nextBlocks),
+    });
+
+    expect(result.status).toBe("done");
+    expect(blocks.at(-1)).toEqual([{ kind: "status", level: "ok", text: "Done" }]);
+  });
+
   it("maps Edit tool calls to diff blocks", async () => {
     vi.stubGlobal(
       "fetch",

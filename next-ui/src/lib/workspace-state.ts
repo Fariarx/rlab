@@ -1,5 +1,5 @@
 import type { AgentBlock, ChatMessage, ComposerDraft, ConversationSummary, Project } from "../components/agent/types";
-import { normalizeAgentProfile } from "./agent-catalog";
+import { isAgentId, normalizeAgentProfile, type AgentId } from "./agent-catalog";
 import { cloneAppSettings, defaultAppSettings, type AppSettings } from "./app-settings";
 import { buildInitialThreads, initialChats, initialProjects } from "./workspace-sample-data";
 
@@ -69,7 +69,20 @@ export function cloneWorkspaceState(state: WorkspaceState): WorkspaceState {
 
 function cloneConversation(conversation: ConversationSummary): ConversationSummary {
   const profile = normalizeAgentProfile(conversation.profile, conversation.agent);
-  return { ...conversation, agent: profile.agent, profile };
+  return { ...conversation, agent: profile.agent, profile, agentSessions: cloneAgentSessions(conversation) };
+}
+
+function cloneAgentSessions(conversation: ConversationSummary): Partial<Record<AgentId, string>> | undefined {
+  const sessions: Partial<Record<AgentId, string>> = {};
+  for (const [agent, sessionId] of Object.entries(conversation.agentSessions ?? {})) {
+    if (isAgentId(agent) && typeof sessionId === "string" && sessionId.trim().length > 0) {
+      sessions[agent] = sessionId;
+    }
+  }
+  if (conversation.sessionAgent && conversation.sessionId && isAgentId(conversation.sessionAgent)) {
+    sessions[conversation.sessionAgent] = conversation.sessionId;
+  }
+  return Object.keys(sessions).length > 0 ? sessions : undefined;
 }
 
 function cloneThreadMessages(messages: readonly ChatMessage[]): ChatMessage[] {

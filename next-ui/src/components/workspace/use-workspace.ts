@@ -1,6 +1,6 @@
 import { type IReactionDisposer, makeAutoObservable, reaction, runInAction } from "mobx";
 import { useEffect, useState } from "react";
-import { compactCommandForAgent, normalizeAgentProfile, type AgentBlock, type AgentProfile, type ApprovalDecision, type ChatMessage, type CompactionSettings, type ComposerDraft, type ConversationStatus, type ConversationSummary, type Project, type ReviewCommentEntry } from "../agent";
+import { compactCommandForAgent, normalizeAgentProfile, type AgentBlock, type AgentId, type AgentProfile, type ApprovalDecision, type ChatMessage, type CompactionSettings, type ComposerDraft, type ConversationStatus, type ConversationSummary, type Project, type ReviewCommentEntry } from "../agent";
 import { translate } from "../../i18n/I18nProvider";
 import { attachRunUpdates, cancelRun, loadActiveRuns, runConversation, type ActiveRunSnapshot, type ActiveRunUpdate, type RunConversationResult } from "./run-agent";
 import { nowLabel, starterThread, truncate } from "./sample-data";
@@ -9,6 +9,7 @@ import { buildEmptyWorkspaceState, buildInitialWorkspaceState, cloneWorkspaceSta
 
 const WORKSPACE_LOAD_RETRY_MS = 15_000;
 const WORKSPACE_SAVE_DEBOUNCE_MS = 250;
+const WORKSPACE_SAVE_RETRY_MS = 2_000;
 
 let idSeq = 1000;
 const nextId = (prefix: string) => `${prefix}-${++idSeq}`;
@@ -148,6 +149,16 @@ function patchConversation(state: WorkspaceState, id: string, patch: Partial<Con
       conversations: p.conversations.map((c) => (c.id === id ? { ...c, ...patch } : c)),
     })),
   };
+}
+
+function conversationSessionId(conversation: ConversationSummary | null | undefined, agent: AgentId): string | undefined {
+  return conversation?.agentSessions?.[agent] ?? (conversation?.sessionAgent === agent ? conversation.sessionId : undefined);
+}
+
+function patchConversationAgentSession(state: WorkspaceState, id: string, agent: AgentId, sessionId: string): WorkspaceState {
+  const conversation = findConversation(state, id);
+  const agentSessions: Partial<Record<AgentId, string>> = { ...(conversation?.agentSessions ?? {}), [agent]: sessionId };
+  return patchConversation(state, id, { agentSessions, sessionId, sessionAgent: agent });
 }
 
 function patchApprovalDecision(state: WorkspaceState, conversationId: string, approvalId: string, decision: ApprovalDecision): WorkspaceState {
@@ -471,6 +482,8 @@ class WorkspaceStore implements Workspace {
 
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
 
+  private saveRetryTimer: ReturnType<typeof setTimeout> | null = null;
+
   private pendingSaveState: WorkspaceState | null = null;
 
   private pendingSaveUrgent = false;
@@ -500,6 +513,7 @@ class WorkspaceStore implements Workspace {
       | "runs"
       | "saveDisposer"
       | "saveTimer"
+      | "saveRetryTimer"
       | "pendingSaveState"
       | "pendingSaveUrgent"
       | "saveInFlight"
@@ -515,6 +529,7 @@ class WorkspaceStore implements Workspace {
         runs: false,
         saveDisposer: false,
         saveTimer: false,
+        saveRetryTimer: false,
         pendingSaveState: false,
         pendingSaveUrgent: false,
         saveInFlight: false,
@@ -609,6 +624,10 @@ class WorkspaceStore implements Workspace {
       clearInterval(this.loadRetryTimer);
       this.loadRetryTimer = null;
     }
+    if (this.saveRetryTimer) {
+      clearTimeout(this.saveRetryTimer);
+      this.saveRetryTimer = null;
+    }
   }
 
   private startSaveTimer(): void {
@@ -619,6 +638,16 @@ class WorkspaceStore implements Workspace {
       this.saveTimer = null;
       void this.flushPendingSave();
     }, WORKSPACE_SAVE_DEBOUNCE_MS);
+  }
+
+  private startSaveRetryTimer(): void {
+    if (this.saveRetryTimer !== null) {
+      return;
+    }
+    this.saveRetryTimer = setTimeout(() => {
+      this.saveRetryTimer = null;
+      void this.flushPendingSave();
+    }, WORKSPACE_SAVE_RETRY_MS);
   }
 
   private scheduleSave(state: WorkspaceState): void {
@@ -640,6 +669,10 @@ class WorkspaceStore implements Workspace {
       clearTimeout(this.saveTimer);
       this.saveTimer = null;
     }
+    if (this.saveRetryTimer !== null) {
+      clearTimeout(this.saveRetryTimer);
+      this.saveRetryTimer = null;
+    }
     if (this.saveInFlight) {
       this.pendingSaveUrgent = true;
       return;
@@ -652,11 +685,22 @@ class WorkspaceStore implements Workspace {
     this.pendingSaveUrgent = false;
     this.saveInFlight = true;
     this.inFlightSaveState = state;
+    let saveFailed = false;
     try {
       await saveWorkspaceState(state);
-    } catch (error) {
       runInAction(() => {
-        this.loadError = error instanceof Error ? error.message : String(error);
+        if (this.loadError?.startsWith("Workspace save failed")) {
+          this.loadError = null;
+        }
+      });
+    } catch (error) {
+      saveFailed = true;
+      runInAction(() => {
+        const message = error instanceof Error ? error.message : String(error);
+        this.loadError = message.startsWith("Workspace save failed") ? message : `Workspace save failed: ${message}`;
+        this.pendingSaveState = this.pendingSaveState ?? state;
+        this.pendingSaveUrgent = false;
+        this.startSaveRetryTimer();
       });
     } finally {
       runInAction(() => {
@@ -665,7 +709,7 @@ class WorkspaceStore implements Workspace {
         if (this.pendingSaveState) {
           if (this.pendingSaveUrgent) {
             void this.flushPendingSave();
-          } else {
+          } else if (!saveFailed) {
             this.startSaveTimer();
           }
         }
@@ -1059,9 +1103,16 @@ class WorkspaceStore implements Workspace {
    *  resumed session. Returns false when there is no live same-agent session to
    *  compact (nothing has run yet), so the caller can surface a hint. */
   compactConversation(id: string): boolean {
+    // Never start a compaction while a run is in flight: runTurn would cancel it,
+    // and resuming the same native session under a second concurrent run strands
+    // both turns (an empty agent bubble that hangs "thinking"). The composer also
+    // disables the trigger while running; this is the safety net.
+    if (this.runs.has(id)) {
+      return false;
+    }
     const conv = this.find(id);
     const profile = conversationProfile(conv);
-    if (!conv?.sessionId || conv.sessionAgent !== profile.agent) {
+    if (!conversationSessionId(conv, profile.agent)) {
       return false;
     }
     const userMsg: ChatMessage = {
@@ -1100,12 +1151,11 @@ class WorkspaceStore implements Workspace {
     const profile = conversationProfile(conv);
     const isDefaultTitle = isDefaultConversationTitle(conv?.title);
     const text = userMsg.text ?? "";
-    // Resume the agent's native session only when it belongs to the CURRENT agent.
-    // Then the agent already holds the thread, so we send just the new message.
-    // Otherwise (first turn, or the user switched agents) replay the transcript so
-    // a fresh/switched session still has the context.
-    const canResume = Boolean(conv?.sessionId && conv.sessionAgent === profile.agent);
-    const resume = canResume ? conv?.sessionId : undefined;
+    // Each agent gets its own native session branch. Returning to an agent
+    // resumes that branch; first use of another agent replays the shared
+    // transcript into a fresh native session.
+    const resume = conversationSessionId(conv, profile.agent);
+    const canResume = Boolean(resume);
     let prompt: string;
     if (options?.promptOverride !== undefined) {
       prompt = options.promptOverride;
@@ -1214,8 +1264,9 @@ class WorkspaceStore implements Workspace {
         runHandle.serverOwned = true;
       },
       onSession: (sessionId) => {
-        // Persist the native session id so the next same-agent turn resumes it.
-        this.setState((current) => patchConversation(current, id, { sessionId, sessionAgent: profile.agent }));
+        // Persist the native session id for this agent branch so switching away
+        // and back can resume it without replaying the transcript.
+        this.setState((current) => patchConversationAgentSession(current, id, profile.agent, sessionId));
         this.persistCurrentStateNow();
       },
       onBlocks: applyBlocks,

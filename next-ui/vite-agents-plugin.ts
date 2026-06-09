@@ -33,6 +33,7 @@ import {
   resolveAgentModeValue,
   resolveAgentModelValue,
   resolveAgentReasoningValue,
+  type AgentId,
   type AgentOption,
   type AgentProfile,
 } from "./src/lib/agent-catalog";
@@ -82,6 +83,7 @@ export const JSON_CONTENT_TYPE = "application/json; charset=utf-8";
 export const BROWSER_ACTION_TIMEOUT_MS = 5000;
 const BROWSER_EVAL_SCRIPT_MAX_CHARS = 8000;
 const AGENT_CONFIG_FILE = join(WORKSPACE_STATE_DIR, "agent-config.json");
+const BACKGROUND_RUN_PERSIST_INTERVAL_MS = 1000;
 
 interface Detect {
   readonly bins: readonly string[];
@@ -2043,14 +2045,18 @@ function replaceStorageFile(tempFile: string, file: string): void {
   }
 }
 
-export function writeJsonFileAtomic(file: string, value: unknown, mode?: number): void {
+export function writeJsonFileAtomic(file: string, value: unknown, mode?: number, backup = true): number {
   mkdirSync(dirname(file), { recursive: true });
   const tempFile = atomicJsonTempFile(file);
-  if (existsSync(file)) {
+  // The `.bak` copy is a full multi-MB sync read+write on a large workspace blob;
+  // callers on the hot path (background-run snapshots) skip it — the temp+rename
+  // below is already atomic, so the live file is never torn.
+  if (backup && existsSync(file)) {
     copyFileSync(file, `${file}.bak`);
   }
+  const serialized = `${JSON.stringify(value, null, 2)}\n`;
   try {
-    writeFileSync(tempFile, `${JSON.stringify(value, null, 2)}\n`, mode === undefined ? "utf8" : { encoding: "utf8", mode });
+    writeFileSync(tempFile, serialized, mode === undefined ? "utf8" : { encoding: "utf8", mode });
     if (mode !== undefined) {
       chmodSync(tempFile, mode);
     }
@@ -2063,6 +2069,7 @@ export function writeJsonFileAtomic(file: string, value: unknown, mode?: number)
       unlinkSync(tempFile);
     }
   }
+  return serialized.length;
 }
 
 export function withStorageFileLock<T>(lockFile: string, fn: () => T): T {
@@ -2084,8 +2091,17 @@ export function withStorageFileLock<T>(lockFile: string, fn: () => T): T {
   }
 }
 
-function writeWorkspaceState(state: WorkspaceState): void {
-  withStorageFileLock(WORKSPACE_STATE_LOCK_FILE, () => writeJsonFileAtomic(WORKSPACE_STATE_FILE, state));
+/** Serialized byte length of the last workspace write — used to scale how often
+ *  background runs persist (a multi-MB blob must persist far less than 1×/s). */
+let lastWorkspaceStateBytes = 0;
+/** Wall-clock of the last background-run snapshot write, to coalesce persistence
+ *  across concurrently streaming runs (each would otherwise rewrite the whole blob). */
+let lastBackgroundPersistAt = 0;
+
+function writeWorkspaceState(state: WorkspaceState, opts?: { readonly backup?: boolean }): void {
+  withStorageFileLock(WORKSPACE_STATE_LOCK_FILE, () => {
+    lastWorkspaceStateBytes = writeJsonFileAtomic(WORKSPACE_STATE_FILE, state, undefined, opts?.backup ?? true);
+  });
 }
 
 export function storageHealthSnapshot(): {
@@ -4108,6 +4124,8 @@ interface StreamingPlan {
 }
 
 interface BackgroundRunAccumulator {
+  agent?: AgentId;
+  sessionId?: string;
   reasoning: string;
   hasReasoning: boolean;
   started: boolean;
@@ -4137,6 +4155,8 @@ interface BackgroundRunAccumulator {
   usage?: RunUsage;
   done: boolean;
   readonly start: number;
+  lastPersistedAt: number;
+  persistTimer: ReturnType<typeof setTimeout> | null;
 }
 
 interface RunSpec {
@@ -5305,6 +5325,8 @@ function createBackgroundAccumulator(): BackgroundRunAccumulator {
     statuses: [],
     done: false,
     start: Date.now(),
+    lastPersistedAt: 0,
+    persistTimer: null,
   };
 }
 
@@ -5437,6 +5459,12 @@ function patchWorkspaceConversation(state: WorkspaceState, id: string, patch: Pa
   };
 }
 
+function patchWorkspaceConversationAgentSession(state: WorkspaceState, id: string, agent: AgentId, sessionId: string): WorkspaceState {
+  const conversation = workspaceConversationMap(state).get(id);
+  const agentSessions: Partial<Record<AgentId, string>> = { ...(conversation?.agentSessions ?? {}), [agent]: sessionId };
+  return patchWorkspaceConversation(state, id, { agentSessions, sessionId, sessionAgent: agent });
+}
+
 function serverOwnsBackgroundRun(conversation: WorkspaceConversation): boolean {
   return Boolean(conversation.activeRunId) && (conversation.status === "running" || conversation.status === "waiting");
 }
@@ -5484,6 +5512,10 @@ export function activeBackgroundRunUpdateFromState(state: WorkspaceState, bindin
 }
 
 function mergeServerOwnedRunFields(incoming: WorkspaceConversation, current: WorkspaceConversation): WorkspaceConversation {
+  const agentSessions: Partial<Record<AgentId, string>> = {
+    ...(incoming.agentSessions ?? {}),
+    ...(current.agentSessions ?? {}),
+  };
   return {
     ...incoming,
     activeRunId: current.activeRunId,
@@ -5492,6 +5524,9 @@ function mergeServerOwnedRunFields(incoming: WorkspaceConversation, current: Wor
     time: current.time,
     costUsd: current.costUsd,
     usage: current.usage,
+    agentSessions: Object.keys(agentSessions).length > 0 ? agentSessions : undefined,
+    sessionId: current.sessionId ?? incoming.sessionId,
+    sessionAgent: current.sessionAgent ?? incoming.sessionAgent,
   };
 }
 
@@ -5650,18 +5685,78 @@ function putBackgroundAgentMessage(
   };
 }
 
-function persistBackgroundBlocks(
-  binding: BackgroundRunBinding,
-  blocks: readonly AgentBlock[],
-  patch: Partial<WorkspaceState["chats"][number]> = {},
-  metadata: Pick<BackgroundRunAccumulator, "costUsd" | "usage"> = {},
-): void {
+function persistBackgroundRunSnapshot(binding: BackgroundRunBinding, accumulator: BackgroundRunAccumulator): void {
   const state = readWorkspaceState();
-  const withMessage = putBackgroundAgentMessage(state, binding, blocks, metadata);
-  writeWorkspaceState(patchWorkspaceConversation(withMessage, binding.conversationId, patch));
+  const blocks = backgroundBlocks(accumulator);
+  const withMessage = putBackgroundAgentMessage(state, binding, blocks, { costUsd: accumulator.costUsd, usage: accumulator.usage });
+  const withConversation = patchWorkspaceConversation(withMessage, binding.conversationId, backgroundRunStatusPatch(binding, blocks, state.settings.general.locale));
+  writeWorkspaceState(
+    accumulator.agent && accumulator.sessionId
+      ? patchWorkspaceConversationAgentSession(withConversation, binding.conversationId, accumulator.agent, accumulator.sessionId)
+      : withConversation,
+    // Streaming snapshots skip the multi-MB `.bak` copy — the final run write and
+    // UI saves still back up. Halves the per-write I/O on the hot path.
+    { backup: false },
+  );
+  const now = Date.now();
+  accumulator.lastPersistedAt = now;
+  lastBackgroundPersistAt = now;
+}
+
+function clearBackgroundRunPersistTimer(accumulator: BackgroundRunAccumulator): void {
+  if (!accumulator.persistTimer) {
+    return;
+  }
+  clearTimeout(accumulator.persistTimer);
+  accumulator.persistTimer = null;
+}
+
+function persistAndNotifyBackgroundRun(binding: BackgroundRunBinding, accumulator: BackgroundRunAccumulator, done: boolean): void {
+  clearBackgroundRunPersistTimer(accumulator);
+  persistBackgroundRunSnapshot(binding, accumulator);
+  notifyBackgroundRunUpdate(binding, done);
+}
+
+function shouldPersistBackgroundRunEventImmediately(event: RunEvent): boolean {
+  if (event.type === "session") {
+    return true;
+  }
+  if (event.type === "approval" || event.type === "options" || event.type === "error") {
+    return true;
+  }
+  return event.type === "status" && (event.level === "warn" || event.level === "error");
+}
+
+function scheduleBackgroundRunPersist(binding: BackgroundRunBinding, accumulator: BackgroundRunAccumulator): void {
+  if (accumulator.persistTimer) {
+    return;
+  }
+  // Persisting rewrites the whole workspace blob (O(state size)). On a multi-MB
+  // state that sync write blocks the event loop, so scale the interval with size
+  // and coalesce across runs: otherwise N concurrent streams each rewrite MBs
+  // every second and every UI `PUT /api/workspace` queues behind them → 502.
+  const sizeFactor = Math.min(8, Math.max(1, Math.ceil(lastWorkspaceStateBytes / 1_000_000)));
+  const interval = BACKGROUND_RUN_PERSIST_INTERVAL_MS * sizeFactor;
+  const since = Math.min(
+    accumulator.lastPersistedAt === 0 ? interval : Date.now() - accumulator.lastPersistedAt,
+    lastBackgroundPersistAt === 0 ? interval : Date.now() - lastBackgroundPersistAt,
+  );
+  const delay = Math.max(0, interval - since);
+  accumulator.persistTimer = setTimeout(() => {
+    accumulator.persistTimer = null;
+    try {
+      persistBackgroundRunSnapshot(binding, accumulator);
+      notifyBackgroundRunUpdate(binding, false);
+    } catch (error) {
+      console.error(`[rlab] Failed to persist background run ${binding.runId}: ${errorMessage(error)}`);
+    }
+  }, delay);
 }
 
 function startBackgroundRunState(state: WorkspaceState, binding: BackgroundRunBinding, request: RunRequest, accumulator: BackgroundRunAccumulator): WorkspaceState {
+  const agent = isAgentId(request.agent) ? request.agent : undefined;
+  accumulator.agent = agent;
+  accumulator.sessionId = request.sessionId;
   const withUserMessage = ensureBackgroundUserMessage(state, binding, request.prompt);
   const started = patchWorkspaceConversation(withUserMessage, binding.conversationId, {
     activeRunId: binding.runId,
@@ -5672,17 +5767,22 @@ function startBackgroundRunState(state: WorkspaceState, binding: BackgroundRunBi
     costUsd: undefined,
     usage: undefined,
   });
-  return putBackgroundAgentMessage(started, binding, backgroundBlocks(accumulator));
+  const withSession = agent && request.sessionId ? patchWorkspaceConversationAgentSession(started, binding.conversationId, agent, request.sessionId) : started;
+  return putBackgroundAgentMessage(withSession, binding, backgroundBlocks(accumulator));
 }
 
 function startPersistedBackgroundRun(binding: BackgroundRunBinding, request: RunRequest): BackgroundRunAccumulator {
   const accumulator = createBackgroundAccumulator();
   writeWorkspaceState(startBackgroundRunState(readWorkspaceState(), binding, request, accumulator));
+  accumulator.lastPersistedAt = Date.now();
   return accumulator;
 }
 
 function accumulateBackgroundRunEvent(accumulator: BackgroundRunAccumulator, event: RunEvent): void {
   switch (event.type) {
+    case "session":
+      accumulator.sessionId = event.id;
+      break;
     case "start":
       accumulator.started = true;
       break;
@@ -5834,10 +5934,14 @@ export function backgroundRunStatusPatch(
 
 function applyBackgroundRunEvent(binding: BackgroundRunBinding, accumulator: BackgroundRunAccumulator, event: RunEvent): void {
   accumulateBackgroundRunEvent(accumulator, event);
-  const blocks = backgroundBlocks(accumulator);
-  const locale = readWorkspaceState().settings.general.locale;
-  persistBackgroundBlocks(binding, blocks, backgroundRunStatusPatch(binding, blocks, locale), { costUsd: accumulator.costUsd, usage: accumulator.usage });
-  notifyBackgroundRunUpdate(binding, false);
+  if (event.type === "done") {
+    return;
+  }
+  if (shouldPersistBackgroundRunEventImmediately(event)) {
+    persistAndNotifyBackgroundRun(binding, accumulator, false);
+    return;
+  }
+  scheduleBackgroundRunPersist(binding, accumulator);
 }
 
 export function finishBackgroundRunState(state: WorkspaceState, binding: BackgroundRunBinding, accumulator: BackgroundRunAccumulator, canceled: boolean): WorkspaceState {
@@ -5878,11 +5982,20 @@ export function finishBackgroundRunState(state: WorkspaceState, binding: Backgro
             ...(accumulator.costUsd === undefined ? {} : { costUsd: accumulator.costUsd }),
             ...(accumulator.usage === undefined ? {} : { usage: accumulator.usage }),
           };
-  return patchWorkspaceConversation(putBackgroundAgentMessage(state, binding, blocks, { costUsd: accumulator.costUsd, usage: accumulator.usage }), binding.conversationId, patch);
+  const withConversation = patchWorkspaceConversation(
+    putBackgroundAgentMessage(state, binding, blocks, { costUsd: accumulator.costUsd, usage: accumulator.usage }),
+    binding.conversationId,
+    patch,
+  );
+  return accumulator.agent && accumulator.sessionId
+    ? patchWorkspaceConversationAgentSession(withConversation, binding.conversationId, accumulator.agent, accumulator.sessionId)
+    : withConversation;
 }
 
 function finishPersistedBackgroundRun(binding: BackgroundRunBinding, accumulator: BackgroundRunAccumulator, canceled: boolean): void {
+  clearBackgroundRunPersistTimer(accumulator);
   writeWorkspaceState(finishBackgroundRunState(readWorkspaceState(), binding, accumulator, canceled));
+  accumulator.lastPersistedAt = Date.now();
 }
 
 export function settleEarlyBackgroundRunState(
@@ -5922,6 +6035,11 @@ interface StreamedTool {
 
 interface ClaudeStreamState {
   sawPartialAssistantContent: boolean;
+  /** True once the turn has emitted any visible block (text/reasoning/tool). A
+   *  successful `result` with no produced content (e.g. a `/compact` whose
+   *  summary lives in the session, not a chat turn) surfaces its result text so
+   *  the bubble is never left empty + perpetually "thinking". */
+  producedContent?: boolean;
   readonly toolsByIndex: Map<number, StreamedTool>;
   readonly toolsById: Map<string, StreamedTool>;
   /** input + cache tokens of the most recent assistant model call = how full the
@@ -6039,6 +6157,7 @@ function translateClaudeStreamEvent(msg: Record<string, unknown>, state: ClaudeS
       inputJson: "",
     };
     state.toolsByIndex.set(index, tool);
+    state.producedContent = true;
     return toolStartEvents(tool, state);
   }
 
@@ -6049,9 +6168,11 @@ function translateClaudeStreamEvent(msg: Record<string, unknown>, state: ClaudeS
   state.sawPartialAssistantContent = true;
   const delta = event.delta;
   if (delta.type === "text_delta" && typeof delta.text === "string") {
+    state.producedContent = true;
     return [{ type: "text", text: delta.text }];
   }
   if (delta.type === "thinking_delta" && typeof delta.thinking === "string") {
+    state.producedContent = true;
     return [{ type: "reasoning", text: delta.thinking }];
   }
   if (delta.type === "input_json_delta" && typeof delta.partial_json === "string" && typeof event.index === "number") {
@@ -6083,6 +6204,18 @@ function translateClaudeMessage(msg: Record<string, unknown>, state: ClaudeStrea
     }
   } else if (type === "system" && msg.subtype === "api_retry") {
     events.push({ type: "status", level: "warn", text: `api retry · ${clip(msg.error ?? msg.message ?? "retrying", 200)}` });
+  } else if (type === "system" && msg.subtype === "compact_boundary") {
+    // A `/compact` (manual or auto) emits only this boundary plus a result with
+    // no chat turn. Mark the turn as having produced content and surface a
+    // settled "ok" note, so the agent bubble settles with feedback instead of
+    // hanging forever on the empty "thinking" placeholder.
+    state.producedContent = true;
+    const meta = isRecord(msg.compact_metadata) ? msg.compact_metadata : undefined;
+    const pre = meta && typeof meta.pre_tokens === "number" ? meta.pre_tokens : undefined;
+    const post = meta && typeof meta.post_tokens === "number" ? meta.post_tokens : undefined;
+    const k = (n: number) => (n >= 1000 ? `${Math.round(n / 1000)}k` : String(n));
+    const detail = pre !== undefined ? (post !== undefined ? ` · ${k(pre)} → ${k(post)} tokens` : ` · from ${k(pre)} tokens`) : "";
+    events.push({ type: "status", level: "ok", text: `context compacted${detail}` });
   } else if (type === "stream_event") {
     events.push(...translateClaudeStreamEvent(msg, state));
   } else if (type === "assistant") {
@@ -6102,8 +6235,10 @@ function translateClaudeMessage(msg: Record<string, unknown>, state: ClaudeStrea
     const content = ((msg.message as { content?: unknown[] })?.content) ?? [];
     for (const block of content as Array<Record<string, unknown>>) {
       if (block.type === "text" && typeof block.text === "string") {
+        state.producedContent = true;
         events.push({ type: "text", text: block.text });
       } else if (block.type === "thinking" && typeof block.thinking === "string") {
+        state.producedContent = true;
         events.push({ type: "reasoning", text: block.thinking });
       } else if (block.type === "tool_use") {
         const tool: StreamedTool = {
@@ -6112,6 +6247,7 @@ function translateClaudeMessage(msg: Record<string, unknown>, state: ClaudeStrea
           input: isRecord(block.input) ? block.input : {},
           inputJson: "",
         };
+        state.producedContent = true;
         events.push(...toolStartEvents(tool, state));
       }
     }
@@ -6126,6 +6262,12 @@ function translateClaudeMessage(msg: Record<string, unknown>, state: ClaudeStrea
   } else if (type === "result") {
     if (msg.is_error === true) {
       events.push({ type: "error", text: typeof msg.result === "string" ? msg.result : String(msg.subtype ?? "run failed") });
+    } else if (!state.producedContent && typeof msg.result === "string" && msg.result.trim().length > 0) {
+      // The turn finished without any visible block — e.g. `/compact`, whose
+      // result message carries a summary/confirmation but no chat turn. Surface
+      // it as an "ok" status (which the client renders) so the bubble settles
+      // with feedback instead of hanging on an empty "thinking" placeholder.
+      events.push({ type: "status", level: "ok", text: msg.result.trim() });
     }
     const baseUsage = runUsageFromRecord(msg.usage);
     const usage = state.lastContextTokens !== undefined ? { ...(baseUsage ?? {}), contextTokens: state.lastContextTokens } : baseUsage;

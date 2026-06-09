@@ -29,7 +29,19 @@ interface SlashCommand {
   readonly prompt: string;
 }
 
+// Pasted-file fallback names only (a filename, not a React key).
 let attachmentIdSeq = 0;
+
+/** A process-unique attachment id. Must NOT derive from file metadata + a
+ *  module counter: the counter resets on every page load, so the same file
+ *  re-attached after a reload (or in a second tab) would mint a colliding id,
+ *  and a persisted-draft round-trip could surface two list entries with the same
+ *  React key — which React reconciles by duplicating or dropping tiles, so
+ *  attachments appeared to vanish or multiply. A UUID is collision-free. */
+function newAttachmentId(): string {
+  const uuid = globalThis.crypto?.randomUUID?.();
+  return uuid ?? `att-${Date.now().toString(36)}-${(attachmentIdSeq++).toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
 
 const TEXT_EXTENSIONS = new Set([
   "txt", "md", "markdown", "json", "yaml", "yml", "toml", "csv", "tsv", "js", "jsx", "ts", "tsx", "mjs", "cjs",
@@ -95,7 +107,7 @@ function fileToBase64(file: File): Promise<string> {
 
 async function fileToAttachmentDraft(file: File): Promise<ComposerAttachmentDraft> {
   const base = {
-    id: `${file.name}-${file.size}-${file.lastModified}-${attachmentIdSeq++}`,
+    id: newAttachmentId(),
     name: file.name,
     type: file.type || "application/octet-stream",
     size: file.size,
@@ -576,7 +588,14 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       }
     });
     if (ready.length > 0) {
-      setComposerAttachments([...latestDraftRef.current.attachments, ...ready]);
+      // Append while de-duping by id, so a persisted-draft round-trip (which can
+      // briefly re-feed the same attachment through `initialAttachments`) can
+      // never produce two list entries — and thus two identical React keys — for
+      // one file.
+      const existing = latestDraftRef.current.attachments;
+      const seen = new Set(existing.map((item) => item.id));
+      const merged = [...existing, ...ready.filter((item) => !seen.has(item.id))];
+      setComposerAttachments(merged);
     }
   };
 
@@ -776,6 +795,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               component="button"
               type="button"
               data-testid="context-over-limit"
+              disabled={running}
               onClick={() => onCompactNow?.()}
               sx={{
                 pointerEvents: "auto",
@@ -788,7 +808,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 borderRadius: (t) => `${t.custom.radii.pill}px`,
                 fontSize: "0.74rem",
                 fontWeight: 600,
-                cursor: "pointer",
+                cursor: running ? "default" : "pointer",
+                opacity: running ? 0.5 : 1,
                 color: (t) => t.palette.status.error.main,
                 backgroundColor: (t) => t.custom.surfaces.s3,
                 border: (t) => `1px solid ${t.palette.status.error.main}`,
@@ -921,30 +942,24 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               </Box>
             </>
           )}
-          {/* Compaction — auto toggle, the compaction window (defaults to the
-              model's full context window), and a force-compact-now action. */}
+          {/* Compaction — modeled as action rows (auto toggle + compact-now)
+              like the Attach/work-mode items above, instead of a heavy boxed
+              control panel, so the menu reads as one consistent list. The window
+              override is an advanced inline field, shown only when auto is on. */}
           <Divider sx={{ my: 0.5 }} />
-          <Box
-            sx={{ px: 2, py: 0.75, cursor: "default" }}
-            onClick={(event) => event.stopPropagation()}
-            onKeyDown={(event) => event.stopPropagation()}
-          >
-            <Typography variant="microLabel" sx={{ color: "text.secondary", display: "block", mb: 0.5 }}>
-              {t("compactionLabel")}
-            </Typography>
-            <Stack spacing={0.75}>
+          <MenuItem onClick={() => onAutoCompactChange?.(!autoCompact)} sx={modeMenuItemSx}>
+            <CompressRoundedIcon sx={{ fontSize: 15, color: "text.secondary" }} />
+            <Box component="span" sx={{ flex: 1, minWidth: 0 }}>{t("compactionAuto")}</Box>
+            <Switch size="small" checked={autoCompact} onChange={() => undefined} tabIndex={-1} sx={modeSwitchSx} />
+          </MenuItem>
+          {autoCompact && (
+            <Box
+              sx={{ pl: 2, pr: 1, pb: 0.5, cursor: "default" }}
+              onClick={(event) => event.stopPropagation()}
+              onKeyDown={(event) => event.stopPropagation()}
+            >
               <Stack direction="row" spacing={1} sx={{ justifyContent: "space-between", alignItems: "center" }}>
-                <Typography sx={{ fontSize: "0.72rem", color: "text.secondary" }}>{t("compactionAuto")}</Typography>
-                <Switch
-                  size="small"
-                  checked={autoCompact}
-                  onChange={(event) => onAutoCompactChange?.(event.target.checked)}
-                  slotProps={{ input: { "aria-label": t("compactionAuto") } }}
-                  sx={{ mr: -0.5 }}
-                />
-              </Stack>
-              <Stack direction="row" spacing={1} sx={{ justifyContent: "space-between", alignItems: "center" }}>
-                <Typography sx={{ fontSize: "0.72rem", color: "text.secondary" }}>{t("compactionWindow")}</Typography>
+                <Typography sx={{ fontSize: "0.72rem", color: "text.tertiary", pl: 3.25 }}>{t("compactionWindow")}</Typography>
                 <TextField
                   type="number"
                   size="small"
@@ -956,24 +971,22 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                     onCompactWindowChange?.(raw === "" || Number.isNaN(parsed) || parsed <= 0 ? undefined : parsed);
                   }}
                   slotProps={{ htmlInput: { min: 0, "aria-label": t("compactionWindow"), style: { padding: "4px 8px", fontSize: "0.72rem", textAlign: "right" } } }}
-                  sx={{ width: 116, "& .MuiInputBase-root": { fontFamily: (th) => th.custom.fonts.mono } }}
+                  sx={{ width: 132, "& .MuiInputBase-root": { fontFamily: (th) => th.custom.fonts.mono } }}
                 />
               </Stack>
-              <Button
-                variant="outlined"
-                size="small"
-                fullWidth
-                startIcon={<CompressRoundedIcon sx={{ fontSize: 15 }} />}
-                onClick={() => {
-                  setModeMenuAnchor(null);
-                  onCompactNow?.();
-                }}
-                sx={{ mt: 0.25, textTransform: "none", fontSize: "0.74rem" }}
-              >
-                {t("compactNow")}
-              </Button>
-            </Stack>
-          </Box>
+            </Box>
+          )}
+          <MenuItem
+            disabled={running}
+            onClick={() => {
+              setModeMenuAnchor(null);
+              onCompactNow?.();
+            }}
+            sx={{ gap: 1, fontSize: "0.8rem", minHeight: 0, pl: 2, pr: 1 }}
+          >
+            <CompressRoundedIcon sx={{ fontSize: 16, color: "text.secondary" }} />
+            <Box component="span">{t("compactNow")}</Box>
+          </MenuItem>
           <Divider sx={{ my: 0.5 }} />
           <Box sx={{ px: 2, py: 0.75, cursor: "default" }} onClick={(event) => event.stopPropagation()}>
             <Typography variant="microLabel" sx={{ color: "text.secondary", display: "block", mb: 0.5 }}>

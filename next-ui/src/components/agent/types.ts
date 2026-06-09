@@ -230,9 +230,12 @@ export interface ConversationSummary {
   readonly pinned?: boolean;
   readonly costUsd?: number;
   readonly usage?: RunUsage;
-  /** Native agent session id to resume on the next turn (continuity without
-   *  replaying the transcript), and the agent that owns it. When the user switches
-   *  agents, the session can't be resumed and the transcript is replayed instead. */
+  /** Native agent sessions keyed by agent. Switching agents forks the native
+   *  session, and switching back resumes that agent's own session. */
+  readonly agentSessions?: Partial<Record<AgentId, string>>;
+  /** Most recently observed native session id and owning agent. Kept for
+   *  persisted-state compatibility; `agentSessions` is the source of truth for
+   *  same-agent resume. */
   readonly sessionId?: string;
   readonly sessionAgent?: AgentId;
   /** When set, this conversation's agent runs (and Git view) operate in an

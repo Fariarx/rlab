@@ -570,6 +570,32 @@ Built-in agents:
     ).toEqual([{ type: "text", text: "hello" }]);
   });
 
+  it("surfaces a settled status for a compaction boundary so the bubble never hangs", () => {
+    const translate = createClaudeStreamTranslator();
+
+    expect(
+      translate(
+        JSON.stringify({
+          type: "system",
+          subtype: "compact_boundary",
+          compact_metadata: { trigger: "manual", pre_tokens: 120000, post_tokens: 38000 },
+        }),
+      ),
+    ).toEqual([{ type: "status", level: "ok", text: "context compacted · 120k → 38k tokens" }]);
+
+    // A trailing empty result must not re-emit a status (producedContent is set),
+    // but still settles the run with a done event.
+    expect(translate(JSON.stringify({ type: "result", status: "success", result: "" }))).toEqual([{ type: "done" }]);
+  });
+
+  it("renders a `/compact` result summary that arrived without a chat turn", () => {
+    const translate = createClaudeStreamTranslator();
+
+    expect(
+      translate(JSON.stringify({ type: "result", subtype: "success", result: "Compacted the conversation." })),
+    ).toEqual([{ type: "status", level: "ok", text: "Compacted the conversation." }, { type: "done" }]);
+  });
+
   it("translates streamed tool input updates", () => {
     const translate = createClaudeStreamTranslator();
 
@@ -2579,6 +2605,8 @@ Built-in agents:
         statuses: [],
         done: false,
         start: Date.now(),
+        lastPersistedAt: 0,
+        persistTimer: null,
       },
       true,
     );
@@ -2969,6 +2997,50 @@ Built-in agents:
         }),
       ]),
     );
+  });
+
+  it("persists bound background run native sessions per agent", () => {
+    const state = buildInitialWorkspaceState();
+    const stateWithExistingSession = {
+      ...state,
+      chats: state.chats.map((conversation) =>
+        conversation.id === "chat-2"
+          ? { ...conversation, agentSessions: { "claude-code": "claude-session-1" } }
+          : conversation,
+      ),
+    };
+    const settled = settleEarlyBackgroundRunState(
+      stateWithExistingSession,
+      {
+        conversationId: "chat-2",
+        runId: "run-session",
+        userMessageId: "u-session",
+        userMessageTime: "10:00",
+        agentMessageId: "a-session",
+        agentMessageTime: "10:01",
+      },
+      {
+        agent: "codex",
+        model: "default",
+        reasoning: "default",
+        mode: "default",
+        prompt: "Continue with Codex",
+        accessMode: "read-only",
+      },
+      [
+        { type: "session", id: "codex-session-1" },
+        { type: "text", text: "done" },
+      ],
+    );
+
+    expect(settled.chats.find((conversation) => conversation.id === "chat-2")).toMatchObject({
+      agentSessions: {
+        "claude-code": "claude-session-1",
+        codex: "codex-session-1",
+      },
+      sessionId: "codex-session-1",
+      sessionAgent: "codex",
+    });
   });
 
   it("does not mark early warning-only bound background runs as done", () => {

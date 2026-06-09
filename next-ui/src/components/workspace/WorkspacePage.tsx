@@ -287,9 +287,6 @@ export function WorkspacePageView({
   // the first message (then it's created with the current/default agent).
   const [composingNew, setComposingNew] = useState<{ readonly projectId?: string } | null>(null);
   const [projectMenuAnchor, setProjectMenuAnchor] = useState<HTMLElement | null>(null);
-  // Pending message awaiting confirmation when the user switches the agent on a
-  // conversation that has a live session (the new agent can't resume it).
-  const [pendingAgentSwitchText, setPendingAgentSwitchText] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
@@ -1371,12 +1368,6 @@ export function WorkspacePageView({
                   if (!selected) {
                     return;
                   }
-                  // Switching the agent on a conversation that owns a live session
-                  // can't resume it — confirm before replaying the transcript.
-                  if (selected.sessionId && selected.sessionAgent && selected.sessionAgent !== profile.agent) {
-                    setPendingAgentSwitchText(text);
-                    return;
-                  }
                   pendingDraftValues.current.delete(ws.selectedId);
                   cancelDraftSave(ws.selectedId);
                   ws.updateComposerDraft(ws.selectedId, EMPTY_COMPOSER_DRAFT);
@@ -1459,35 +1450,6 @@ export function WorkspacePageView({
         </DialogActions>
       </Dialog>
 
-      <Dialog open={pendingAgentSwitchText !== null} onClose={() => setPendingAgentSwitchText(null)} maxWidth="xs" fullWidth>
-        <DialogTitle>{t("agentSwitchTitle")}</DialogTitle>
-        <DialogContent>
-          <DialogContentText>
-            {t("agentSwitchBody", { from: selected?.sessionAgent ? getAgent(selected.sessionAgent).name : "", to: getAgent(profile.agent).name })}
-          </DialogContentText>
-        </DialogContent>
-        <DialogActions sx={{ px: 2.5, pb: 2 }}>
-          <Button variant="text" onClick={() => setPendingAgentSwitchText(null)}>
-            {t("cancel")}
-          </Button>
-          <Button
-            variant="contained"
-            onClick={() => {
-              const text = pendingAgentSwitchText;
-              setPendingAgentSwitchText(null);
-              if (text && selected) {
-                pendingDraftValues.current.delete(ws.selectedId);
-                cancelDraftSave(ws.selectedId);
-                ws.updateComposerDraft(ws.selectedId, EMPTY_COMPOSER_DRAFT);
-                notifiableRuns.current.add(ws.selectedId);
-                ws.sendMessage(ws.selectedId, text);
-              }
-            }}
-          >
-            {t("agentSwitchConfirm")}
-          </Button>
-        </DialogActions>
-      </Dialog>
     </Box>
     </WorkspaceUiProvider>
   );
