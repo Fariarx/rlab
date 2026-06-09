@@ -20,6 +20,7 @@ import {
   type Locale,
 } from "./src/lib/app-settings";
 import { buildEmptyWorkspaceState, buildInitialWorkspaceState, cloneWorkspaceState, type WorkspaceState } from "./src/lib/workspace-state";
+import { initWorkspaceDb, readConversation, readMessageBlocks, readWorkspaceStateFromDb, updateConversationData, upsertMessage, workspaceDbHasState, writeWorkspaceStateToDb } from "./workspace-db";
 import {
   agentProfileEquals,
   claudeAgentNameFromMode,
@@ -70,6 +71,7 @@ const WORKSPACE_STATE_DIR = process.env.RLAB_DATA_DIR
   ? (isAbsolute(process.env.RLAB_DATA_DIR) ? process.env.RLAB_DATA_DIR : resolve(process.cwd(), process.env.RLAB_DATA_DIR))
   : join(PLUGIN_DIR, ".data");
 const WORKSPACE_STATE_FILE = join(WORKSPACE_STATE_DIR, "workspace-state.json");
+const WORKSPACE_DB_FILE = join(WORKSPACE_STATE_DIR, "workspace.db");
 const WORKSPACE_STATE_LOCK_FILE = join(WORKSPACE_STATE_DIR, "workspace-state.lock");
 const RUN_AUDIT_FILE = join(WORKSPACE_STATE_DIR, "run-audit.ndjson");
 const ATTACHMENTS_DIR = join(WORKSPACE_STATE_DIR, "attachments");
@@ -1978,41 +1980,59 @@ function isDemoWorkspaceEnabled(): boolean {
   return process.env.RLAB_DEMO === "1" || process.env.NODE_ENV === "development";
 }
 
+/** Coerce a parsed legacy JSON-blob state into the current full shape (adds
+ *  composerDrafts/settings defaults). Returns null if it isn't recognizable. */
+function coerceParsedWorkspaceState(parsed: unknown): WorkspaceState | null {
+  if (isWorkspaceState(parsed)) {
+    return cloneWorkspaceState(parsed);
+  }
+  if (isWorkspaceStateWithoutComposerDrafts(parsed)) {
+    return cloneWorkspaceState({ ...parsed, composerDrafts: {} });
+  }
+  if (isLegacyWorkspaceState(parsed)) {
+    return { ...parsed, composerDrafts: {}, settings: cloneAppSettings(defaultAppSettings) };
+  }
+  return null;
+}
+
+let workspaceDbReady = false;
+/** Open the workspace DB once and, on first run, import the legacy JSON blob so
+ *  existing installs migrate transparently. The blob is then renamed to a frozen
+ *  `.pre-sqlite` backup so it is never re-imported (and never written again). */
+function ensureWorkspaceDb(): void {
+  if (workspaceDbReady) {
+    return;
+  }
+  initWorkspaceDb(WORKSPACE_DB_FILE);
+  if (!workspaceDbHasState() && existsSync(WORKSPACE_STATE_FILE)) {
+    try {
+      const parsed = JSON.parse(readFileSync(WORKSPACE_STATE_FILE, "utf8").replace(/^\uFEFF/, "")) as unknown;
+      const imported = coerceParsedWorkspaceState(parsed);
+      if (imported) {
+        writeWorkspaceStateToDb(normalizeSeedProjectPaths(migrateSeedWorkspaceState(imported)));
+        try {
+          renameSync(WORKSPACE_STATE_FILE, `${WORKSPACE_STATE_FILE}.pre-sqlite`);
+        } catch {
+          // best-effort; the workspaceDbHasState() guard still prevents a re-import next boot
+        }
+      }
+    } catch (error) {
+      console.error(`[rlab] Failed to import legacy workspace state: ${errorMessage(error)}`);
+    }
+  }
+  workspaceDbReady = true;
+}
+
 function readWorkspaceState(): WorkspaceState {
-  if (!existsSync(WORKSPACE_STATE_FILE)) {
-    const seed = isDemoWorkspaceEnabled() ? buildInitialWorkspaceState() : buildEmptyWorkspaceState();
-    const initial = normalizeSeedProjectPaths(seed);
+  ensureWorkspaceDb();
+  if (!workspaceDbHasState()) {
+    const initial = normalizeSeedProjectPaths(isDemoWorkspaceEnabled() ? buildInitialWorkspaceState() : buildEmptyWorkspaceState());
     writeWorkspaceState(initial);
     return initial;
   }
-  const parsed = JSON.parse(readFileSync(WORKSPACE_STATE_FILE, "utf8").replace(/^\uFEFF/, "")) as unknown;
-  if (isWorkspaceState(parsed)) {
-    const normalized = reconcileStaleBackgroundRuns(normalizeSeedProjectPaths(migrateSeedWorkspaceState(cloneWorkspaceState(parsed))), new Set(backgroundRunHandles.keys()));
-    if (JSON.stringify(normalized) !== JSON.stringify(parsed)) {
-      writeWorkspaceState(normalized);
-    }
-    return normalized;
-  }
-  if (isWorkspaceStateWithoutComposerDrafts(parsed)) {
-    const migrated: WorkspaceState = {
-      ...parsed,
-      composerDrafts: {},
-    };
-    const normalized = reconcileStaleBackgroundRuns(normalizeSeedProjectPaths(migrateSeedWorkspaceState(cloneWorkspaceState(migrated))), new Set(backgroundRunHandles.keys()));
-    writeWorkspaceState(normalized);
-    return normalized;
-  }
-  if (isLegacyWorkspaceState(parsed)) {
-    const migrated: WorkspaceState = {
-      ...parsed,
-      composerDrafts: {},
-      settings: cloneAppSettings(defaultAppSettings),
-    };
-    const normalized = reconcileStaleBackgroundRuns(normalizeSeedProjectPaths(migrateSeedWorkspaceState(migrated)), new Set(backgroundRunHandles.keys()));
-    writeWorkspaceState(normalized);
-    return normalized;
-  }
-  throw new Error(`${WORKSPACE_STATE_FILE} does not contain a valid workspace state.`);
+  const raw = readWorkspaceStateFromDb();
+  cachedWorkspaceLocale = raw.settings?.general?.locale ?? cachedWorkspaceLocale;
+  return reconcileStaleBackgroundRuns(normalizeSeedProjectPaths(migrateSeedWorkspaceState(cloneWorkspaceState(raw))), new Set(backgroundRunHandles.keys()));
 }
 
 let atomicJsonWriteSeq = 0;
@@ -2091,17 +2111,17 @@ export function withStorageFileLock<T>(lockFile: string, fn: () => T): T {
   }
 }
 
-/** Serialized byte length of the last workspace write — used to scale how often
- *  background runs persist (a multi-MB blob must persist far less than 1×/s). */
-let lastWorkspaceStateBytes = 0;
 /** Wall-clock of the last background-run snapshot write, to coalesce persistence
- *  across concurrently streaming runs (each would otherwise rewrite the whole blob). */
+ *  across concurrently streaming runs. */
 let lastBackgroundPersistAt = 0;
+/** Locale of the persisted settings, cached so the background hot path can build
+ *  status snippets without loading the whole workspace. */
+let cachedWorkspaceLocale: Locale = "en";
 
-function writeWorkspaceState(state: WorkspaceState, opts?: { readonly backup?: boolean }): void {
-  withStorageFileLock(WORKSPACE_STATE_LOCK_FILE, () => {
-    lastWorkspaceStateBytes = writeJsonFileAtomic(WORKSPACE_STATE_FILE, state, undefined, opts?.backup ?? true);
-  });
+function writeWorkspaceState(state: WorkspaceState): void {
+  ensureWorkspaceDb();
+  cachedWorkspaceLocale = state.settings?.general?.locale ?? cachedWorkspaceLocale;
+  writeWorkspaceStateToDb(state);
 }
 
 export function storageHealthSnapshot(): {
@@ -2111,16 +2131,14 @@ export function storageHealthSnapshot(): {
 } {
   const browser = { installed: isPlaywrightBrowserInstalled() };
   try {
-    mkdirSync(WORKSPACE_STATE_DIR, { recursive: true });
-    if (existsSync(WORKSPACE_STATE_FILE)) {
-      JSON.parse(readFileSync(WORKSPACE_STATE_FILE, "utf8").replace(/^\uFEFF/, "")) as unknown;
-    }
+    ensureWorkspaceDb();
+    workspaceDbHasState();
     return {
       storage: {
         ok: true,
-        stateFile: WORKSPACE_STATE_FILE,
-        lockFile: WORKSPACE_STATE_LOCK_FILE,
-        backupFile: `${WORKSPACE_STATE_FILE}.bak`,
+        stateFile: WORKSPACE_DB_FILE,
+        lockFile: `${WORKSPACE_DB_FILE}-wal`,
+        backupFile: `${WORKSPACE_STATE_FILE}.pre-sqlite`,
       },
       agents: { visible: visibleAgentDetectionIds() },
       browser,
@@ -2129,9 +2147,9 @@ export function storageHealthSnapshot(): {
     return {
       storage: {
         ok: false,
-        stateFile: WORKSPACE_STATE_FILE,
-        lockFile: WORKSPACE_STATE_LOCK_FILE,
-        backupFile: `${WORKSPACE_STATE_FILE}.bak`,
+        stateFile: WORKSPACE_DB_FILE,
+        lockFile: `${WORKSPACE_DB_FILE}-wal`,
+        backupFile: `${WORKSPACE_STATE_FILE}.pre-sqlite`,
         error: errorMessage(error),
       },
       agents: { visible: visibleAgentDetectionIds() },
@@ -5686,18 +5704,29 @@ function putBackgroundAgentMessage(
 }
 
 function persistBackgroundRunSnapshot(binding: BackgroundRunBinding, accumulator: BackgroundRunAccumulator): void {
-  const state = readWorkspaceState();
-  const blocks = backgroundBlocks(accumulator);
-  const withMessage = putBackgroundAgentMessage(state, binding, blocks, { costUsd: accumulator.costUsd, usage: accumulator.usage });
-  const withConversation = patchWorkspaceConversation(withMessage, binding.conversationId, backgroundRunStatusPatch(binding, blocks, state.settings.general.locale));
-  writeWorkspaceState(
-    accumulator.agent && accumulator.sessionId
-      ? patchWorkspaceConversationAgentSession(withConversation, binding.conversationId, accumulator.agent, accumulator.sessionId)
-      : withConversation,
-    // Streaming snapshots skip the multi-MB `.bak` copy — the final run write and
-    // UI saves still back up. Halves the per-write I/O on the hot path.
-    { backup: false },
-  );
+  ensureWorkspaceDb();
+  // Hot path: upsert ONLY the streamed message + its conversation row, never the
+  // whole workspace. mergeInputBlockState preserves any interactive-block state
+  // (approvals/options) the previous snapshot already recorded.
+  const blocks = mergeInputBlockState(backgroundBlocks(accumulator), readMessageBlocks(binding.agentMessageId));
+  const message: ChatMessage = {
+    id: binding.agentMessageId,
+    role: "agent",
+    time: binding.agentMessageTime,
+    blocks,
+    ...(accumulator.costUsd === undefined ? {} : { costUsd: accumulator.costUsd }),
+    ...(accumulator.usage === undefined ? {} : { usage: accumulator.usage }),
+  };
+  upsertMessage(binding.conversationId, message);
+  const conversation = readConversation(binding.conversationId);
+  if (conversation) {
+    const patched = { ...conversation, ...backgroundRunStatusPatch(binding, blocks, cachedWorkspaceLocale) };
+    updateConversationData(
+      accumulator.agent && accumulator.sessionId
+        ? { ...patched, agentSessions: { ...(patched.agentSessions ?? {}), [accumulator.agent]: accumulator.sessionId }, sessionId: accumulator.sessionId, sessionAgent: accumulator.agent }
+        : patched,
+    );
+  }
   const now = Date.now();
   accumulator.lastPersistedAt = now;
   lastBackgroundPersistAt = now;
@@ -5731,12 +5760,9 @@ function scheduleBackgroundRunPersist(binding: BackgroundRunBinding, accumulator
   if (accumulator.persistTimer) {
     return;
   }
-  // Persisting rewrites the whole workspace blob (O(state size)). On a multi-MB
-  // state that sync write blocks the event loop, so scale the interval with size
-  // and coalesce across runs: otherwise N concurrent streams each rewrite MBs
-  // every second and every UI `PUT /api/workspace` queues behind them → 502.
-  const sizeFactor = Math.min(8, Math.max(1, Math.ceil(lastWorkspaceStateBytes / 1_000_000)));
-  const interval = BACKGROUND_RUN_PERSIST_INTERVAL_MS * sizeFactor;
+  // Persists are now cheap per-row upserts, but still coalesce across runs so a
+  // burst of tokens from several concurrent streams doesn't write on every tick.
+  const interval = BACKGROUND_RUN_PERSIST_INTERVAL_MS;
   const since = Math.min(
     accumulator.lastPersistedAt === 0 ? interval : Date.now() - accumulator.lastPersistedAt,
     lastBackgroundPersistAt === 0 ? interval : Date.now() - lastBackgroundPersistAt,

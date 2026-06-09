@@ -154,7 +154,7 @@ describe("vite agents plugin", () => {
   it("reports storage and visible-agent health without exposing hidden agents", () => {
     const snapshot = storageHealthSnapshot();
 
-    expect(snapshot.storage.stateFile).toContain("workspace-state.json");
+    expect(snapshot.storage.stateFile).toContain("workspace.db");
     expect(snapshot.storage.ok).toBe(true);
     expect(snapshot.agents.visible).toEqual(["claude-code", "codex", "gemini", "opencode"]);
   });
