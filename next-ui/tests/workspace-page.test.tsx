@@ -819,6 +819,90 @@ describe("WorkspacePage", () => {
     expect(screen.getAllByText("src/auth.ts").length).toBeGreaterThan(0);
   });
 
+  it("clears stale worktree Git changes immediately after switching the conversation back to main", async () => {
+    const base = buildInitialWorkspaceState();
+    const worktreePath = "/root/workspace/rlab.worktrees/wt-stale";
+    let workspace = {
+      ...base,
+      selectedId: "c-flaky",
+      projects: base.projects.map((project) =>
+        project.id === "auth-service"
+          ? {
+              ...project,
+              conversations: project.conversations.map((conversation) => (conversation.id === "c-flaky" ? { ...conversation, worktreePath } : conversation)),
+            }
+          : project,
+      ),
+    };
+    let resolveBaseStatus: (response: Response) => void = () => undefined;
+    const baseStatusPromise = new Promise<Response>((resolve) => {
+      resolveBaseStatus = resolve;
+    });
+    const gitStatusCwds: string[] = [];
+    const mergeRequests: Array<{ readonly base?: string; readonly worktreePath?: string }> = [];
+    const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+      const activeRuns = activeRunsResponse(path);
+      if (activeRuns) {
+        return activeRuns;
+      }
+      if (path === "/api/workspace" && (!init || init.method === "GET")) {
+        return Response.json(workspace);
+      }
+      if (path === "/api/workspace" && init?.method === "PUT") {
+        workspace = JSON.parse(String(init.body)) as typeof workspace;
+        return Response.json(workspace);
+      }
+      if (path === "/api/project-files") {
+        return Response.json({ files: [] });
+      }
+      if (path === "/api/git-status") {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { cwd?: string };
+        gitStatusCwds.push(body.cwd ?? "");
+        if (body.cwd === worktreePath) {
+          return Response.json({
+            branch: "kanban/wt-stale",
+            ahead: 0,
+            behind: 0,
+            clean: false,
+            files: [{ code: " M", label: "Modified", path: "src/worktree-only.ts", gitPath: "src/worktree-only.ts", staged: false, unstaged: true }],
+            unstagedAdditions: 1,
+            unstagedDeletions: 0,
+          });
+        }
+        return baseStatusPromise;
+      }
+      if (path === "/api/git-diff") {
+        return Response.json({ path: "src/worktree-only.ts", mode: "worktree", diff: "@@ -1 +1 @@\n-oldWorktree\n+newWorktree" });
+      }
+      if (path === "/api/git-worktree-merge") {
+        mergeRequests.push(JSON.parse(String(init?.body ?? "{}")) as { base?: string; worktreePath?: string });
+        return Response.json({ branch: "main", ahead: 0, behind: 0, clean: true, files: [], unstagedAdditions: 0, unstagedDeletions: 0 });
+      }
+      return new Response("not found", { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetch);
+
+    renderWithThemeAndVirtuoso(<WorkspacePage />);
+
+    await screen.findByPlaceholderText("Написать: CC");
+    fireEvent.click(screen.getByRole("button", { name: "Git" }));
+    expect(await screen.findByText("src/worktree-only.ts")).toBeInTheDocument();
+    expect(await screen.findByText("oldWorktree")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Влить в основной + удалить" }));
+
+    await waitFor(() => {
+      expect(mergeRequests).toEqual([{ base: "/root/workspace/rlab", worktreePath }]);
+      expect(gitStatusCwds).toContain("/root/workspace/rlab");
+      expect(screen.queryByText("src/worktree-only.ts")).not.toBeInTheDocument();
+      expect(screen.queryByText("oldWorktree")).not.toBeInTheDocument();
+    });
+
+    resolveBaseStatus(Response.json({ branch: "main", ahead: 0, behind: 0, clean: true, files: [], unstagedAdditions: 0, unstagedDeletions: 0 }));
+    expect(await screen.findByText("main")).toBeInTheDocument();
+  });
+
   it("shows an explicit Git API status error when the backend omits an error message", async () => {
     const workspace = { ...buildInitialWorkspaceState(), selectedId: "c-flaky" };
     const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {

@@ -47,6 +47,7 @@ import {
   parseGitCommitPayload,
   gitErrorStatus,
   gitPushRequestErrorStatus,
+  isNoChangesGitCommitResult,
   jsonBodyReadErrorStatus,
   parseProjectDirectoryPayload,
   parseRunRequestPayload,
@@ -1711,6 +1712,21 @@ Built-in agents:
   it("builds safe git commit arguments from an explicit message", () => {
     expect(buildGitCommitArgs(" Fix auth login test ")).toEqual(["commit", "-m", "Fix auth login test"]);
     expect(() => buildGitCommitArgs(" ")).toThrow("Commit message is required.");
+  });
+
+  it("recognizes git commit no-op output without swallowing real commit errors", () => {
+    expect(
+      isNoChangesGitCommitResult({
+        stdout: "On branch kanban/wt-1\nnothing to commit, working tree clean\n",
+        error: "git commit exited with code 1.",
+      }),
+    ).toBe(true);
+    expect(
+      isNoChangesGitCommitResult({
+        stdout: "",
+        error: "Author identity unknown\nfatal: unable to auto-detect email address",
+      }),
+    ).toBe(false);
   });
 
   it("builds safe git push arguments", () => {

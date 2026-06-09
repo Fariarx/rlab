@@ -394,6 +394,7 @@ function GitFileDiffCard({
 export function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnstagedStatsChange, bottomInset = 0, focusPath, focusNonce = 0, reloadSignal = 0, worktree }: GitViewProps) {
   const { t } = useI18n();
   const [status, setStatus] = useState<GitStatusPayload | null>(null);
+  const [statusVersion, setStatusVersion] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
@@ -403,11 +404,21 @@ export function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnst
   // The focused file plus a tick so re-selecting the same path re-scrolls.
   const [focused, setFocused] = useState<{ readonly path: string; readonly tick: number }>({ path: "", tick: 0 });
   const scrollRef = useRef<HTMLDivElement>(null);
+  const applyStatus = useCallback((nextStatus: GitStatusPayload) => {
+    setStatus(nextStatus);
+    setStatusVersion((version) => version + 1);
+  }, []);
+
+  useEffect(() => {
+    setStatus(null);
+    setStatusVersion((version) => version + 1);
+    setError(null);
+    setActiveTab("unstaged");
+    setFocused({ path: "", tick: 0 });
+  }, [cwd]);
 
   useEffect(() => {
     if (!cwd) {
-      setStatus(null);
-      setError(null);
       setLoading(false);
       return;
     }
@@ -418,7 +429,7 @@ export function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnst
     void fetchGitStatus(cwd)
       .then((next) => {
         if (alive) {
-          setStatus(next);
+          applyStatus(next);
         }
       })
       .catch((loadError) => {
@@ -436,7 +447,7 @@ export function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnst
     return () => {
       alive = false;
     };
-  }, [cwd, reloadKey, reloadSignal, t]);
+  }, [applyStatus, cwd, reloadKey, reloadSignal, t]);
 
   const unstagedFiles = useMemo(() => changedFilesForTab(status, "unstaged"), [status]);
   const stagedFiles = useMemo(() => changedFilesForTab(status, "staged"), [status]);
@@ -476,7 +487,7 @@ export function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnst
     setError(null);
     void action()
       .then((nextStatus) => {
-        setStatus(nextStatus);
+        applyStatus(nextStatus);
         onDone?.();
       })
       .catch((loadError) => {
@@ -615,7 +626,7 @@ export function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnst
                   <Stack spacing={1.25}>
                     {unstagedFiles.map((file) => (
                       <GitFileDiffCard
-                        key={`${file.code}-${file.gitPath}`}
+                        key={`${cwd}:${statusVersion}:worktree:${file.code}:${file.gitPath}`}
                         cwd={cwd}
                         file={file}
                         mode="worktree"
@@ -646,7 +657,7 @@ export function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnst
                   <Stack spacing={1.25}>
                     {stagedFiles.map((file) => (
                       <GitFileDiffCard
-                        key={`${file.code}-${file.gitPath}`}
+                        key={`${cwd}:${statusVersion}:staged:${file.code}:${file.gitPath}`}
                         cwd={cwd}
                         file={file}
                         mode="staged"

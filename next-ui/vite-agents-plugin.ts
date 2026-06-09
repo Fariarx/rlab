@@ -3577,6 +3577,11 @@ function runGitP(cwd: string, args: readonly string[]): Promise<GitCommandResult
   return new Promise((resolve) => runGit(cwd, args, resolve));
 }
 
+export function isNoChangesGitCommitResult(result: Pick<GitCommandResult, "stdout" | "error">): boolean {
+  const output = `${result.stdout}\n${result.error}`.toLowerCase();
+  return output.includes("nothing to commit") || output.includes("no changes added to commit");
+}
+
 /** Creates an isolated git worktree off the current HEAD on a fresh branch. The
  *  worktree dir lives in a sibling `<repo>.worktrees/` folder so it never shows
  *  up as an untracked path inside the repo itself. */
@@ -3632,9 +3637,16 @@ function handleGitWorktreeMerge(req: IncomingMessage, res: ServerResponse): void
           return;
         }
         const branch = branchResult.stdout.trim();
-        // Stage + commit any pending work (a no-op commit just fails harmlessly).
-        await runGitP(worktreePath, ["add", "-A"]);
-        await runGitP(worktreePath, ["commit", "-m", "Kanban: worktree changes"]);
+        const addResult = await runGitP(worktreePath, ["add", "-A"]);
+        if (!addResult.ok) {
+          sendJson(res, 500, { error: addResult.error });
+          return;
+        }
+        const commitResult = await runGitP(worktreePath, ["commit", "-m", "Kanban: worktree changes"]);
+        if (!commitResult.ok && !isNoChangesGitCommitResult(commitResult)) {
+          sendJson(res, 500, { error: commitResult.error });
+          return;
+        }
         const mergeResult = await runGitP(base, ["merge", "--no-ff", "-m", `Kanban: merge ${branch}`, branch]);
         if (!mergeResult.ok) {
           // Leave the worktree intact so the user can resolve and retry.

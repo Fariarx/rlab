@@ -411,10 +411,12 @@ export function WorkspacePageView({
         inWorktree: Boolean(selected.worktreePath),
         busy: worktreeBusy,
         onCreate: () => {
+          const conversationId = selected.id;
+          const basePath = selectedBasePath;
           setWorktreeBusy(true);
-          createWorktree(selectedBasePath)
+          createWorktree(basePath)
             .then(({ path }) => {
-              ws.setWorktree(ws.selectedId, path);
+              ws.setWorktree(conversationId, path);
               setGitReloadSignal((value) => value + 1);
               toast({ message: t("worktreeCreatedToast"), severity: "success", duration: 2500 });
             })
@@ -422,14 +424,16 @@ export function WorkspacePageView({
             .finally(() => setWorktreeBusy(false));
         },
         onMerge: () => {
+          const conversationId = selected.id;
+          const basePath = selectedBasePath;
           const worktreePath = selected.worktreePath;
           if (!worktreePath) {
             return;
           }
           setWorktreeBusy(true);
-          mergeWorktree(selectedBasePath, worktreePath)
+          mergeWorktree(basePath, worktreePath)
             .then(() => {
-              ws.setWorktree(ws.selectedId, undefined);
+              ws.setWorktree(conversationId, undefined);
               setGitReloadSignal((value) => value + 1);
               toast({ message: t("worktreeMergedToast"), severity: "success", duration: 2500 });
             })
