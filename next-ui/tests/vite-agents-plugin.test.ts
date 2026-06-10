@@ -11,6 +11,7 @@ import {
   buildClaudeRunArgs,
   buildClaudeSdkOptions,
   buildCodexRunArgs,
+  buildCodexThreadParams,
   codexAppServerItemEvents,
   codexAppServerUsage,
   buildGeminiRunArgs,
@@ -30,6 +31,7 @@ import {
   applyBrowserStorageSnapshot,
   appendRunAuditEvent,
   BROWSER_ACTION_TIMEOUT_MS,
+  browserBridgeOrigin,
   browserPreviewActionFailureResult,
   parseRunApprovalPayload,
   parseRunCancelPayload,
@@ -89,6 +91,7 @@ import {
   visibleAgentDetectionIds,
   readRunAuditEvents,
 } from "../vite-agents-plugin";
+import { MAX_AGENT_TOOL_OUTPUT_CHARS } from "../src/lib/agent-output";
 import { buildInitialWorkspaceState } from "../src/components/workspace/workspace-state";
 import { type CanUseTool } from "@anthropic-ai/claude-agent-sdk";
 import { type AgentProfile } from "../src/components/agent";
@@ -101,6 +104,18 @@ describe("vite agents plugin", () => {
     expect(source).not.toContain('from "./src/components/workspace/workspace-state"');
     expect(source).not.toContain('from "./src/components/workspace/sample-data"');
     expect(source).not.toContain('from "./src/i18n/I18nProvider"');
+  });
+
+  it("uses the loopback HTTP origin for browser bridge prompts behind the production proxy", () => {
+    const req = {
+      headers: {
+        host: "127.0.0.1:4280",
+        "x-forwarded-proto": "https",
+        "x-forwarded-host": "rlab.132.243.123.242.sslip.io",
+      },
+    } as unknown as Parameters<typeof browserBridgeOrigin>[0];
+
+    expect(browserBridgeOrigin(req)).toBe("http://127.0.0.1:4280");
   });
 
   it("only exposes the supported visible agents in backend discovery", () => {
@@ -911,6 +926,33 @@ Built-in agents:
     expect(buildOpenCodeRunArgs({ prompt: "next", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted", resume: "oc-sess" })).toEqual(expect.arrayContaining(["--session", "oc-sess"]));
   });
 
+  it("passes Codex compaction window as a per-thread app-server config override", () => {
+    expect(
+      buildCodexThreadParams({
+        agent: "codex",
+        model: "default",
+        reasoning: "default",
+        mode: "default",
+        prompt: "hello",
+        accessMode: "read-only",
+        compactWindow: 120000,
+      }),
+    ).toMatchObject({
+      config: { model_auto_compact_token_limit: 120000 },
+    });
+
+    expect(
+      buildCodexThreadParams({
+        agent: "codex",
+        model: "default",
+        reasoning: "default",
+        mode: "default",
+        prompt: "hello",
+        accessMode: "read-only",
+      }).config,
+    ).toBeUndefined();
+  });
+
   it("captures each agent's native session id from its stream", () => {
     expect(createCodexStreamTranslator()(JSON.stringify({ type: "thread.started", thread_id: "cdx-123" }))).toEqual([{ type: "session", id: "cdx-123" }]);
     expect(createOpenCodeStreamTranslator()(JSON.stringify({ type: "step_start", sessionID: "ses_abc", part: { sessionID: "ses_abc" } }))).toEqual([{ type: "session", id: "ses_abc" }]);
@@ -922,6 +964,7 @@ Built-in agents:
     expect(translate(JSON.stringify({ type: "turn.started" }))).toEqual([{ type: "status", level: "info", text: "codex turn started" }]);
     expect(translate(JSON.stringify({ type: "item.completed", item: { id: "item_0", type: "agent_message", text: "hello" } }))).toEqual([{ type: "text", text: "hello" }]);
     expect(translate(JSON.stringify({ type: "agent_message", message: "hello" }))).toEqual([{ type: "text", text: "hello" }]);
+    expect(translate(JSON.stringify({ type: "item.completed", item: { id: "reasoning_0", type: "reasoning", text: "right side." } }))).toEqual([{ type: "reasoning", text: "right side.\n" }]);
     expect(translate(JSON.stringify({ type: "turn.failed", error: { message: "model unsupported" } }))).toEqual([{ type: "error", text: "model unsupported" }]);
   });
 
@@ -929,13 +972,20 @@ Built-in agents:
     // agentMessage -> text
     expect(codexAppServerItemEvents({ type: "agentMessage", id: "m1", text: "hi" }, true)).toEqual([{ type: "text", text: "hi" }]);
     // reasoning -> joins summary + content
-    expect(codexAppServerItemEvents({ type: "reasoning", id: "r1", summary: ["plan"], content: ["details"] }, true)).toEqual([{ type: "reasoning", text: "plan\ndetails" }]);
+    expect(codexAppServerItemEvents({ type: "reasoning", id: "r1", summary: ["plan"], content: ["details"] }, true)).toEqual([{ type: "reasoning", text: "plan\ndetails\n" }]);
+    expect(codexAppServerItemEvents({ type: "reasoning", id: "r2", summary: ["streaming"] }, false)).toEqual([{ type: "reasoning", text: "streaming" }]);
     // commandExecution started -> tool; completed -> tool + tool_result
     expect(codexAppServerItemEvents({ type: "commandExecution", id: "c1", command: "ls" }, false)).toEqual([{ type: "tool", id: "c1", name: "Shell", summary: "ls" }]);
     expect(codexAppServerItemEvents({ type: "commandExecution", id: "c1", command: "ls", status: "completed", aggregatedOutput: "a\nb" }, true)).toEqual([
       { type: "tool", id: "c1", name: "Shell", summary: "ls" },
       { type: "tool_result", id: "c1", ok: true, output: "a\nb" },
     ]);
+    const largeOutput = `${"a".repeat(MAX_AGENT_TOOL_OUTPUT_CHARS)}tail`;
+    const largeCommandEvents = codexAppServerItemEvents({ type: "commandExecution", id: "c2", command: "rg noisy", status: "completed", aggregatedOutput: largeOutput }, true);
+    expect(largeCommandEvents).toHaveLength(2);
+    expect(largeCommandEvents[1]).toMatchObject({ type: "tool_result", id: "c2", ok: true });
+    expect(largeCommandEvents[1]?.type === "tool_result" ? largeCommandEvents[1].output : "").toContain("[tool output truncated:");
+    expect(largeCommandEvents[1]?.type === "tool_result" ? largeCommandEvents[1].output.length : 0).toBeLessThanOrEqual(MAX_AGENT_TOOL_OUTPUT_CHARS);
     // fileChange started -> running Edit tool (no perpetual "running": resolved on completed)
     expect(codexAppServerItemEvents({ type: "fileChange", id: "f1", status: "inProgress", changes: [{ path: "a.ts", kind: "update" }] }, false)).toEqual([
       { type: "tool", id: "f1", name: "Edit", summary: "a.ts" },

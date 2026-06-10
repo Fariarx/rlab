@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_PROFILE, type AgentBlock } from "../src/components/agent";
 import { attachRunUpdates, runConversation } from "../src/components/workspace/run-agent";
+import { MAX_AGENT_TOOL_OUTPUT_CHARS } from "../src/lib/agent-output";
 
 function streamResponse(events: readonly unknown[]): Response {
   return new Response(
@@ -124,6 +125,22 @@ describe("runConversation", () => {
     expect(blocks.at(-1)).toContainEqual({ kind: "status", level: "error", text: "Run stream closed before completion" });
   });
 
+  it("surfaces backend JSON errors from rejected run requests", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ error: "Project directory does not exist: /missing" }, { status: 400 })));
+    const blocks: AgentBlock[][] = [];
+
+    const result = await runConversation({
+      profile: DEFAULT_PROFILE,
+      prompt: "answer",
+      accessMode: "read-only",
+      locale: "en",
+      onBlocks: (nextBlocks) => blocks.push(nextBlocks),
+    });
+
+    expect(result.status).toBe("error");
+    expect(blocks.at(-1)).toContainEqual({ kind: "status", level: "error", text: "Project directory does not exist: /missing" });
+  });
+
   it("detaches a server-owned stream that closes before done", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => streamResponse([{ type: "start" }])));
     const blocks: AgentBlock[][] = [];
@@ -188,6 +205,34 @@ describe("runConversation", () => {
         { type: "add", text: "const ttl = 120;" },
       ],
     });
+  });
+
+  it("truncates large streamed tool outputs before rendering blocks", async () => {
+    const largeOutput = `${"x".repeat(MAX_AGENT_TOOL_OUTPUT_CHARS)}tail`;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        streamResponse([
+          { type: "tool", id: "tool-1", name: "Shell", summary: "rg noisy" },
+          { type: "tool_result", id: "tool-1", ok: true, output: largeOutput },
+          { type: "done" },
+        ]),
+      ),
+    );
+    const blocks: AgentBlock[][] = [];
+
+    await runConversation({
+      profile: DEFAULT_PROFILE,
+      prompt: "run command",
+      accessMode: "read-only",
+      locale: "ru",
+      onBlocks: (nextBlocks) => blocks.push(nextBlocks),
+    });
+
+    const tool = blocks.at(-1)?.find((block) => block.kind === "tool");
+    expect(tool).toMatchObject({ kind: "tool", state: "ok" });
+    expect(tool?.kind === "tool" ? tool.output : "").toContain("[tool output truncated:");
+    expect(tool?.kind === "tool" ? tool.output?.length : 0).toBeLessThanOrEqual(MAX_AGENT_TOOL_OUTPUT_CHARS);
   });
 
   it("maps Write tool calls to diff blocks", async () => {

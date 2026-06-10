@@ -10,7 +10,7 @@ import { query, type CanUseTool, type EffortLevel, type Options as ClaudeQueryOp
 import { chromium, type Browser, type BrowserContext, type ConsoleMessage, type Frame, type FrameLocator, type Locator, type Page, type Request as PlaywrightRequest } from "playwright";
 import type { Plugin, ViteDevServer, PreviewServer } from "vite";
 import { parseGitStatusPorcelain, parseNumstatTotals } from "./src/lib/git-status";
-import { normalizeAgentToolOutput } from "./src/lib/agent-output";
+import { normalizeAgentToolOutput, truncateAgentToolOutput } from "./src/lib/agent-output";
 import {
   cloneAppSettings,
   defaultAppSettings,
@@ -87,6 +87,7 @@ const BROWSER_EVAL_SCRIPT_MAX_CHARS = 8000;
 const AGENT_CONFIG_FILE = join(WORKSPACE_STATE_DIR, "agent-config.json");
 const BACKGROUND_RUN_PERSIST_INTERVAL_MS = 1000;
 const STREAM_HEARTBEAT_INTERVAL_MS = 10_000;
+const DEFAULT_BROWSER_BRIDGE_ORIGIN = "http://127.0.0.1:4280";
 
 interface Detect {
   readonly bins: readonly string[];
@@ -4246,10 +4247,40 @@ const CODEX_PLAN_PROMPT_PREFIX = [
   "",
 ].join("\n");
 
-function browserBridgeOrigin(req: IncomingMessage): string {
-  const host = typeof req.headers.host === "string" && req.headers.host.trim().length > 0 ? req.headers.host.trim() : "localhost:5187";
-  const forwardedProto = typeof req.headers["x-forwarded-proto"] === "string" ? req.headers["x-forwarded-proto"].split(",")[0]?.trim() : "";
-  const protocol = forwardedProto === "https" ? "https" : "http";
+function firstForwardedHeaderValue(value: string | string[] | undefined): string | undefined {
+  const raw = Array.isArray(value) ? value[0] : value;
+  const first = raw?.split(",")[0]?.trim();
+  return first && first.length > 0 ? first : undefined;
+}
+
+function envBrowserBridgeOrigin(): string | undefined {
+  const raw = process.env.RLAB_BROWSER_BRIDGE_ORIGIN?.trim();
+  if (!raw) {
+    return undefined;
+  }
+  const parsed = new URL(raw);
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("RLAB_BROWSER_BRIDGE_ORIGIN must be an http(s) URL.");
+  }
+  return parsed.toString().replace(/\/+$/g, "");
+}
+
+function isLoopbackHost(host: string): boolean {
+  const hostname = host.replace(/^\[/, "").replace(/\](:\d+)?$/, "").replace(/:\d+$/, "");
+  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+}
+
+export function browserBridgeOrigin(req: IncomingMessage): string {
+  const configured = envBrowserBridgeOrigin();
+  if (configured) {
+    return configured;
+  }
+  const host = firstForwardedHeaderValue(req.headers.host) ?? new URL(DEFAULT_BROWSER_BRIDGE_ORIGIN).host;
+  if (isLoopbackHost(host)) {
+    return `http://${host}`;
+  }
+  const forwardedProto = firstForwardedHeaderValue(req.headers["x-forwarded-proto"]);
+  const protocol = forwardedProto === "https" || forwardedProto === "http" ? forwardedProto : "http";
   return `${protocol}://${host}`;
 }
 
@@ -4709,12 +4740,16 @@ function toArgs(input: unknown): Record<string, string> {
 
 function resultText(content: unknown): string {
   if (typeof content === "string") {
-    return normalizeAgentToolOutput(content);
+    return truncateAgentToolOutput(normalizeAgentToolOutput(content));
   }
   if (Array.isArray(content)) {
-    return normalizeAgentToolOutput(content.map((c) => (c && typeof c === "object" && "text" in c ? String((c as { text: unknown }).text) : clip(c, 120))).join("\n"));
+    return truncateAgentToolOutput(normalizeAgentToolOutput(content.map((c) => (c && typeof c === "object" && "text" in c ? String((c as { text: unknown }).text) : clip(c, 120))).join("\n")));
   }
-  return normalizeAgentToolOutput(clip(content, 600));
+  return truncateAgentToolOutput(normalizeAgentToolOutput(clip(content, 600)));
+}
+
+function completedReasoningText(text: string, completed: boolean): string {
+  return completed && text.length > 0 && !/\s$/.test(text) ? `${text}\n` : text;
 }
 
 function splitDiffLines(value: string): string[] {
@@ -6743,7 +6778,7 @@ function commandExecutionEvents(eventType: unknown, item: Record<string, unknown
       type: "tool_result",
       id,
       ok: exitCode === 0 || status === "completed" || status === "success",
-      output: normalizeAgentToolOutput(output),
+      output: resultText(output),
     },
   ];
 }
@@ -6808,7 +6843,7 @@ function codexSemanticItemEvents(eventType: unknown, item: Record<string, unknow
   // Codex agent reasoning (thinking) — render as a reasoning block.
   if (type === "reasoning") {
     const text = firstString(item, ["text", "content", "reasoning", "summary"]);
-    return text ? [{ type: "reasoning", text }] : [];
+    return text ? [{ type: "reasoning", text: completedReasoningText(text, eventType === "item.completed") }] : [];
   }
   // Codex's plan tracker arrives as `todo_list` with {text, completed} items.
   if (type === "todo_list") {
@@ -6840,7 +6875,7 @@ function codexSemanticItemEvents(eventType: unknown, item: Record<string, unknow
       const status = String(item.status ?? "").toLowerCase();
       const ok = status !== "failed" && status !== "error";
       const result = item.result ?? item.output;
-      events.push({ type: "tool_result", id: callId, ok, output: typeof result === "string" ? result : result === undefined ? "" : JSON.stringify(result) });
+      events.push({ type: "tool_result", id: callId, ok, output: resultText(result ?? "") });
     }
     return events;
   }
@@ -7688,7 +7723,7 @@ function emitOpenCodeParts(parts: unknown, send: (event: RunEvent) => void): voi
       send({ type: "tool", id: callId, name });
       const state = isRecord(part.state) ? part.state : undefined;
       if (state && (typeof state.output === "string" || state.status === "completed" || state.status === "error")) {
-        send({ type: "tool_result", id: callId, ok: state.status !== "error", output: typeof state.output === "string" ? state.output : "" });
+        send({ type: "tool_result", id: callId, ok: state.status !== "error", output: resultText(state.output ?? "") });
       }
     }
   }
@@ -7864,7 +7899,7 @@ export function codexAppServerItemEvents(item: Record<string, unknown>, complete
       const summary = Array.isArray(item.summary) ? item.summary.filter((s): s is string => typeof s === "string") : [];
       const content = Array.isArray(item.content) ? item.content.filter((s): s is string => typeof s === "string") : [];
       const text = [...summary, ...content].join("\n").trim();
-      return text ? [{ type: "reasoning", text }] : [];
+      return text ? [{ type: "reasoning", text: completedReasoningText(text, completed) }] : [];
     }
     case "plan": {
       const text = firstString(item, ["text"]);
@@ -7876,7 +7911,7 @@ export function codexAppServerItemEvents(item: Record<string, unknown>, complete
       const events: RunEvent[] = [{ type: "tool", id: callId, name: "Shell", summary: clip(command, 120) }];
       if (completed) {
         const ok = String(item.status ?? "").toLowerCase() === "completed";
-        events.push({ type: "tool_result", id: callId, ok, output: firstString(item, ["aggregatedOutput"]) ?? "" });
+        events.push({ type: "tool_result", id: callId, ok, output: resultText(firstString(item, ["aggregatedOutput"]) ?? "") });
       }
       return events;
     }
@@ -7913,7 +7948,7 @@ export function codexAppServerItemEvents(item: Record<string, unknown>, complete
       if (completed) {
         const ok = String(item.status ?? "").toLowerCase() === "completed";
         const result = item.result ?? item.error;
-        events.push({ type: "tool_result", id: callId, ok, output: typeof result === "string" ? result : result == null ? "" : clip(JSON.stringify(result), 2000) });
+        events.push({ type: "tool_result", id: callId, ok, output: resultText(result ?? "") });
       }
       return events;
     }
@@ -7926,13 +7961,20 @@ export function codexAppServerItemEvents(item: Record<string, unknown>, complete
   }
 }
 
+function codexCompactionConfigForRequest(request: RunRequest): Record<string, number> | undefined {
+  return typeof request.compactWindow === "number" && request.compactWindow > 0
+    ? { model_auto_compact_token_limit: request.compactWindow }
+    : undefined;
+}
+
 /** Sandbox/approval/model/effort + plan-aware prompt for a Codex thread. */
-function buildCodexThreadParams(request: RunRequest): {
+export function buildCodexThreadParams(request: RunRequest): {
   readonly sandbox: "read-only" | "danger-full-access";
   readonly approvalPolicy: "never";
   readonly model?: string;
   readonly effort?: string;
   readonly prompt: string;
+  readonly config?: Record<string, number>;
 } {
   const profile = normalizeAgentProfile(request, "codex");
   const mode = modeForProfile(profile);
@@ -7944,6 +7986,7 @@ function buildCodexThreadParams(request: RunRequest): {
     model: modelForProfile(profile),
     effort: reasoningForProfile(profile),
     prompt: codexPromptForMode(request.prompt, mode),
+    config: codexCompactionConfigForRequest(request),
   };
 }
 
@@ -8205,6 +8248,9 @@ async function runCodexAppServer(
     if (params.model) {
       threadParams.model = params.model;
     }
+    if (params.config) {
+      threadParams.config = params.config;
+    }
     const startResponse = request.resume
       ? await sendRequest("thread/resume", { threadId: request.resume, ...threadParams })
       : await sendRequest("thread/start", threadParams);
@@ -8359,104 +8405,61 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
     }
   });
   req.on("end", () => {
-    setNdjsonStreamHeaders(res);
-    const sender = createRunEventSender(res);
-    let accumulator: BackgroundRunAccumulator | null = null;
-    let binding: BackgroundRunBinding | null = null;
-    const send = (event: RunEvent) => {
-      sender.send(event);
-      if (binding && accumulator) {
-        applyBackgroundRunEvent(binding, accumulator, event);
-      }
-    };
-    const sendDone = sender.sendDone;
-
     if (bodyReadError) {
-      res.statusCode = jsonBodyReadErrorStatus(bodyReadError);
-      send({ type: "error", text: errorMessage(bodyReadError) });
-      sendDone();
-      sender.end();
+      sendJson(res, jsonBodyReadErrorStatus(bodyReadError), { error: errorMessage(bodyReadError) });
       return;
     }
     const parsedPayload = parseRunRequestPayload(bodyAccumulator.body);
 
     if (!parsedPayload.ok) {
-      send({ type: "error", text: parsedPayload.error });
-      sendDone();
-      sender.end();
+      sendJson(res, 400, { error: parsedPayload.error });
       return;
     }
     const { agent, model, reasoning, mode, prompt, requestedCwd, accessMode, resume, autoCompact, compactWindow, accessModeValid, profileValid, profileError, bindingInvalid } = parsedPayload;
-    binding = parsedPayload.binding;
+    let binding: BackgroundRunBinding | null = parsedPayload.binding;
 
     if (!prompt) {
-      send({ type: "error", text: "Empty prompt" });
-      sendDone();
-      sender.end();
+      sendJson(res, 400, { error: "Empty prompt" });
       return;
     }
     if (bindingInvalid) {
-      send({ type: "error", text: "Invalid background run binding." });
-      sendDone();
-      sender.end();
+      sendJson(res, 400, { error: "Invalid background run binding." });
       return;
     }
-
-    // Gemini lets us set a session id for a NEW session; assign one so the client
-    // can resume it later. Claude/Codex/OpenCode mint their own and report it back
-    // via a "session" event from their stream translators.
-    const assignedSessionId = !resume && agent === "gemini" ? randomUUID() : undefined;
-    const request: RunRequest = { agent, model, reasoning, mode, prompt, accessMode, resume, sessionId: assignedSessionId, autoCompact, compactWindow };
-    if (assignedSessionId) {
-      send({ type: "session", id: assignedSessionId });
-    }
-    const origin = browserBridgeOrigin(req);
-    const executionRequest: RunRequest = {
-      ...request,
-      prompt: appendBrowserBridgePrompt(request.prompt, binding, origin),
-    };
-    if (binding) {
-      accumulator = startPersistedBackgroundRun(binding, request);
-    }
-    const finishAndEnd = () => {
-      if (binding && accumulator) {
-        finishPersistedBackgroundRun(binding, accumulator, false);
-      }
-      sendDone();
-      sender.end();
-    };
-
     if (!accessModeValid) {
-      send({ type: "error", text: "Invalid accessMode. Expected read-only or unrestricted." });
-      finishAndEnd();
+      sendJson(res, 400, { error: "Invalid accessMode. Expected read-only or unrestricted." });
       return;
     }
     if (!profileValid) {
-      send({ type: "error", text: profileError });
-      finishAndEnd();
+      sendJson(res, 400, { error: profileError });
       return;
     }
 
     const spec = RUN[agent];
     const resolvedBin = spec ? resolveBinOnPath(spec.bin) : null;
-    if (!spec || !resolvedBin || !isAgentId(agent)) {
-      send({ type: "start" });
-      send({ type: "status", level: "warn", text: spec ? `${spec.bin} is not installed on this machine` : `Running ${agent || "this agent"} is not wired yet` });
-      finishAndEnd();
+    if (!spec || !isAgentId(agent)) {
+      sendJson(res, 400, { error: `Running ${agent || "this agent"} is not wired yet.` });
+      return;
+    }
+    if (!resolvedBin) {
+      sendJson(res, 503, { error: `${spec.bin} is not installed on this machine.` });
       return;
     }
     const requestedProfileErrorMessage = requestedProfileError(agent, model, reasoning, mode);
     if (requestedProfileErrorMessage) {
-      send({ type: "start" });
-      send({ type: "error", text: requestedProfileErrorMessage });
-      finishAndEnd();
+      sendJson(res, 400, { error: requestedProfileErrorMessage });
       return;
     }
     const accessModeError = validateRunAccessModeForAgent(agent, accessMode);
     if (accessModeError) {
-      send({ type: "start" });
-      send({ type: "error", text: accessModeError });
-      finishAndEnd();
+      sendJson(res, 400, { error: accessModeError });
+      return;
+    }
+    let origin: string;
+    try {
+      origin = browserBridgeOrigin(req);
+    } catch (error) {
+      sendJson(res, 500, { error: errorMessage(error) });
       return;
     }
     const config = readAgentSecretConfig();
@@ -8472,9 +8475,7 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
     };
     const detect = DETECT[agent];
     if (spec.env && detect && !hasConfiguredAgentAuth(detect, config, runEnv)) {
-      send({ type: "start" });
-      send({ type: "status", level: "warn", text: `${agent} needs setup: set one of ${spec.env.join(", ")}` });
-      finishAndEnd();
+      sendJson(res, 503, { error: `${agent} needs setup: set one of ${spec.env.join(", ")}.` });
       return;
     }
 
@@ -8486,23 +8487,54 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
     if (requestedCwd) {
       try {
         if (!existsSync(requestedCwd) || !statSync(requestedCwd).isDirectory()) {
-          send({ type: "start" });
-          send({ type: "error", text: `Project directory does not exist: ${requestedCwd}` });
-          finishAndEnd();
+          sendJson(res, 400, { error: `Project directory does not exist: ${requestedCwd}` });
           return;
         }
         cwd = requestedCwd;
       } catch (error) {
-        send({ type: "start" });
-        send({ type: "error", text: error instanceof Error ? error.message : String(error) });
-        finishAndEnd();
+        sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
         return;
       }
     }
     try {
       mkdirSync(cwd, { recursive: true });
-    } catch {
-      // ignore
+    } catch (error) {
+      sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) });
+      return;
+    }
+
+    setNdjsonStreamHeaders(res);
+    const sender = createRunEventSender(res);
+    let accumulator: BackgroundRunAccumulator | null = null;
+    const send = (event: RunEvent) => {
+      sender.send(event);
+      if (binding && accumulator) {
+        applyBackgroundRunEvent(binding, accumulator, event);
+      }
+    };
+    const sendDone = sender.sendDone;
+    const finishAndEnd = () => {
+      if (binding && accumulator) {
+        finishPersistedBackgroundRun(binding, accumulator, false);
+      }
+      sendDone();
+      sender.end();
+    };
+
+    // Gemini lets us set a session id for a NEW session; assign one so the client
+    // can resume it later. Claude/Codex/OpenCode mint their own and report it back
+    // via a "session" event from their stream translators.
+    const assignedSessionId = !resume && agent === "gemini" ? randomUUID() : undefined;
+    const request: RunRequest = { agent, model, reasoning, mode, prompt, accessMode, resume, sessionId: assignedSessionId, autoCompact, compactWindow };
+    if (assignedSessionId) {
+      send({ type: "session", id: assignedSessionId });
+    }
+    const executionRequest: RunRequest = {
+      ...request,
+      prompt: appendBrowserBridgePrompt(request.prompt, binding, origin),
+    };
+    if (binding) {
+      accumulator = startPersistedBackgroundRun(binding, request);
     }
 
     send({ type: "start" });
@@ -8740,91 +8772,51 @@ function handlePreviewProxy(req: IncomingMessage, res: ServerResponse): void {
   req.pipe(proxyReq);
 }
 
+type ApiHandler = (req: IncomingMessage, res: ServerResponse) => void;
+
+function isExactMountedRequest(req: IncomingMessage): boolean {
+  const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
+  return pathname === "" || pathname === "/";
+}
+
+function methodOnly(method: "GET" | "POST" | "PUT", handler: ApiHandler): ApiHandler {
+  return (req, res) => {
+    if (req.method !== method) {
+      res.statusCode = 405;
+      res.end();
+      return;
+    }
+    handler(req, res);
+  };
+}
+
+function useExactApi(server: ViteDevServer | PreviewServer, path: string, handler: ApiHandler): void {
+  server.middlewares.use(path, (req, res) => {
+    if (!isExactMountedRequest(req)) {
+      sendJson(res, 404, { error: `Unknown API endpoint: ${path}${req.url ?? ""}` });
+      return;
+    }
+    handler(req, res);
+  });
+}
+
 function attach(server: ViteDevServer | PreviewServer): void {
   server.middlewares.use(PREVIEW_PROXY_PREFIX, handlePreviewProxy);
-  server.middlewares.use("/api/health", (_req, res) => {
+  useExactApi(server, "/api/health", methodOnly("GET", (_req, res) => {
     const health = storageHealthSnapshot();
     sendJson(res, health.storage.ok ? 200 : 500, health);
-  });
-  server.middlewares.use("/api/browser/session", (req, res) => {
-    if (req.method !== "POST") {
-      res.statusCode = 405;
-      res.end();
-      return;
-    }
-    handleBrowserSession(req, res);
-  });
-  server.middlewares.use("/api/browser/sync", (req, res) => {
-    if (req.method !== "POST") {
-      res.statusCode = 405;
-      res.end();
-      return;
-    }
-    handleBrowserSync(req, res);
-  });
-  server.middlewares.use("/api/browser/dirty", (req, res) => {
-    if (req.method !== "POST") {
-      res.statusCode = 405;
-      res.end();
-      return;
-    }
-    handleBrowserDirty(req, res);
-  });
-  server.middlewares.use("/api/browser/action", (req, res) => {
-    if (req.method !== "POST") {
-      res.statusCode = 405;
-      res.end();
-      return;
-    }
-    handleBrowserAction(req, res);
-  });
-  server.middlewares.use("/api/browser/bridge/sync", (req, res) => {
-    if (req.method !== "POST") {
-      res.statusCode = 405;
-      res.end();
-      return;
-    }
-    handleBrowserBridgeSync(req, res);
-  });
-  server.middlewares.use("/api/browser/bridge/action", (req, res) => {
-    if (req.method !== "POST") {
-      res.statusCode = 405;
-      res.end();
-      return;
-    }
-    handleBrowserBridgeAction(req, res);
-  });
-  server.middlewares.use("/api/browser/bridge/snapshot", (req, res) => {
-    if (req.method !== "GET") {
-      res.statusCode = 405;
-      res.end();
-      return;
-    }
-    handleBrowserBridgeSnapshot(req, res);
-  });
-  server.middlewares.use("/api/browser/snapshot", (req, res) => {
-    if (req.method !== "GET") {
-      res.statusCode = 405;
-      res.end();
-      return;
-    }
-    handleBrowserSnapshot(req, res);
-  });
-  server.middlewares.use("/api/browser/events", (req, res) => {
-    if (req.method !== "GET") {
-      res.statusCode = 405;
-      res.end();
-      return;
-    }
-    handleBrowserEvents(req, res);
-  });
-  server.middlewares.use("/api/workspace", handleWorkspace);
-  server.middlewares.use("/api/thread", (req, res) => {
-    if (req.method !== "GET") {
-      res.statusCode = 405;
-      res.end();
-      return;
-    }
+  }));
+  useExactApi(server, "/api/browser/session", methodOnly("POST", handleBrowserSession));
+  useExactApi(server, "/api/browser/sync", methodOnly("POST", handleBrowserSync));
+  useExactApi(server, "/api/browser/dirty", methodOnly("POST", handleBrowserDirty));
+  useExactApi(server, "/api/browser/action", methodOnly("POST", handleBrowserAction));
+  useExactApi(server, "/api/browser/bridge/sync", methodOnly("POST", handleBrowserBridgeSync));
+  useExactApi(server, "/api/browser/bridge/action", methodOnly("POST", handleBrowserBridgeAction));
+  useExactApi(server, "/api/browser/bridge/snapshot", methodOnly("GET", handleBrowserBridgeSnapshot));
+  useExactApi(server, "/api/browser/snapshot", methodOnly("GET", handleBrowserSnapshot));
+  useExactApi(server, "/api/browser/events", methodOnly("GET", handleBrowserEvents));
+  useExactApi(server, "/api/workspace", handleWorkspace);
+  useExactApi(server, "/api/thread", methodOnly("GET", (req, res) => {
     try {
       const conversationId = new URL(req.url ?? "/", "http://localhost").searchParams.get("conversationId") ?? "";
       if (!conversationId) {
@@ -8835,221 +8827,39 @@ function attach(server: ViteDevServer | PreviewServer): void {
     } catch (error) {
       sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) });
     }
-  });
-  server.middlewares.use("/api/agents", (_req, res) => {
+  }));
+  useExactApi(server, "/api/agents", methodOnly("GET", (_req, res) => {
     res.setHeader("Content-Type", "application/json");
     res.setHeader("Cache-Control", "no-store");
     res.end(JSON.stringify(detectAgents()));
-  });
-  server.middlewares.use("/api/agent-config", handleAgentConfig);
-  server.middlewares.use("/api/agent-install", (req, res) => {
-    if (req.method !== "POST") {
-      res.statusCode = 405;
-      res.end();
-      return;
-    }
-    handleAgentInstall(req, res);
-  });
-  server.middlewares.use("/api/playwright-install", (req, res) => {
-    if (req.method !== "POST") {
-      res.statusCode = 405;
-      res.end();
-      return;
-    }
-    handlePlaywrightInstall(req, res);
-  });
-  server.middlewares.use("/api/folder-picker", (req, res) => {
-    if (req.method !== "POST") {
-      res.statusCode = 405;
-      res.end();
-      return;
-    }
-    handleFolderPicker(req, res);
-  });
-  server.middlewares.use("/api/list-directories", (req, res) => {
-    if (req.method !== "POST") {
-      res.statusCode = 405;
-      res.end();
-      return;
-    }
-    handleListDirectories(req, res);
-  });
-  server.middlewares.use("/api/folder-info", (req, res) => {
-    if (req.method !== "POST") {
-      res.statusCode = 405;
-      res.end();
-      return;
-    }
-    handleFolderInfo(req, res);
-  });
-  server.middlewares.use("/api/project-files", (req, res) => {
-    if (req.method !== "POST") {
-      res.statusCode = 405;
-      res.end();
-      return;
-    }
-    handleProjectFiles(req, res);
-  });
-  server.middlewares.use("/api/attachments", (req, res) => {
-    if (req.method !== "POST") {
-      res.statusCode = 405;
-      res.end();
-      return;
-    }
-    handleAttachmentUpload(req, res);
-  });
-  server.middlewares.use("/api/local-file", (req, res) => {
-    if (req.method !== "GET") {
-      res.statusCode = 405;
-      res.end();
-      return;
-    }
-    handleLocalFile(req, res);
-  });
-  server.middlewares.use("/api/version", (req, res) => {
-    if (req.method !== "GET") {
-      res.statusCode = 405;
-      res.end();
-      return;
-    }
-    handleVersion(req, res);
-  });
-  server.middlewares.use("/api/agent-limits", (req, res) => {
-    if (req.method !== "GET") {
-      res.statusCode = 405;
-      res.end();
-      return;
-    }
-    handleAgentLimits(req, res);
-  });
-  server.middlewares.use("/api/git-status", (req, res) => {
-    if (req.method !== "POST") {
-      res.statusCode = 405;
-      res.end();
-      return;
-    }
-    handleGitStatus(req, res);
-  });
-  server.middlewares.use("/api/git-diff", (req, res) => {
-    if (req.method !== "POST") {
-      res.statusCode = 405;
-      res.end();
-      return;
-    }
-    handleGitDiff(req, res);
-  });
-  server.middlewares.use("/api/git-stage", (req, res) => {
-    if (req.method !== "POST") {
-      res.statusCode = 405;
-      res.end();
-      return;
-    }
-    handleGitStage(req, res);
-  });
-  server.middlewares.use("/api/git-unstage", (req, res) => {
-    if (req.method !== "POST") {
-      res.statusCode = 405;
-      res.end();
-      return;
-    }
-    handleGitUnstage(req, res);
-  });
-  server.middlewares.use("/api/git-commit", (req, res) => {
-    if (req.method !== "POST") {
-      res.statusCode = 405;
-      res.end();
-      return;
-    }
-    handleGitCommit(req, res);
-  });
-  server.middlewares.use("/api/git-push", (req, res) => {
-    if (req.method !== "POST") {
-      res.statusCode = 405;
-      res.end();
-      return;
-    }
-    handleGitPush(req, res);
-  });
-  server.middlewares.use("/api/git-worktree-create", (req, res) => {
-    if (req.method !== "POST") {
-      res.statusCode = 405;
-      res.end();
-      return;
-    }
-    handleGitWorktreeCreate(req, res);
-  });
-  server.middlewares.use("/api/git-worktree-merge", (req, res) => {
-    if (req.method !== "POST") {
-      res.statusCode = 405;
-      res.end();
-      return;
-    }
-    handleGitWorktreeMerge(req, res);
-  });
-  server.middlewares.use("/api/git-init", (req, res) => {
-    if (req.method !== "POST") {
-      res.statusCode = 405;
-      res.end();
-      return;
-    }
-    handleGitInit(req, res);
-  });
-  server.middlewares.use("/api/terminal", (req, res) => {
-    if (req.method !== "POST") {
-      res.statusCode = 405;
-      res.end();
-      return;
-    }
-    handleTerminal(req, res);
-  });
-  server.middlewares.use("/api/runs", (req, res) => {
-    if (req.method !== "GET") {
-      res.statusCode = 405;
-      res.end();
-      return;
-    }
-    handleActiveRuns(req, res);
-  });
-  server.middlewares.use("/api/run-attach", (req, res) => {
-    if (req.method !== "GET") {
-      res.statusCode = 405;
-      res.end();
-      return;
-    }
-    handleRunAttach(req, res);
-  });
-  server.middlewares.use("/api/run", (req, res) => {
-    if (req.method !== "POST") {
-      res.statusCode = 405;
-      res.end();
-      return;
-    }
-    handleRun(req, res);
-  });
-  server.middlewares.use("/api/run-approval", (req, res) => {
-    if (req.method !== "POST") {
-      res.statusCode = 405;
-      res.end();
-      return;
-    }
-    handleRunApproval(req, res);
-  });
-  server.middlewares.use("/api/run-cancel", (req, res) => {
-    if (req.method !== "POST") {
-      res.statusCode = 405;
-      res.end();
-      return;
-    }
-    handleRunCancel(req, res);
-  });
-  server.middlewares.use("/api/run-input", (req, res) => {
-    if (req.method !== "POST") {
-      res.statusCode = 405;
-      res.end();
-      return;
-    }
-    handleRunInput(req, res);
-  });
+  }));
+  useExactApi(server, "/api/agent-config", handleAgentConfig);
+  useExactApi(server, "/api/agent-install", methodOnly("POST", handleAgentInstall));
+  useExactApi(server, "/api/playwright-install", methodOnly("POST", handlePlaywrightInstall));
+  useExactApi(server, "/api/folder-picker", methodOnly("POST", handleFolderPicker));
+  useExactApi(server, "/api/list-directories", methodOnly("POST", handleListDirectories));
+  useExactApi(server, "/api/folder-info", methodOnly("POST", handleFolderInfo));
+  useExactApi(server, "/api/project-files", methodOnly("POST", handleProjectFiles));
+  useExactApi(server, "/api/attachments", methodOnly("POST", handleAttachmentUpload));
+  useExactApi(server, "/api/local-file", methodOnly("GET", handleLocalFile));
+  useExactApi(server, "/api/version", methodOnly("GET", handleVersion));
+  useExactApi(server, "/api/agent-limits", methodOnly("GET", handleAgentLimits));
+  useExactApi(server, "/api/git-status", methodOnly("POST", handleGitStatus));
+  useExactApi(server, "/api/git-diff", methodOnly("POST", handleGitDiff));
+  useExactApi(server, "/api/git-stage", methodOnly("POST", handleGitStage));
+  useExactApi(server, "/api/git-unstage", methodOnly("POST", handleGitUnstage));
+  useExactApi(server, "/api/git-commit", methodOnly("POST", handleGitCommit));
+  useExactApi(server, "/api/git-push", methodOnly("POST", handleGitPush));
+  useExactApi(server, "/api/git-worktree-create", methodOnly("POST", handleGitWorktreeCreate));
+  useExactApi(server, "/api/git-worktree-merge", methodOnly("POST", handleGitWorktreeMerge));
+  useExactApi(server, "/api/git-init", methodOnly("POST", handleGitInit));
+  useExactApi(server, "/api/terminal", methodOnly("POST", handleTerminal));
+  useExactApi(server, "/api/runs", methodOnly("GET", handleActiveRuns));
+  useExactApi(server, "/api/run-attach", methodOnly("GET", handleRunAttach));
+  useExactApi(server, "/api/run", methodOnly("POST", handleRun));
+  useExactApi(server, "/api/run-approval", methodOnly("POST", handleRunApproval));
+  useExactApi(server, "/api/run-cancel", methodOnly("POST", handleRunCancel));
+  useExactApi(server, "/api/run-input", methodOnly("POST", handleRunInput));
 }
 
 export function agentsApiPlugin(): Plugin {

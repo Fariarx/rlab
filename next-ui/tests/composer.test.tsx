@@ -177,6 +177,33 @@ describe("Composer", () => {
     expect(screen.getByTestId("composer-browser-activity-section")).toHaveTextContent("https://example.com/");
   });
 
+  it("shows compaction window controls only for agents with backend support", () => {
+    const claude = renderWithTheme(<Composer placeholder="Написать" agentId="claude-code" />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Опции" }));
+    expect(screen.getByText("Авто-сжатие контекста")).toBeInTheDocument();
+    expect(screen.getByLabelText("Окно сжатия")).toBeInTheDocument();
+
+    claude.unmount();
+    const codex = renderWithTheme(<Composer placeholder="Написать" agentId="codex" />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Опции" }));
+    expect(screen.queryByText("Авто-сжатие контекста")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Окно сжатия")).toBeInTheDocument();
+
+    codex.unmount();
+    for (const agentId of ["gemini", "opencode"]) {
+      const unsupported = renderWithTheme(<Composer placeholder="Написать" agentId={agentId} />);
+
+      fireEvent.click(screen.getByRole("button", { name: "Опции" }));
+      expect(screen.queryByText("Авто-сжатие контекста")).not.toBeInTheDocument();
+      expect(screen.queryByLabelText("Окно сжатия")).not.toBeInTheDocument();
+      expect(screen.getByText("Сжать сейчас")).toBeInTheDocument();
+
+      unsupported.unmount();
+    }
+  });
+
   it("uses a light shadow for floating work-mode tags", () => {
     renderWithTheme(
       <Composer

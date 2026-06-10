@@ -12,6 +12,7 @@ import type {
   SuggestedActionsBlock,
 } from "../agent";
 import { translate } from "../../i18n/I18nProvider";
+import { truncateAgentToolOutput } from "../../lib/agent-output";
 import type { Locale } from "./app-settings";
 import type { AgentAccessMode } from "./app-settings";
 import { truncate } from "./sample-data";
@@ -77,6 +78,13 @@ function isAbortError(value: unknown, signal?: AbortSignal): boolean {
     return false;
   }
   return value.name === "AbortError";
+}
+
+async function responseErrorMessage(response: Response, fallback: string): Promise<string> {
+  const payload = (await response.json().catch(() => null)) as unknown;
+  return typeof payload === "object" && payload !== null && "error" in payload && typeof payload.error === "string" && payload.error.trim().length > 0
+    ? payload.error.trim()
+    : fallback;
 }
 
 function splitDiffLines(value: string): string[] {
@@ -264,7 +272,7 @@ function isRunAttachEvent(value: unknown): value is RunAttachEvent {
 export async function loadActiveRuns(): Promise<ActiveRunSnapshot[]> {
   const response = await fetch("/api/runs", { method: "GET", cache: "no-store" });
   if (!response.ok) {
-    throw new Error(`Active runs load failed (${response.status})`);
+    throw new Error(await responseErrorMessage(response, `Active runs load failed (${response.status})`));
   }
   const payload = (await response.json()) as unknown;
   if (!isRecord(payload) || !Array.isArray(payload.runs) || !payload.runs.every(isActiveRunSnapshot)) {
@@ -287,7 +295,7 @@ export async function attachRunUpdates(opts: {
   const query = new URLSearchParams({ runId: opts.runId });
   const response = await fetch(`/api/run-attach?${query.toString()}`, { method: "GET", cache: "no-store", signal: opts.signal });
   if (!response.ok || !response.body) {
-    throw new Error(`Run attach failed (${response.status})`);
+    throw new Error(await responseErrorMessage(response, `Run attach failed (${response.status})`));
   }
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -318,8 +326,7 @@ export async function cancelRun(runId: string): Promise<void> {
     body: JSON.stringify({ runId }),
   });
   if (!response.ok && response.status !== 404) {
-    const payload = (await response.json().catch(() => ({}))) as { error?: string };
-    throw new Error(payload.error ?? `Run cancel failed (${response.status})`);
+    throw new Error(await responseErrorMessage(response, `Run cancel failed (${response.status})`));
   }
 }
 
@@ -355,7 +362,7 @@ async function streamRun(
     signal,
   });
   if (!res.ok || !res.body) {
-    throw new Error(`Run request failed (${res.status})`);
+    throw new Error(await responseErrorMessage(res, `Run request failed (${res.status})`));
   }
   onAccepted();
   const reader = res.body.getReader();
@@ -579,7 +586,7 @@ export async function runConversation(opts: {
         const tool = tools.find((t) => t.id === e.id);
         if (tool) {
           tool.state = e.ok ? "ok" : "error";
-          tool.output = e.output;
+          tool.output = truncateAgentToolOutput(e.output);
         }
         emitBlocks();
         break;

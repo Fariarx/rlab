@@ -10,6 +10,7 @@ import { buildEmptyWorkspaceState, buildInitialWorkspaceState, cloneWorkspaceSta
 const WORKSPACE_LOAD_RETRY_MS = 15_000;
 const WORKSPACE_SAVE_DEBOUNCE_MS = 250;
 const WORKSPACE_SAVE_RETRY_MS = 2_000;
+const BACKGROUND_ATTACH_SILENCE_RECONCILE_MS = 20_000;
 
 let idSeq = 1000;
 const nextId = (prefix: string) => `${prefix}-${++idSeq}`;
@@ -48,10 +49,17 @@ export interface CreatedProject {
   readonly conversationId: string;
 }
 
+async function responseErrorMessage(response: Response, fallback: string): Promise<string> {
+  const payload = (await response.json().catch(() => null)) as unknown;
+  return typeof payload === "object" && payload !== null && "error" in payload && typeof payload.error === "string" && payload.error.trim().length > 0
+    ? payload.error.trim()
+    : fallback;
+}
+
 async function loadWorkspaceState(): Promise<WorkspaceState> {
   const response = await fetch("/api/workspace", { method: "GET", cache: "no-store" });
   if (!response.ok) {
-    throw new Error(`Workspace load failed (${response.status})`);
+    throw new Error(await responseErrorMessage(response, `Workspace load failed (${response.status})`));
   }
   return (await response.json()) as WorkspaceState;
 }
@@ -63,7 +71,7 @@ async function saveWorkspaceState(state: WorkspaceState): Promise<void> {
     body: JSON.stringify(state),
   });
   if (!response.ok) {
-    throw new Error(`Workspace save failed (${response.status})`);
+    throw new Error(await responseErrorMessage(response, `Workspace save failed (${response.status})`));
   }
 }
 
@@ -630,7 +638,7 @@ class WorkspaceStore implements Workspace {
       try {
         const response = await fetch(`/api/thread?conversationId=${encodeURIComponent(id)}`, { cache: "no-store" });
         if (!response.ok) {
-          throw new Error(`Thread load failed (${response.status})`);
+          throw new Error(await responseErrorMessage(response, `Thread load failed (${response.status})`));
         }
         const { messages } = (await response.json()) as { messages: ChatMessage[] };
         runInAction(() => {
@@ -985,6 +993,45 @@ class WorkspaceStore implements Workspace {
     this.runs.set(run.conversationId, runHandle);
     let terminalUpdateReceived = false;
     let attachErrorMessage: string | null = null;
+    let silenceTimer: ReturnType<typeof setTimeout> | null = null;
+    const clearSilenceTimer = () => {
+      if (silenceTimer !== null) {
+        clearTimeout(silenceTimer);
+        silenceTimer = null;
+      }
+    };
+    const scheduleSilenceReconcile = () => {
+      clearSilenceTimer();
+      silenceTimer = setTimeout(() => {
+        silenceTimer = null;
+        if (this.runs.get(run.conversationId) !== runHandle || controller.signal.aborted || runHandle.canceled) {
+          return;
+        }
+        void loadActiveRuns()
+          .then((activeRuns) => {
+            if (this.runs.get(run.conversationId) !== runHandle || controller.signal.aborted || runHandle.canceled) {
+              return;
+            }
+            if (activeRuns.some((activeRun) => activeRun.runId === run.runId)) {
+              scheduleSilenceReconcile();
+              return;
+            }
+            this.runs.delete(run.conversationId);
+            controller.abort();
+            void this.syncBackgroundRuns();
+          })
+          .catch((error) => {
+            if (this.runs.get(run.conversationId) !== runHandle || controller.signal.aborted || runHandle.canceled) {
+              return;
+            }
+            runInAction(() => {
+              this.loadError = error instanceof Error ? error.message : String(error);
+            });
+            scheduleSilenceReconcile();
+          });
+      }, BACKGROUND_ATTACH_SILENCE_RECONCILE_MS);
+    };
+    scheduleSilenceReconcile();
     attachRunUpdates({
       runId: run.runId,
       signal: controller.signal,
@@ -998,6 +1045,11 @@ class WorkspaceStore implements Workspace {
           this.state = patchActiveRunUpdate(this.state, update);
           this.loadError = null;
         });
+        if (terminalUpdateReceived) {
+          clearSilenceTimer();
+        } else {
+          scheduleSilenceReconcile();
+        }
       },
     })
       .catch((error) => {
@@ -1010,6 +1062,7 @@ class WorkspaceStore implements Workspace {
         });
       })
       .finally(() => {
+        clearSilenceTimer();
         if (this.runs.get(run.conversationId) === runHandle) {
           this.runs.delete(run.conversationId);
         }

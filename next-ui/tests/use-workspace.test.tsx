@@ -326,7 +326,7 @@ describe("useWorkspace", () => {
       if (url === "/api/workspace" && init?.method === "PUT") {
         saveAttempts += 1;
         if (saveAttempts === 1) {
-          return new Response("bad gateway", { status: 502 });
+          return Response.json({ error: "database is locked" }, { status: 502 });
         }
         state = JSON.parse(String(init.body)) as WorkspaceState;
         return Response.json(state);
@@ -350,7 +350,7 @@ describe("useWorkspace", () => {
     });
 
     expect(saveAttempts).toBe(1);
-    expect(screen.getByTestId("error")).toHaveTextContent("Workspace save failed (502)");
+    expect(screen.getByTestId("error")).toHaveTextContent("Workspace save failed: database is locked");
     expect(state.composerDrafts["chat-2"]?.text).not.toBe("a");
 
     await act(async () => {
@@ -1060,6 +1060,52 @@ describe("useWorkspace", () => {
     expect(runRequests).toEqual([]);
   });
 
+  it("reconciles an attached background run when the attach stream goes silent after the server run disappears", async () => {
+    vi.useFakeTimers();
+    const runningState: WorkspaceState = {
+      ...state,
+      chats: state.chats.map((chat) => (chat.id === "chat-2" ? { ...chat, activeRunId: "run-existing", status: "running" } : chat)),
+      threads: {
+        ...state.threads,
+        "chat-2": [
+          ...state.threads["chat-2"],
+          { id: "test-agent-message", role: "agent", time: "14:00", blocks: [{ kind: "reasoning", text: "", active: true }] },
+        ],
+      },
+    };
+    const doneState: WorkspaceState = {
+      ...runningState,
+      chats: runningState.chats.map((chat) => (chat.id === "chat-2" ? { ...chat, activeRunId: undefined, status: "done", snippet: "finished" } : chat)),
+      threads: {
+        ...runningState.threads,
+        "chat-2": [...runningState.threads["chat-2"].slice(0, -1), { id: "test-agent-message", role: "agent", time: "14:01", blocks: [{ kind: "text", text: "finished" }] }],
+      },
+    };
+    state = runningState;
+
+    render(<Probe />);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByText("chat-2")).toBeInTheDocument();
+    expect(attachRunRequests).toEqual(["/api/run-attach?runId=run-existing"]);
+
+    state = doneState;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20_000);
+      await Promise.resolve();
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    expect(screen.getByTestId("status")).toHaveTextContent("done");
+    expect(attachRunSignal?.aborted).toBe(true);
+    expect(runRequests).toEqual([]);
+  });
+
   it("closes background run attach streams on unmount without canceling the server run", async () => {
     state = {
       ...state,
@@ -1195,18 +1241,23 @@ describe("useWorkspace", () => {
   });
 
   it("creates a project bound to a real path with a starter conversation", async () => {
+    vi.useFakeTimers();
     render(<Probe />);
 
-    await screen.findByText("chat-2");
-    screen.getByRole("button", { name: "create-project" }).click();
-
-    await waitFor(() => {
-      const project = state.projects.find((item) => item.id === "billing");
-      expect(project?.name).toBe("billing");
-      expect(project?.path).toBe("C:\\work\\billing");
-      expect(project?.conversations).toHaveLength(1);
-      expect(project?.conversations[0]?.profile).toEqual({ agent: "codex", model: "gpt-5.5", reasoning: "high", mode: "default" });
-      expect(state.selectedId).toBe(project?.conversations[0]?.id);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
     });
+    expect(screen.getByText("chat-2")).toBeInTheDocument();
+    await act(async () => {
+      screen.getByRole("button", { name: "create-project" }).click();
+      await vi.advanceTimersByTimeAsync(250);
+    });
+
+    const project = state.projects.find((item) => item.id === "billing");
+    expect(project?.name).toBe("billing");
+    expect(project?.path).toBe("C:\\work\\billing");
+    expect(project?.conversations).toHaveLength(1);
+    expect(project?.conversations[0]?.profile).toEqual({ agent: "codex", model: "gpt-5.5", reasoning: "high", mode: "default" });
+    expect(state.selectedId).toBe(project?.conversations[0]?.id);
   });
 });

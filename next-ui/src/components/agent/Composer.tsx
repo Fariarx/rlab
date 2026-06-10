@@ -337,6 +337,8 @@ interface AgentRateLimit {
  *  shows "not reported" instead of a forever-pending "no data yet". Gemini's
  *  CLI keeps quota only in its interactive UI; OpenCode doesn't report it. */
 const LIMIT_UNSUPPORTED_AGENTS = new Set<string>(["gemini", "opencode"]);
+const AUTO_COMPACT_TOGGLE_AGENTS = new Set<string>(["claude-code"]);
+const COMPACTION_WINDOW_AGENTS = new Set<string>(["claude-code", "codex"]);
 
 /** Composer — the chat input. Sends on Enter (Shift+Enter for newline). Sticky
  * at the bottom on mobile; the send button stays a comfortable tap target. */
@@ -770,6 +772,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // over-limit warning that offers compaction.
   const hasContextGauge = typeof contextTokens === "number" && contextTokens > 0 && typeof contextWindow === "number" && contextWindow > 0;
   const contextOverLimit = hasContextGauge && (contextTokens as number) / (contextWindow as number) >= 1;
+  const supportsAutoCompactToggle = agentId !== undefined && AUTO_COMPACT_TOGGLE_AGENTS.has(agentId);
+  const supportsCompactionWindow = agentId !== undefined && COMPACTION_WINDOW_AGENTS.has(agentId);
 
   // Compact, localized lines describing the agent's account rate-limits — one
   // row per window (5-hour, weekly, …) showing usage % and time-to-reset side
@@ -1101,34 +1105,35 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           </Box>
           {/* Compaction — below both conversation info sections */}
           <Divider sx={{ my: 0.5 }} />
-          <MenuItem onClick={() => onAutoCompactChange?.(!autoCompact)} sx={modeMenuItemSx}>
-            <CompressRoundedIcon sx={{ fontSize: 15, color: "text.secondary" }} />
-            <Box component="span" sx={{ flex: 1, minWidth: 0 }}>{t("compactionAuto")}</Box>
-            <Switch size="small" checked={autoCompact} onChange={() => undefined} tabIndex={-1} sx={modeSwitchSx} />
-          </MenuItem>
-          {autoCompact && (
+          {supportsAutoCompactToggle && (
+            <MenuItem onClick={() => onAutoCompactChange?.(!autoCompact)} sx={modeMenuItemSx}>
+              <CompressRoundedIcon sx={{ fontSize: 15, color: "text.secondary" }} />
+              <Box component="span" sx={{ flex: 1, minWidth: 0 }}>{t("compactionAuto")}</Box>
+              <Switch size="small" checked={autoCompact} onChange={() => undefined} tabIndex={-1} sx={modeSwitchSx} />
+            </MenuItem>
+          )}
+          {supportsCompactionWindow && (supportsAutoCompactToggle ? autoCompact : true) && (
             <Box
-              sx={{ pl: 2, pr: 1, pb: 0.5, cursor: "default" }}
+              sx={{ ...modeMenuItemSx, alignItems: "center", cursor: "default", py: 0.5 }}
               onClick={(event) => event.stopPropagation()}
               onKeyDown={(event) => event.stopPropagation()}
             >
-              <Stack direction="row" spacing={1} sx={{ justifyContent: "space-between", alignItems: "center" }}>
-                <Typography sx={{ fontSize: "0.72rem", color: "text.tertiary", pl: 3.25 }}>{t("compactionWindow")}</Typography>
-                <TextField
-                  type="text"
-                  inputMode="numeric"
-                  size="small"
-                  value={typeof compactWindow === "number" ? String(compactWindow) : ""}
-                  placeholder={typeof contextWindow === "number" ? String(contextWindow) : t("compactionWindowAuto")}
-                  onChange={(event) => {
-                    const digits = event.target.value.replace(/\D/g, "");
-                    const parsed = Number.parseInt(digits, 10);
-                    onCompactWindowChange?.(digits === "" || Number.isNaN(parsed) || parsed <= 0 ? undefined : parsed);
-                  }}
-                  slotProps={{ htmlInput: { inputMode: "numeric", pattern: "[0-9]*", "aria-label": t("compactionWindow"), style: { padding: "4px 8px", fontSize: "0.72rem", textAlign: "right" } } }}
-                  sx={{ width: 132, "& .MuiInputBase-root": { fontFamily: (th) => th.custom.fonts.mono } }}
-                />
-              </Stack>
+              <CompressRoundedIcon sx={{ fontSize: 16, color: "text.secondary" }} />
+              <Box component="span" sx={{ flex: 1, minWidth: 0 }}>{t("compactionWindow")}</Box>
+              <TextField
+                type="text"
+                inputMode="numeric"
+                size="small"
+                value={typeof compactWindow === "number" ? String(compactWindow) : ""}
+                placeholder={typeof contextWindow === "number" ? String(contextWindow) : t("compactionWindowAuto")}
+                onChange={(event) => {
+                  const digits = event.target.value.replace(/\D/g, "");
+                  const parsed = Number.parseInt(digits, 10);
+                  onCompactWindowChange?.(digits === "" || Number.isNaN(parsed) || parsed <= 0 ? undefined : parsed);
+                }}
+                slotProps={{ htmlInput: { inputMode: "numeric", pattern: "[0-9]*", "aria-label": t("compactionWindow"), style: { padding: "4px 8px", fontSize: "0.72rem", textAlign: "right" } } }}
+                sx={{ width: 132, "& .MuiInputBase-root": { fontFamily: (th) => th.custom.fonts.mono } }}
+              />
             </Box>
           )}
           <MenuItem
