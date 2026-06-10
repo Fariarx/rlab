@@ -1,8 +1,10 @@
+import { DEFAULT_AGENT_OPTION_ID, resolveAgentModelValue, type AgentProfile } from "./agent-catalog";
+
 /** Best-effort context-window sizes (in tokens) per model family, used by the
  *  composer's context gauge to show how full the window is. Matched by name
  *  because the agents report free-form model ids; returns undefined when the
- *  model is unknown (or "default", where the concrete model isn't resolved
- *  client-side) so the gauge degrades to a plain token count. */
+ *  model is unknown so the gauge is hidden rather than guessing. Callers should
+ *  resolve catalog "default" aliases before calling this. */
 const CONTEXT_WINDOWS: ReadonlyArray<readonly [RegExp, number]> = [
   [/sonnet.*\[1m\]|context-1m/i, 1_000_000],
   [/opus|sonnet|haiku|claude/i, 200_000],
@@ -21,6 +23,11 @@ export function contextWindowForModel(model: string | undefined): number | undef
     }
   }
   return undefined;
+}
+
+export function contextWindowForAgentProfile(profile: AgentProfile): number | undefined {
+  const model = resolveAgentModelValue(profile.agent, profile.model) ?? (profile.model === DEFAULT_AGENT_OPTION_ID ? profile.agent : profile.model);
+  return contextWindowForModel(model);
 }
 
 export type ContextSeverity = "ok" | "warn" | "full";

@@ -16,14 +16,24 @@ export function DiffCard({ block }: { readonly block: DiffBlock }) {
         borderRadius: (t) => `${t.custom.radii.md}px`,
         border: (t) => `1px solid ${t.custom.borders.subtle}`,
         backgroundColor: (t) => t.custom.surfaces.s2,
-        overflow: "hidden",
+        overflow: "clip",
       }}
     >
       <Stack
         direction="row"
         spacing={1.25}
         onClick={() => setOpen((v) => !v)}
-        sx={{ alignItems: "center", px: 1.5, py: 1, cursor: "pointer", "&:hover": { backgroundColor: (t) => t.custom.surfaces.s3 } }}
+        sx={{
+          alignItems: "center",
+          px: 1.5,
+          py: 1,
+          cursor: "pointer",
+          position: "sticky",
+          top: "var(--agent-sticky-top, 0px)",
+          zIndex: "var(--agent-sticky-z-index, 1)",
+          backgroundColor: (t) => t.custom.surfaces.s2,
+          "&:hover": { backgroundColor: (t) => t.custom.surfaces.s3 },
+        }}
       >
         <DescriptionIcon sx={{ fontSize: 16, color: "text.secondary" }} />
         {/* Truncate from the LEFT so the filename (right side) stays visible when

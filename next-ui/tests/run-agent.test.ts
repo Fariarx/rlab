@@ -424,6 +424,50 @@ describe("runConversation", () => {
     ]);
   });
 
+  it("updates anonymous plan events in place", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        streamResponse([
+          {
+            type: "plan",
+            steps: [
+              { label: "Read files", state: "running" },
+              { label: "Patch UI", state: "pending" },
+            ],
+          },
+          {
+            type: "plan",
+            steps: [
+              { label: "Read files", state: "ok" },
+              { label: "Patch UI", state: "running" },
+            ],
+          },
+          { type: "done" },
+        ]),
+      ),
+    );
+    const blocks: AgentBlock[][] = [];
+
+    await runConversation({
+      profile: DEFAULT_PROFILE,
+      prompt: "plan",
+      accessMode: "read-only",
+      locale: "ru",
+      onBlocks: (nextBlocks) => blocks.push(nextBlocks),
+    });
+
+    expect(blocks.at(-1)?.filter((block) => block.kind === "plan")).toEqual([
+      {
+        kind: "plan",
+        steps: [
+          { label: "Read files", state: "ok" },
+          { label: "Patch UI", state: "ok" },
+        ],
+      },
+    ]);
+  });
+
   it("shows a live thinking block after run start even before reasoning tokens arrive", async () => {
     vi.stubGlobal(
       "fetch",
@@ -501,7 +545,7 @@ describe("runConversation", () => {
     });
 
     const liveTextBlocks = blocks.flatMap((blockList) => blockList.filter((block) => block.kind === "text" && block.streaming === true));
-    expect(liveTextBlocks).toEqual([{ kind: "text", text: "hello", streaming: true, result: true }]);
+    expect(liveTextBlocks).toEqual([{ kind: "text", text: "hello", streaming: true, result: false }]);
     expect(blocks.at(-1)).toEqual([{ kind: "text", text: "hello", streaming: false, result: true }]);
   });
 
@@ -532,7 +576,7 @@ describe("runConversation", () => {
 
     await vi.advanceTimersByTimeAsync(35);
     expect(blocks.flatMap((blockList) => blockList.filter((block) => block.kind === "text" && block.streaming === true))).toEqual([
-      { kind: "text", text: "hello", streaming: true, result: true },
+      { kind: "text", text: "hello", streaming: true, result: false },
     ]);
 
     await vi.advanceTimersByTimeAsync(100);

@@ -19,14 +19,24 @@ export function ReviewCard({ block }: { readonly block: ReviewBlock }) {
         borderRadius: (theme) => `${theme.custom.radii.md}px`,
         border: (theme) => `1px solid ${theme.custom.borders.subtle}`,
         backgroundColor: (theme) => theme.custom.surfaces.s2,
-        overflow: "hidden",
+        overflow: "clip",
       }}
     >
       <Stack
         direction="row"
         spacing={1}
         onClick={() => setOpen((value) => !value)}
-        sx={{ alignItems: "center", px: 1.5, py: 1, cursor: "pointer", "&:hover": { backgroundColor: (theme) => theme.custom.surfaces.s3 } }}
+        sx={{
+          alignItems: "center",
+          px: 1.5,
+          py: 1,
+          cursor: "pointer",
+          position: "sticky",
+          top: "var(--agent-sticky-top, 0px)",
+          zIndex: "var(--agent-sticky-z-index, 1)",
+          backgroundColor: (theme) => theme.custom.surfaces.s2,
+          "&:hover": { backgroundColor: (theme) => theme.custom.surfaces.s3 },
+        }}
       >
         <RateReviewOutlinedIcon sx={{ fontSize: 16, color: (theme) => theme.palette.status.info.main, flex: "0 0 auto" }} />
         <Typography sx={{ flex: 1, minWidth: 0, fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.8rem", fontWeight: 600 }}>

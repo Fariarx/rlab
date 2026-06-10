@@ -27,6 +27,12 @@ function Probe() {
       <button type="button" onClick={() => workspace.setConversationProfile(workspace.selectedId, { agent: "codex", model: "default", reasoning: "default", mode: "default" })}>
         agent-codex
       </button>
+      <button type="button" onClick={() => workspace.setConversationProfile(workspace.selectedId, { agent: "gemini", model: "default", reasoning: "default", mode: "default" })}>
+        agent-gemini
+      </button>
+      <button type="button" onClick={() => workspace.setConversationProfile(workspace.selectedId, { agent: "opencode", model: "default", reasoning: "default", mode: "default" })}>
+        agent-opencode
+      </button>
       <button type="button" onClick={() => workspace.updateComposerDraft(workspace.selectedId, { text: "a", attachments: [] })}>
         draft-a
       </button>
@@ -571,7 +577,7 @@ describe("useWorkspace", () => {
     });
   });
 
-  it("keeps native session forks per agent and resumes the selected agent's branch", async () => {
+  it("keeps native session forks per runnable agent and resumes the selected agent's branch", async () => {
     state = {
       ...state,
       chats: state.chats.map((chat) =>
@@ -638,13 +644,68 @@ describe("useWorkspace", () => {
       codex: "codex-session-1",
     });
 
-    screen.getByRole("button", { name: "agent-codex" }).click();
+    screen.getByRole("button", { name: "agent-gemini" }).click();
     screen.getByRole("button", { name: "send" }).click();
     await waitFor(() => expect(runRequests).toHaveLength(3));
-    expect(runRequests[2]).toMatchObject({
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("done"));
+    expect(runRequests[2]).toMatchObject({ agent: "gemini", prompt: expect.stringContaining("This is a continuing conversation") });
+    expect(runRequests[2]?.resume).toBeUndefined();
+    expect(state.chats.find((chat) => chat.id === "chat-2")?.agentSessions).toEqual({
+      "claude-code": "claude-code-session-2",
+      codex: "codex-session-1",
+      gemini: "gemini-session-3",
+    });
+
+    screen.getByRole("button", { name: "agent-opencode" }).click();
+    screen.getByRole("button", { name: "send" }).click();
+    await waitFor(() => expect(runRequests).toHaveLength(4));
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("done"));
+    expect(runRequests[3]).toMatchObject({ agent: "opencode", prompt: expect.stringContaining("This is a continuing conversation") });
+    expect(runRequests[3]?.resume).toBeUndefined();
+    expect(state.chats.find((chat) => chat.id === "chat-2")?.agentSessions).toEqual({
+      "claude-code": "claude-code-session-2",
+      codex: "codex-session-1",
+      gemini: "gemini-session-3",
+      opencode: "opencode-session-4",
+    });
+
+    screen.getByRole("button", { name: "agent-codex" }).click();
+    screen.getByRole("button", { name: "send" }).click();
+    await waitFor(() => expect(runRequests).toHaveLength(5));
+    expect(runRequests[4]).toMatchObject({
       agent: "codex",
       prompt: "Persist this message",
       resume: "codex-session-1",
+    });
+
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("done"));
+    screen.getByRole("button", { name: "agent-gemini" }).click();
+    screen.getByRole("button", { name: "send" }).click();
+    await waitFor(() => expect(runRequests).toHaveLength(6));
+    expect(runRequests[5]).toMatchObject({
+      agent: "gemini",
+      prompt: "Persist this message",
+      resume: "gemini-session-3",
+    });
+
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("done"));
+    screen.getByRole("button", { name: "agent-opencode" }).click();
+    screen.getByRole("button", { name: "send" }).click();
+    await waitFor(() => expect(runRequests).toHaveLength(7));
+    expect(runRequests[6]).toMatchObject({
+      agent: "opencode",
+      prompt: "Persist this message",
+      resume: "opencode-session-4",
+    });
+
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("done"));
+    screen.getByRole("button", { name: "agent-claude" }).click();
+    screen.getByRole("button", { name: "send" }).click();
+    await waitFor(() => expect(runRequests).toHaveLength(8));
+    expect(runRequests[7]).toMatchObject({
+      agent: "claude-code",
+      prompt: "Persist this message",
+      resume: "claude-code-session-2",
     });
   });
 

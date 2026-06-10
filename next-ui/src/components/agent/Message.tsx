@@ -8,7 +8,7 @@ import RefreshIcon from "@mui/icons-material/Refresh";
 import SendIcon from "@mui/icons-material/Send";
 import CloseIcon from "@mui/icons-material/Close";
 import { Box, ButtonBase, Collapse, Stack, Typography } from "@mui/material";
-import { type ChangeEvent, type KeyboardEvent, type ReactNode, useEffect, useId, useRef, useState } from "react";
+import { type ChangeEvent, type KeyboardEvent, useEffect, useId, useRef, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import { localFileUrl } from "../../lib/external-url";
 import { ImageLightbox } from "../workspace/ImageLightbox";
@@ -20,8 +20,7 @@ import { DEFAULT_AGENT_OPTION_ID, agentProfileLabels, getAgent, resolveAgentReas
 import { rise } from "./anim";
 import type { MessageActionHandlers } from "./message-actions";
 import { AgentAvatar, TypingDots, UserAvatar } from "./parts";
-import type { AgentBlock, ChatMessage, DiffBlock } from "./types";
-import { formatCostUsd, formatTokenUsage } from "./usage-cost";
+import type { AgentBlock, ChatMessage, DiffBlock, PlanBlock } from "./types";
 
 interface MessageAttachment {
   readonly name: string;
@@ -266,6 +265,8 @@ function UserMessage({ message, delay, actions }: { readonly message: ChatMessag
 // pulled out separately and shown under the reply once the turn is done.
 const ANSWER_BLOCK_KINDS: ReadonlySet<AgentBlock["kind"]> = new Set(["text", "options", "approval", "suggested"]);
 const DIFF_KIND: AgentBlock["kind"] = "diff";
+const COMPLETED_PLAN_HIDE_DELAY_MS = 3000;
+const AGENT_DETAILS_STICKY_HEADER_TOP = "42px";
 
 /** Whether the agent turn is still producing output (so diffs aren't surfaced
  *  until the turn settles). */
@@ -288,45 +289,42 @@ function isMessageLive(blocks: readonly AgentBlock[]): boolean {
   });
 }
 
+function isCompletedPlanBlock(block: AgentBlock): block is PlanBlock {
+  return block.kind === "plan" && block.steps.length > 0 && block.steps.every((step) => step.state === "ok" || step.state === "error");
+}
+
+function planStateSignature(blocks: readonly PlanBlock[]): string {
+  return blocks.map((block) => block.steps.map((step) => `${step.state}:${step.label}`).join("|")).join("\n");
+}
+
+function resolvedInputSignature(blocks: readonly AgentBlock[]): string {
+  return blocks
+    .filter(isResolvedInputBlock)
+    .map((block) => {
+      if (block.kind === "approval") {
+        return `approval:${block.id ?? ""}:${block.decision ?? ""}`;
+      }
+      if (block.kind === "options") {
+        return `options:${block.id ?? ""}:${(block.selected ?? []).join(",")}`;
+      }
+      return "";
+    })
+    .join("\n");
+}
+
+function isResolvedInputBlock(block: AgentBlock): boolean {
+  if (block.kind === "approval") {
+    return block.decision != null;
+  }
+  if (block.kind === "options") {
+    return (block.selected?.length ?? 0) > 0;
+  }
+  return false;
+}
+
 export interface MessageDisplayPrefs {
-  readonly showTokens: boolean;
-  readonly showCost: boolean;
   /** Auto-expand the reasoning container while the agent is actively thinking. */
   readonly reasoningAutoExpand?: boolean;
-}
-
-function UsagePill({ children }: { readonly children: ReactNode }) {
-  return (
-    <Box
-      component="span"
-      sx={{
-        px: 0.75,
-        py: 0.2,
-        borderRadius: (t) => `${t.custom.radii.pill}px`,
-        border: (t) => `1px solid ${t.custom.borders.subtle}`,
-        color: "text.secondary",
-        fontFamily: (t) => t.custom.fonts.mono,
-        fontSize: "0.66rem",
-        lineHeight: 1.4,
-      }}
-    >
-      {children}
-    </Box>
-  );
-}
-
-function AgentUsageMeta({ message, displayPrefs }: { readonly message: ChatMessage; readonly displayPrefs: MessageDisplayPrefs }) {
-  const showCost = displayPrefs.showCost && message.costUsd !== undefined;
-  const showTokens = displayPrefs.showTokens && message.usage !== undefined;
-  if (!showCost && !showTokens) {
-    return null;
-  }
-  return (
-    <Stack direction="row" spacing={0.75} sx={{ flexWrap: "wrap", rowGap: 0.5 }}>
-      {showCost && <UsagePill>{formatCostUsd(message.costUsd!)}</UsagePill>}
-      {showTokens && <UsagePill>{formatTokenUsage(message.usage!)}</UsagePill>}
-    </Stack>
-  );
 }
 
 function agentMessageProfileLabel(profile: AgentProfile | undefined): string | null {
@@ -346,13 +344,28 @@ function agentMessageProfileLabel(profile: AgentProfile | undefined): string | n
 
 /** Collapsed-by-default container holding an agent turn's intermediate work, so
  *  threads stay readable — only the answer and the (collapsed) details show. */
-function AgentDetails({ blocks, actions, autoExpand = false, live = false, showSpinner = false }: { readonly blocks: readonly AgentBlock[]; readonly actions?: MessageActionHandlers; readonly autoExpand?: boolean; readonly live?: boolean; readonly showSpinner?: boolean }) {
+function AgentDetails({
+  blocks,
+  actions,
+  autoExpand = false,
+  live = false,
+  showSpinner = false,
+  hasResultAfter = false,
+}: {
+  readonly blocks: readonly AgentBlock[];
+  readonly actions?: MessageActionHandlers;
+  readonly autoExpand?: boolean;
+  readonly live?: boolean;
+  readonly showSpinner?: boolean;
+  readonly hasResultAfter?: boolean;
+}) {
   // `autoExpand` only seeds the initial open state — expanded while the turn is
   // live (the agent is still working). We key off the live turn, not a reasoning
   // block being active, because some agents stream their thinking as plain text
   // rather than reasoning events. Afterwards the user's manual toggle always
   // wins, so the container can be collapsed mid-thought.
   const [open, setOpen] = useState(autoExpand && live);
+  const previousLive = useRef(live);
   const detailsId = useId();
   const { t } = useI18n();
   const reasoning = blocks.find((block) => block.kind === "reasoning");
@@ -379,6 +392,12 @@ function AgentDetails({ blocks, actions, autoExpand = false, live = false, showS
     const id = setInterval(() => forceTick((n) => n + 1), 1000);
     return () => clearInterval(id);
   }, [showSpinner]);
+  useEffect(() => {
+    if (previousLive.current && !live && hasResultAfter) {
+      setOpen(false);
+    }
+    previousLive.current = live;
+  }, [hasResultAfter, live]);
   const fmtDuration = (totalSec: number): string => {
     const safe = Math.max(0, totalSec);
     const m = Math.floor(safe / 60);
@@ -422,24 +441,34 @@ function AgentDetails({ blocks, actions, autoExpand = false, live = false, showS
   } as const;
 
   return (
-    <Box sx={{ borderRadius: (t) => `${t.custom.radii.md}px`, border: (t) => `1px dashed ${t.custom.borders.subtle}`, backgroundColor: (t) => t.custom.surfaces.s1, overflow: "hidden" }}>
+    <Box sx={{ borderRadius: (t) => `${t.custom.radii.md}px`, border: (t) => `1px dashed ${t.custom.borders.subtle}`, backgroundColor: (t) => t.custom.surfaces.s1, overflow: "clip" }}>
       {expandable ? (
         <ButtonBase
           aria-controls={detailsId}
           aria-expanded={isOpen}
           onClick={() => setOpen((value) => !value)}
-          sx={{ ...headerSx, "&:hover": { backgroundColor: (t) => t.custom.surfaces.s3 } }}
+          sx={{ ...headerSx, position: "sticky", top: 0, zIndex: 3, backgroundColor: (t) => t.custom.surfaces.s1, "&:hover": { backgroundColor: (t) => t.custom.surfaces.s3 } }}
           type="button"
         >
           {headerContent}
         </ButtonBase>
       ) : (
-        <Stack direction="row" sx={headerSx}>
+        <Stack direction="row" sx={{ ...headerSx, position: "sticky", top: 0, zIndex: 3, backgroundColor: (t) => t.custom.surfaces.s1 }}>
           {headerContent}
         </Stack>
       )}
       <Collapse in={isOpen} unmountOnExit>
-        <Stack id={detailsId} spacing={0.75} sx={{ px: 1.5, py: 1.5, borderTop: (t) => `1px dashed ${t.custom.borders.subtle}` }}>
+        <Stack
+          id={detailsId}
+          spacing={0.75}
+          sx={{
+            "--agent-sticky-top": AGENT_DETAILS_STICKY_HEADER_TOP,
+            "--agent-sticky-z-index": 2,
+            px: 1.5,
+            py: 1.5,
+            borderTop: (t) => `1px dashed ${t.custom.borders.subtle}`,
+          }}
+        >
           {/* Drop empty reasoning segments — a blank Typography still consumes a
               Stack gap on each side, which read as uneven spacing between tools. */}
           {blocks
@@ -449,7 +478,16 @@ function AgentDetails({ blocks, actions, autoExpand = false, live = false, showS
                 <Typography
                   key={index}
                   component="div"
-                  sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.76rem", lineHeight: 1.7, color: "text.secondary", whiteSpace: "pre-line", fontStyle: "italic" }}
+                  sx={{
+                    fontFamily: (t) => t.custom.fonts.mono,
+                    fontSize: "0.76rem",
+                    lineHeight: 1.7,
+                    color: "text.secondary",
+                    whiteSpace: "pre-line",
+                    overflowWrap: "anywhere",
+                    wordBreak: "break-word",
+                    fontStyle: "italic",
+                  }}
                 >
                   {block.text.trim()}
                 </Typography>
@@ -477,7 +515,7 @@ function AgentDetails({ blocks, actions, autoExpand = false, live = false, showS
   );
 }
 
-const DEFAULT_DISPLAY_PREFS: MessageDisplayPrefs = { showTokens: true, showCost: false };
+const DEFAULT_DISPLAY_PREFS: MessageDisplayPrefs = { reasoningAutoExpand: true };
 
 function AgentMessage({
   message,
@@ -494,19 +532,50 @@ function AgentMessage({
 }) {
   const { t } = useI18n();
   const blocks = message.blocks ?? [];
+  const live = isMessageLive(blocks);
   const diffBlocks = blocks.filter((block): block is DiffBlock => block.kind === DIFF_KIND);
-  // The plan is pinned under the message (visible even while the agent works),
-  // not folded into the collapsible details.
-  const planBlocks = blocks.filter((block) => block.kind === "plan");
+  // The live plan is pinned under the message; completed plans archive into
+  // details after a short grace period so the thread does not keep duplicating
+  // stale checklists.
+  const planBlocks = blocks.filter((block): block is PlanBlock => block.kind === "plan");
+  const [hideCompletedPlans, setHideCompletedPlans] = useState(false);
+  const completedPlanSignature = planStateSignature(planBlocks);
+  const hasCompletedPlan = planBlocks.some(isCompletedPlanBlock);
+  useEffect(() => {
+    if (!hasCompletedPlan) {
+      setHideCompletedPlans(false);
+      return;
+    }
+    setHideCompletedPlans(false);
+    const timer = window.setTimeout(() => setHideCompletedPlans(true), COMPLETED_PLAN_HIDE_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [completedPlanSignature, hasCompletedPlan]);
+  const visiblePlanBlocks = planBlocks.filter((block) => !hideCompletedPlans || !isCompletedPlanBlock(block));
+  const archivedPlanBlocks = hideCompletedPlans ? planBlocks.filter(isCompletedPlanBlock) : [];
+  const [hideResolvedInputs, setHideResolvedInputs] = useState(false);
+  const resolvedInputsSignature = resolvedInputSignature(blocks);
+  const hasResolvedInput = resolvedInputsSignature.length > 0;
+  useEffect(() => {
+    if (!hasResolvedInput) {
+      setHideResolvedInputs(false);
+      return;
+    }
+    setHideResolvedInputs(false);
+    const timer = window.setTimeout(() => setHideResolvedInputs(true), COMPLETED_PLAN_HIDE_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [hasResolvedInput, resolvedInputsSignature]);
   // Only the final result text escapes the Reasoning container; narration text
   // that arrived before/between tool calls stays interleaved with them inside.
   // Legacy/persisted text blocks have no `result` flag — treat them as result
   // (visible) unless explicitly marked as narration (result === false).
-  const isResultText = (block: AgentBlock): boolean => block.kind === "text" && block.result !== false;
-  const isAnswerBlock = (block: AgentBlock): boolean => isResultText(block) || (ANSWER_BLOCK_KINDS.has(block.kind) && block.kind !== "text");
-  const detailBlocks = blocks.filter((block) => !isAnswerBlock(block) && block.kind !== DIFF_KIND && block.kind !== "plan");
+  const isResultText = (block: AgentBlock): boolean => block.kind === "text" && block.result !== false && !live;
+  const isAnswerBlock = (block: AgentBlock): boolean =>
+    isResultText(block) || (ANSWER_BLOCK_KINDS.has(block.kind) && block.kind !== "text" && (!isResolvedInputBlock(block) || !hideResolvedInputs));
+  const detailBlocks = [
+    ...blocks.filter((block) => !isAnswerBlock(block) && block.kind !== DIFF_KIND && block.kind !== "plan"),
+    ...archivedPlanBlocks,
+  ];
   const answerBlocks = blocks.filter((block) => isAnswerBlock(block));
-  const live = isMessageLive(blocks);
   // The live "thinking" dots live in exactly one place. Once the answer text
   // starts streaming (white text appears) it carries its own trailing dots, so
   // the reasoning header dots would otherwise hang awkwardly in the middle.
@@ -531,7 +600,6 @@ function AgentMessage({
               {message.time}
             </Typography>
           )}
-          <AgentUsageMeta message={message} displayPrefs={displayPrefs} />
         </Stack>
         <Stack spacing={1.25}>
           {/* The turn starts as an empty agent message; show the thinking dots in
@@ -539,11 +607,11 @@ function AgentMessage({
           {blocks.length === 0 && <TypingDots />}
           {detailBlocks.length > 0 && (
             <Box sx={rise(delay + 40)}>
-              <AgentDetails blocks={detailBlocks} actions={actions} autoExpand={displayPrefs.reasoningAutoExpand ?? false} live={live} showSpinner={showDetailSpinner} />
+              <AgentDetails blocks={detailBlocks} actions={actions} autoExpand={displayPrefs.reasoningAutoExpand ?? false} live={live} showSpinner={showDetailSpinner} hasResultAfter={answerBlocks.length > 0} />
             </Box>
           )}
           {/* Plan stays pinned and visible under the message, even mid-run. */}
-          {planBlocks.map((block, index) => (
+          {visiblePlanBlocks.map((block, index) => (
             <Box key={`plan-${index}`} sx={rise(delay + 60)}>
               <AgentBlockRenderer block={block} />
             </Box>

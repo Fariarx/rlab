@@ -21,9 +21,7 @@ describe("workspace state", () => {
         density: "comfortable",
         reduceMotion: false,
         reasoningAutoExpand: true,
-        showCost: false,
         showTerminal: false,
-        showTokens: true,
         sidebarWidth: 300,
         theme: "dark",
       },
@@ -128,9 +126,9 @@ describe("workspace state", () => {
 
     const restored = cloneWorkspaceState(legacyState);
 
-    expect(restored.settings.appearance.showCost).toBe(false);
+    expect("showCost" in restored.settings.appearance).toBe(false);
     expect(restored.settings.appearance.showTerminal).toBe(false);
-    expect(restored.settings.appearance.showTokens).toBe(true);
+    expect("showTokens" in restored.settings.appearance).toBe(false);
   });
 
   it("deduplicates persisted message ids inside a thread", () => {

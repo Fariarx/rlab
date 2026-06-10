@@ -14,9 +14,7 @@ export interface AppearanceSettings {
   readonly reduceMotion: boolean;
   /** Auto-expand the reasoning block while the agent is thinking. */
   readonly reasoningAutoExpand: boolean;
-  readonly showCost: boolean;
   readonly showTerminal: boolean;
-  readonly showTokens: boolean;
   readonly sidebarWidth: number;
   readonly theme: ThemeMode;
 }
@@ -55,9 +53,7 @@ export const defaultAppSettings: AppSettings = {
     density: "comfortable",
     reduceMotion: false,
     reasoningAutoExpand: true,
-    showCost: false,
     showTerminal: false,
-    showTokens: true,
     sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
     theme: "dark",
   },
@@ -82,7 +78,14 @@ export function cloneAppSettings(settings: AppSettings): AppSettings {
   const general = { ...defaultAppSettings.general, ...settings.general };
 
   return {
-    appearance: { ...appearance, sidebarWidth: normalizeSidebarWidth(appearance.sidebarWidth) },
+    appearance: {
+      density: appearance.density,
+      reduceMotion: appearance.reduceMotion,
+      reasoningAutoExpand: appearance.reasoningAutoExpand,
+      showTerminal: appearance.showTerminal,
+      sidebarWidth: normalizeSidebarWidth(appearance.sidebarWidth),
+      theme: appearance.theme,
+    },
     general,
     agents: {
       accessMode: isAgentAccessMode(settings.agents.accessMode) ? settings.agents.accessMode : defaultAppSettings.agents.accessMode,
@@ -161,8 +164,6 @@ export function isAppSettings(value: unknown): value is AppSettings {
     isThemeMode(appearance.theme) &&
     isDensityMode(appearance.density) &&
     typeof appearance.reduceMotion === "boolean" &&
-    (appearance.showTokens === undefined || typeof appearance.showTokens === "boolean") &&
-    (appearance.showCost === undefined || typeof appearance.showCost === "boolean") &&
     (appearance.showTerminal === undefined || typeof appearance.showTerminal === "boolean") &&
     (appearance.reasoningAutoExpand === undefined || typeof appearance.reasoningAutoExpand === "boolean") &&
     (appearance.sidebarWidth === undefined || normalizeSidebarWidth(appearance.sidebarWidth) === appearance.sidebarWidth) &&

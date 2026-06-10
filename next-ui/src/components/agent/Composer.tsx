@@ -14,7 +14,6 @@ import { Box, Divider, InputBase, Menu, MenuItem, Stack, Switch, type SxProps, T
 import { type ChangeEvent, type ClipboardEvent, forwardRef, type KeyboardEvent, type MouseEvent, type ReactNode, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import { localFileUrl } from "../../lib/external-url";
-import { formatTokens } from "../../lib/model-context";
 import { ImageLightbox } from "../workspace/ImageLightbox";
 import { Button, IconButton, KeyHint } from "../ui";
 import { AttachmentTile } from "./AttachmentTile";
@@ -305,8 +304,6 @@ interface ComposerProps {
    *  model's window size, for the context gauge in the options menu. */
   readonly contextTokens?: number;
   readonly contextWindow?: number;
-  /** The selected conversation's cumulative cost (USD), shown in the menu. */
-  readonly costUsd?: number;
   /** Compaction controls (per conversation). `autoCompact` defaults to true;
    *  `compactWindow` is the token override (undefined = the model's full window). */
   readonly autoCompact?: boolean;
@@ -366,7 +363,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     agentId,
     contextTokens,
     contextWindow,
-    costUsd,
     autoCompact = true,
     compactWindow,
     onAutoCompactChange,
@@ -748,25 +744,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const modeMenuItemSx: SxProps<Theme> = { display: "flex", gap: 1, fontSize: "0.8rem", minHeight: 0, pl: 2, pr: 1, width: "100%" };
   const modeSwitchSx: SxProps<Theme> = { ml: "auto", mr: 0, pointerEvents: "none" };
 
-  // The selected conversation's context-window fill + cost (per-conversation,
-  // distinct from the account rate-limits below).
-  const contextLines: ReadonlyArray<{ readonly label: string; readonly value: string; readonly percent?: number }> = (() => {
-    const lines: Array<{ label: string; value: string; percent?: number }> = [];
-    if (typeof contextTokens === "number" && contextTokens > 0) {
-      const used = formatTokens(contextTokens);
-      if (typeof contextWindow === "number" && contextWindow > 0) {
-        const pct = Math.min(100, Math.round((contextTokens / contextWindow) * 100));
-        lines.push({ label: t("contextUsage"), value: `${used} / ${formatTokens(contextWindow)} · ${pct}%`, percent: pct });
-      } else {
-        lines.push({ label: t("contextUsage"), value: used });
-      }
-    }
-    if (typeof costUsd === "number" && costUsd > 0) {
-      lines.push({ label: t("conversationCost"), value: costUsd < 1 ? `$${costUsd.toFixed(3)}` : `$${costUsd.toFixed(2)}` });
-    }
-    return lines;
-  })();
-
   // How full the context window is (raw ratio, may exceed 1 once the thread has
   // outgrown the window). Drives the gauge next to the options button and the
   // over-limit warning that offers compaction.
@@ -1066,22 +1043,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                     {t("browserPreviewActivityEmpty")}
                   </Typography>
                 )}
-              </Box>
-            </>
-          )}
-          {/* Conversation context (БЕСЕДА) */}
-          {contextLines.length > 0 && (
-            <>
-              <Divider sx={{ my: 0.5 }} />
-              <Box sx={{ px: 2, py: 0.75, cursor: "default" }} onClick={(event) => event.stopPropagation()}>
-                <Typography variant="microLabel" sx={{ color: "text.secondary", display: "block", mb: 0.5 }}>
-                  {t("contextLabel")}
-                </Typography>
-                <Stack spacing={1}>
-                  {contextLines.map((line) => (
-                    <MeterRow key={line.label} label={line.label} value={line.value} percent={line.percent} />
-                  ))}
-                </Stack>
               </Box>
             </>
           )}

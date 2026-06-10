@@ -32,7 +32,7 @@ import {
 import { type DragEvent, type MouseEvent as ReactMouseEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { I18nProvider, useI18n } from "../../i18n/I18nProvider";
 import { normalizeExternalUrl } from "../../lib/external-url";
-import { contextWindowForModel } from "../../lib/model-context";
+import { contextWindowForAgentProfile } from "../../lib/model-context";
 import type { HashRoute } from "../../lib/use-hash-route";
 import {
   type AgentProfile,
@@ -1066,7 +1066,7 @@ export function WorkspacePageView({
         </Stack>
       </Stack>
 
-      <ConversationList projects={ws.projects} chats={ws.chats} selectedId={ws.selectedId} onSelect={openConversation} actions={conversationActions} showCost={ws.settings.appearance.showCost} showTokens={ws.settings.appearance.showTokens} />
+      <ConversationList projects={ws.projects} chats={ws.chats} selectedId={ws.selectedId} onSelect={openConversation} actions={conversationActions} />
     </Stack>
   );
 
@@ -1314,7 +1314,7 @@ export function WorkspacePageView({
                     typing={selected.status === "running" && messages[messages.length - 1]?.role === "user"}
                     actions={messageActions}
                     agentProfile={conversationProfile(selected)}
-                    displayPrefs={{ showTokens: ws.settings.appearance.showTokens, showCost: ws.settings.appearance.showCost, reasoningAutoExpand: ws.settings.appearance.reasoningAutoExpand }}
+                    displayPrefs={{ reasoningAutoExpand: ws.settings.appearance.reasoningAutoExpand }}
                     contentMaxWidth={THREAD_MAX_WIDTH}
                     contentPaddingX={THREAD_PADDING_X}
                     bottomInset={contentBottomInset}
@@ -1423,8 +1423,7 @@ export function WorkspacePageView({
                 history={messageHistory}
                 agentId={profile.agent}
                 contextTokens={selected?.usage?.contextTokens}
-                contextWindow={contextWindowForModel(profile.model)}
-                costUsd={selected?.costUsd}
+                contextWindow={contextWindowForAgentProfile(profile)}
                 autoCompact={selected?.compaction?.auto ?? true}
                 compactWindow={selected?.compaction?.window}
                 onAutoCompactChange={(enabled) => {

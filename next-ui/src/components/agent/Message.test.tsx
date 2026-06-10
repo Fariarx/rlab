@@ -1,6 +1,6 @@
 import { ThemeProvider } from "@mui/material/styles";
-import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../../i18n/I18nProvider";
 import { appTheme } from "../../theme/app-theme";
 import { Message } from "./Message";
@@ -17,6 +17,10 @@ function renderMessage(message: ChatMessage, actions?: Parameters<typeof Message
 }
 
 describe("Message", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("renders retry action for agent messages", () => {
     const onRetry = vi.fn();
     const message: ChatMessage = {
@@ -62,6 +66,81 @@ describe("Message", () => {
     fireEvent.click(disclosure);
 
     expect(disclosure).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("keeps the agent details header sticky while expanded", () => {
+    const message: ChatMessage = {
+      id: "agent-sticky",
+      role: "agent",
+      blocks: [{ kind: "reasoning", text: "Проверяю контекст", duration: "2s" }],
+    };
+
+    renderMessage(message);
+
+    expect(screen.getByRole("button", { name: /размышление/i })).toHaveStyle({ position: "sticky", top: "0px" });
+  });
+
+  it("archives a completed plan into agent details after a short delay", () => {
+    vi.useFakeTimers();
+    const message: ChatMessage = {
+      id: "agent-plan",
+      role: "agent",
+      blocks: [
+        { kind: "reasoning", text: "Собрал план", duration: "1s" },
+        { kind: "plan", steps: [{ label: "Проверить sticky", state: "ok" }] },
+      ],
+    };
+
+    renderMessage(message);
+
+    expect(screen.getByText("Plan")).toBeInTheDocument();
+
+    act(() => {
+      vi.advanceTimersByTime(3000);
+    });
+
+    expect(screen.queryByText("Plan")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /размышление/i }));
+
+    expect(screen.getByText("Plan")).toBeInTheDocument();
+    expect(screen.getByText("Проверить sticky")).toBeInTheDocument();
+  });
+
+  it("moves resolved option prompts into agent details", () => {
+    vi.useFakeTimers();
+    const message: ChatMessage = {
+      id: "agent-options",
+      role: "agent",
+      blocks: [
+        {
+          kind: "options",
+          id: "question-1",
+          prompt: "Как форматировать ответ?",
+          options: [
+            { id: "Summary", label: "Summary" },
+            { id: "Detailed", label: "Detailed" },
+          ],
+          selected: ["Summary"],
+        },
+      ],
+    };
+
+    renderMessage(message);
+
+    expect(screen.getByText("Как форматировать ответ?")).toBeInTheDocument();
+    expect(screen.getByText("Выбрано: Summary")).toBeInTheDocument();
+
+    act(() => {
+      vi.advanceTimersByTime(3000);
+    });
+
+    expect(screen.queryByText("Как форматировать ответ?")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /размышление/i }));
+
+    expect(screen.getByText("Как форматировать ответ?")).toBeInTheDocument();
+    expect(screen.getByText("Выбрано: Summary")).toBeInTheDocument();
   });
 
   it("shows the agent model next to the agent label", () => {

@@ -4,15 +4,13 @@ import { Conversation, ConversationList } from "../src/components/agent";
 import { renderWithThemeAndVirtuoso } from "./util/render-with-virtuoso";
 
 describe("usage cost", () => {
-  it("shows conversation cost and token usage in the sidebar row", () => {
+  it("does not show conversation cost and token usage in the sidebar row", () => {
     renderWithThemeAndVirtuoso(
       <ConversationList
         projects={[]}
         selectedId="cost-chat"
         onSelect={vi.fn()}
         actions={{ onRename: vi.fn(), onTogglePin: vi.fn(), onArchive: vi.fn(), onDelete: vi.fn() }}
-        showCost={true}
-        showTokens={true}
         chats={[
           {
             id: "cost-chat",
@@ -28,14 +26,13 @@ describe("usage cost", () => {
       />,
     );
 
-    expect(screen.getByText("$0.0173")).toBeInTheDocument();
-    expect(screen.getByText("9.7k")).toBeInTheDocument();
+    expect(screen.queryByText("$0.0173")).not.toBeInTheDocument();
+    expect(screen.queryByText("9.7k")).not.toBeInTheDocument();
   });
 
-  it("shows agent message cost and token usage in the conversation", () => {
+  it("does not show agent message cost and token usage in the conversation", () => {
     renderWithThemeAndVirtuoso(
       <Conversation
-        displayPrefs={{ showTokens: true, showCost: true }}
         messages={[
           {
             id: "a-cost",
@@ -49,7 +46,7 @@ describe("usage cost", () => {
       />,
     );
 
-    expect(screen.getByText("$0.0042")).toBeInTheDocument();
-    expect(screen.getByText("1.2k")).toBeInTheDocument();
+    expect(screen.queryByText("$0.0042")).not.toBeInTheDocument();
+    expect(screen.queryByText("1.2k")).not.toBeInTheDocument();
   });
 });

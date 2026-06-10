@@ -14,7 +14,6 @@ import { type AgentId, getAgent, withAlpha } from "./agents";
 import { rise } from "./anim";
 import { messageToPlainText } from "./message-actions";
 import { type ChatMessage, conversationStatusKey as statusToKey, type ConversationStatus, type ConversationSummary, type Project } from "./types";
-import { formatCostUsd, formatTokenUsage } from "./usage-cost";
 
 export interface ConversationActions {
   readonly onRename: (id: string, title: string) => void;
@@ -53,11 +52,11 @@ type ConversationListItem =
       readonly kind: "empty";
     };
 
-function conversationListItemKey(index: number, item: ConversationListItem): string {
-  if (item.kind === "group") {
+function conversationListItemKey(index: number, item: ConversationListItem | undefined): string {
+  if (item?.kind === "group") {
     return `group:${item.idBase}`;
   }
-  if (item.kind === "conversation") {
+  if (item?.kind === "conversation") {
     return `conversation:${item.conversation.id}`;
   }
   return `empty:${index}`;
@@ -129,8 +128,6 @@ function ConversationRow({
   onMove,
   registerRowRef,
   actions,
-  showCost = false,
-  showTokens = true,
 }: {
   readonly conversation: ConversationSummary;
   readonly active: boolean;
@@ -139,8 +136,6 @@ function ConversationRow({
   readonly onMove: (id: string, offset: -1 | 1) => void;
   readonly registerRowRef: (id: string, element: HTMLDivElement | null) => void;
   readonly actions: ConversationActions;
-  readonly showCost?: boolean;
-  readonly showTokens?: boolean;
 }) {
   const [menuAnchor, setMenuAnchor] = useState<null | HTMLElement>(null);
   const [editing, setEditing] = useState(false);
@@ -271,16 +266,6 @@ function ConversationRow({
             </Typography>
             <Stack direction="row" spacing={0.75} sx={{ alignItems: "center", flex: "0 0 auto" }}>
               {conversation.unread && <Box sx={{ width: 6, height: 6, borderRadius: "50%", backgroundColor: (t) => t.palette.status.running.main }} />}
-              {showCost && conversation.costUsd !== undefined && (
-                <Typography sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.64rem", color: (t) => t.palette.status.info.main }}>
-                  {formatCostUsd(conversation.costUsd)}
-                </Typography>
-              )}
-              {showTokens && conversation.usage !== undefined && (
-                <Typography sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.64rem", color: "text.secondary" }}>
-                  {formatTokenUsage(conversation.usage)}
-                </Typography>
-              )}
               <Typography className="row-date" sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.64rem", color: "text.secondary", transition: "opacity 120ms ease" }}>{conversation.time}</Typography>
             </Stack>
           </Stack>
@@ -427,16 +412,12 @@ export function ConversationList({
   selectedId,
   onSelect,
   actions,
-  showCost = false,
-  showTokens = true,
 }: {
   readonly projects: readonly Project[];
   readonly chats: readonly ConversationSummary[];
   readonly selectedId: string | null;
   readonly onSelect: (id: string) => void;
   readonly actions: ConversationActions;
-  readonly showCost?: boolean;
-  readonly showTokens?: boolean;
 }) {
   const virtuosoRef = useRef<VirtuosoHandle | null>(null);
   const rowRefs = useRef(new Map<string, HTMLDivElement>());
@@ -634,8 +615,6 @@ export function ConversationList({
                 onMove={moveConversation}
                 registerRowRef={registerRowRef}
                 actions={actions}
-                showCost={showCost}
-                showTokens={showTokens}
               />
             </Box>
           );

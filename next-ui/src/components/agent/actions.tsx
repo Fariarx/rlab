@@ -74,7 +74,7 @@ export function ActionFrame({ icon, title, meta, state, defaultOpen, collapsible
         border: (t) => `1px solid ${t.custom.borders.subtle}`,
         borderLeft: (t) => `2px solid ${t.palette.status[stateBorder[state]].main}`,
         backgroundColor: (t) => t.custom.surfaces.s2,
-        overflow: "hidden",
+        overflow: "clip",
       }}
     >
       <Stack
@@ -86,6 +86,10 @@ export function ActionFrame({ icon, title, meta, state, defaultOpen, collapsible
           px: 1.5,
           py: 1,
           cursor: hasBody && collapsible ? "pointer" : "default",
+          position: "sticky",
+          top: "var(--agent-sticky-top, 0px)",
+          zIndex: "var(--agent-sticky-z-index, 1)",
+          backgroundColor: (t) => t.custom.surfaces.s2,
           transition: "background-color 120ms ease",
           "&:hover": hasBody && collapsible ? { backgroundColor: (t) => t.custom.surfaces.s3 } : undefined,
         }}

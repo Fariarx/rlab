@@ -1,7 +1,7 @@
 import { Box, CircularProgress, type SxProps, type Theme, Tooltip } from "@mui/material";
 import type { MouseEvent } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
-import { type ContextSeverity, contextSeverity, formatTokens } from "../../lib/model-context";
+import { type ContextSeverity, contextSeverity } from "../../lib/model-context";
 
 const FILL_COLOR: Record<ContextSeverity, (theme: Theme) => string> = {
   ok: (theme) => theme.palette.status.info.main,
@@ -28,7 +28,7 @@ export function ContextGauge({ tokens, window, size = 22, onClick }: ContextGaug
   const severity = contextSeverity(ratio);
   const pct = Math.round(ratio * 100);
   const thickness = 4.5;
-  const tooltip = `${t("contextUsage")}: ${formatTokens(tokens)} / ${formatTokens(window)} · ${pct}%`;
+  const tooltip = `${t("contextUsage")} · ${pct}%`;
 
   const fillSx: SxProps<Theme> = {
     position: "absolute",

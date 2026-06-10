@@ -204,6 +204,12 @@ describe("Composer", () => {
     }
   });
 
+  it("shows the context gauge when context tokens and window are available", () => {
+    renderWithTheme(<Composer placeholder="Написать" agentId="codex" contextTokens={120000} contextWindow={272000} />);
+
+    expect(screen.getByTestId("context-gauge")).toBeInTheDocument();
+  });
+
   it("uses a light shadow for floating work-mode tags", () => {
     renderWithTheme(
       <Composer

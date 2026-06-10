@@ -474,7 +474,7 @@ export async function runConversation(opts: {
         const active = !done && idx === lastReasoningIdx;
         blocks.push({ kind: "reasoning", text: item.text, active, duration: done && idx === firstReasoningIdx ? duration : undefined, ...(active ? { startedAtMs } : {}) });
       } else if (item.kind === "text") {
-        blocks.push({ kind: "text", text: item.text, streaming: !done && idx === lastTextIdx, result: idx > lastNonTextIdx });
+        blocks.push({ kind: "text", text: item.text, streaming: !done && idx === lastTextIdx, result: done && idx > lastNonTextIdx });
       } else if (item.kind === "search") {
         const s = item.search;
         blocks.push({ kind: "search", query: s.query, state: s.state, results: s.results });
@@ -605,12 +605,7 @@ export async function runConversation(opts: {
       }
       case "plan": {
         started = true;
-        const existing = e.id ? plans.find((item) => item.id === e.id) : undefined;
-        if (existing) {
-          existing.steps = e.steps;
-        } else {
-          plans.push({ id: e.id, steps: e.steps });
-        }
+        plans.splice(0, plans.length, { id: e.id, steps: e.steps });
         emitBlocks();
         break;
       }

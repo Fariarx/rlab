@@ -37,7 +37,7 @@ export function Reasoning({ block }: { readonly block: ReasoningBlock }) {
         borderRadius: (t) => `${t.custom.radii.md}px`,
         border: (t) => `1px dashed ${t.custom.borders.subtle}`,
         backgroundColor: (t) => t.custom.surfaces.s1,
-        overflow: "hidden",
+        overflow: "clip",
       }}
     >
       <Stack
@@ -49,6 +49,10 @@ export function Reasoning({ block }: { readonly block: ReasoningBlock }) {
           px: 1.5,
           py: 1,
           cursor: hasBody ? "pointer" : "default",
+          position: "sticky",
+          top: "var(--agent-sticky-top, 0px)",
+          zIndex: "var(--agent-sticky-z-index, 1)",
+          backgroundColor: (t) => t.custom.surfaces.s1,
           ...(hasBody && { "&:hover": { backgroundColor: (t) => t.custom.surfaces.s3 } }),
         }}
       >

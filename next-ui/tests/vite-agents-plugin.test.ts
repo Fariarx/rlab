@@ -1012,6 +1012,7 @@ Built-in agents:
       outputTokens: 20,
       reasoningTokens: 5,
       cacheReadTokens: 60,
+      contextTokens: 100,
     });
     expect(codexAppServerUsage(undefined)).toBeUndefined();
   });

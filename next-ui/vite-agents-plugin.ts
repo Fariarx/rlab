@@ -5467,7 +5467,7 @@ function backgroundBlocks(accumulator: BackgroundRunAccumulator): AgentBlock[] {
       const active = !accumulator.done && idx === lastReasoningIdx;
       blocks.push({ kind: "reasoning", text: item.text, active, duration: accumulator.done && idx === firstReasoningIdx ? reasoningDuration : undefined, ...(active ? { startedAtMs: accumulator.start } : {}) });
     } else if (item.kind === "text") {
-      blocks.push({ kind: "text", text: item.text, streaming: !accumulator.done && idx === lastTextIdx, result: idx > lastNonTextIdx });
+      blocks.push({ kind: "text", text: item.text, streaming: !accumulator.done && idx === lastTextIdx, result: accumulator.done && idx > lastNonTextIdx });
     } else if (item.kind === "search") {
       const s = item.search;
       blocks.push({ kind: "search", query: s.query, state: s.state, results: s.results });
@@ -6097,12 +6097,7 @@ function accumulateBackgroundRunEvent(accumulator: BackgroundRunAccumulator, eve
     }
     case "plan": {
       accumulator.started = true;
-      const existing = event.id ? accumulator.plans.find((item) => item.id === event.id) : undefined;
-      if (existing) {
-        existing.steps = event.steps;
-      } else {
-        accumulator.plans.push({ id: event.id, steps: event.steps });
-      }
+      accumulator.plans.splice(0, accumulator.plans.length, { id: event.id, steps: event.steps });
       break;
     }
     case "code": {
@@ -6730,7 +6725,8 @@ function compactUsage(usage: RunUsage): RunUsage | undefined {
     usage.outputTokens !== undefined ||
     usage.reasoningTokens !== undefined ||
     usage.cacheReadTokens !== undefined ||
-    usage.cacheWriteTokens !== undefined
+    usage.cacheWriteTokens !== undefined ||
+    usage.contextTokens !== undefined
     ? usage
     : undefined;
 }
@@ -7872,6 +7868,7 @@ export function codexAppServerUsage(tokenUsage: unknown): RunUsage | undefined {
     outputTokens: firstNumber(total, ["outputTokens"]),
     reasoningTokens: firstNumber(total, ["reasoningOutputTokens"]),
     cacheReadTokens: firstNumber(total, ["cachedInputTokens"]),
+    contextTokens: firstNumber(total, ["contextTokens", "totalTokens"]),
   });
 }
 

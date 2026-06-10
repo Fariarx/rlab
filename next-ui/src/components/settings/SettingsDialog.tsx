@@ -586,16 +586,6 @@ function AppearanceSection({ settings, onSettingsChange }: Pick<SettingsDialogPr
         control={<Switch checked={settings.appearance.reduceMotion} onChange={(e) => onSettingsChange({ appearance: { reduceMotion: e.target.checked } })} />}
       />
       <SettingRow
-        title={t("showTokens")}
-        description={t("showTokensDescription")}
-        control={<Switch checked={settings.appearance.showTokens} onChange={(e) => onSettingsChange({ appearance: { showTokens: e.target.checked } })} />}
-      />
-      <SettingRow
-        title={t("showCost")}
-        description={t("showCostDescription")}
-        control={<Switch checked={settings.appearance.showCost} onChange={(e) => onSettingsChange({ appearance: { showCost: e.target.checked } })} />}
-      />
-      <SettingRow
         title={t("showTerminal")}
         description={t("showTerminalDescription")}
         control={<Switch checked={settings.appearance.showTerminal} onChange={(e) => onSettingsChange({ appearance: { showTerminal: e.target.checked } })} />}
