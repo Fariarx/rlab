@@ -543,6 +543,8 @@ class WorkspaceStore implements Workspace {
   // fetches and lets `loadAllThreads` await them.
   private readonly fullyLoadedThreadIds = new Set<string>();
   private readonly threadLoads = new Map<string, Promise<void>>();
+  private readonly dirtyThreadVersions = new Map<string, number>();
+  private nextDirtyThreadVersion = 0;
 
   constructor() {
     makeAutoObservable<
@@ -562,6 +564,8 @@ class WorkspaceStore implements Workspace {
       | "skipNextSave"
       | "fullyLoadedThreadIds"
       | "threadLoads"
+      | "dirtyThreadVersions"
+      | "nextDirtyThreadVersion"
     >(
       this,
       {
@@ -580,6 +584,8 @@ class WorkspaceStore implements Workspace {
         skipNextSave: false,
         fullyLoadedThreadIds: false,
         threadLoads: false,
+        dirtyThreadVersions: false,
+        nextDirtyThreadVersion: false,
       },
       { autoBind: true },
     );
@@ -615,6 +621,7 @@ class WorkspaceStore implements Workspace {
     // are fully loaded. Reset the tracking to match the freshly loaded shell.
     this.fullyLoadedThreadIds.clear();
     this.threadLoads.clear();
+    this.dirtyThreadVersions.clear();
     for (const id of Object.keys(state.threads)) {
       this.fullyLoadedThreadIds.add(id);
     }
@@ -761,19 +768,30 @@ class WorkspaceStore implements Workspace {
     void this.flushPendingSave();
   }
 
+  private markThreadDirty(id: string): void {
+    this.dirtyThreadVersions.set(id, ++this.nextDirtyThreadVersion);
+  }
+
   /** Build the PUT body, persisting ONLY threads we hold in full. A partial
    *  thread (lazily not yet loaded, or freshly populated by a run before its
    *  history arrived) must never be sent — the server replaces threads it
    *  receives, so a partial one would delete the unopened history. Omitted
-   *  threads are preserved server-side; run messages persist via the run binding. */
-  private putPayload(state: WorkspaceState): WorkspaceState {
+   *  threads are preserved server-side; run messages persist via the run binding.
+   *
+   *  Shell-only mutations (create/delete/rename/select) must not resend a huge
+   *  selected thread: under CPU pressure that made tiny UI actions depend on a
+   *  multi-MB PUT and they could vanish after reload if the request hit 502. */
+  private putPayload(state: WorkspaceState): { readonly state: WorkspaceState; readonly threadVersions: ReadonlyMap<string, number> } {
     const threads: Record<string, ChatMessage[]> = {};
-    for (const [id, messages] of Object.entries(state.threads)) {
-      if (this.fullyLoadedThreadIds.has(id)) {
+    const threadVersions = new Map<string, number>();
+    for (const [id, version] of this.dirtyThreadVersions) {
+      const messages = state.threads[id];
+      if (messages && this.fullyLoadedThreadIds.has(id)) {
         threads[id] = messages;
+        threadVersions.set(id, version);
       }
     }
-    return { ...state, threads };
+    return { state: { ...state, threads }, threadVersions };
   }
 
   private async flushPendingSave(): Promise<void> {
@@ -798,9 +816,15 @@ class WorkspaceStore implements Workspace {
     this.saveInFlight = true;
     this.inFlightSaveState = state;
     let saveFailed = false;
+    const payload = this.putPayload(state);
     try {
-      await saveWorkspaceState(this.putPayload(state));
+      await saveWorkspaceState(payload.state);
       runInAction(() => {
+        for (const [id, version] of payload.threadVersions) {
+          if (this.dirtyThreadVersions.get(id) === version) {
+            this.dirtyThreadVersions.delete(id);
+          }
+        }
         if (this.loadError?.startsWith("Workspace save failed")) {
           this.loadError = null;
         }
@@ -1117,6 +1141,7 @@ class WorkspaceStore implements Workspace {
         selectedId: id,
       };
     });
+    this.persistCurrentStateNow();
     return id;
   }
 
@@ -1153,6 +1178,7 @@ class WorkspaceStore implements Workspace {
         selectedId: conversationId,
       };
     });
+    this.persistCurrentStateNow();
     return { projectId, conversationId };
   }
 
@@ -1181,6 +1207,7 @@ class WorkspaceStore implements Workspace {
         selectedId: id,
       };
     });
+    this.persistCurrentStateNow();
     return id;
   }
 
@@ -1222,6 +1249,8 @@ class WorkspaceStore implements Workspace {
         selectedId: current.selectedId === id ? "" : current.selectedId,
       };
     });
+    this.dirtyThreadVersions.delete(id);
+    this.persistCurrentStateNow();
   }
 
   sendMessage(id: string, text: string): void {
@@ -1230,6 +1259,7 @@ class WorkspaceStore implements Workspace {
       ...current,
       threads: { ...current.threads, [id]: [...(current.threads[id] ?? []), userMsg] },
     }));
+    this.markThreadDirty(id);
     // If the agent is still working, queue this turn instead of cancelling it —
     // it dispatches automatically when the current run settles (see drainPendingMessages).
     if (this.runs.has(id)) {
@@ -1302,9 +1332,23 @@ class WorkspaceStore implements Workspace {
     };
     this.setState((current) => ({
       ...current,
+      chats: current.chats.map((conversation) =>
+        conversation.id === id
+          ? { ...conversation, usage: { ...(conversation.usage ?? {}), contextTokens: 0 } }
+          : conversation,
+      ),
+      projects: current.projects.map((project) => ({
+        ...project,
+        conversations: project.conversations.map((conversation) =>
+          conversation.id === id
+            ? { ...conversation, usage: { ...(conversation.usage ?? {}), contextTokens: 0 } }
+            : conversation,
+        ),
+      })),
       threads: { ...current.threads, [id]: [...(current.threads[id] ?? []), userMsg] },
     }));
-    this.runTurn(id, userMsg, { promptOverride: compactCommandForAgent(profile.agent) });
+    this.markThreadDirty(id);
+    this.runTurn(id, userMsg, { promptOverride: compactCommandForAgent(profile.agent), initialContextTokens: 0 });
     return true;
   }
 
@@ -1319,13 +1363,14 @@ class WorkspaceStore implements Workspace {
       ...current,
       threads: { ...current.threads, [id]: [...(current.threads[id] ?? []), message] },
     }));
+    this.markThreadDirty(id);
   }
 
   /** Run (or re-run) the agent for an existing user message in the thread.
    *  `promptOverride` sends a different prompt to the agent than the message text
    *  shows (used by manual compaction, where the bubble reads "Compact context"
    *  but the agent receives its `/compact` command). */
-  private runTurn(id: string, userMsg: ChatMessage, options?: { readonly promptOverride?: string }): void {
+  private runTurn(id: string, userMsg: ChatMessage, options?: { readonly promptOverride?: string; readonly initialContextTokens?: number }): void {
     const conv = this.find(id);
     const profile = conversationProfile(conv);
     const isDefaultTitle = isDefaultConversationTitle(conv?.title);
@@ -1366,7 +1411,7 @@ class WorkspaceStore implements Workspace {
       time: nowLabel(),
       unread: false,
       costUsd: undefined,
-      usage: undefined,
+      usage: options?.initialContextTokens === undefined ? undefined : { ...(conv?.usage ?? {}), contextTokens: options.initialContextTokens },
     };
     const conversationPatch = isDefaultTitle ? { ...runningPatch, title: truncate(text, 40) } : runningPatch;
     this.setState((current) => patchConversation(current, id, conversationPatch));
@@ -1384,6 +1429,7 @@ class WorkspaceStore implements Workspace {
       }
       return { ...current, threads: { ...current.threads, [id]: upsertAgentMessageForUserTurn(arr, userMsg.id, { id: aId, role: "agent", time: agentTime, profile, blocks: [] }) } };
     });
+    this.markThreadDirty(id);
     const applyBlocks = (blocks: AgentBlock[]) => {
       let shouldFlush = false;
       this.setState((current) => {
@@ -1413,6 +1459,7 @@ class WorkspaceStore implements Workspace {
           ? patchConversation(nextState, id, { status: "waiting", snippet: translate(current.settings.general.locale, "runNeedsInputSnippet"), time: nowLabel() })
           : nextState;
       });
+      this.markThreadDirty(id);
       if (shouldFlush) {
         this.persistCurrentStateNow();
       }
@@ -1460,11 +1507,13 @@ class WorkspaceStore implements Workspace {
           const withConversation = patchConversation(settled, id, finalRunPatch(settled, id, aId, result));
           return patchAgentMessageUsage(withConversation, id, aId, result);
         });
+        this.markThreadDirty(id);
         this.persistCurrentStateNow();
       })
       .catch(() => {
         if (!runHandle.canceled) {
           this.setState((current) => patchConversation(settleThreadLiveBlocks(current, id), id, { activeRunId: undefined, status: "error", snippet: translate(current.settings.general.locale, "runFailedSnippet") }));
+          this.markThreadDirty(id);
           this.persistCurrentStateNow();
         }
       })
@@ -1511,6 +1560,7 @@ class WorkspaceStore implements Workspace {
         time: nowLabel(),
       });
     });
+    this.markThreadDirty(id);
     this.persistCurrentStateNow();
   }
 
@@ -1537,6 +1587,7 @@ class WorkspaceStore implements Workspace {
     // Drop everything after this user message (the stale agent reply) and re-run
     // it in place — no duplicate user turn.
     this.setState((current) => ({ ...current, threads: { ...current.threads, [id]: thread.slice(0, userIndex + 1) } }));
+    this.markThreadDirty(id);
     this.runTurn(id, userMsg);
   }
 
@@ -1588,6 +1639,10 @@ class WorkspaceStore implements Workspace {
         selectedId: forkId,
       };
     });
+    if (forkId) {
+      this.markThreadDirty(forkId);
+      this.persistCurrentStateNow();
+    }
     return forkId;
   }
 
@@ -1609,16 +1664,19 @@ class WorkspaceStore implements Workspace {
     // Replace the edited user message, drop everything after it, and re-run.
     const userMsg: ChatMessage = { ...thread[index], text: nextText, time: nowLabel() };
     this.setState((current) => ({ ...current, threads: { ...current.threads, [id]: [...thread.slice(0, index), userMsg] } }));
+    this.markThreadDirty(id);
     this.runTurn(id, userMsg);
   }
 
   decideApproval(id: string, approvalId: string, decision: ApprovalDecision): void {
     this.setState((current) => patchConversation(patchApprovalDecision(current, id, approvalId, decision), id, { status: "running", time: nowLabel() }));
+    this.markThreadDirty(id);
     this.persistCurrentStateNow();
   }
 
   selectOptions(id: string, optionBlockId: string, selectedLabels: readonly string[]): void {
     this.setState((current) => patchConversation(patchOptionSelection(current, id, optionBlockId, selectedLabels), id, { status: "running", time: nowLabel() }));
+    this.markThreadDirty(id);
     this.persistCurrentStateNow();
   }
 

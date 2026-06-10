@@ -578,8 +578,9 @@ describe("WorkspacePage", () => {
 
     renderWithThemeAndVirtuoso(<WorkspacePage />);
 
-    expect(await screen.findByText("Ошибка Workspace API: Workspace load failed (503)")).toBeInTheDocument();
-    expect(screen.getByRole("alert")).toHaveStyle({ alignItems: "center" });
+    const alert = await screen.findByRole("alert");
+    expect(within(alert).getByText("Ошибка Workspace API: Workspace load failed (503)")).toBeInTheDocument();
+    expect(alert).toHaveStyle({ alignItems: "center" });
     expect(screen.queryByText("Release notes для 0.1.69")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Повторить загрузку" }));

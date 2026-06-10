@@ -280,6 +280,7 @@ export function WorkspacePageView({
   const agentStatusLive = useAgentStatusLive();
   const agentStatusError = useAgentStatusError();
   const reloadAgentStatus = useReloadAgentStatus();
+  const lastWorkspaceErrorToast = useRef<string | null>(null);
 
   const [searchOpen, setSearchOpen] = useState(false);
   const [profile, setProfile] = useState<AgentProfile>(ws.settings.agents.defaultProfile ?? DEFAULT_PROFILE);
@@ -488,6 +489,18 @@ export function WorkspacePageView({
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (!ws.loadError) {
+      lastWorkspaceErrorToast.current = null;
+      return;
+    }
+    if (lastWorkspaceErrorToast.current === ws.loadError) {
+      return;
+    }
+    lastWorkspaceErrorToast.current = ws.loadError;
+    toast({ message: t("workspaceError", { error: ws.loadError }), severity: "error", duration: 5000 });
+  }, [t, toast, ws.loadError]);
 
   useEffect(() => {
     if (selected) {

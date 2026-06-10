@@ -66,8 +66,10 @@ import {
   hasGeminiStoredAuthAt,
   installCommandForAgent,
   JSON_CONTENT_TYPE,
+  parseAnthropicModelInfos,
   parseCodexModelsOutput,
   parseClaudeAgentsOutput,
+  parseGeminiCliModelConfigSource,
   parseOpenCodeAgentsOutput,
   parseOpenCodeModelsOutput,
   prioritizeBrowserPreviewDomTargets,
@@ -358,6 +360,69 @@ describe("vite agents plugin", () => {
     });
   });
 
+  it("parses live model catalogs from Claude API", () => {
+    expect(
+      parseAnthropicModelInfos([
+        {
+          id: "claude-opus-4-8",
+          display_name: "Claude Opus 4.8",
+          created_at: "2026-01-01T00:00:00Z",
+          type: "model",
+          capabilities: null,
+          max_input_tokens: null,
+          max_tokens: null,
+        },
+        {
+          id: "not-a-claude-model",
+          display_name: "Ignored",
+          created_at: "2026-01-01T00:00:00Z",
+          type: "model",
+          capabilities: null,
+          max_input_tokens: null,
+          max_tokens: null,
+        },
+      ]),
+    ).toEqual([{ id: "claude-opus-4-8", label: "Claude Opus 4.8", value: "claude-opus-4-8" }]);
+  });
+
+  it("parses visible model options from Gemini CLI model config", () => {
+    expect(
+      parseGeminiCliModelConfigSource(`
+var DEFAULT_MODEL_CONFIGS = {
+  modelDefinitions: {
+    "gemini-3.1-pro-preview": {
+      tier: "pro",
+      isPreview: true,
+      isVisible: true,
+      features: { thinking: true }
+    },
+    "gemini-3.1-pro-preview-customtools": {
+      tier: "pro",
+      isPreview: true,
+      isVisible: false,
+      features: { thinking: true }
+    },
+    "gemma-4-31b-it": {
+      displayName: "gemma-4-31b-it",
+      tier: "custom",
+      isVisible: true,
+      features: { thinking: true }
+    },
+    auto: {
+      displayName: "Auto",
+      tier: "auto",
+      isVisible: true,
+      features: {}
+    }
+  }
+};
+`),
+    ).toEqual([
+      { id: "gemini-3.1-pro-preview", label: "Gemini 3.1 Pro Preview", value: "gemini-3.1-pro-preview" },
+      { id: "gemma-4-31b-it", label: "gemma-4-31b-it", value: "gemma-4-31b-it" },
+    ]);
+  });
+
   it("parses live OpenCode agents as chat work modes", () => {
     expect(
       parseOpenCodeAgentsOutput(`build (primary)
@@ -394,6 +459,20 @@ Built-in agents:
       { id: "claude-agent:Explore", label: "Explore", value: "Explore" },
       { id: "claude-agent:general-purpose", label: "General Purpose", value: "general-purpose" },
       { id: "claude-agent:Goal", label: "Goal", value: "Goal" },
+    ]);
+
+    expect(
+      parseClaudeAgentsOutput(
+        JSON.stringify([
+          { name: "Explore", model: "haiku" },
+          { name: "statusline-setup", model: "haiku" },
+          { id: "custom-reviewer", model: "inherit" },
+          "Plan",
+        ]),
+      ),
+    ).toEqual([
+      { id: "claude-agent:Explore", label: "Explore", value: "Explore" },
+      { id: "claude-agent:custom-reviewer", label: "Custom Reviewer", value: "custom-reviewer" },
     ]);
   });
 
@@ -601,7 +680,7 @@ Built-in agents:
 
     // A trailing empty result must not re-emit a status (producedContent is set),
     // but still settles the run with a done event.
-    expect(translate(JSON.stringify({ type: "result", status: "success", result: "" }))).toEqual([{ type: "done" }]);
+    expect(translate(JSON.stringify({ type: "result", status: "success", result: "" }))).toEqual([{ type: "done", usage: { contextTokens: 38000 } }]);
   });
 
   it("renders a `/compact` result summary that arrived without a chat turn", () => {

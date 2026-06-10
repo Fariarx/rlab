@@ -747,8 +747,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // How full the context window is (raw ratio, may exceed 1 once the thread has
   // outgrown the window). Drives the gauge next to the options button and the
   // over-limit warning that offers compaction.
-  const hasContextGauge = typeof contextTokens === "number" && contextTokens > 0 && typeof contextWindow === "number" && contextWindow > 0;
-  const contextOverLimit = hasContextGauge && (contextTokens as number) / (contextWindow as number) >= 1;
+  const hasContextGauge = typeof contextWindow === "number" && contextWindow > 0;
+  const effectiveContextTokens = typeof contextTokens === "number" && Number.isFinite(contextTokens) && contextTokens > 0 ? contextTokens : 0;
+  const contextOverLimit = hasContextGauge && effectiveContextTokens / (contextWindow as number) >= 1;
   const supportsAutoCompactToggle = agentId !== undefined && AUTO_COMPACT_TOGGLE_AGENTS.has(agentId);
   const supportsCompactionWindow = agentId !== undefined && COMPACTION_WINDOW_AGENTS.has(agentId);
 
@@ -1180,7 +1181,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         <Stack direction="row" spacing={0.5} sx={{ alignItems: "center", flex: "0 0 auto" }}>
           {hasContextGauge && (
             <ContextGauge
-              tokens={contextTokens as number}
+              tokens={effectiveContextTokens}
               window={contextWindow as number}
               onClick={(event) => openOptionsMenu(event.currentTarget)}
             />

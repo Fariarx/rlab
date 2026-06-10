@@ -99,6 +99,9 @@ export function AgentPicker({
     const sys = statusOf(id);
     const cli = cliInfoOf(id);
     const bins = cliBinsLabel(cli?.bins ?? agentDef.cliBins);
+    if (cli?.modelDiscoveryError) {
+      return cli.modelDiscoveryError;
+    }
     if (sys === "unavailable") {
       return t("agentCliNotFound", { bins });
     }

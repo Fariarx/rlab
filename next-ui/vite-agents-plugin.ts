@@ -1,11 +1,13 @@
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { appendFileSync, chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { request as httpRequest, type IncomingMessage, type ServerResponse } from "node:http";
 import { homedir, tmpdir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import Anthropic from "@anthropic-ai/sdk";
+import type { ModelInfo as AnthropicModelInfo } from "@anthropic-ai/sdk/resources/models";
 import { query, type CanUseTool, type EffortLevel, type Options as ClaudeQueryOptions, type PermissionResult } from "@anthropic-ai/claude-agent-sdk";
 import { chromium, type Browser, type BrowserContext, type ConsoleMessage, type Frame, type FrameLocator, type Locator, type Page, type Request as PlaywrightRequest } from "playwright";
 import type { Plugin, ViteDevServer, PreviewServer } from "vite";
@@ -108,6 +110,7 @@ interface AgentCliInfo {
   readonly models?: readonly AgentOption[];
   readonly reasoning?: readonly AgentOption[];
   readonly modes?: readonly AgentOption[];
+  readonly modelDiscoveryError?: string;
 }
 
 // Keys must match AgentId in src/components/agent/agents.ts.
@@ -341,7 +344,33 @@ function spawnResolvedBin(resolvedBin: string, args: readonly string[], options:
   return spawn(launch.command, launch.args, options);
 }
 
+function agentProcessSpawnOptions(options: NonNullable<Parameters<typeof spawn>[2]>): NonNullable<Parameters<typeof spawn>[2]> {
+  return process.platform === "win32" ? options : { ...options, detached: true };
+}
+
+function terminateAgentProcessTree(child: ReturnType<typeof spawn>, signal: NodeJS.Signals = "SIGTERM"): void {
+  if (child.exitCode !== null || child.pid === undefined) {
+    return;
+  }
+  try {
+    if (process.platform === "win32") {
+      child.kill(signal);
+    } else {
+      process.kill(-child.pid, signal);
+    }
+  } catch {
+    if (child.exitCode === null) {
+      try {
+        child.kill(signal);
+      } catch {
+        // already gone
+      }
+    }
+  }
+}
+
 const MODEL_DISCOVERY_TIMEOUT_MS = 5_000;
+const ANTHROPIC_MODEL_API_KEY_ENV = ["ANTHROPIC_API_KEY"] as const;
 const REASONING_LABELS: Record<string, string> = {
   low: "Low",
   medium: "Medium",
@@ -436,6 +465,36 @@ export function parseOpenCodeAgentsOutput(output: string): AgentOption[] {
 }
 
 export function parseClaudeAgentsOutput(output: string): AgentOption[] {
+  try {
+    const parsed = JSON.parse(output) as unknown;
+    if (Array.isArray(parsed)) {
+      return uniqueAgentOptions(
+        parsed
+          .map((item): string | null => {
+            if (typeof item === "string") {
+              return item;
+            }
+            if (!isRecord(item)) {
+              return null;
+            }
+            if (typeof item.name === "string") {
+              return item.name;
+            }
+            if (typeof item.id === "string") {
+              return item.id;
+            }
+            return null;
+          })
+          .filter(
+            (id): id is string =>
+              id !== null && !CLAUDE_INTERNAL_AGENT_IDS.has(id) && !CLAUDE_STATIC_AGENT_IDS.has(id.toLowerCase()) && claudeAgentNameFromMode(claudeAgentModeId(id)) !== null,
+          )
+          .map((id) => ({ id: claudeAgentModeId(id), label: modelLabelFromValue(id), value: id })),
+      );
+    }
+  } catch {
+    // Older Claude CLIs only print a text table.
+  }
   return uniqueAgentOptions(
     output
       .split(/\r?\n/)
@@ -484,7 +543,229 @@ export function parseCodexModelsOutput(output: string): { readonly models: reado
   return { models: uniqueAgentOptions(models), reasoning };
 }
 
-function runResolvedBinText(resolvedBin: string, args: readonly string[]): string | null {
+export function parseAnthropicModelInfos(models: readonly AnthropicModelInfo[]): AgentOption[] {
+  return uniqueAgentOptions(
+    models
+      .filter((model) => isDirectAgentModelValue("claude-code", model.id))
+      .map((model) => ({ id: model.id, label: model.display_name || modelLabelFromValue(model.id), value: model.id })),
+  );
+}
+
+function skipJsWhitespaceAndComments(source: string, index: number): number {
+  let i = index;
+  while (i < source.length) {
+    const char = source[i];
+    if (/\s/.test(char)) {
+      i += 1;
+      continue;
+    }
+    if (source.startsWith("//", i)) {
+      const next = source.indexOf("\n", i + 2);
+      i = next === -1 ? source.length : next + 1;
+      continue;
+    }
+    if (source.startsWith("/*", i)) {
+      const next = source.indexOf("*/", i + 2);
+      i = next === -1 ? source.length : next + 2;
+      continue;
+    }
+    break;
+  }
+  return i;
+}
+
+function extractJsObjectBody(source: string, openBraceIndex: number): { readonly body: string; readonly end: number } | null {
+  if (source[openBraceIndex] !== "{") {
+    return null;
+  }
+  let depth = 0;
+  let quote: "\"" | "'" | "`" | null = null;
+  let escaped = false;
+  let lineComment = false;
+  let blockComment = false;
+  for (let i = openBraceIndex; i < source.length; i += 1) {
+    const char = source[i];
+    const next = source[i + 1];
+    if (lineComment) {
+      if (char === "\n") {
+        lineComment = false;
+      }
+      continue;
+    }
+    if (blockComment) {
+      if (char === "*" && next === "/") {
+        blockComment = false;
+        i += 1;
+      }
+      continue;
+    }
+    if (quote) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (char === "/" && next === "/") {
+      lineComment = true;
+      i += 1;
+      continue;
+    }
+    if (char === "/" && next === "*") {
+      blockComment = true;
+      i += 1;
+      continue;
+    }
+    if (char === "\"" || char === "'" || char === "`") {
+      quote = char;
+      continue;
+    }
+    if (char === "{") {
+      depth += 1;
+      continue;
+    }
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return { body: source.slice(openBraceIndex + 1, i), end: i + 1 };
+      }
+    }
+  }
+  return null;
+}
+
+function readJsObjectKey(source: string, index: number): { readonly key: string; readonly next: number } | null {
+  const i = skipJsWhitespaceAndComments(source, index);
+  const char = source[i];
+  if (char === "\"" || char === "'") {
+    let escaped = false;
+    for (let j = i + 1; j < source.length; j += 1) {
+      const current = source[j];
+      if (escaped) {
+        escaped = false;
+      } else if (current === "\\") {
+        escaped = true;
+      } else if (current === char) {
+        return { key: source.slice(i + 1, j), next: j + 1 };
+      }
+    }
+    return null;
+  }
+  const match = source.slice(i).match(/^([A-Za-z_$][A-Za-z0-9_$.-]*)/);
+  return match ? { key: match[1], next: i + match[1].length } : null;
+}
+
+export function parseGeminiCliModelConfigSource(source: string): AgentOption[] {
+  const options: AgentOption[] = [];
+  let searchFrom = 0;
+  while (searchFrom < source.length) {
+    const keyIndex = source.indexOf("modelDefinitions", searchFrom);
+    if (keyIndex === -1) {
+      break;
+    }
+    searchFrom = keyIndex + "modelDefinitions".length;
+    const colonIndex = source.indexOf(":", keyIndex);
+    if (colonIndex === -1) {
+      continue;
+    }
+    const openIndex = source.indexOf("{", colonIndex);
+    if (openIndex === -1) {
+      continue;
+    }
+    const definitions = extractJsObjectBody(source, openIndex);
+    if (!definitions) {
+      continue;
+    }
+    let entryIndex = 0;
+    while (entryIndex < definitions.body.length) {
+      const key = readJsObjectKey(definitions.body, entryIndex);
+      if (!key) {
+        break;
+      }
+      let valueIndex = skipJsWhitespaceAndComments(definitions.body, key.next);
+      if (definitions.body[valueIndex] !== ":") {
+        entryIndex = key.next + 1;
+        continue;
+      }
+      valueIndex = skipJsWhitespaceAndComments(definitions.body, valueIndex + 1);
+      if (definitions.body[valueIndex] !== "{") {
+        entryIndex = valueIndex + 1;
+        continue;
+      }
+      const value = extractJsObjectBody(definitions.body, valueIndex);
+      if (!value) {
+        break;
+      }
+      entryIndex = value.end + 1;
+      if (!/\bisVisible\s*:\s*true\b/.test(value.body) || !isDirectAgentModelValue("gemini", key.key)) {
+        continue;
+      }
+      const displayName = value.body.match(/\bdisplayName\s*:\s*["']([^"']+)["']/)?.[1];
+      options.push({ id: key.key, label: displayName ?? modelLabelFromValue(key.key), value: key.key });
+    }
+  }
+  return uniqueAgentOptions(options);
+}
+
+function geminiCliPackageRootFromBin(resolvedBin: string): string | null {
+  const directRoot = join(dirname(resolvedBin), "node_modules", "@google", "gemini-cli");
+  if (existsSync(join(directRoot, "package.json"))) {
+    return directRoot;
+  }
+  let realBin: string;
+  try {
+    realBin = realpathSync(resolvedBin);
+  } catch {
+    realBin = resolvedBin;
+  }
+  const parts = realBin.split(/[\\/]/);
+  for (let i = 0; i < parts.length - 2; i += 1) {
+    if (parts[i] === "node_modules" && parts[i + 1] === "@google" && parts[i + 2] === "gemini-cli") {
+      const root = parts.slice(0, i + 3).join(process.platform === "win32" ? "\\" : "/");
+      return root.length > 0 ? root : null;
+    }
+  }
+  return null;
+}
+
+function parseGeminiCliInstalledModelOptions(resolvedBin: string): TextDiscoveryResult & { readonly models: readonly AgentOption[] } {
+  const root = geminiCliPackageRootFromBin(resolvedBin);
+  if (!root) {
+    return { output: null, error: `${basename(resolvedBin)} package root was not found`, models: [] };
+  }
+  const bundleDir = join(root, "bundle");
+  if (!existsSync(bundleDir)) {
+    return { output: null, error: `${basename(resolvedBin)} bundle directory was not found`, models: [] };
+  }
+  const models: AgentOption[] = [];
+  for (const entry of readdirSync(bundleDir).filter((name) => name.endsWith(".js")).sort()) {
+    const file = join(bundleDir, entry);
+    let source: string;
+    try {
+      source = readFileSync(file, "utf8");
+    } catch {
+      continue;
+    }
+    if (!source.includes("modelDefinitions") || !source.includes("isVisible")) {
+      continue;
+    }
+    models.push(...parseGeminiCliModelConfigSource(source));
+  }
+  const unique = uniqueAgentOptions(models);
+  return unique.length > 0
+    ? { output: null, error: null, models: unique }
+    : { output: null, error: `${basename(resolvedBin)} installed model config did not expose visible models`, models: [] };
+}
+
+interface TextDiscoveryResult {
+  readonly output: string | null;
+  readonly error: string | null;
+}
+
+function runResolvedBinText(resolvedBin: string, args: readonly string[]): TextDiscoveryResult {
   const launch = resolveLaunchCommand(resolvedBin, args);
   const result = spawnSync(launch.command, launch.args, {
     encoding: "utf8",
@@ -493,38 +774,94 @@ function runResolvedBinText(resolvedBin: string, args: readonly string[]): strin
     windowsHide: true,
   });
   if (result.error || result.status !== 0 || typeof result.stdout !== "string") {
-    return null;
+    const detail =
+      result.error?.message ??
+      (typeof result.stderr === "string" && result.stderr.trim().length > 0 ? result.stderr.trim().split(/\r?\n/)[0] : null) ??
+      (result.signal ? `terminated by ${result.signal}` : `exited with status ${result.status ?? "unknown"}`);
+    return { output: null, error: `${basename(resolvedBin)} ${args.join(" ")} failed: ${detail}` };
   }
   const output = result.stdout.trim();
-  return output.length > 0 ? output : null;
+  return { output: output.length > 0 ? output : null, error: null };
 }
 
-function discoveredAgentOptions(id: string, resolvedBin: string | null): Pick<AgentCliInfo, "models" | "reasoning" | "modes"> {
+function discoveredAgentOptions(id: string, resolvedBin: string | null): Pick<AgentCliInfo, "models" | "reasoning" | "modes" | "modelDiscoveryError"> {
   if (!resolvedBin) {
     return {};
   }
   if (id === "opencode") {
     const modelOutput = runResolvedBinText(resolvedBin, ["models"]);
     const agentOutput = runResolvedBinText(resolvedBin, ["agent", "list"]);
-    const models = modelOutput ? parseOpenCodeModelsOutput(modelOutput) : [];
-    const modes = agentOutput ? parseOpenCodeAgentsOutput(agentOutput) : [];
+    const models = modelOutput.output ? parseOpenCodeModelsOutput(modelOutput.output) : [];
+    const modes = agentOutput.output ? parseOpenCodeAgentsOutput(agentOutput.output) : [];
+    const modelDiscoveryError = [modelOutput.error, agentOutput.error].filter((error): error is string => error !== null).join("; ");
     return {
       ...(models.length > 0 ? { models } : {}),
       ...(modes.length > 0 ? { modes } : {}),
+      ...(modelDiscoveryError.length > 0 ? { modelDiscoveryError } : {}),
     };
   }
   if (id === "claude-code") {
-    const agentOutput = runResolvedBinText(resolvedBin, ["agents"]);
-    const modes = agentOutput ? parseClaudeAgentsOutput(agentOutput) : [];
-    return modes.length > 0 ? { modes } : {};
+    const jsonAgentOutput = runResolvedBinText(resolvedBin, ["agents", "--json"]);
+    const agentOutput = jsonAgentOutput.error?.includes("unknown option") ? runResolvedBinText(resolvedBin, ["agents"]) : jsonAgentOutput;
+    const modes = agentOutput.output ? parseClaudeAgentsOutput(agentOutput.output) : [];
+    return {
+      ...(modes.length > 0 ? { modes } : {}),
+      ...(agentOutput.error ? { modelDiscoveryError: agentOutput.error } : {}),
+    };
   }
   if (id === "codex") {
     const output = runResolvedBinText(resolvedBin, ["debug", "models"]);
-    const parsed = output ? parseCodexModelsOutput(output) : { models: [], reasoning: [] };
+    const parsed = output.output ? parseCodexModelsOutput(output.output) : { models: [], reasoning: [] };
     return {
       ...(parsed.models.length > 0 ? { models: parsed.models } : {}),
       ...(parsed.reasoning.length > 0 ? { reasoning: parsed.reasoning } : {}),
+      ...(output.error ? { modelDiscoveryError: output.error } : {}),
     };
+  }
+  if (id === "gemini") {
+    const parsed = parseGeminiCliInstalledModelOptions(resolvedBin);
+    return {
+      ...(parsed.models.length > 0 ? { models: parsed.models } : {}),
+      ...(parsed.error ? { modelDiscoveryError: parsed.error } : {}),
+    };
+  }
+  return {};
+}
+
+function firstConfiguredEnvValue(envNames: readonly string[], config: AgentSecretConfig, env: NodeJS.ProcessEnv): string | undefined {
+  for (const envName of envNames) {
+    const value = configuredEnvValueFrom(envName, config, env);
+    if (value && value.trim().length > 0) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+async function discoveredRemoteAgentOptions(
+  id: string,
+  config: AgentSecretConfig,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<Pick<AgentCliInfo, "models" | "modelDiscoveryError">> {
+  if (id === "claude-code") {
+    const apiKey = firstConfiguredEnvValue(ANTHROPIC_MODEL_API_KEY_ENV, config, env);
+    if (!apiKey) {
+      return {};
+    }
+    try {
+      const client = new Anthropic({ apiKey, maxRetries: 0, timeout: MODEL_DISCOVERY_TIMEOUT_MS });
+      const models: AnthropicModelInfo[] = [];
+      for await (const model of client.models.list({ limit: 100 })) {
+        models.push(model);
+      }
+      const parsed = parseAnthropicModelInfos(models);
+      return parsed.length > 0 ? { models: parsed } : {};
+    } catch (error) {
+      return { modelDiscoveryError: `Claude model discovery failed: ${errorMessage(error)}` };
+    }
+  }
+  if (id === "gemini") {
+    return {};
   }
   return {};
 }
@@ -559,7 +896,7 @@ export function agentCliInfoForDetection(
     selectable: status !== "unavailable" && status !== "unsupported",
     env: detect.env ?? [],
     installCommand: installCommandForAgent(id)?.join(" ") ?? null,
-    ...discoveredAgentOptions(id, resolvedBin),
+    ...(status === "available" ? discoveredAgentOptions(id, resolvedBin) : {}),
   };
 }
 
@@ -569,6 +906,25 @@ function detectAgents(): Record<string, AgentCliInfo> {
   for (const [id, cfg] of Object.entries(DETECT)) {
     result[id] = agentCliInfoForDetection(id, cfg, config);
   }
+  return result;
+}
+
+async function detectAgentsWithLiveModels(): Promise<Record<string, AgentCliInfo>> {
+  const result: Record<string, AgentCliInfo> = {};
+  const config = readAgentSecretConfig();
+  await Promise.all(
+    Object.entries(DETECT).map(async ([id, cfg]) => {
+      const cliInfo = agentCliInfoForDetection(id, cfg, config);
+      const remote = cliInfo.status === "available" ? await discoveredRemoteAgentOptions(id, config) : {};
+      const models = cliInfo.models || remote.models ? uniqueAgentOptions([...(cliInfo.models ?? []), ...(remote.models ?? [])]) : undefined;
+      result[id] = {
+        ...cliInfo,
+        ...remote,
+        ...(models ? { models } : {}),
+        modelDiscoveryError: [cliInfo.modelDiscoveryError, remote.modelDiscoveryError].filter((error): error is string => typeof error === "string" && error.length > 0).join("; ") || undefined,
+      };
+    }),
+  );
   return result;
 }
 
@@ -6467,6 +6823,9 @@ function translateClaudeMessage(msg: Record<string, unknown>, state: ClaudeStrea
     const meta = isRecord(msg.compact_metadata) ? msg.compact_metadata : undefined;
     const pre = meta && typeof meta.pre_tokens === "number" ? meta.pre_tokens : undefined;
     const post = meta && typeof meta.post_tokens === "number" ? meta.post_tokens : undefined;
+    if (post !== undefined) {
+      state.lastContextTokens = post;
+    }
     const k = (n: number) => (n >= 1000 ? `${Math.round(n / 1000)}k` : String(n));
     const detail = pre !== undefined ? (post !== undefined ? ` · ${k(pre)} → ${k(post)} tokens` : ` · from ${k(pre)} tokens`) : "";
     events.push({ type: "status", level: "ok", text: `context compacted${detail}` });
@@ -7767,11 +8126,11 @@ async function runOpenCodeServer(
     }
     const password = randomUUID();
     const launch = resolveLaunchCommand(resolvedBin, ["serve", "--hostname", "127.0.0.1", "--port", "0"]);
-    serverProc = spawn(launch.command, [...launch.args], {
+    serverProc = spawn(launch.command, [...launch.args], agentProcessSpawnOptions({
       cwd,
       env: { ...process.env, ...readAgentSecretConfig().env, OPENCODE_SERVER_USERNAME: "opencode", OPENCODE_SERVER_PASSWORD: password },
       stdio: ["ignore", "pipe", "pipe"],
-    });
+    }));
     const baseUrl = await waitForOpenCodeServerUrl(serverProc, abortController.signal);
     const headers = { "Content-Type": "application/json", Authorization: `Basic ${Buffer.from(`opencode:${password}`).toString("base64")}` };
     const dir = `directory=${encodeURIComponent(cwd)}`;
@@ -7830,7 +8189,7 @@ async function runOpenCodeServer(
     clearTimeout(runTimeout);
     if (serverProc) {
       try {
-        serverProc.kill("SIGTERM");
+        terminateAgentProcessTree(serverProc);
       } catch {
         // already gone
       }
@@ -8166,11 +8525,11 @@ async function runCodexAppServer(
     if (!resolvedBin) {
       throw new Error("codex is not installed (not found on PATH).");
     }
-    child = spawnResolvedBin(resolvedBin, ["app-server"], {
+    child = spawnResolvedBin(resolvedBin, ["app-server"], agentProcessSpawnOptions({
       cwd,
       env: { ...process.env, ...readAgentSecretConfig().env, NODE_NO_WARNINGS: "1", NO_COLOR: "1", RUST_LOG: "error" },
       stdio: ["pipe", "pipe", "pipe"],
-    });
+    }));
 
     const childProc = child;
     childProc.on("exit", () => {
@@ -8182,7 +8541,7 @@ async function runCodexAppServer(
     });
     abortController.signal.addEventListener("abort", () => {
       if (childProc.exitCode === null) {
-        childProc.kill("SIGTERM");
+        terminateAgentProcessTree(childProc);
       }
       settleTurn?.();
     });
@@ -8291,7 +8650,7 @@ async function runCodexAppServer(
     clearTimeout(runTimeout);
     if (child && child.exitCode === null) {
       try {
-        child.kill("SIGTERM");
+        terminateAgentProcessTree(child);
       } catch {
         // already gone
       }
@@ -8587,7 +8946,7 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
     // stalls ~3s: "no stdin data received").
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawnResolvedBin(resolvedBin, spec.args(executionRequest), { cwd, env: runEnv, stdio: ["ignore", "pipe", "pipe"] });
+      child = spawnResolvedBin(resolvedBin, spec.args(executionRequest), agentProcessSpawnOptions({ cwd, env: runEnv, stdio: ["ignore", "pipe", "pipe"] }));
     } catch (error) {
       send({ type: "error", text: error instanceof Error ? `Failed to launch ${spec.bin}: ${error.message}` : `Failed to launch ${spec.bin}` });
       finishAndEnd();
@@ -8601,7 +8960,7 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
         cancel: () => {
           canceled = true;
           if (child.exitCode === null) {
-            child.kill("SIGTERM");
+            terminateAgentProcessTree(child);
           }
         },
       });
@@ -8667,7 +9026,7 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
     // request — `req`'s "close" fires as soon as the POST body is consumed.
     res.on("close", () => {
       if (!binding && child.exitCode === null) {
-        child.kill("SIGTERM");
+        terminateAgentProcessTree(child);
       }
     });
   });
@@ -8826,9 +9185,13 @@ function attach(server: ViteDevServer | PreviewServer): void {
     }
   }));
   useExactApi(server, "/api/agents", methodOnly("GET", (_req, res) => {
-    res.setHeader("Content-Type", "application/json");
-    res.setHeader("Cache-Control", "no-store");
-    res.end(JSON.stringify(detectAgents()));
+    void (async () => {
+      try {
+        sendJson(res, 200, await detectAgentsWithLiveModels());
+      } catch (error) {
+        sendJson(res, 500, { error: errorMessage(error) });
+      }
+    })();
   }));
   useExactApi(server, "/api/agent-config", handleAgentConfig);
   useExactApi(server, "/api/agent-install", methodOnly("POST", handleAgentInstall));

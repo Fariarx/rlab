@@ -210,6 +210,12 @@ describe("Composer", () => {
     expect(screen.getByTestId("context-gauge")).toBeInTheDocument();
   });
 
+  it("keeps the context gauge visible when only the model window is known", () => {
+    renderWithTheme(<Composer placeholder="Написать" agentId="codex" contextWindow={272000} />);
+
+    expect(screen.getByTestId("context-gauge")).toHaveAttribute("aria-label", "Контекст · 0%");
+  });
+
   it("uses a light shadow for floating work-mode tags", () => {
     renderWithTheme(
       <Composer

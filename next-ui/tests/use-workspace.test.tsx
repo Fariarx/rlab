@@ -17,6 +17,7 @@ function Probe() {
       <div data-testid="error">{workspace.loadError ?? "none"}</div>
       <div data-testid="cost">{selected?.costUsd ?? "none"}</div>
       <div data-testid="usage">{selected?.usage?.totalTokens ?? "none"}</div>
+      <div data-testid="context-usage">{selected?.usage?.contextTokens ?? "none"}</div>
       <div data-testid="thread-ids">{(workspace.threads[workspace.selectedId] ?? []).map((message) => message.id).join(",")}</div>
       <button type="button" onClick={() => workspace.sendMessage(workspace.selectedId, "Persist this message")}>
         send
@@ -41,6 +42,12 @@ function Probe() {
       </button>
       <button type="button" onClick={() => workspace.stopRun(workspace.selectedId)}>
         stop
+      </button>
+      <button type="button" onClick={() => workspace.remove("chat-1")}>
+        remove-chat-1
+      </button>
+      <button type="button" onClick={() => workspace.compactConversation(workspace.selectedId)}>
+        compact
       </button>
       <button type="button" onClick={() => workspace.retryMessage(workspace.selectedId, "u1")}>
         retry
@@ -264,6 +271,24 @@ describe("useWorkspace", () => {
     expect(localStorageSetItem).not.toHaveBeenCalledWith(expect.stringContaining("rlab-workspace"), expect.any(String));
   });
 
+  it("persists conversation deletion without resending unchanged loaded threads", async () => {
+    render(<Probe />);
+
+    await screen.findByText("chat-2");
+    const savesBefore = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace" && init?.method === "PUT").length;
+    screen.getByRole("button", { name: "remove-chat-1" }).click();
+
+    await waitFor(() => {
+      const saves = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace" && init?.method === "PUT");
+      expect(saves).toHaveLength(savesBefore + 1);
+    });
+    const saves = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace" && init?.method === "PUT");
+    const payload = JSON.parse(String(saves.at(-1)?.[1]?.body ?? "{}")) as WorkspaceState;
+    expect(payload.chats.some((chat) => chat.id === "chat-1")).toBe(false);
+    expect(payload.threads).toEqual({});
+    expect(state.chats.some((chat) => chat.id === "chat-1")).toBe(false);
+  });
+
   it("continues generated ids after persisted workspace ids", async () => {
     state = {
       ...state,
@@ -431,6 +456,40 @@ describe("useWorkspace", () => {
     const agentMessage = [...state.threads["chat-2"]].reverse().find((message) => message.role === "agent");
     expect(agentMessage?.costUsd).toBe(0.0173);
     expect(agentMessage?.usage).toEqual({ totalTokens: 9653 });
+  });
+
+  it("clears stale context usage immediately when manual compaction starts", async () => {
+    state = {
+      ...state,
+      chats: state.chats.map((chat) =>
+        chat.id === "chat-2"
+          ? {
+              ...chat,
+              agent: "codex",
+              profile: { agent: "codex", model: "default", reasoning: "default", mode: "default" },
+              sessionAgent: "codex",
+              sessionId: "codex-session-1",
+              usage: { contextTokens: 300000 },
+            }
+          : chat,
+      ),
+    };
+
+    render(<Probe />);
+
+    await screen.findByText("chat-2");
+    expect(screen.getByTestId("context-usage")).toHaveTextContent("300000");
+
+    await act(async () => {
+      screen.getByRole("button", { name: "compact" }).click();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("context-usage")).toHaveTextContent("0");
+      expect(runRequests).toHaveLength(1);
+    });
+    expect(runRequests[0]).toMatchObject({ agent: "codex", prompt: "/compact", resume: "codex-session-1" });
+    expect(state.chats.find((chat) => chat.id === "chat-2")?.usage?.contextTokens).toBe(0);
   });
 
   it("keeps a bound background run running after the client stream disconnects and settles from workspace sync", async () => {
@@ -707,6 +766,121 @@ describe("useWorkspace", () => {
       prompt: "Persist this message",
       resume: "claude-code-session-2",
     });
+  });
+
+  it("uses the latest selected agent for queued messages after switching during a run", async () => {
+    state = {
+      ...state,
+      chats: state.chats.map((chat) =>
+        chat.id === "chat-2"
+          ? { ...chat, activeRunId: undefined, status: "idle", agent: "codex", profile: { agent: "codex", model: "default", reasoning: "default", mode: "default" } }
+          : chat,
+      ),
+    };
+    const encoder = new TextEncoder();
+    const controllers: ReadableStreamDefaultController<Uint8Array>[] = [];
+    const encodeEvent = (event: unknown) => encoder.encode(`${JSON.stringify(event)}\n`);
+    const finishRun = (index: number) => {
+      controllers[index]?.enqueue(encodeEvent({ type: "done" }));
+      controllers[index]?.close();
+    };
+    vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/workspace" && (!init || init.method === "GET")) {
+        return Response.json(state);
+      }
+      if (url === "/api/workspace" && init?.method === "PUT") {
+        state = JSON.parse(String(init.body)) as WorkspaceState;
+        return Response.json(state);
+      }
+      if (url === "/api/runs") {
+        return Response.json(activeRunsPayloadFromState(state));
+      }
+      if (url === "/api/run") {
+        const request = JSON.parse(String(init?.body ?? "{}")) as RunRequestRecord;
+        runRequests.push(request);
+        const sessionId = `${request.agent ?? "agent"}-session-${runRequests.length}`;
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controllers.push(controller);
+            controller.enqueue(encodeEvent({ type: "session", id: sessionId }));
+            controller.enqueue(encodeEvent({ type: "text", text: "ok" }));
+          },
+        });
+        return new Response(stream, {
+          headers: { "Content-Type": "application/x-ndjson" },
+        });
+      }
+      if (url === "/api/run-cancel") {
+        runCancelRequests.push(JSON.parse(String(init?.body ?? "{}")) as { runId?: string });
+        return Response.json({ canceled: true });
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    render(<Probe />);
+
+    await screen.findByText("chat-2");
+    screen.getByRole("button", { name: "send" }).click();
+    await waitFor(() => expect(runRequests).toHaveLength(1));
+    expect(runRequests[0]).toMatchObject({
+      agent: "codex",
+      prompt: expect.stringContaining("Persist this message"),
+    });
+    expect(runRequests[0]?.resume).toBeUndefined();
+
+    screen.getByRole("button", { name: "agent-claude" }).click();
+    screen.getByRole("button", { name: "send" }).click();
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("running"));
+    expect(runRequests).toHaveLength(1);
+
+    await act(async () => {
+      finishRun(0);
+    });
+
+    await waitFor(() => expect(runRequests).toHaveLength(2));
+    expect(runRequests[1]).toMatchObject({
+      agent: "claude-code",
+      prompt: expect.stringContaining("This is a continuing conversation"),
+    });
+    expect(runRequests[1]?.resume).toBeUndefined();
+    expect(state.chats.find((chat) => chat.id === "chat-2")?.agentSessions).toEqual({
+      "claude-code": "claude-code-session-2",
+      codex: "codex-session-1",
+    });
+
+    await act(async () => {
+      finishRun(1);
+    });
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("done"));
+
+    screen.getByRole("button", { name: "agent-codex" }).click();
+    screen.getByRole("button", { name: "send" }).click();
+    await waitFor(() => expect(runRequests).toHaveLength(3));
+    expect(runRequests[2]).toMatchObject({
+      agent: "codex",
+      prompt: "Persist this message",
+      resume: "codex-session-1",
+    });
+
+    await act(async () => {
+      finishRun(2);
+    });
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("done"));
+
+    screen.getByRole("button", { name: "agent-claude" }).click();
+    screen.getByRole("button", { name: "send" }).click();
+    await waitFor(() => expect(runRequests).toHaveLength(4));
+    expect(runRequests[3]).toMatchObject({
+      agent: "claude-code",
+      prompt: "Persist this message",
+      resume: "claude-code-session-2",
+    });
+
+    await act(async () => {
+      finishRun(3);
+    });
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("done"));
   });
 
   it("sends the configured filesystem access mode to the run API", async () => {
@@ -1296,29 +1470,23 @@ describe("useWorkspace", () => {
       expect(project?.conversations[0]?.title).toBe("Новый чат");
       expect(project?.conversations[0]?.agent).toBe("claude-code");
       expect(state.selectedId).toBe(project?.conversations[0]?.id);
-      expect(state.threads[state.selectedId]).toBeDefined();
       expect(state.chats).toHaveLength(initialChatCount);
     });
   });
 
   it("creates a project bound to a real path with a starter conversation", async () => {
-    vi.useFakeTimers();
     render(<Probe />);
 
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(0);
-    });
-    expect(screen.getByText("chat-2")).toBeInTheDocument();
-    await act(async () => {
-      screen.getByRole("button", { name: "create-project" }).click();
-      await vi.advanceTimersByTimeAsync(250);
-    });
+    await screen.findByText("chat-2");
+    screen.getByRole("button", { name: "create-project" }).click();
 
-    const project = state.projects.find((item) => item.id === "billing");
-    expect(project?.name).toBe("billing");
-    expect(project?.path).toBe("C:\\work\\billing");
-    expect(project?.conversations).toHaveLength(1);
-    expect(project?.conversations[0]?.profile).toEqual({ agent: "codex", model: "gpt-5.5", reasoning: "high", mode: "default" });
-    expect(state.selectedId).toBe(project?.conversations[0]?.id);
+    await waitFor(() => {
+      const project = state.projects.find((item) => item.id === "billing");
+      expect(project?.name).toBe("billing");
+      expect(project?.path).toBe("C:\\work\\billing");
+      expect(project?.conversations).toHaveLength(1);
+      expect(project?.conversations[0]?.profile).toEqual({ agent: "codex", model: "gpt-5.5", reasoning: "high", mode: "default" });
+      expect(state.selectedId).toBe(project?.conversations[0]?.id);
+    });
   });
 });

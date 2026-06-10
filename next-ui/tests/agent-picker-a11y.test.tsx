@@ -80,7 +80,7 @@ describe("AgentPicker a11y", () => {
     expect(await screen.findByText("CLI-путь: C:\\tools\\codex.cmd")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Выбрать Codex из CLI" }));
-    fireEvent.click(screen.getByRole("button", { name: "Использовать Codex" }));
+    fireEvent.click(screen.getByRole("button", { name: "Применить" }));
 
     expect(onSelect).toHaveBeenCalledWith({ agent: "codex", model: "default", reasoning: "default", mode: "default" });
   });
@@ -118,7 +118,7 @@ describe("AgentPicker a11y", () => {
     expect(await screen.findByText("CLI-путь: C:\\tools\\opencode.cmd")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Выбрать OpenCode из CLI" }));
     fireEvent.click(screen.getByRole("button", { name: "Claude Custom Lab" }));
-    fireEvent.click(screen.getByRole("button", { name: "Использовать OpenCode" }));
+    fireEvent.click(screen.getByRole("button", { name: "Применить" }));
 
     expect(onSelect).toHaveBeenCalledWith({ agent: "opencode", model: "anthropic/claude-custom-lab", reasoning: "default", mode: "default" });
   });

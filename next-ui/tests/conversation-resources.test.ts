@@ -45,13 +45,14 @@ describe("collectResources", () => {
     expect(kinds).toContain("link:https://example.com/a");
     expect(kinds).toContain("link:https://vitest.dev");
     expect(kinds).toContain("image:https://cdn.example.com/chart.png");
-    expect(kinds).toContain("file:src/login.ts");
-    expect(kinds).toContain("file:src/util.ts");
     expect(kinds).toContain("link:developer.mozilla.org/en-US/docs");
+    expect(kinds).not.toContain("file:src/login.ts");
+    expect(kinds).not.toContain("file:src/util.ts");
 
-    // The attachment (first message) precedes the agent's diff (second message).
+    // Resources lists direct mentions and uploads, not files merely touched by
+    // tool/diff blocks.
     const fileUrls = resources.filter((resource) => resource.kind === "file").map((resource) => resource.url);
-    expect(fileUrls.indexOf("notes.txt")).toBeLessThan(fileUrls.indexOf("src/login.ts"));
+    expect(fileUrls).toEqual(["notes.txt"]);
   });
 
   it("deduplicates repeated references and ignores command/code bodies", () => {

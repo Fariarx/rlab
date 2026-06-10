@@ -67,4 +67,44 @@ describe("AgentStatusProvider", () => {
     expect(screen.getByTestId("claude")).toHaveTextContent("available");
     expect(reads).toBe(2);
   });
+
+  it("refreshes successful agent detection every 5 minutes", async () => {
+    vi.useFakeTimers();
+    let reads = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL | Request) => {
+        const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+        if (path === "/api/agents") {
+          reads += 1;
+          return Response.json({ "claude-code": "available" });
+        }
+        return new Response("not found", { status: 404 });
+      }),
+    );
+
+    render(
+      <AgentStatusProvider>
+        <Probe />
+      </AgentStatusProvider>,
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(reads).toBe(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(299_999);
+    });
+    expect(reads).toBe(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+
+    expect(screen.getByTestId("live")).toHaveTextContent("live");
+    expect(reads).toBe(2);
+  });
 });

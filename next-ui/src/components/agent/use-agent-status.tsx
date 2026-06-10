@@ -5,6 +5,7 @@ import { AGENTS, AGENT_STATUS, STATIC_AGENT_CLI_INFO, type AgentCliInfo, type Ag
 
 type StatusMap = Partial<Record<AgentId, AgentSystemStatus>>;
 const AGENT_STATUS_RETRY_MS = 15_000;
+const AGENT_STATUS_REFRESH_MS = 5 * 60_000;
 
 interface AgentStatusValue {
   readonly agents: AgentCliMap | null;
@@ -65,7 +66,8 @@ function isAgentCliInfo(value: unknown): value is AgentCliInfo {
     (typeof value.installCommand === "string" || value.installCommand === null) &&
     (value.models === undefined || agentOptions(value.models) !== undefined) &&
     (value.reasoning === undefined || agentOptions(value.reasoning) !== undefined) &&
-    (value.modes === undefined || agentOptions(value.modes) !== undefined)
+    (value.modes === undefined || agentOptions(value.modes) !== undefined) &&
+    (value.modelDiscoveryError === undefined || typeof value.modelDiscoveryError === "string")
   );
 }
 
@@ -114,6 +116,8 @@ class AgentStatusStore {
 
   private retryTimer: ReturnType<typeof setInterval> | null = null;
 
+  private refreshTimer: ReturnType<typeof setInterval> | null = null;
+
   constructor() {
     makeAutoObservable(this, {}, { autoBind: true });
   }
@@ -143,6 +147,13 @@ class AgentStatusStore {
         }
       }, AGENT_STATUS_RETRY_MS);
     }
+    if (!this.refreshTimer) {
+      this.refreshTimer = setInterval(() => {
+        if (!this.loading) {
+          void this.reload();
+        }
+      }, AGENT_STATUS_REFRESH_MS);
+    }
   }
 
   unmount(): void {
@@ -150,6 +161,10 @@ class AgentStatusStore {
     if (this.retryTimer) {
       clearInterval(this.retryTimer);
       this.retryTimer = null;
+    }
+    if (this.refreshTimer) {
+      clearInterval(this.refreshTimer);
+      this.refreshTimer = null;
     }
   }
 

@@ -220,6 +220,7 @@ export interface AgentCliInfo {
   readonly models?: readonly AgentOption[];
   readonly reasoning?: readonly AgentOption[];
   readonly modes?: readonly AgentOption[];
+  readonly modelDiscoveryError?: string;
 }
 
 export type AgentCliMap = Partial<Record<AgentId, AgentCliInfo>>;
@@ -273,7 +274,7 @@ export function isDirectAgentModelValue(agent: AgentId, value: string): boolean 
     case "codex":
       return /^(?:gpt|codex)-[A-Za-z0-9._-]+$/.test(value);
     case "gemini":
-      return /^gemini-[A-Za-z0-9._-]+$/.test(value);
+      return /^(?:gemini|gemma)-[A-Za-z0-9._-]+$/.test(value);
     case "opencode":
       return /^[a-z0-9][a-z0-9.-]*(?:\/[A-Za-z0-9._-]+)+$/.test(value);
     case "qwen":
