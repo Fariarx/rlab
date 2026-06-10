@@ -6,7 +6,7 @@ import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
 import MergeIcon from "@mui/icons-material/Merge";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import RemoveIcon from "@mui/icons-material/Remove";
-import { Alert, Box, Chip, CircularProgress, Collapse, Stack, Tab, Tabs, type Theme, Tooltip, Typography } from "@mui/material";
+import { Alert, Autocomplete, Box, Chip, CircularProgress, Collapse, Stack, Tab, Tabs, TextField, type Theme, Tooltip, Typography } from "@mui/material";
 import { type ReactNode, type RefObject, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type I18nApi, useI18n } from "../../i18n/I18nProvider";
 import type { GitFileStatus, GitStatusPayload } from "../../lib/git-status";
@@ -144,6 +144,85 @@ async function commitGit(cwd: string, message: string): Promise<GitStatusPayload
   });
   const payload = await readGitApiPayload<GitStatusPayload>(response);
   return assertGitApiOk("Git commit", response, payload);
+}
+
+async function checkoutGitBranch(cwd: string, branch: string): Promise<GitStatusPayload> {
+  const response = await fetch("/api/git-checkout", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cwd, branch }),
+  });
+  const payload = await readGitApiPayload<GitStatusPayload>(response);
+  return assertGitApiOk("Git checkout", response, payload);
+}
+
+function branchOptionsFor(status: GitStatusPayload): readonly string[] {
+  return Array.from(new Set([status.branch, ...(status.branches ?? [])].filter((branch) => branch.trim().length > 0)));
+}
+
+function GitBranchAutocomplete({
+  branches,
+  disabled,
+  onSelect,
+  t,
+  value,
+}: {
+  readonly branches: readonly string[];
+  readonly disabled: boolean;
+  readonly onSelect: (branch: string) => void;
+  readonly t: I18nApi["t"];
+  readonly value: string;
+}) {
+  return (
+    <Autocomplete
+      size="small"
+      disableClearable
+      disabled={disabled}
+      value={value}
+      options={branches}
+      onChange={(_, next) => {
+        if (next !== null && next !== value) {
+          onSelect(next);
+        }
+      }}
+      noOptionsText={t("gitNoBranches")}
+      sx={{
+        width: { xs: "100%", sm: 220 },
+        minWidth: 150,
+        maxWidth: 280,
+        flex: "0 1 220px",
+        "& .MuiInputBase-root": {
+          minHeight: 28,
+          height: 28,
+          py: 0,
+          pr: "32px !important",
+          borderRadius: (theme) => `${theme.custom.radii.md}px`,
+          backgroundColor: (theme) => theme.custom.surfaces.s2,
+        },
+        "& .MuiInputBase-input": {
+          py: "3px !important",
+          fontFamily: (theme) => theme.custom.fonts.mono,
+          fontSize: "0.78rem",
+          fontWeight: 700,
+        },
+        "& .MuiAutocomplete-endAdornment": { right: 5 },
+        "& .MuiAutocomplete-popupIndicator": { width: 24, height: 24 },
+      }}
+      renderInput={(params) => (
+        <TextField
+          id={params.id}
+          disabled={params.disabled}
+          fullWidth={params.fullWidth}
+          size={params.size}
+          slotProps={{
+            inputLabel: params.slotProps.inputLabel,
+            input: params.slotProps.input,
+            htmlInput: { ...params.slotProps.htmlInput, "aria-label": t("gitSwitchBranch") },
+          }}
+        />
+      )}
+    />
+  );
 }
 
 function changedFilesForTab(status: GitStatusPayload | null, tab: "unstaged" | "staged"): readonly GitFileStatus[] {
@@ -452,6 +531,7 @@ export function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnst
   const unstagedFiles = useMemo(() => changedFilesForTab(status, "unstaged"), [status]);
   const stagedFiles = useMemo(() => changedFilesForTab(status, "staged"), [status]);
   const hasStagedFiles = stagedFiles.length > 0;
+  const branchOptions = useMemo(() => (status ? branchOptionsFor(status) : []), [status]);
 
   // Handle an external "open in Git" jump: switch to the tab that holds the file
   // and remember it so the matching card expands and scrolls into view. Re-runs
@@ -504,6 +584,7 @@ export function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnst
       runGitAction(() => commitGit(cwd, message), () => setCommitMessage(""));
     }
   };
+  const switchBranch = (branch: string) => cwd && branch !== status?.branch && runGitAction(() => checkoutGitBranch(cwd, branch));
   const initRepo = () => cwd && runGitAction(() => initGitRepo(cwd));
 
   return (
@@ -516,24 +597,67 @@ export function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnst
             justifyContent: "space-between",
             px: 1.5,
             py: 0.75,
+            rowGap: 0.75,
+            flexWrap: "wrap",
             flex: "0 0 auto",
             borderBottom: (theme) => `1px solid ${theme.custom.borders.subtle}`,
+            backgroundColor: (theme) => (worktree?.active && worktree.inWorktree ? theme.palette.status.running.soft : theme.custom.surfaces.s1),
           }}
         >
-          <Box sx={{ minWidth: 0, flex: "1 1 0", display: "flex", alignItems: "center", gap: 0.75 }}>
+          <Box sx={{ minWidth: 0, flex: "1 1 420px", display: "flex", alignItems: "center", gap: 0.75, rowGap: 0.75, flexWrap: "wrap" }}>
             <AccountTreeIcon sx={{ fontSize: 16, color: "text.secondary", flexShrink: 0 }} />
-            <Typography component="span" noWrap sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontWeight: 700, fontSize: "0.82rem" }}>
-              {status?.branch ?? t("git")}
-            </Typography>
+            {status ? (
+              <Tooltip title={!status.clean ? t("gitSwitchBranchDirty") : t("gitSwitchBranch")}>
+                <Box component="span" sx={{ display: "inline-flex", minWidth: 0 }}>
+                  <GitBranchAutocomplete branches={branchOptions} disabled={!cwd || loading || actionLoading || !status.clean} value={status.branch} onSelect={switchBranch} t={t} />
+                </Box>
+              </Tooltip>
+            ) : (
+              <Typography component="span" noWrap sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontWeight: 700, fontSize: "0.82rem" }}>
+                {t("git")}
+              </Typography>
+            )}
             {status?.commitHash && (
               <Typography component="span" sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.75rem", color: "text.secondary", flexShrink: 0, whiteSpace: "nowrap" }}>
                 · {status.commitHash}
               </Typography>
             )}
             {status?.commitTitle && (
-              <Typography component="span" noWrap sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.75rem", color: "text.tertiary", flex: "1 1 0", minWidth: 0 }}>
+              <Typography component="span" noWrap sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.75rem", color: "text.tertiary", flex: "1 1 220px", minWidth: 96, maxWidth: 520 }}>
                 · {status.commitTitle}
               </Typography>
+            )}
+            {worktree?.active && cwd && (
+              <>
+                <Stack
+                  direction="row"
+                  spacing={0.5}
+                  sx={{
+                    alignItems: "center",
+                    minHeight: 28,
+                    px: 0.75,
+                    borderRadius: (theme) => `${theme.custom.radii.md}px`,
+                    border: (theme) => `1px solid ${worktree.inWorktree ? theme.palette.status.running.border : theme.custom.borders.subtle}`,
+                    backgroundColor: (theme) => (worktree.inWorktree ? theme.palette.status.running.soft : theme.custom.surfaces.s2),
+                    color: worktree.inWorktree ? "text.primary" : "text.secondary",
+                    flex: "0 0 auto",
+                  }}
+                >
+                  <CallSplitIcon sx={{ fontSize: 14, flexShrink: 0, color: (theme) => (worktree.inWorktree ? theme.palette.status.running.main : theme.palette.text.secondary) }} />
+                  <Typography noWrap sx={{ fontSize: "0.72rem", fontWeight: 600 }}>
+                    {worktree.inWorktree ? t("worktreeActive") : t("worktreeIdle")}
+                  </Typography>
+                </Stack>
+                {worktree.inWorktree ? (
+                  <Button size="small" variant="contained" disabled={worktree.busy} onClick={worktree.onMerge} startIcon={<MergeIcon sx={{ fontSize: 14 }} />} sx={{ minHeight: 28, height: 28, px: 1, fontSize: "0.72rem", flex: "0 0 auto" }}>
+                    {t("worktreeMerge")}
+                  </Button>
+                ) : (
+                  <Button size="small" variant="subtle" disabled={worktree.busy} onClick={worktree.onCreate} startIcon={<CallSplitIcon sx={{ fontSize: 14 }} />} sx={{ minHeight: 28, height: 28, px: 1, fontSize: "0.72rem", flex: "0 0 auto" }}>
+                    {t("worktreeCreate")}
+                  </Button>
+                )}
+              </>
             )}
           </Box>
           <Tooltip title={t("refresh")}>
@@ -544,38 +668,6 @@ export function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnst
             </span>
           </Tooltip>
         </Stack>
-
-        {worktree?.active && cwd && (
-          <Stack
-            direction="row"
-            spacing={1}
-            sx={{
-              alignItems: "center",
-              justifyContent: "space-between",
-              px: 1.5,
-              py: 0.75,
-              flex: "0 0 auto",
-              borderBottom: (theme) => `1px solid ${theme.custom.borders.subtle}`,
-              backgroundColor: (theme) => (worktree.inWorktree ? theme.palette.status.running.soft : theme.custom.surfaces.s1),
-            }}
-          >
-            <Stack direction="row" spacing={0.75} sx={{ alignItems: "center", minWidth: 0 }}>
-              <CallSplitIcon sx={{ fontSize: 15, flexShrink: 0, color: (theme) => (worktree.inWorktree ? theme.palette.status.running.main : theme.palette.text.secondary) }} />
-              <Typography noWrap sx={{ fontSize: "0.74rem", color: "text.secondary" }}>
-                {worktree.inWorktree ? t("worktreeActive") : t("worktreeIdle")}
-              </Typography>
-            </Stack>
-            {worktree.inWorktree ? (
-              <Button size="small" variant="contained" disabled={worktree.busy} onClick={worktree.onMerge} startIcon={<MergeIcon sx={{ fontSize: 15 }} />}>
-                {t("worktreeMerge")}
-              </Button>
-            ) : (
-              <Button size="small" variant="subtle" disabled={worktree.busy} onClick={worktree.onCreate} startIcon={<CallSplitIcon sx={{ fontSize: 15 }} />}>
-                {t("worktreeCreate")}
-              </Button>
-            )}
-          </Stack>
-        )}
 
         {status && (
           <Tabs

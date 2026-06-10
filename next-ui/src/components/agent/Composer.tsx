@@ -1,4 +1,5 @@
 import AttachFileIcon from "@mui/icons-material/AttachFile";
+import AccessTimeIcon from "@mui/icons-material/AccessTime";
 import AutoAwesomeRoundedIcon from "@mui/icons-material/AutoAwesomeRounded";
 import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
 import DescriptionOutlinedIcon from "@mui/icons-material/DescriptionOutlined";
@@ -6,11 +7,12 @@ import ImageOutlinedIcon from "@mui/icons-material/ImageOutlined";
 import OpenInBrowserIcon from "@mui/icons-material/OpenInBrowser";
 import RateReviewOutlinedIcon from "@mui/icons-material/RateReviewOutlined";
 import SendIcon from "@mui/icons-material/Send";
+import SendTimeExtensionIcon from "@mui/icons-material/SendTimeExtension";
 import CompressRoundedIcon from "@mui/icons-material/CompressRounded";
 import StopCircleIcon from "@mui/icons-material/StopCircle";
 import WarningAmberRoundedIcon from "@mui/icons-material/WarningAmberRounded";
 import { Box, Divider, InputBase, Menu, MenuItem, Stack, Switch, type SxProps, TextField, type Theme, Tooltip, Typography } from "@mui/material";
-import { type ChangeEvent, type ClipboardEvent, forwardRef, type KeyboardEvent, type MouseEvent, type ReactNode, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { type ChangeEvent, type ClipboardEvent, forwardRef, type KeyboardEvent, type MouseEvent, type ReactNode, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import { localFileUrl } from "../../lib/external-url";
 import { ImageLightbox } from "../workspace/ImageLightbox";
@@ -149,58 +151,138 @@ function composerDraftsEqual(left: ComposerDraft, right: ComposerDraft): boolean
   return left.text === right.text && composerAttachmentsEqual(left.attachments, right.attachments);
 }
 
+const COMPOSER_TILE_SIZE = 76;
+
 /**
- * FloatingTag — a single rounded pill that "floats" above the composer (its own
- * shadow, not boxed into a shared container). Used for each attached file and
- * for each enabled work mode (accent tone), all individually removable.
+ * FloatingTile — a square control that "floats" above the composer with the
+ * same footprint as attachment tiles. Wakeups, modes, review state, and context
+ * warnings all use this shape so the row reads as one tile strip.
  */
-function FloatingTag({
+function FloatingTile({
   icon,
   label,
   onRemove,
   removeLabel,
+  onClick,
+  disabled = false,
   tone = "neutral",
+  testId,
 }: {
   readonly icon: ReactNode;
   readonly label: string;
   /** When omitted the tag has no close button (e.g. the read-only review tag). */
   readonly onRemove?: () => void;
   readonly removeLabel?: string;
-  readonly tone?: "neutral" | "accent";
+  readonly onClick?: () => void;
+  readonly disabled?: boolean;
+  readonly tone?: "neutral" | "accent" | "warn" | "danger";
+  readonly testId?: string;
 }) {
+  const Component = onClick ? "button" : "span";
   return (
     <Box
-      component="span"
+      component={Component}
+      type={onClick ? "button" : undefined}
+      disabled={onClick ? disabled : undefined}
+      data-testid={testId}
+      onClick={onClick}
       sx={{
         pointerEvents: "auto",
-        display: "inline-flex",
-        alignItems: "center",
+        position: "relative",
+        width: COMPOSER_TILE_SIZE,
+        height: COMPOSER_TILE_SIZE,
+        flex: `0 0 ${COMPOSER_TILE_SIZE}px`,
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "stretch",
+        justifyContent: "space-between",
         gap: 0.5,
-        maxWidth: 240,
-        pl: 0.875,
-        pr: onRemove ? 0.25 : 0.875,
-        py: 0.25,
-        borderRadius: (t) => `${t.custom.radii.pill}px`,
-        fontSize: "0.74rem",
+        p: 0.75,
+        borderRadius: (t) => `${t.custom.radii.md}px`,
+        fontSize: "0.68rem",
         fontWeight: 600,
-        // Solid, opaque surface — these sit over the thread, so no translucency.
+        lineHeight: 1.18,
+        textAlign: "left",
+        fontFamily: "inherit",
         color: "text.primary",
         backgroundColor: (t) => t.custom.surfaces.s3,
-        border: (t) => `1px solid ${t.custom.borders.strong}`,
+        border: (t) => {
+          if (tone === "danger") {
+            return `1px solid ${t.palette.status.error.main}`;
+          }
+          if (tone === "warn") {
+            return `1px solid ${t.palette.status.warn.main}`;
+          }
+          if (tone === "accent") {
+            return `1px solid ${t.palette.status.info.main}`;
+          }
+          return `1px solid ${t.custom.borders.strong}`;
+        },
         boxShadow: "0 1px 4px rgba(0, 0, 0, 0.18)",
         transition: "transform 120ms ease, box-shadow 120ms ease",
-        "&:hover": { boxShadow: "0 2px 6px rgba(0, 0, 0, 0.22)" },
+        cursor: onClick && !disabled ? "pointer" : "default",
+        opacity: disabled ? 0.5 : 1,
+        "&:hover": {
+          boxShadow: disabled ? "0 1px 4px rgba(0, 0, 0, 0.18)" : "0 2px 6px rgba(0, 0, 0, 0.24)",
+          transform: disabled ? "none" : "translateY(-1px)",
+        },
       }}
     >
-      <Box component="span" sx={{ display: "inline-flex", flex: "0 0 auto", color: tone === "accent" ? (t) => t.palette.status.info.main : "text.secondary" }}>
+      <Box
+        component="span"
+        sx={{
+          display: "inline-flex",
+          flex: "0 0 auto",
+          color: (t) => {
+            if (tone === "danger") {
+              return t.palette.status.error.main;
+            }
+            if (tone === "warn") {
+              return t.palette.status.warn.main;
+            }
+            if (tone === "accent") {
+              return t.palette.status.info.main;
+            }
+            return t.palette.text.secondary;
+          },
+        }}
+      >
         {icon}
       </Box>
-      <Box component="span" sx={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+      <Box
+        component="span"
+        sx={{
+          minHeight: 0,
+          overflow: "hidden",
+          display: "-webkit-box",
+          WebkitBoxOrient: "vertical",
+          WebkitLineClamp: 3,
+          overflowWrap: "anywhere",
+        }}
+      >
         {label}
       </Box>
       {onRemove && (
-        <IconButton aria-label={removeLabel ?? ""} onClick={onRemove} sx={{ p: 0.125, flex: "0 0 auto", color: "inherit", "&:hover": { backgroundColor: "transparent", opacity: 0.7 } }}>
-          <CloseRoundedIcon sx={{ fontSize: 13 }} />
+        <IconButton
+          aria-label={removeLabel ?? ""}
+          onClick={(event) => {
+            event.stopPropagation();
+            onRemove();
+          }}
+          sx={{
+            position: "absolute",
+            top: 3,
+            right: 3,
+            width: 20,
+            height: 20,
+            p: 0,
+            color: "text.secondary",
+            backgroundColor: (t) => t.custom.surfaces.s2,
+            border: (t) => `1px solid ${t.custom.borders.subtle}`,
+            "&:hover": { backgroundColor: (t) => t.custom.surfaces.s4, color: "text.primary" },
+          }}
+        >
+          <CloseRoundedIcon sx={{ fontSize: 14 }} />
         </IconButton>
       )}
     </Box>
@@ -313,6 +395,11 @@ interface ComposerProps {
   readonly onCompactNow?: () => void;
   /** Browser Preview activity, shown inside the input options menu. */
   readonly browserActivityEvents?: readonly ComposerBrowserActivityEvent[];
+  /** Server-side scheduled wakeups for this chat, rendered as first floating tags. */
+  readonly scheduledWakeups?: readonly { readonly id: string; readonly label: string; readonly removeLabel: string; readonly onRemove: () => void }[];
+  /** User turns queued behind the current/last run; can be dispatched manually. */
+  readonly queuedMessageCount?: number;
+  readonly onSendQueuedNow?: () => void;
 }
 
 interface RateLimitWindow {
@@ -368,6 +455,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     onCompactWindowChange,
     onCompactNow,
     browserActivityEvents,
+    scheduledWakeups = [],
+    queuedMessageCount = 0,
+    onSendQueuedNow,
   },
   ref,
 ) {
@@ -799,24 +889,43 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     return lines;
   })();
 
-  // Opens the options menu anchored to the clicked element and refreshes the
-  // agent's account rate-limits. Shared by the options button and the context
-  // gauge (clicking the ring opens the same menu).
-  const openOptionsMenu = (anchorEl: HTMLElement) => {
-    setModeMenuAnchor(anchorEl);
+  const refreshAgentLimits = useCallback(() => {
     void (async () => {
       try {
         const response = await fetch("/api/agent-limits", { cache: "no-store" });
         if (response.ok) {
           const { limits } = (await response.json()) as { limits?: Record<string, AgentRateLimit> };
           setAgentLimit((agentId && limits ? limits[agentId] : null) ?? null);
+        } else {
+          setAgentLimit(null);
         }
       } catch {
-        // Offline / unavailable — leave as no-data.
+        setAgentLimit(null);
       } finally {
         setLimitLoaded(true);
       }
     })();
+  }, [agentId]);
+
+  useEffect(() => {
+    setAgentLimit(null);
+    setLimitLoaded(false);
+  }, [agentId]);
+
+  useEffect(() => {
+    if (!modeMenuAnchor) {
+      return undefined;
+    }
+    refreshAgentLimits();
+    const timer = window.setInterval(refreshAgentLimits, 5000);
+    return () => window.clearInterval(timer);
+  }, [modeMenuAnchor, refreshAgentLimits]);
+
+  // Opens the options menu anchored to the clicked element; limits refresh while
+  // the menu remains open, so a running agent can update the numbers in-place.
+  const openOptionsMenu = (anchorEl: HTMLElement) => {
+    setLimitLoaded(false);
+    setModeMenuAnchor(anchorEl);
   };
 
   return (
@@ -824,8 +933,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     // image thumbnails float above it (absolute, each with its own shadow), and
     // the multiline input lifts into an upward overlay — nothing reflows the thread.
     <Box ref={rootRef} sx={{ position: "relative" }}>
-      {/* Floating row — pills (mode, review, over-limit) + attachment tiles,
-          always mounted so height can be measured. */}
+      {/* Floating row — square tiles (wakeups, mode, review, over-limit) +
+          attachment tiles, always mounted so height can be measured. */}
       <Box
         ref={tagsRef}
         sx={{
@@ -845,54 +954,53 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           zIndex: 6,
         }}
       >
+        {scheduledWakeups.map((wakeup) => (
+          <FloatingTile
+            key={wakeup.id}
+            tone="warn"
+            icon={<AccessTimeIcon sx={{ fontSize: 20 }} />}
+            label={wakeup.label}
+            removeLabel={wakeup.removeLabel}
+            onRemove={wakeup.onRemove}
+            testId={`scheduled-wakeup-tile-${wakeup.id}`}
+          />
+        ))}
+        {queuedMessageCount > 0 && (
+          <FloatingTile
+            tone="warn"
+            icon={<SendTimeExtensionIcon sx={{ fontSize: 20 }} />}
+            label={queuedMessageCount > 1 ? t("sendQueuedNowCount", { count: queuedMessageCount }) : t("sendQueuedNow")}
+            onClick={onSendQueuedNow}
+            testId="queued-message-send-now"
+          />
+        )}
         {contextOverLimit && (
           <Tooltip title={t("contextOverLimitHint")}>
-            <Box
-              component="button"
-              type="button"
-              data-testid="context-over-limit"
+            <FloatingTile
+              tone="danger"
+              icon={<WarningAmberRoundedIcon sx={{ fontSize: 20 }} />}
+              label={t("contextOverLimit")}
               disabled={running}
               onClick={() => onCompactNow?.()}
-              sx={{
-                pointerEvents: "auto",
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 0.5,
-                pl: 0.875,
-                pr: 1,
-                py: 0.25,
-                borderRadius: (t) => `${t.custom.radii.pill}px`,
-                fontSize: "0.74rem",
-                fontWeight: 600,
-                cursor: running ? "default" : "pointer",
-                opacity: running ? 0.5 : 1,
-                color: (t) => t.palette.status.error.main,
-                backgroundColor: (t) => t.custom.surfaces.s3,
-                border: (t) => `1px solid ${t.palette.status.error.main}`,
-                boxShadow: "0 1px 4px rgba(0, 0, 0, 0.18)",
-                transition: "box-shadow 120ms ease",
-                "&:hover": { boxShadow: "0 2px 6px rgba(0, 0, 0, 0.24)" },
-              }}
-            >
-              <WarningAmberRoundedIcon sx={{ fontSize: 14 }} />
-              <Box component="span">{t("contextOverLimit")}</Box>
-            </Box>
+              testId="context-over-limit"
+            />
           </Tooltip>
         )}
         {reviewCount > 0 && (
-          <FloatingTag
+          <FloatingTile
             tone="accent"
-            icon={<RateReviewOutlinedIcon sx={{ fontSize: 14 }} />}
+            icon={<RateReviewOutlinedIcon sx={{ fontSize: 20 }} />}
             label={t("reviewPending", { count: reviewCount })}
           />
         )}
         {activeModeOption && (
-          <FloatingTag
+          <FloatingTile
             tone="accent"
-            icon={<AutoAwesomeRoundedIcon sx={{ fontSize: 14 }} />}
+            icon={<AutoAwesomeRoundedIcon sx={{ fontSize: 20 }} />}
             label={activeModeOption.label}
             removeLabel={t("disableMode", { mode: activeModeOption.label })}
             onRemove={() => onModeChange?.("default")}
+            testId="active-mode-tile"
           />
         )}
         {composerAttachments.map((attachment) => {

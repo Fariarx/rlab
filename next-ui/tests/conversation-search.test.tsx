@@ -95,6 +95,16 @@ describe("conversation search popup", () => {
     expect(screen.getByRole("button", { name: "Release work" })).toBeInTheDocument();
   });
 
+  it("always includes archived conversations and marks them in the title", () => {
+    renderSearch([{ ...baseConversation, archived: true, snippet: "Hidden from the sidebar" }]);
+
+    fireEvent.change(screen.getByPlaceholderText("Поиск по названию или сообщению..."), { target: { value: "archive" } });
+
+    const archived = screen.getByRole("button", { name: "(архив) Release work" });
+    expect(archived).toBeInTheDocument();
+    expect(archived).toHaveStyle({ opacity: "0.58" });
+  });
+
   it("reports when nothing matches the query", () => {
     renderSearch([{ ...baseConversation, snippet: "No direct match" }]);
 

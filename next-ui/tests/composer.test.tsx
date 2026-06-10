@@ -14,6 +14,16 @@ describe("Composer", () => {
     expect(screen.getByTestId("composer-send-button")).toBe(screen.getByRole("button", { name: "Отправить" }));
   });
 
+  it("shows a manual send-now tile for queued messages", () => {
+    const onSendQueuedNow = vi.fn();
+    renderWithTheme(<Composer placeholder="Написать" queuedMessageCount={2} onSendQueuedNow={onSendQueuedNow} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Отправить сейчас · 2" }));
+
+    expect(screen.getByTestId("queued-message-send-now")).toHaveStyle({ width: "76px", height: "76px" });
+    expect(onSendQueuedNow).toHaveBeenCalledTimes(1);
+  });
+
   it("sends selected text attachments with the prompt", async () => {
     const onSend = vi.fn();
     renderWithTheme(<Composer placeholder="Написать" onSend={onSend} />);
@@ -216,17 +226,27 @@ describe("Composer", () => {
     expect(screen.getByTestId("composer-options-button")).toHaveAttribute("aria-label", "Опции · Контекст · 0%");
   });
 
-  it("uses a light shadow for floating work-mode tags", () => {
+  it("renders composer floating controls as square tiles", () => {
     renderWithTheme(
       <Composer
         placeholder="Написать"
+        scheduledWakeups={[
+          {
+            id: "wake-1",
+            label: "Wakeup установлен: 10.06.2026, 14:18:00",
+            removeLabel: "Убрать запланированную задачу",
+            onRemove: vi.fn(),
+          },
+        ]}
         modes={[{ id: "review", label: "Review" }]}
         activeMode="review"
       />,
     );
 
-    const floatingTag = screen.getByText("Review").parentElement;
+    const wakeupTile = screen.getByTestId("scheduled-wakeup-tile-wake-1");
+    const modeTile = screen.getByTestId("active-mode-tile");
 
-    expect(floatingTag).toHaveStyle({ boxShadow: "0 1px 4px rgba(0, 0, 0, 0.18)" });
+    expect(wakeupTile).toHaveStyle({ width: "76px", height: "76px", boxShadow: "0 1px 4px rgba(0, 0, 0, 0.18)" });
+    expect(modeTile).toHaveStyle({ width: "76px", height: "76px" });
   });
 });

@@ -9,6 +9,7 @@ export interface GitFileStatus {
 
 export interface GitStatusPayload {
   readonly branch: string;
+  readonly branches?: readonly string[];
   readonly upstream?: string;
   readonly ahead: number;
   readonly behind: number;

@@ -9,6 +9,7 @@ import { Box, InputBase, Menu, MenuItem, Stack, Tooltip, Typography } from "@mui
 import { type KeyboardEvent, type MouseEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import { useI18n } from "../../i18n/I18nProvider";
+import { normalizeClockLabel } from "../../lib/time-format";
 import { IconButton, StatusDot } from "../ui";
 import { type AgentId, getAgent, withAlpha } from "./agents";
 import { rise } from "./anim";
@@ -24,7 +25,8 @@ export interface ConversationActions {
 
 export function conversationMatches(conversation: ConversationSummary, query: string, threads: Readonly<Record<string, readonly ChatMessage[]>>): boolean {
   const threadText = (threads[conversation.id] ?? []).map(messageToPlainText).join("\n");
-  const searchable = `${conversation.title}\n${conversation.snippet}\n${threadText}`.toLowerCase();
+  const archiveText = conversation.archived ? "\narchive archived архив" : "";
+  const searchable = `${conversation.title}\n${conversation.snippet}${archiveText}\n${threadText}`.toLowerCase();
   return searchable.includes(query);
 }
 
@@ -32,6 +34,7 @@ export function conversationMatches(conversation: ConversationSummary, query: st
 // actionable states (running / waiting / error) get one. Idle (gray) and done
 // (green) render the bare avatar.
 const STATUSES_WITH_DOT: ReadonlySet<ConversationStatus> = new Set<ConversationStatus>(["running", "waiting", "error"]);
+const ACTIVE_STATUS_PRIORITY: ReadonlySet<ConversationStatus> = new Set<ConversationStatus>(["running", "waiting", "error"]);
 
 type ConversationListItem =
   | {
@@ -103,17 +106,29 @@ function InitialsAvatar({ title, agent }: { readonly title: string; readonly age
   );
 }
 
-function ConversationAvatar({ conversation }: { readonly conversation: ConversationSummary }) {
-  const { conversationStatus } = useI18n();
-  if (!STATUSES_WITH_DOT.has(conversation.status)) {
+function visualStatusKey(conversation: ConversationSummary, hasWakeup: boolean) {
+  if (hasWakeup) {
+    return "warn" as const;
+  }
+  if (ACTIVE_STATUS_PRIORITY.has(conversation.status)) {
+    return statusToKey[conversation.status];
+  }
+  return statusToKey[conversation.status];
+}
+
+function ConversationAvatar({ conversation, hasWakeup }: { readonly conversation: ConversationSummary; readonly hasWakeup: boolean }) {
+  const { t, conversationStatus } = useI18n();
+  const showDot = STATUSES_WITH_DOT.has(conversation.status) || hasWakeup;
+  const label = hasWakeup ? t("wakeupScheduledStatus") : conversationStatus(conversation.status);
+  if (!showDot) {
     return <InitialsAvatar title={conversation.title} agent={conversation.agent} />;
   }
   return (
     <Box sx={{ position: "relative", flex: "0 0 auto" }}>
       <InitialsAvatar title={conversation.title} agent={conversation.agent} />
-      <Tooltip title={conversationStatus(conversation.status)}>
+      <Tooltip title={label}>
         <Box sx={{ position: "absolute", right: -3, bottom: -3, borderRadius: "50%", display: "flex", p: "2px", backgroundColor: (t) => t.custom.surfaces.s1 }}>
-          <StatusDot status={statusToKey[conversation.status]} label={conversationStatus(conversation.status)} pulse={conversation.status === "running"} size="sm" />
+          <StatusDot status={visualStatusKey(conversation, hasWakeup)} label={label} pulse={conversation.status === "running"} size="sm" />
         </Box>
       </Tooltip>
     </Box>
@@ -128,6 +143,7 @@ function ConversationRow({
   onMove,
   registerRowRef,
   actions,
+  hasWakeup,
 }: {
   readonly conversation: ConversationSummary;
   readonly active: boolean;
@@ -136,6 +152,7 @@ function ConversationRow({
   readonly onMove: (id: string, offset: -1 | 1) => void;
   readonly registerRowRef: (id: string, element: HTMLDivElement | null) => void;
   readonly actions: ConversationActions;
+  readonly hasWakeup: boolean;
 }) {
   const [menuAnchor, setMenuAnchor] = useState<null | HTMLElement>(null);
   const [editing, setEditing] = useState(false);
@@ -223,7 +240,7 @@ function ConversationRow({
         backgroundColor: (t) => (active ? t.custom.surfaces.s3 : "transparent"),
         // Accent rendered as an inset shadow (not an element) so it never shifts
         // the content or collides with the avatar.
-        boxShadow: (t) => (active ? `inset 3px 0 0 0 ${t.palette.status.running.main}` : "none"),
+        boxShadow: (t) => (active ? `inset 3px 0 0 0 ${t.palette.status[visualStatusKey(conversation, hasWakeup)].main}` : "none"),
         transition: "background-color 140ms ease, box-shadow 140ms ease",
         "&:hover": { backgroundColor: (t) => t.custom.surfaces.s3 },
         "&:hover .row-more": { opacity: 1 },
@@ -239,7 +256,7 @@ function ConversationRow({
         ...rise(delay),
       }}
     >
-      <ConversationAvatar conversation={conversation} />
+      <ConversationAvatar conversation={conversation} hasWakeup={hasWakeup} />
       <Box sx={{ flex: 1, minWidth: 0 }}>
         {editing ? (
           <InputBase
@@ -266,7 +283,7 @@ function ConversationRow({
             </Typography>
             <Stack direction="row" spacing={0.75} sx={{ alignItems: "center", flex: "0 0 auto" }}>
               {conversation.unread && <Box sx={{ width: 6, height: 6, borderRadius: "50%", backgroundColor: (t) => t.palette.status.running.main }} />}
-              <Typography className="row-date" sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.64rem", color: "text.secondary", transition: "opacity 120ms ease" }}>{conversation.time}</Typography>
+              <Typography className="row-date" sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.64rem", color: "text.secondary", transition: "opacity 120ms ease" }}>{normalizeClockLabel(conversation.time)}</Typography>
             </Stack>
           </Stack>
         )}
@@ -343,6 +360,7 @@ function ConversationGroupHeader({
   collapsedIcon,
   expandedIcon,
   onToggle,
+  wakeupConversationIds,
 }: {
   readonly idBase: string;
   readonly label: string;
@@ -352,9 +370,11 @@ function ConversationGroupHeader({
   readonly collapsedIcon: ReactNode;
   readonly expandedIcon: ReactNode;
   readonly onToggle: (idBase: string) => void;
+  readonly wakeupConversationIds: ReadonlySet<string>;
 }) {
   const { t } = useI18n();
   const runningCount = conversations.filter((c) => c.status === "running").length;
+  const hasWakeup = conversations.some((c) => wakeupConversationIds.has(c.id));
   const hasUnread = conversations.some((c) => c.unread);
   const panelId = `${idBase}-conversations`;
 
@@ -398,6 +418,8 @@ function ConversationGroupHeader({
         {!open &&
           (runningCount > 0 ? (
             <StatusDot status="running" label={t("runningCount", { count: runningCount })} />
+          ) : hasWakeup ? (
+            <StatusDot status="warn" label={t("wakeupScheduledStatus")} pulse={false} />
           ) : hasUnread ? (
             <Box role="img" aria-label={t("unread")} sx={{ width: 6, height: 6, borderRadius: "50%", backgroundColor: (t) => t.palette.status.running.main }} />
           ) : null)}
@@ -412,12 +434,14 @@ export function ConversationList({
   selectedId,
   onSelect,
   actions,
+  wakeupConversationIds = new Set<string>(),
 }: {
   readonly projects: readonly Project[];
   readonly chats: readonly ConversationSummary[];
   readonly selectedId: string | null;
   readonly onSelect: (id: string) => void;
   readonly actions: ConversationActions;
+  readonly wakeupConversationIds?: ReadonlySet<string>;
 }) {
   const virtuosoRef = useRef<VirtuosoHandle | null>(null);
   const rowRefs = useRef(new Map<string, HTMLDivElement>());
@@ -427,16 +451,20 @@ export function ConversationList({
   // Pinned conversations are lifted into a top group and removed from their
   // original project / chats list.
   const pinned = useMemo(
-    () => [...chats, ...projects.flatMap((project) => project.conversations)].filter((c) => c.pinned),
+    () => [...chats, ...projects.flatMap((project) => project.conversations)].filter((c) => c.pinned && !c.archived),
     [projects, chats],
   );
   const visibleProjects = useMemo(
-    () => projects.map((project) => ({ ...project, conversations: project.conversations.filter((c) => !c.pinned) })),
+    () =>
+      projects
+        .map((project) => ({ ...project, conversations: project.conversations.filter((c) => !c.pinned && !c.archived) }))
+        .filter((project) => project.conversations.length > 0),
     [projects],
   );
-  const visibleChats = useMemo(() => chats.filter((c) => !c.pinned), [chats]);
+  const visibleChats = useMemo(() => chats.filter((c) => !c.pinned && !c.archived), [chats]);
+  const wakeupConversationKey = useMemo(() => [...wakeupConversationIds].sort().join("\n"), [wakeupConversationIds]);
 
-  const empty = projects.length === 0 && chats.length === 0;
+  const empty = pinned.length === 0 && visibleProjects.length === 0 && visibleChats.length === 0;
   const toggleGroup = (idBase: string) => {
     setCollapsedGroups((current) => {
       const next = new Set(current);
@@ -511,7 +539,7 @@ export function ConversationList({
     }
 
     return items;
-  }, [collapsedGroups, empty, pinned, t, visibleChats, visibleProjects]);
+  }, [collapsedGroups, empty, pinned, t, visibleChats, visibleProjects, wakeupConversationKey]);
   // Pinned first, then projects, then chats — flattened for arrow-key navigation.
   const visibleConversationIds = useMemo(
     () => listItems.flatMap((item) => (item.kind === "conversation" ? [item.conversation.id] : [])),
@@ -601,6 +629,7 @@ export function ConversationList({
                   collapsedIcon={item.collapsedIcon}
                   expandedIcon={item.expandedIcon}
                   onToggle={toggleGroup}
+                  wakeupConversationIds={wakeupConversationIds}
                 />
               </Box>
             );
@@ -615,6 +644,7 @@ export function ConversationList({
                 onMove={moveConversation}
                 registerRowRef={registerRowRef}
                 actions={actions}
+                hasWakeup={wakeupConversationIds.has(item.conversation.id)}
               />
             </Box>
           );

@@ -1,6 +1,5 @@
 import AddIcon from "@mui/icons-material/Add";
 import AccountTreeIcon from "@mui/icons-material/AccountTree";
-import AccessTimeIcon from "@mui/icons-material/AccessTime";
 import AttachFileIcon from "@mui/icons-material/AttachFile";
 import ChatBubbleOutlineIcon from "@mui/icons-material/ChatOutlined";
 import CreateNewFolderIcon from "@mui/icons-material/CreateNewFolder";
@@ -33,6 +32,7 @@ import {
 import { type DragEvent, type MouseEvent as ReactMouseEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { I18nProvider, useI18n } from "../../i18n/I18nProvider";
 import { normalizeExternalUrl } from "../../lib/external-url";
+import { formatDateTime24 } from "../../lib/time-format";
 import { contextWindowForAgentProfile } from "../../lib/model-context";
 import type { HashRoute } from "../../lib/use-hash-route";
 import {
@@ -95,9 +95,13 @@ interface WakeupSummary {
   readonly trigger: WakeupTrigger;
 }
 
-async function loadWakeups(conversationId: string): Promise<WakeupSummary[]> {
-  const query = new URLSearchParams({ conversationId });
-  const response = await fetch(`/api/wakeups?${query.toString()}`, { method: "GET", cache: "no-store" });
+async function loadWakeups(conversationId?: string): Promise<WakeupSummary[]> {
+  const query = new URLSearchParams();
+  if (conversationId) {
+    query.set("conversationId", conversationId);
+  }
+  const suffix = query.size > 0 ? `?${query.toString()}` : "";
+  const response = await fetch(`/api/wakeups${suffix}`, { method: "GET", cache: "no-store" });
   if (!response.ok) {
     const payload = (await response.json().catch(() => ({}))) as { error?: string };
     throw new Error(payload.error ?? `Wakeups load failed (${response.status})`);
@@ -106,9 +110,18 @@ async function loadWakeups(conversationId: string): Promise<WakeupSummary[]> {
   return Array.isArray(payload.wakeups) ? payload.wakeups : [];
 }
 
+async function deleteWakeup(conversationId: string, wakeupId: string): Promise<void> {
+  const query = new URLSearchParams({ conversationId, id: wakeupId });
+  const response = await fetch(`/api/wakeups?${query.toString()}`, { method: "DELETE", cache: "no-store" });
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => ({}))) as { error?: string };
+    throw new Error(payload.error ?? `Wakeup delete failed (${response.status})`);
+  }
+}
+
 function wakeupLabel(wakeup: WakeupSummary, locale: "ru" | "en"): string {
   if (wakeup.trigger.type === "time") {
-    const when = new Date(wakeup.trigger.fireAtMs).toLocaleString();
+    const when = formatDateTime24(new Date(wakeup.trigger.fireAtMs));
     return locale === "ru" ? `Wakeup установлен: ${when}` : `Wakeup scheduled: ${when}`;
   }
   const base = locale === "ru" ? `Wakeup script: каждые ${wakeup.trigger.intervalSeconds}s` : `Wakeup script: every ${wakeup.trigger.intervalSeconds}s`;
@@ -400,6 +413,8 @@ export function WorkspacePageView({
   const selected = ws.find(ws.selectedId);
   const messages = ws.threads[ws.selectedId] ?? [];
   const [wakeups, setWakeups] = useState<readonly WakeupSummary[]>([]);
+  const selectedWakeups = useMemo(() => (selected ? wakeups.filter((wakeup) => wakeup.conversationId === selected.id) : []), [selected, wakeups]);
+  const wakeupConversationIds = useMemo(() => new Set(wakeups.map((wakeup) => wakeup.conversationId)), [wakeups]);
   // Sent user messages (oldest first) for ArrowUp/ArrowDown recall in the
   // composer; attachment blocks / file-link markdown are stripped to the visible
   // text, and blank entries dropped.
@@ -415,14 +430,11 @@ export function WorkspacePageView({
   const lastTurnDiffs = useMemo(() => latestAgentDiffBlocks(messages), [messages]);
   const composerDraft = ws.composerDrafts[ws.selectedId] ?? { text: "", attachments: [] };
   const selectedCwd = ws.cwdOf(ws.selectedId);
+  const terminalCwd = selected ? (selectedCwd ?? ".") : undefined;
   useEffect(() => {
-    if (!selected) {
-      setWakeups([]);
-      return;
-    }
     let canceled = false;
     const refresh = () => {
-      loadWakeups(selected.id)
+      loadWakeups()
         .then((items) => {
           if (!canceled) {
             setWakeups(items);
@@ -441,6 +453,19 @@ export function WorkspacePageView({
       window.clearInterval(timer);
     };
   }, [selected?.id, selected?.status, messages.length]);
+  const removeWakeup = (wakeupId: string) => {
+    if (!selected) {
+      return;
+    }
+    const conversationId = selected.id;
+    setWakeups((current) => current.filter((wakeup) => wakeup.id !== wakeupId));
+    deleteWakeup(conversationId, wakeupId).catch((error: unknown) => {
+      loadWakeups()
+        .then((items) => setWakeups(items))
+        .catch(() => setWakeups([]));
+      toast({ message: error instanceof Error ? error.message : String(error), severity: "error", duration: 3000 });
+    });
+  };
   const sendBrowserAnnotation = (message: string) => {
     if (!selected) {
       return;
@@ -922,7 +947,7 @@ export function WorkspacePageView({
     onRename: ws.rename,
     onTogglePin: ws.togglePin,
     onArchive: (id: string) => {
-      ws.remove(id);
+      ws.archive(id);
       toast({ message: t("conversationArchived"), severity: "info", duration: 2500 });
     },
     onDelete: (id: string) => {
@@ -1146,7 +1171,7 @@ export function WorkspacePageView({
         </Stack>
       </Stack>
 
-      <ConversationList projects={ws.projects} chats={ws.chats} selectedId={ws.selectedId} onSelect={openConversation} actions={conversationActions} />
+      <ConversationList projects={ws.projects} chats={ws.chats} selectedId={ws.selectedId} onSelect={openConversation} actions={conversationActions} wakeupConversationIds={wakeupConversationIds} />
     </Stack>
   );
 
@@ -1428,6 +1453,7 @@ export function WorkspacePageView({
                   <BrowserPreview
                     sessionId={selected.id}
                     active={view === "preview"}
+                    bridgeActive={view === "preview" || selectedHasActiveWork}
                     onSendAnnotation={sendBrowserAnnotation}
                     onActivityEventsChange={setBrowserActivityEvents}
                     openRequest={browserOpenRequest}
@@ -1439,7 +1465,7 @@ export function WorkspacePageView({
               {/* Keyed by folder so each project's terminal keeps its own scrollback. */}
               {showTerminal && (
                 <Box sx={{ position: "absolute", inset: 0, display: view === "terminal" ? "block" : "none" }}>
-                  <TerminalView key={selectedCwd ?? "none"} cwd={selectedCwd} />
+                  <TerminalView key={terminalCwd ?? "none"} cwd={terminalCwd} />
                 </Box>
               )}
             </Box>
@@ -1469,27 +1495,6 @@ export function WorkspacePageView({
               <Box aria-busy="true" sx={{ minHeight: 44 }} />
             ) : (
               <Stack spacing={1}>
-                {wakeups.length > 0 && (
-                  <Stack
-                    direction="row"
-                    spacing={1}
-                    sx={{
-                      alignItems: "center",
-                      px: 1.5,
-                      py: 0.9,
-                      borderRadius: (theme) => `${theme.custom.radii.md}px`,
-                      border: (theme) => `1px solid ${theme.custom.borders.subtle}`,
-                      bgcolor: (theme) => theme.custom.surfaces.s1,
-                      color: "text.secondary",
-                    }}
-                  >
-                    <AccessTimeIcon sx={{ fontSize: 16, color: "text.secondary", flex: "0 0 auto" }} />
-                    <Typography sx={{ minWidth: 0, flex: 1, fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.72rem", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                      {wakeupLabel(wakeups[0], locale)}
-                      {wakeups.length > 1 ? ` · +${wakeups.length - 1}` : ""}
-                    </Typography>
-                  </Stack>
-                )}
                 <Composer
                   key={ws.selectedId}
                   ref={composerRef}
@@ -1546,7 +1551,19 @@ export function WorkspacePageView({
                       toast({ message: t("compactionNoSession"), severity: "info", duration: 3000 });
                     }
                   }}
+                  queuedMessageCount={selected ? ws.pendingMessageCount(selected.id) : 0}
+                  onSendQueuedNow={() => {
+                    if (selected) {
+                      ws.sendQueuedMessageNow(selected.id);
+                    }
+                  }}
                   browserActivityEvents={view === "preview" ? browserActivityEvents : undefined}
+                  scheduledWakeups={selectedWakeups.map((wakeup) => ({
+                    id: wakeup.id,
+                    label: wakeupLabel(wakeup, locale),
+                    removeLabel: locale === "ru" ? "Убрать запланированную задачу" : "Remove scheduled wakeup",
+                    onRemove: () => removeWakeup(wakeup.id),
+                  }))}
                 />
               </Stack>
             )}

@@ -1,4 +1,5 @@
 import type { ChatMessage, ConversationSummary, Project } from "../components/agent/types";
+import { formatClock24 } from "./time-format";
 
 /** The detailed sample thread (flaky-test investigation). */
 const flakyThread: readonly ChatMessage[] = [
@@ -179,7 +180,7 @@ export function buildInitialThreads(): Record<string, ChatMessage[]> {
 }
 
 export function nowLabel(): string {
-  return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return formatClock24();
 }
 
 export function truncate(text: string, max: number): string {

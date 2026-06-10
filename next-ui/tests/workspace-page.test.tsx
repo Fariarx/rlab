@@ -1,5 +1,9 @@
 ﻿import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+vi.mock("../src/components/workspace/TerminalView", () => ({
+  TerminalView: ({ cwd }: { readonly cwd?: string }) => <div data-testid="terminal-cwd">{cwd ?? "none"}</div>,
+}));
+
 import { WorkspacePage } from "../src/components/workspace/WorkspacePage";
 import { buildInitialWorkspaceState } from "../src/components/workspace/workspace-state";
 import { renderWithThemeAndVirtuoso } from "./util/render-with-virtuoso";
@@ -73,6 +77,48 @@ describe("WorkspacePage", () => {
     renderWithThemeAndVirtuoso(<WorkspacePage />);
 
     expect(screen.getByText("auth-service")).toBeInTheDocument();
+  });
+
+  it("opens the terminal for a non-project chat in the app workspace directory", async () => {
+    const initial = buildInitialWorkspaceState();
+    const workspace = {
+      ...initial,
+      selectedId: "chat-2",
+      settings: {
+        ...initial.settings,
+        appearance: {
+          ...initial.settings.appearance,
+          showTerminal: true,
+        },
+      },
+    };
+    vi.mocked(fetch).mockImplementation(async (url: string | URL | Request, init?: RequestInit) => {
+      const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+      const activeRuns = activeRunsResponse(path);
+      if (activeRuns) {
+        return activeRuns;
+      }
+      if (path === "/api/workspace" && (!init || init.method === "GET")) {
+        return Response.json(workspace);
+      }
+      if (path === "/api/workspace" && init?.method === "PUT") {
+        return Response.json(workspace);
+      }
+      if (path === "/api/project-files") {
+        return Response.json({ files: [] });
+      }
+      if (path === "/api/agent-config") {
+        return Response.json({ agents: {} });
+      }
+      return Response.json({});
+    });
+
+    renderWithThemeAndVirtuoso(<WorkspacePage />);
+
+    await screen.findByTestId("terminal-cwd");
+    fireEvent.click(screen.getByRole("button", { name: "Терминал" }));
+
+    expect(screen.getByTestId("terminal-cwd")).toHaveTextContent(".");
   });
 
   it("opens the agent picker from the agent badge", () => {
@@ -791,6 +837,7 @@ describe("WorkspacePage", () => {
       if (path === "/api/git-status") {
         return Response.json({
           branch: "main",
+          branches: ["main", "feature/ui"],
           upstream: "origin/main",
           ahead: 1,
           behind: 0,
@@ -815,9 +862,57 @@ describe("WorkspacePage", () => {
         }),
       );
     });
-    // The Git view shows the current branch.
-    expect(await screen.findByText("main")).toBeInTheDocument();
+    // The Git view shows the current branch as a switchable combobox.
+    const branchCombo = await screen.findByRole("combobox", { name: "Переключить ветку" });
+    expect(branchCombo).toHaveValue("main");
+    expect(branchCombo).toBeDisabled();
     expect(screen.getAllByText("src/auth.ts").length).toBeGreaterThan(0);
+  });
+
+  it("switches Git branches from the header autocomplete when the worktree is clean", async () => {
+    const workspace = { ...buildInitialWorkspaceState(), selectedId: "c-flaky" };
+    const checkoutRequests: Array<{ readonly cwd?: string; readonly branch?: string }> = [];
+    let branch = "main";
+    const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+      const activeRuns = activeRunsResponse(path);
+      if (activeRuns) {
+        return activeRuns;
+      }
+      if (path === "/api/workspace" && (!init || init.method === "GET")) {
+        return Response.json(workspace);
+      }
+      if (path === "/api/workspace" && init?.method === "PUT") {
+        return Response.json(workspace);
+      }
+      if (path === "/api/project-files") {
+        return Response.json({ files: [] });
+      }
+      if (path === "/api/git-status") {
+        return Response.json({ branch, branches: ["main", "feature/ui"], ahead: 0, behind: 0, clean: true, files: [], unstagedAdditions: 0, unstagedDeletions: 0 });
+      }
+      if (path === "/api/git-checkout") {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { cwd?: string; branch?: string };
+        checkoutRequests.push(body);
+        branch = body.branch ?? branch;
+        return Response.json({ branch, branches: ["main", "feature/ui"], ahead: 0, behind: 0, clean: true, files: [], unstagedAdditions: 0, unstagedDeletions: 0 });
+      }
+      return new Response("not found", { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetch);
+
+    renderWithThemeAndVirtuoso(<WorkspacePage />);
+
+    await screen.findByPlaceholderText("Написать: CC");
+    fireEvent.click(screen.getByRole("button", { name: "Git" }));
+    const combo = await screen.findByRole("combobox", { name: "Переключить ветку" });
+    fireEvent.mouseDown(combo);
+    fireEvent.click(await screen.findByRole("option", { name: "feature/ui" }));
+
+    await waitFor(() => {
+      expect(checkoutRequests).toEqual([{ cwd: "/root/workspace/rlab", branch: "feature/ui" }]);
+      expect(screen.getByRole("combobox", { name: "Переключить ветку" })).toHaveValue("feature/ui");
+    });
   });
 
   it("clears stale worktree Git changes immediately after switching the conversation back to main", async () => {
@@ -901,7 +996,7 @@ describe("WorkspacePage", () => {
     });
 
     resolveBaseStatus(Response.json({ branch: "main", ahead: 0, behind: 0, clean: true, files: [], unstagedAdditions: 0, unstagedDeletions: 0 }));
-    expect(await screen.findByText("main")).toBeInTheDocument();
+    expect(await screen.findByRole("combobox", { name: "Переключить ветку" })).toHaveValue("main");
   });
 
   it("shows an explicit Git API status error when the backend omits an error message", async () => {
@@ -1277,52 +1372,6 @@ describe("WorkspacePage", () => {
 
     // The review renders as a collapsible block (not plain text) in the chat.
     expect(await screen.findByText("Ревью · 1 комментариев")).toBeInTheDocument();
-  });
-
-  it("runs a command in the Terminal tab and streams its output", async () => {
-    const base = buildInitialWorkspaceState();
-    const workspace = { ...base, selectedId: "c-flaky", settings: { ...base.settings, appearance: { ...base.settings.appearance, showTerminal: true } } };
-    let terminalRequest: { readonly cwd?: string; readonly command?: string } | null = null;
-    const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
-      const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
-      const activeRuns = activeRunsResponse(path);
-      if (activeRuns) {
-        return activeRuns;
-      }
-      if (path === "/api/workspace" && (!init || init.method === "GET")) {
-        return Response.json(workspace);
-      }
-      if (path === "/api/workspace" && init?.method === "PUT") {
-        return Response.json(workspace);
-      }
-      if (path === "/api/project-files") {
-        return Response.json({ files: [] });
-      }
-      if (path === "/api/git-status") {
-        return Response.json({ branch: "main", ahead: 0, behind: 0, clean: true, files: [] });
-      }
-      if (path === "/api/terminal") {
-        terminalRequest = JSON.parse(String(init?.body ?? "{}")) as { cwd?: string; command?: string };
-        return new Response(
-          `${JSON.stringify({ type: "out", chunk: "hello-from-shell\n" })}\n${JSON.stringify({ type: "exit", code: 0 })}\n`,
-          { headers: { "Content-Type": "application/x-ndjson" } },
-        );
-      }
-      return new Response("not found", { status: 404 });
-    });
-    vi.stubGlobal("fetch", fetch);
-
-    renderWithThemeAndVirtuoso(<WorkspacePage />);
-
-    await screen.findByPlaceholderText("Написать: CC");
-    fireEvent.click(screen.getByRole("button", { name: "Терминал" }));
-
-    const input = await screen.findByPlaceholderText("Выполнить команду...");
-    fireEvent.change(input, { target: { value: "echo hi" } });
-    fireEvent.keyDown(input, { key: "Enter" });
-
-    expect(await screen.findByText("hello-from-shell")).toBeInTheDocument();
-    expect(terminalRequest).toEqual({ cwd: "/root/workspace/rlab", command: "echo hi" });
   });
 
 });

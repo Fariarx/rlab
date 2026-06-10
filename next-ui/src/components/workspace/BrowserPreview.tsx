@@ -111,9 +111,22 @@ interface BrowserSelectionRect {
 interface BrowserComponentSelection {
   readonly label: string;
   readonly selector: string;
+  readonly tagName: string;
+  readonly role?: string;
+  readonly ariaLabel?: string;
+  readonly testId?: string;
+  readonly name?: string;
+  readonly title?: string;
+  readonly href?: string;
+  readonly value?: string;
+  readonly placeholder?: string;
+  readonly checked?: boolean;
+  readonly disabled?: boolean;
+  readonly classes: readonly string[];
   readonly text: string;
   readonly rect: BrowserSelectionRect;
   readonly viewport: BrowserViewport;
+  readonly screenshotDataUrl?: string;
 }
 
 interface BrowserSelectionPanel {
@@ -127,6 +140,7 @@ interface BrowserSelectionPanel {
 interface BrowserPreviewProps {
   readonly sessionId: string;
   readonly active: boolean;
+  readonly bridgeActive?: boolean;
   readonly onSendAnnotation?: (message: string) => void;
   readonly onActivityEventsChange?: (events: readonly BrowserActivityEvent[]) => void;
   readonly bottomInset?: number;
@@ -595,6 +609,86 @@ function clippedText(value: string): string {
   return normalized.length > 160 ? `${normalized.slice(0, 157)}...` : normalized;
 }
 
+function optionalClippedAttribute(value: string | null | undefined): string | undefined {
+  const text = clippedText(value ?? "");
+  return text.length > 0 ? text : undefined;
+}
+
+function optionalElementValue(element: Element): string | undefined {
+  const view = element.ownerDocument.defaultView ?? window;
+  if (element instanceof view.HTMLInputElement || element instanceof view.HTMLTextAreaElement || element instanceof view.HTMLSelectElement) {
+    return optionalClippedAttribute(element.value);
+  }
+  return undefined;
+}
+
+function optionalElementPlaceholder(element: Element): string | undefined {
+  const view = element.ownerDocument.defaultView ?? window;
+  if (element instanceof view.HTMLInputElement || element instanceof view.HTMLTextAreaElement) {
+    return optionalClippedAttribute(element.placeholder);
+  }
+  return undefined;
+}
+
+function optionalElementChecked(element: Element): boolean | undefined {
+  const view = element.ownerDocument.defaultView ?? window;
+  if (element instanceof view.HTMLInputElement && (element.type === "checkbox" || element.type === "radio")) {
+    return element.checked;
+  }
+  return undefined;
+}
+
+function optionalElementDisabled(element: Element): boolean | undefined {
+  const view = element.ownerDocument.defaultView ?? window;
+  if (element instanceof view.HTMLButtonElement || element instanceof view.HTMLInputElement || element instanceof view.HTMLSelectElement || element instanceof view.HTMLTextAreaElement) {
+    return element.disabled;
+  }
+  if (element.getAttribute("aria-disabled") === "true") {
+    return true;
+  }
+  return undefined;
+}
+
+function cropComponentScreenshot(dataUrl: string | undefined, rect: BrowserSelectionRect, viewport: BrowserViewport): Promise<string | undefined> {
+  if (!dataUrl || rect.width < 1 || rect.height < 1 || viewport.width < 1 || viewport.height < 1) {
+    return Promise.resolve(undefined);
+  }
+  return new Promise((resolve) => {
+    const image = new Image();
+    image.onload = () => {
+      try {
+        const scaleX = image.naturalWidth / viewport.width;
+        const scaleY = image.naturalHeight / viewport.height;
+        const padding = 8;
+        const sourceX = Math.max(0, Math.floor((rect.x - padding) * scaleX));
+        const sourceY = Math.max(0, Math.floor((rect.y - padding) * scaleY));
+        const sourceRight = Math.min(image.naturalWidth, Math.ceil((rect.x + rect.width + padding) * scaleX));
+        const sourceBottom = Math.min(image.naturalHeight, Math.ceil((rect.y + rect.height + padding) * scaleY));
+        const width = Math.max(1, sourceRight - sourceX);
+        const height = Math.max(1, sourceBottom - sourceY);
+        const maxOutput = 480;
+        const outputScale = Math.min(1, maxOutput / Math.max(width, height));
+        const outputWidth = Math.max(1, Math.round(width * outputScale));
+        const outputHeight = Math.max(1, Math.round(height * outputScale));
+        const canvas = document.createElement("canvas");
+        canvas.width = outputWidth;
+        canvas.height = outputHeight;
+        const context = canvas.getContext("2d");
+        if (!context) {
+          resolve(undefined);
+          return;
+        }
+        context.drawImage(image, sourceX, sourceY, width, height, 0, 0, outputWidth, outputHeight);
+        resolve(canvas.toDataURL("image/png"));
+      } catch {
+        resolve(undefined);
+      }
+    };
+    image.onerror = () => resolve(undefined);
+    image.src = dataUrl;
+  });
+}
+
 function pickBrowserComponent(frame: HTMLIFrameElement | null, event: ReactMouseEvent<HTMLElement>): BrowserComponentSelection {
   if (!frame?.contentWindow) {
     throw new Error("Iframe is not ready.");
@@ -615,6 +709,18 @@ function pickBrowserComponent(frame: HTMLIFrameElement | null, event: ReactMouse
   return {
     label: componentLabelForElement(element),
     selector: selectorForElement(element),
+    tagName: element.tagName.toLowerCase(),
+    role: optionalClippedAttribute(element.getAttribute("role")),
+    ariaLabel: optionalClippedAttribute(element.getAttribute("aria-label")),
+    testId: optionalClippedAttribute(element.getAttribute("data-testid") ?? element.getAttribute("data-test")),
+    name: optionalClippedAttribute(element.getAttribute("name")),
+    title: optionalClippedAttribute(element.getAttribute("title")),
+    href: element instanceof (element.ownerDocument.defaultView ?? window).HTMLAnchorElement ? optionalClippedAttribute(element.href) : undefined,
+    value: optionalElementValue(element),
+    placeholder: optionalElementPlaceholder(element),
+    checked: optionalElementChecked(element),
+    disabled: optionalElementDisabled(element),
+    classes: elementClassNames(element),
     text: clippedText(element.textContent ?? ""),
     rect: {
       x: clamp(Math.round(elementBounds.left), 0, viewport.width),
@@ -637,16 +743,34 @@ function buildAnnotationMessage(target: { readonly url: string; readonly title: 
 }
 
 function buildComponentAnnotationMessage(target: { readonly url: string; readonly title: string }, component: BrowserComponentSelection, comment: string): string {
-  return [
+  const lines = [
+    "Source: rlab Preview plugin / Component picker",
     "Browser component annotation",
     `url: ${target.url}`,
     `title: ${target.title || "-"}`,
     `component: ${component.label}`,
     `selector: ${component.selector}`,
+    `tag: ${component.tagName}`,
+    `classes: ${component.classes.length > 0 ? component.classes.join(" ") : "-"}`,
+    `role: ${component.role ?? "-"}`,
+    `aria-label: ${component.ariaLabel ?? "-"}`,
+    `test-id: ${component.testId ?? "-"}`,
+    `name: ${component.name ?? "-"}`,
+    `element-title: ${component.title ?? "-"}`,
+    `href: ${component.href ?? "-"}`,
+    `value: ${component.value ?? "-"}`,
+    `placeholder: ${component.placeholder ?? "-"}`,
+    `checked: ${component.checked === undefined ? "-" : String(component.checked)}`,
+    `disabled: ${component.disabled === undefined ? "-" : String(component.disabled)}`,
     `text: ${component.text || "-"}`,
     `rect: x=${component.rect.x} y=${component.rect.y} width=${component.rect.width} height=${component.rect.height}`,
+    `viewport: width=${component.viewport.width} height=${component.viewport.height}`,
+    "agent-note: This metadata and optional screenshot were captured by rlab's Preview tab component picker, not typed by the user or scraped from page text.",
+    `componentScreenshotStatus: ${component.screenshotDataUrl ? "attached" : "unavailable"}`,
+    `componentScreenshotDataUrl: ${component.screenshotDataUrl ?? "-"}`,
     `comment: ${comment.trim()}`,
-  ].join("\n");
+  ];
+  return lines.join("\n");
 }
 
 function appendBrowserActivityEvent(events: readonly BrowserActivityEvent[], event: BrowserActivityEvent): readonly BrowserActivityEvent[] {
@@ -1084,7 +1208,16 @@ function isReplayableBrowserActivityEvent(event: BrowserActivityEvent): boolean 
   );
 }
 
-export function BrowserPreview({ sessionId, active, onSendAnnotation, onActivityEventsChange, bottomInset = 0, openRequest, serverHostOverride = "" }: BrowserPreviewProps) {
+export function BrowserPreview({
+  sessionId,
+  active,
+  bridgeActive = active,
+  onSendAnnotation,
+  onActivityEventsChange,
+  bottomInset = 0,
+  openRequest,
+  serverHostOverride = "",
+}: BrowserPreviewProps) {
   const { t } = useI18n();
   const { toast } = useToast();
   const frameRef = useRef<HTMLIFrameElement | null>(null);
@@ -1094,6 +1227,9 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, onActivity
   const [liveUrl, setLiveUrl] = useState<string | null>(null);
   const liveUrlRef = useRef<string | null>(null);
   const userLiveNavigationStartedRef = useRef(false);
+  const browserEventCursorRef = useRef(0);
+  const agentNavigationUrlRef = useRef<string | null>(null);
+  const localMirrorDirtyPendingRef = useRef(false);
   const [frameKey, setFrameKey] = useState(0);
   const [mode, setMode] = useState<PreviewMode>("interact");
   const [snapshot, setSnapshot] = useState<BrowserSnapshot | null>(null);
@@ -1192,6 +1328,8 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, onActivity
   }, [liveUrl]);
 
   useEffect(() => {
+    browserEventCursorRef.current = 0;
+    agentNavigationUrlRef.current = null;
     setActivityEvents([]);
   }, [sessionId]);
 
@@ -1240,17 +1378,21 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, onActivity
   };
 
   useEffect(() => {
-    if (!active) {
+    if (!bridgeActive) {
       return;
     }
     let canceled = false;
+    const eventCursorAtRequest = browserEventCursorRef.current;
     void loadBrowserState(sessionId, t("browserPreviewInvalidResponse"))
       .then((next) => {
         if (canceled || next === null) {
           return;
         }
-        applySnapshot(next, { preserveLocalStale: true });
-        if (!userLiveNavigationStartedRef.current) {
+        applySnapshot(next, { preserveLocalStale: localMirrorDirtyPendingRef.current });
+        const agentNavigationUrl = agentNavigationUrlRef.current;
+        if (agentNavigationUrl) {
+          adoptBrowserUrl(agentNavigationUrl);
+        } else if (!userLiveNavigationStartedRef.current && browserEventCursorRef.current === eventCursorAtRequest) {
           adoptBrowserUrl(next.url);
         }
         setError(null);
@@ -1266,10 +1408,10 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, onActivity
     return () => {
       canceled = true;
     };
-  }, [active, sessionId, t]);
+  }, [bridgeActive, sessionId, t]);
 
   useEffect(() => {
-    if (!active || typeof EventSource === "undefined") {
+    if (!bridgeActive || typeof EventSource === "undefined") {
       setEventStreamStatus("idle");
       return;
     }
@@ -1294,6 +1436,7 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, onActivity
       if (!isBrowserActivityEvent(parsed) || parsed.sessionId !== sessionId) {
         return;
       }
+      browserEventCursorRef.current = Math.max(browserEventCursorRef.current, parsed.id);
       setActivityEvents((current) => appendBrowserActivityEvent(current, parsed));
       if (isReplayableBrowserActivityEvent(parsed)) {
         // Replaying into the live iframe can throw on cross-origin frames or
@@ -1309,6 +1452,7 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, onActivity
         setLiveReplayBlocked(!replayed);
       }
       if (parsed.url && (parsed.type === "navigation.started" || parsed.type === "navigation.done" || parsed.type === "tab.selected")) {
+        agentNavigationUrlRef.current = parsed.url;
         setLiveReplayBlocked(false);
         adoptBrowserUrl(parsed.url);
       }
@@ -1330,7 +1474,7 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, onActivity
         void loadBrowserState(sessionId, t("browserPreviewInvalidResponse"))
           .then((next) => {
             if (alive && next) {
-              applySnapshot(next, { preserveLocalStale: true });
+              applySnapshot(next, { preserveLocalStale: localMirrorDirtyPendingRef.current });
             }
           })
           .catch(() => undefined);
@@ -1347,10 +1491,11 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, onActivity
       source.removeEventListener("browser", handleBrowserEvent);
       source.close();
     };
-  }, [active, sessionId]);
+  }, [bridgeActive, sessionId]);
 
   const markMirrorDirty = async (reason: string, dirtyUrl?: string) => {
     const blocked = reason.toLowerCase().includes("cross-origin") || reason.toLowerCase().includes("storage blocked");
+    localMirrorDirtyPendingRef.current = true;
     setMirrorStatus(blocked ? "blocked" : "dirty");
     try {
       const body = dirtyUrl ? { sessionId, reason, url: dirtyUrl } : { sessionId, reason };
@@ -1360,6 +1505,8 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, onActivity
       const message = operationError instanceof Error ? operationError.message : String(operationError);
       setMirrorStatus("error");
       setError(t("browserPreviewOpenError", { error: message }));
+    } finally {
+      localMirrorDirtyPendingRef.current = false;
     }
   };
 
@@ -1374,9 +1521,6 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, onActivity
       const next = await postBrowserSnapshot("/api/browser/sync", mirrorBody, t("browserPreviewInvalidResponse"));
       applySnapshot(next);
       setLiveReplayBlocked(false);
-      if (syncRequest.blockedReason) {
-        void markMirrorDirty(syncRequest.blockedReason, syncRequest.request.url);
-      }
     } catch (operationError) {
       const message = operationError instanceof Error ? operationError.message : String(operationError);
       setMirrorStatus("error");
@@ -1440,7 +1584,7 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, onActivity
         }
       };
     } catch {
-      void markMirrorDirty("cross-origin iframe", liveUrlRef.current ?? undefined);
+      detachFrameListeners();
     }
   };
 
@@ -1452,7 +1596,6 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, onActivity
     const currentUrl = readableFrameUrl(frame);
     if (!currentUrl) {
       detachFrameListeners();
-      void markMirrorDirty("cross-origin iframe", liveUrlRef.current ?? undefined);
       return;
     }
     attachFrameDirtyListeners(frame);
@@ -1631,7 +1774,19 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, onActivity
       return;
     }
     try {
-      setComponentSelection(pickBrowserComponent(frameRef.current, event));
+      const picked = pickBrowserComponent(frameRef.current, event);
+      setComponentSelection(picked);
+      void cropComponentScreenshot(snapshot?.screenshot, picked.rect, picked.viewport).then((screenshotDataUrl) => {
+        if (!screenshotDataUrl) {
+          return;
+        }
+        setComponentSelection((current) => {
+          if (!current || current.selector !== picked.selector || current.rect.x !== picked.rect.x || current.rect.y !== picked.rect.y || current.rect.width !== picked.rect.width || current.rect.height !== picked.rect.height) {
+            return current;
+          }
+          return { ...current, screenshotDataUrl };
+        });
+      });
       setSelection(null);
       setSelectionViewport(null);
       setError(null);
@@ -2105,6 +2260,24 @@ export function BrowserPreview({ sessionId, active, onSendAnnotation, onActivity
                     {panelState.description}
                   </Typography>
                 </Box>
+                {componentSelection?.screenshotDataUrl && (
+                  <Box
+                    component="img"
+                    data-testid="browser-preview-component-screenshot"
+                    alt={t("browserPreviewComponentScreenshotAlt")}
+                    src={componentSelection.screenshotDataUrl}
+                    sx={{
+                      width: 96,
+                      maxWidth: "100%",
+                      maxHeight: 72,
+                      objectFit: "contain",
+                      alignSelf: "flex-start",
+                      borderRadius: 0.75,
+                      border: (theme) => `1px solid ${theme.custom.borders.subtle}`,
+                      backgroundColor: (theme) => theme.custom.surfaces.s1,
+                    }}
+                  />
+                )}
                 <Box
                   sx={{
                     display: "grid",

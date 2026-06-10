@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, join, resolve } from "node:path";
 import {
   agentStatusForDetection,
   agentCliInfoForDetection,
@@ -29,6 +29,7 @@ import {
   activeBackgroundRunSnapshotsFromHandles,
   applyBrowserStorageSnapshot,
   appendRunAuditEvent,
+  appendRlabChatToolsPrompt,
   BROWSER_ACTION_TIMEOUT_MS,
   browserBridgeOrigin,
   browserPreviewActionFailureResult,
@@ -46,6 +47,8 @@ import {
   parseGitCwdPayload,
   parseGitFilePayload,
   parseGitCommitPayload,
+  parseGitCheckoutPayload,
+  parseTerminalSessionRequest,
   gitErrorStatus,
   gitPushRequestErrorStatus,
   isNoChangesGitCommitResult,
@@ -71,6 +74,7 @@ import {
   parseGeminiCliModelConfigSource,
   parseOpenCodeAgentsOutput,
   parseOpenCodeModelsOutput,
+  prepareAgentPrompt,
   prioritizeBrowserPreviewDomTargets,
   resolveAgentInstallLaunch,
   resolveBinOnPath,
@@ -116,6 +120,30 @@ describe("vite agents plugin", () => {
     } as unknown as Parameters<typeof browserBridgeOrigin>[0];
 
     expect(browserBridgeOrigin(req)).toBe("http://127.0.0.1:4280");
+  });
+
+  it("adds rlab chat tool instructions to every agent prompt once", () => {
+    const withTools = appendRlabChatToolsPrompt("wait until the deployment is ready");
+
+    expect(withTools).toContain("<rlab-chat-tools>");
+    expect(withTools).toContain("ScheduleWakeup supports delaySeconds/fireAt");
+    expect(withTools).toContain("{ prompt, script, intervalSeconds, reason }");
+    expect(appendRlabChatToolsPrompt(withTools).match(/<rlab-chat-tools>/g)).toHaveLength(1);
+  });
+
+  it("keeps browser bridge prompt appended after the rlab chat tool contract", () => {
+    const binding: BackgroundRunBinding = {
+      conversationId: "chat-browser",
+      runId: "run-browser",
+      userMessageId: "u-browser",
+      userMessageTime: "10:00",
+      agentMessageId: "a-browser",
+      agentMessageTime: "10:01",
+    };
+    const prompt = prepareAgentPrompt("use preview", binding, "https://rlab.example");
+
+    expect(prompt.indexOf("<rlab-chat-tools>")).toBeGreaterThan(-1);
+    expect(prompt.indexOf("<browser-preview-bridge>")).toBeGreaterThan(prompt.indexOf("</rlab-chat-tools>"));
   });
 
   it("only exposes the supported visible agents in backend discovery", () => {
@@ -778,6 +806,40 @@ Built-in agents:
     ).toEqual([
       { type: "tool_result", id: "wake-script", ok: true, output: "installed" },
       { type: "wakeup", toolId: "wake-script", prompt: "continue after ready file exists", script: "test -f /tmp/ready", intervalSeconds: 15 },
+    ]);
+  });
+
+  it("translates ScheduleWakeup cancel tool input into a scheduler cancellation event", () => {
+    const translate = createClaudeStreamTranslator();
+
+    translate(
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          content: [
+            {
+              type: "tool_use",
+              id: "wake-cancel",
+              name: "ScheduleWakeup",
+              input: { action: "cancel", wakeupId: "wakeup-123", reason: "user canceled it" },
+            },
+          ],
+        },
+      }),
+    );
+
+    expect(
+      translate(
+        JSON.stringify({
+          type: "user",
+          message: {
+            content: [{ type: "tool_result", tool_use_id: "wake-cancel", content: "canceled" }],
+          },
+        }),
+      ),
+    ).toEqual([
+      { type: "tool_result", id: "wake-cancel", ok: true, output: "canceled" },
+      { type: "cancel_wakeup", toolId: "wake-cancel", wakeupId: "wakeup-123", all: false, reason: "user canceled it" },
     ]);
   });
 
@@ -1951,11 +2013,32 @@ Built-in agents:
     });
   });
 
+  it("validates git checkout payloads without accepting non-object JSON", () => {
+    expect(() => parseGitCheckoutPayload(JSON.stringify(false))).toThrow("Invalid git request payload.");
+    expect(() => parseGitCheckoutPayload(JSON.stringify({ cwd: "C:\\repo", branch: "" }))).toThrow("Git branch is required.");
+    expect(() => parseGitCheckoutPayload(JSON.stringify({ cwd: "C:\\repo", branch: "bad\0branch" }))).toThrow("Git branch contains an invalid null byte.");
+    expect(parseGitCheckoutPayload(JSON.stringify({ cwd: " C:\\repo ", branch: " feature/ui " }))).toEqual({
+      cwd: "C:\\repo",
+      branch: "feature/ui",
+    });
+  });
+
+  it("parses terminal session cwd from request headers and resolves relative paths", () => {
+    expect(() => parseTerminalSessionRequest({ headers: {} } as unknown as Parameters<typeof parseTerminalSessionRequest>[0])).toThrow("Project directory is required.");
+    expect(
+      parseTerminalSessionRequest({
+        headers: { "x-rlab-terminal-cwd": " . " },
+      } as unknown as Parameters<typeof parseTerminalSessionRequest>[0]),
+    ).toEqual({ cwd: resolve(".") });
+  });
+
   it("classifies git validation errors separately from runtime errors", () => {
     expect(gitErrorStatus(new SyntaxError("Unexpected token"))).toBe(400);
     expect(gitErrorStatus(new Error("Invalid git request payload."))).toBe(400);
     expect(gitErrorStatus(new Error("Project directory is required."))).toBe(400);
     expect(gitErrorStatus(new Error("Git file path contains an invalid null byte."))).toBe(400);
+    expect(gitErrorStatus(new Error("Git branch is required."))).toBe(400);
+    expect(gitErrorStatus(new Error("Git branch contains an invalid null byte."))).toBe(400);
     expect(gitErrorStatus(new Error("EACCES: permission denied"))).toBe(500);
   });
 

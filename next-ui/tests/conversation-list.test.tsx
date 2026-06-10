@@ -16,12 +16,22 @@ function noopActions() {
   return { onRename: vi.fn(), onTogglePin: vi.fn(), onArchive: vi.fn(), onDelete: vi.fn() };
 }
 
-function render(chats: readonly ConversationSummary[], actions = noopActions()) {
-  renderWithThemeAndVirtuoso(<ConversationList projects={[]} chats={chats} selectedId={chats[0]?.id ?? null} onSelect={vi.fn()} actions={actions} />);
+function render(chats: readonly ConversationSummary[], actions = noopActions(), wakeupConversationIds: ReadonlySet<string> = new Set()) {
+  renderWithThemeAndVirtuoso(<ConversationList projects={[]} chats={chats} selectedId={chats[0]?.id ?? null} onSelect={vi.fn()} actions={actions} wakeupConversationIds={wakeupConversationIds} />);
   return actions;
 }
 
 describe("ConversationList pinning", () => {
+  it("hides archived conversations from the normal sidebar list", () => {
+    render([
+      { ...base, id: "archived", title: "Archived chat", archived: true },
+      { ...base, id: "plain", title: "Plain chat" },
+    ]);
+
+    expect(screen.queryByRole("option", { name: "Archived chat" })).not.toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Plain chat" })).toBeInTheDocument();
+  });
+
   it("lifts pinned conversations into a Pinned group and out of their original list", () => {
     render([
       { ...base, id: "pinned", title: "Pinned chat", pinned: true },
@@ -82,6 +92,41 @@ describe("ConversationList status dots", () => {
     expect(screen.queryByRole("img", { name: "Готово" })).not.toBeInTheDocument();
     expect(screen.getByRole("img", { name: "В работе" })).toBeInTheDocument();
   });
+
+  it("shows a warning status for idle conversations with an active wakeup", () => {
+    render([{ ...base, id: "wakeup", title: "Wakeup chat", status: "idle" }], noopActions(), new Set(["wakeup"]));
+
+    expect(screen.getByRole("img", { name: "Wakeup запланирован" })).toBeInTheDocument();
+  });
+
+  it("lets an active wakeup override an existing error status visually", () => {
+    render([{ ...base, id: "wakeup", title: "Wakeup chat", status: "error" }], noopActions(), new Set(["wakeup"]));
+
+    expect(screen.getByRole("img", { name: "Wakeup запланирован" })).toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: "Ошибка" })).not.toBeInTheDocument();
+  });
+
+  it("updates already-rendered rows when wakeups arrive after the list mounts", () => {
+    const chat = { ...base, id: "wakeup", title: "Wakeup chat", status: "error" as const };
+    const actions = noopActions();
+    const rendered = renderWithThemeAndVirtuoso(<ConversationList projects={[]} chats={[chat]} selectedId="wakeup" onSelect={vi.fn()} actions={actions} wakeupConversationIds={new Set()} />);
+
+    expect(screen.getByRole("img", { name: "Ошибка" })).toBeInTheDocument();
+
+    rendered.rerender(<ConversationList projects={[]} chats={[chat]} selectedId="wakeup" onSelect={vi.fn()} actions={actions} wakeupConversationIds={new Set(["wakeup"])} />);
+
+    expect(screen.getByRole("img", { name: "Wakeup запланирован" })).toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: "Ошибка" })).not.toBeInTheDocument();
+  });
+});
+
+describe("ConversationList time labels", () => {
+  it("renders persisted AM/PM labels as 24-hour time", () => {
+    render([{ ...base, id: "pm", title: "PM chat", time: "03:19 PM" }]);
+
+    expect(screen.getByText("15:19")).toBeInTheDocument();
+    expect(screen.queryByText("03:19 PM")).not.toBeInTheDocument();
+  });
 });
 
 describe("ConversationList collapsed group indicators", () => {
@@ -104,6 +149,14 @@ describe("ConversationList collapsed group indicators", () => {
     // Status wins; the unread dot is not shown alongside it.
     expect(screen.getByRole("img", { name: "в работе: 1" })).toBeInTheDocument();
     expect(screen.queryByRole("img", { name: "Непрочитанные" })).not.toBeInTheDocument();
+  });
+
+  it("shows the wakeup status when a collapsed group has scheduled work", () => {
+    render([{ ...base, id: "wakeup", title: "Wakeup chat" }], noopActions(), new Set(["wakeup"]));
+
+    fireEvent.click(screen.getByRole("button", { name: /Чаты/ }));
+
+    expect(screen.getByRole("img", { name: "Wakeup запланирован" })).toBeInTheDocument();
   });
 
   it("does not render a conversation-count badge on group headers", () => {

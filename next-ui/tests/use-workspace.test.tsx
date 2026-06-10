@@ -18,6 +18,8 @@ function Probe() {
       <div data-testid="cost">{selected?.costUsd ?? "none"}</div>
       <div data-testid="usage">{selected?.usage?.totalTokens ?? "none"}</div>
       <div data-testid="context-usage">{selected?.usage?.contextTokens ?? "none"}</div>
+      <div data-testid="queued">{workspace.pendingMessageCount(workspace.selectedId)}</div>
+      <div data-testid="archived">{[...workspace.chats, ...workspace.projects.flatMap((project) => project.conversations)].filter((conversation) => conversation.archived).map((conversation) => conversation.id).join(",")}</div>
       <div data-testid="thread-ids">{(workspace.threads[workspace.selectedId] ?? []).map((message) => message.id).join(",")}</div>
       <button type="button" onClick={() => workspace.sendMessage(workspace.selectedId, "Persist this message")}>
         send
@@ -43,8 +45,14 @@ function Probe() {
       <button type="button" onClick={() => workspace.stopRun(workspace.selectedId)}>
         stop
       </button>
+      <button type="button" onClick={() => workspace.sendQueuedMessageNow(workspace.selectedId)}>
+        send-queued-now
+      </button>
       <button type="button" onClick={() => workspace.remove("chat-1")}>
         remove-chat-1
+      </button>
+      <button type="button" onClick={() => workspace.archive("chat-1")}>
+        archive-chat-1
       </button>
       <button type="button" onClick={() => workspace.compactConversation(workspace.selectedId)}>
         compact
@@ -287,6 +295,24 @@ describe("useWorkspace", () => {
     expect(payload.chats.some((chat) => chat.id === "chat-1")).toBe(false);
     expect(payload.threads).toEqual({});
     expect(state.chats.some((chat) => chat.id === "chat-1")).toBe(false);
+  });
+
+  it("archives conversations without deleting their thread", async () => {
+    render(<Probe />);
+
+    await screen.findByText("chat-2");
+    const originalThread = state.threads["chat-1"];
+    const savesBefore = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace" && init?.method === "PUT").length;
+    screen.getByRole("button", { name: "archive-chat-1" }).click();
+
+    await waitFor(() => {
+      const saves = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace" && init?.method === "PUT");
+      expect(saves).toHaveLength(savesBefore + 1);
+    });
+
+    expect(screen.getByTestId("archived")).toHaveTextContent("chat-1");
+    expect(state.chats.find((chat) => chat.id === "chat-1")?.archived).toBe(true);
+    expect(state.threads["chat-1"]).toEqual(originalThread);
   });
 
   it("continues generated ids after persisted workspace ids", async () => {
@@ -883,6 +909,73 @@ describe("useWorkspace", () => {
     await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("done"));
   });
 
+  it("keeps queued messages paused after stop until the user sends one now", async () => {
+    state = {
+      ...state,
+      chats: state.chats.map((chat) =>
+        chat.id === "chat-2"
+          ? { ...chat, activeRunId: undefined, status: "idle", agent: "codex", profile: { agent: "codex", model: "default", reasoning: "default", mode: "default" } }
+          : chat,
+      ),
+    };
+    const encoder = new TextEncoder();
+    vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/workspace" && (!init || init.method === "GET")) {
+        return Response.json(state);
+      }
+      if (url === "/api/workspace" && init?.method === "PUT") {
+        state = JSON.parse(String(init.body)) as WorkspaceState;
+        return Response.json(state);
+      }
+      if (url === "/api/runs") {
+        return Response.json(activeRunsPayloadFromState(state));
+      }
+      if (url === "/api/run") {
+        const request = JSON.parse(String(init?.body ?? "{}")) as RunRequestRecord;
+        runRequests.push(request);
+        const sessionId = `${request.agent ?? "agent"}-session-${runRequests.length}`;
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(encoder.encode(`${JSON.stringify({ type: "session", id: sessionId })}\n`));
+            controller.enqueue(encoder.encode(`${JSON.stringify({ type: "text", text: "ok" })}\n`));
+          },
+        });
+        return new Response(stream, { headers: { "Content-Type": "application/x-ndjson" } });
+      }
+      if (url === "/api/run-cancel") {
+        runCancelRequests.push(JSON.parse(String(init?.body ?? "{}")) as { runId?: string });
+        return Response.json({ canceled: true });
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    render(<Probe />);
+
+    await screen.findByText("chat-2");
+    screen.getByRole("button", { name: "send" }).click();
+    await waitFor(() => expect(runRequests).toHaveLength(1));
+
+    screen.getByRole("button", { name: "send" }).click();
+    await waitFor(() => expect(screen.getByTestId("queued")).toHaveTextContent("1"));
+    expect(runRequests).toHaveLength(1);
+
+    screen.getByRole("button", { name: "stop" }).click();
+    await waitFor(() => expect(runCancelRequests).toHaveLength(1));
+    expect(screen.getByTestId("queued")).toHaveTextContent("1");
+    expect(runRequests).toHaveLength(1);
+
+    screen.getByRole("button", { name: "send-queued-now" }).click();
+    await waitFor(() => expect(runRequests).toHaveLength(2));
+    expect(screen.getByTestId("queued")).toHaveTextContent("0");
+    expect(runRequests[1]).toMatchObject({
+      agent: "codex",
+      prompt: "Persist this message",
+      resume: "codex-session-1",
+    });
+    expect((state.threads["chat-2"] ?? []).filter((message) => message.role === "user" && message.text === "Persist this message")).toHaveLength(2);
+  });
+
   it("sends the configured filesystem access mode to the run API", async () => {
     state = {
       ...state,
@@ -1421,6 +1514,7 @@ describe("useWorkspace", () => {
     render(<Probe />);
 
     await screen.findByText("chat-2");
+    const sourceMessageIds = new Set(state.threads["chat-2"].map((message) => message.id));
     screen.getByRole("button", { name: "fork-a1" }).click();
 
     await waitFor(() => {
@@ -1439,6 +1533,8 @@ describe("useWorkspace", () => {
     expect(fork?.sessionId).toBeUndefined();
     expect(fork?.sessionAgent).toBeUndefined();
     expect(state.threads[state.selectedId]).toHaveLength(2);
+    const forkedMessageIds = state.threads[state.selectedId].map((message) => message.id);
+    expect(forkedMessageIds.some((messageId) => sourceMessageIds.has(messageId))).toBe(false);
     const forkedAgentMessage = state.threads[state.selectedId][1];
     expect(forkedAgentMessage?.role).toBe("agent");
     const streamingText = forkedAgentMessage?.blocks?.find((block) => block.kind === "text" && block.text.includes("Открыть PR"));

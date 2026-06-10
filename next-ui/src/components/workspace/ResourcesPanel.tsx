@@ -9,6 +9,7 @@ import { useI18n } from "../../i18n/I18nProvider";
 import type { TranslationKey } from "../../i18n/I18nProvider";
 import { type ConversationResource, type ResourceKind, collectResources } from "../../lib/conversation-resources";
 import { localFileUrl } from "../../lib/external-url";
+import { normalizeClockLabel } from "../../lib/time-format";
 import type { ChatMessage } from "../agent";
 import { EmptyState } from "../ui";
 import { ImageLightbox } from "./ImageLightbox";
@@ -78,7 +79,7 @@ function ResourceCard({ resource, onClick }: { readonly resource: ConversationRe
         </Typography>
         {resource.time && (
           <Typography sx={{ flex: "0 0 auto", alignSelf: "flex-start", fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.62rem", color: "text.tertiary" }}>
-            {resource.time}
+            {normalizeClockLabel(resource.time)}
           </Typography>
         )}
       </Stack>
@@ -96,7 +97,7 @@ function ResourceCard({ resource, onClick }: { readonly resource: ConversationRe
 function ResourceGroup({ title, count, children }: { readonly title: string; readonly count: number; readonly children: ReactNode }) {
   const [open, setOpen] = useState(true);
   return (
-    <Box sx={{ borderRadius: (theme) => `${theme.custom.radii.md}px`, border: (theme) => `1px solid ${theme.custom.borders.subtle}`, backgroundColor: (theme) => theme.custom.surfaces.s1, overflow: "hidden" }}>
+    <Box sx={{ borderRadius: (theme) => `${theme.custom.radii.md}px`, backgroundColor: (theme) => theme.custom.surfaces.s1, overflow: "hidden" }}>
       <ButtonBase
         onClick={() => setOpen((value) => !value)}
         aria-expanded={open}

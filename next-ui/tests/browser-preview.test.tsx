@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { BrowserPreview } from "../src/components/workspace/BrowserPreview";
 import { renderWithTheme } from "./util/render-with-theme";
@@ -301,6 +301,35 @@ describe("BrowserPreview", () => {
     expect(screen.getByTestId("browser-preview-action-marker")).toBeInTheDocument();
   });
 
+  it("keeps the agent bridge stream live while the preview tab is hidden", async () => {
+    MockEventSource.instances = [];
+    vi.stubGlobal("EventSource", MockEventSource);
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json(browserSnapshot())));
+    const onActivityEventsChange = vi.fn();
+
+    renderWithTheme(<BrowserPreview sessionId="test-session" active={false} bridgeActive onActivityEventsChange={onActivityEventsChange} />);
+
+    await waitFor(() => expect(MockEventSource.instances).toHaveLength(1));
+    expect(String(MockEventSource.instances[0]?.url)).toBe("/api/browser/events?sessionId=test-session");
+
+    act(() => {
+      MockEventSource.instances[0]?.emitBrowser({
+        id: 31,
+        sessionId: "test-session",
+        tabId: "tab-1",
+        type: "navigation.done",
+        label: "Navigation finished",
+        url: "http://localhost:3000/agent-live",
+        title: "Agent live page",
+        at: "2026-06-07T09:00:09.000Z",
+      });
+    });
+
+    await waitFor(() => expect(onActivityEventsChange).toHaveBeenCalledWith([expect.objectContaining({ type: "navigation.done", url: "http://localhost:3000/agent-live" })]));
+    await waitFor(() => expect(screen.getByTitle("Живой просмотр страницы")).toHaveAttribute("src", "http://localhost:3000/agent-live"));
+    expect(screen.getByLabelText("URL для просмотра")).toHaveValue("http://localhost:3000/agent-live");
+  });
+
   it("shows dirty mirror freshness from the backend instead of claiming full sync", async () => {
     vi.stubGlobal(
       "fetch",
@@ -315,7 +344,7 @@ describe("BrowserPreview", () => {
     expect(screen.getByText("Страница изменена пользователем")).toBeInTheDocument();
   });
 
-  it("marks the mirror dirty when the user edits same-origin iframe content", async () => {
+  it("reports same-origin iframe edits to the mirror dirty endpoint", async () => {
     const fetchMock = vi.fn(async (url: string | URL | Request) => {
       const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
       if (path === "/api/browser/dirty") {
@@ -345,7 +374,35 @@ describe("BrowserPreview", () => {
     fireEvent.input(input);
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/browser/dirty", expect.objectContaining({ method: "POST" })));
-    await waitFor(() => expect(screen.getByLabelText("Playwright: страница изменена пользователем")).toBeInTheDocument());
+  });
+
+  it("does not mark a synced external iframe stale just because its DOM is cross-origin", async () => {
+    const fetchMock = vi.fn(async (url: string | URL | Request) => {
+      const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+      if (path === "/api/browser/dirty") {
+        throw new Error("external iframe load should not mark the mirror dirty");
+      }
+      return Response.json(browserSnapshot({ url: "https://example.com/", title: "Example Domain", freshness: "synced" }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderWithTheme(<BrowserPreview sessionId="test-session" active />);
+
+    expect(await screen.findByLabelText("Playwright: синхронизировано")).toBeInTheDocument();
+    const frame = screen.getByTitle("Живой просмотр страницы") as HTMLIFrameElement;
+    Object.defineProperty(frame, "contentWindow", {
+      configurable: true,
+      value: {
+        get location() {
+          throw new Error("cross-origin iframe");
+        },
+      },
+    });
+
+    fireEvent.load(frame);
+
+    await waitFor(() => expect(screen.getByLabelText("Playwright: синхронизировано")).toBeInTheDocument());
+    expect(fetchMock.mock.calls.some((call) => String(call[0]).includes("/api/browser/dirty"))).toBe(false);
   });
 
   it("hydrates existing agent browser state when the preview tab opens", async () => {
@@ -720,10 +777,18 @@ describe("BrowserPreview", () => {
 
     await waitFor(() => expect(onSendAnnotation).toHaveBeenCalledTimes(1));
     expect(onSendAnnotation.mock.calls[0][0]).toContain("Browser component annotation");
+    expect(onSendAnnotation.mock.calls[0][0]).toContain("Source: rlab Preview plugin / Component picker");
+    expect(onSendAnnotation.mock.calls[0][0]).toContain("agent-note: This metadata and optional screenshot were captured by rlab's Preview tab component picker");
     expect(onSendAnnotation.mock.calls[0][0]).toContain("component: button#save.primary.wide");
     expect(onSendAnnotation.mock.calls[0][0]).toContain('selector: [data-testid="save-button"]');
+    expect(onSendAnnotation.mock.calls[0][0]).toContain("tag: button");
+    expect(onSendAnnotation.mock.calls[0][0]).toContain("test-id: save-button");
+    expect(onSendAnnotation.mock.calls[0][0]).toContain("classes: primary wide");
     expect(onSendAnnotation.mock.calls[0][0]).toContain("text: Save changes");
     expect(onSendAnnotation.mock.calls[0][0]).toContain("rect: x=120 y=100 width=240 height=48");
+    expect(onSendAnnotation.mock.calls[0][0]).toContain("viewport: width=800 height=600");
+    expect(onSendAnnotation.mock.calls[0][0]).toContain("componentScreenshotStatus:");
+    expect(onSendAnnotation.mock.calls[0][0]).toContain("componentScreenshotDataUrl:");
     expect(onSendAnnotation.mock.calls[0][0]).toContain("Проверь кнопку");
   });
 });

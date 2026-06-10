@@ -148,6 +148,8 @@ export interface ChatMessage {
   readonly id: string;
   readonly role: "user" | "agent";
   readonly time?: string;
+  /** Epoch ms when this assistant turn actually started. Used for live timers. */
+  readonly startedAtMs?: number;
   /** Agent profile used for this specific assistant turn. */
   readonly profile?: AgentProfile;
   /** User messages carry plain text; agent messages carry rich blocks. */
@@ -228,6 +230,9 @@ export interface ConversationSummary {
   /** Pinned conversations surface in a dedicated top group and are hidden from
    *  their original project/chats list. */
   readonly pinned?: boolean;
+  /** Archived conversations stay persisted and searchable, but are hidden from
+   *  the normal sidebar groups. */
+  readonly archived?: boolean;
   readonly costUsd?: number;
   readonly usage?: RunUsage;
   /** Native agent sessions keyed by agent. Switching agents forks the native

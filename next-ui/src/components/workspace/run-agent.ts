@@ -192,6 +192,7 @@ export interface ActiveRunUpdate {
   readonly conversationId: string;
   readonly userMessageId: string;
   readonly agentMessageId: string;
+  readonly startedAtMs?: number;
   readonly status: ConversationStatus;
   readonly snippet: string;
   readonly time: string;
@@ -255,6 +256,7 @@ function isActiveRunUpdate(value: unknown): value is ActiveRunUpdate {
     typeof value.conversationId === "string" &&
     typeof value.userMessageId === "string" &&
     typeof value.agentMessageId === "string" &&
+    (value.startedAtMs === undefined || typeof value.startedAtMs === "number") &&
     isConversationStatus(value.status) &&
     typeof value.snippet === "string" &&
     typeof value.time === "string" &&

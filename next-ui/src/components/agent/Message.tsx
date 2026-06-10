@@ -11,6 +11,7 @@ import { Box, ButtonBase, Collapse, Stack, Typography } from "@mui/material";
 import { type ChangeEvent, type KeyboardEvent, useEffect, useId, useRef, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import { localFileUrl } from "../../lib/external-url";
+import { normalizeClockLabel } from "../../lib/time-format";
 import { ImageLightbox } from "../workspace/ImageLightbox";
 import { Button, IconButton, Tooltip } from "../ui";
 import { AgentBlockRenderer } from "./AgentBlockRenderer";
@@ -71,6 +72,51 @@ function MessageAttachments({ attachments, onOpenImage }: { readonly attachments
           }
         />
       ))}
+    </Stack>
+  );
+}
+
+const READ_ONLY_IMAGE_TOOL_NAMES = new Set(["read", "readfile", "read_file", "viewimage", "view_image", "image", "openimage", "open_image"]);
+
+function toolLeafName(name: string): string {
+  return name.split("/").at(-1)?.replace(/[-\s]/g, "_").toLowerCase() ?? name.toLowerCase();
+}
+
+function basename(path: string): string {
+  const normalized = path.replace(/\\/g, "/");
+  const leaf = normalized.split("/").filter(Boolean).at(-1);
+  return leaf && leaf.trim().length > 0 ? leaf : path;
+}
+
+function readOnlyImageToolPath(block: AgentBlock): string | null {
+  if (block.kind !== "tool" || block.state === "error") {
+    return null;
+  }
+  const leaf = toolLeafName(block.name);
+  if (!READ_ONLY_IMAGE_TOOL_NAMES.has(leaf) && !READ_ONLY_IMAGE_TOOL_NAMES.has(leaf.replace(/_/g, ""))) {
+    return null;
+  }
+  const args = block.args ?? {};
+  const candidates = [
+    args.path,
+    args.file,
+    args.file_path,
+    args.filePath,
+    args.image,
+    args.image_path,
+    args.imagePath,
+    args.source,
+    args.input,
+    block.summary,
+  ].filter((value): value is string => typeof value === "string" && value.trim().length > 0);
+  return candidates.find((value) => MESSAGE_IMAGE_RE.test(value.trim()))?.trim() ?? null;
+}
+
+function AgentImagePreview({ path, onOpen }: { readonly path: string; readonly onOpen: (attachment: MessageAttachment) => void }) {
+  const attachment = { name: basename(path), target: path, isImage: true };
+  return (
+    <Stack direction="row" sx={{ flexWrap: "wrap", gap: 0.75 }}>
+      <AttachmentTile name={attachment.name} mime="image/*" previewSrc={localFileUrl(path)} onOpen={() => onOpen(attachment)} />
     </Stack>
   );
 }
@@ -231,7 +277,7 @@ function UserMessage({ message, delay, actions }: { readonly message: ChatMessag
         )}
         {message.time && (
           <Typography sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.66rem", color: "text.secondary" }}>
-            {message.time}
+            {normalizeClockLabel(message.time)}
           </Typography>
         )}
         {!editing && (
@@ -266,7 +312,6 @@ function UserMessage({ message, delay, actions }: { readonly message: ChatMessag
 const ANSWER_BLOCK_KINDS: ReadonlySet<AgentBlock["kind"]> = new Set(["text", "options", "approval", "suggested"]);
 const DIFF_KIND: AgentBlock["kind"] = "diff";
 const COMPLETED_PLAN_HIDE_DELAY_MS = 3000;
-const AGENT_DETAILS_STICKY_HEADER_TOP = "42px";
 
 /** Whether the agent turn is still producing output (so diffs aren't surfaced
  *  until the turn settles). */
@@ -312,6 +357,15 @@ function resolvedInputSignature(blocks: readonly AgentBlock[]): string {
     .join("\n");
 }
 
+function formatElapsedSeconds(totalSec: number, t: ReturnType<typeof useI18n>["t"]): string {
+  const safe = Math.max(0, totalSec);
+  const m = Math.floor(safe / 60);
+  const s = safe % 60;
+  return m > 0 ? `${m}${t("unitMinShort")} ${s}${t("unitSecShort")}` : `${s}${t("unitSecShort")}`;
+}
+
+const durationLabelSx = { fontFamily: (th: { custom: { fonts: { mono: string } } }) => th.custom.fonts.mono, fontSize: "0.68rem", color: "text.secondary", flex: "0 0 auto", whiteSpace: "nowrap" } as const;
+
 function isResolvedInputBlock(block: AgentBlock): boolean {
   if (block.kind === "approval") {
     return block.decision != null;
@@ -351,6 +405,7 @@ function AgentDetails({
   live = false,
   showSpinner = false,
   hasResultAfter = false,
+  startedAtMs,
 }: {
   readonly blocks: readonly AgentBlock[];
   readonly actions?: MessageActionHandlers;
@@ -358,6 +413,7 @@ function AgentDetails({
   readonly live?: boolean;
   readonly showSpinner?: boolean;
   readonly hasResultAfter?: boolean;
+  readonly startedAtMs?: number;
 }) {
   // `autoExpand` only seeds the initial open state — expanded while the turn is
   // live (the agent is still working). We key off the live turn, not a reasoning
@@ -374,20 +430,14 @@ function AgentDetails({
   // elapsed time, surviving page reloads, instead of counting from mount. It's
   // carried by the ACTIVE (last) reasoning block, not necessarily the first, so
   // scan all reasoning blocks for it.
-  const startedAtMs = blocks.reduce<number | undefined>((found, block) => found ?? (block.kind === "reasoning" ? block.startedAtMs : undefined), undefined);
+  const blockStartedAtMs = blocks.reduce<number | undefined>((found, block) => found ?? (block.kind === "reasoning" ? block.startedAtMs : undefined), undefined);
   // Parse the persisted "17s" duration string into seconds for a tidy m/s label.
   const doneSeconds = reasoningDuration ? Number.parseInt(reasoningDuration, 10) : Number.NaN;
   // Re-render once per second so the live elapsed label ticks.
   const [, forceTick] = useState(0);
-  const liveStartRef = useRef<number | null>(null);
   useEffect(() => {
     if (!showSpinner) {
-      liveStartRef.current = null;
       return;
-    }
-    // Fall back to a mount-relative clock only if the block carries no real start.
-    if (liveStartRef.current === null) {
-      liveStartRef.current = Date.now();
     }
     const id = setInterval(() => forceTick((n) => n + 1), 1000);
     return () => clearInterval(id);
@@ -398,19 +448,12 @@ function AgentDetails({
     }
     previousLive.current = live;
   }, [hasResultAfter, live]);
-  const fmtDuration = (totalSec: number): string => {
-    const safe = Math.max(0, totalSec);
-    const m = Math.floor(safe / 60);
-    const s = safe % 60;
-    return m > 0 ? `${m}${t("unitMinShort")} ${s}${t("unitSecShort")}` : `${s}${t("unitSecShort")}`;
-  };
-  const liveAnchor = startedAtMs ?? liveStartRef.current;
-  const liveSeconds = showSpinner && liveAnchor !== null && liveAnchor !== undefined ? Math.round((Date.now() - liveAnchor) / 1000) : 0;
+  const liveAnchor = startedAtMs ?? blockStartedAtMs;
+  const liveSeconds = showSpinner && liveAnchor !== undefined ? Math.round((Date.now() - liveAnchor) / 1000) : null;
   // Only expandable when there is real content — an empty reasoning block (e.g.
   // a still-streaming turn) shows the header but can't be opened to nothing.
   const expandable = blocks.some((block) => (block.kind === "reasoning" ? block.text.trim().length > 0 : true));
   const isOpen = expandable && open;
-  const durationLabelSx = { fontFamily: (th: { custom: { fonts: { mono: string } } }) => th.custom.fonts.mono, fontSize: "0.68rem", color: "text.secondary", flex: "0 0 auto", whiteSpace: "nowrap" } as const;
   const headerContent = (
     <>
       <PsychologyIcon sx={{ fontSize: 16, color: "text.secondary", flex: "0 0 auto" }} />
@@ -421,10 +464,10 @@ function AgentDetails({
       {showSpinner ? (
         <Stack direction="row" spacing={0.75} sx={{ alignItems: "center", flex: "0 0 auto" }}>
           <TypingDots />
-          <Typography component="span" sx={durationLabelSx}>{fmtDuration(liveSeconds)}</Typography>
+          {liveSeconds !== null && <Typography component="span" sx={durationLabelSx}>{formatElapsedSeconds(liveSeconds, t)}</Typography>}
         </Stack>
       ) : Number.isFinite(doneSeconds) ? (
-        <Typography component="span" sx={durationLabelSx}>{t("reasoningWorked", { duration: fmtDuration(doneSeconds) })}</Typography>
+        <Typography component="span" sx={durationLabelSx}>{t("reasoningWorked", { duration: formatElapsedSeconds(doneSeconds, t) })}</Typography>
       ) : null}
       {expandable && <KeyboardArrowDownIcon sx={{ fontSize: 18, color: "text.secondary", transition: "transform 180ms ease", transform: isOpen ? "rotate(180deg)" : "none" }} />}
     </>
@@ -459,10 +502,11 @@ function AgentDetails({
       )}
       <Collapse in={isOpen} unmountOnExit>
         <Stack
+          data-testid="agent-details-body"
           id={detailsId}
           spacing={0.75}
           sx={{
-            "--agent-sticky-top": AGENT_DETAILS_STICKY_HEADER_TOP,
+            "--agent-sticky-top": "0px",
             "--agent-sticky-z-index": 2,
             px: 1.5,
             py: 1.5,
@@ -506,7 +550,7 @@ function AgentDetails({
           {showSpinner && (
             <Stack direction="row" spacing={0.75} sx={{ alignItems: "center" }}>
               <TypingDots />
-              <Typography component="span" sx={durationLabelSx}>{fmtDuration(liveSeconds)}</Typography>
+              {liveSeconds !== null && <Typography component="span" sx={durationLabelSx}>{formatElapsedSeconds(liveSeconds, t)}</Typography>}
             </Stack>
           )}
         </Stack>
@@ -533,6 +577,8 @@ function AgentMessage({
   const { t } = useI18n();
   const blocks = message.blocks ?? [];
   const live = isMessageLive(blocks);
+  const emptyLive = blocks.length === 0 && message.startedAtMs !== undefined;
+  const [, forceMessageTick] = useState(0);
   const diffBlocks = blocks.filter((block): block is DiffBlock => block.kind === DIFF_KIND);
   // The live plan is pinned under the message; completed plans archive into
   // details after a short grace period so the thread does not keep duplicating
@@ -553,6 +599,7 @@ function AgentMessage({
   const visiblePlanBlocks = planBlocks.filter((block) => !hideCompletedPlans || !isCompletedPlanBlock(block));
   const archivedPlanBlocks = hideCompletedPlans ? planBlocks.filter(isCompletedPlanBlock) : [];
   const [hideResolvedInputs, setHideResolvedInputs] = useState(false);
+  const [previewImage, setPreviewImage] = useState<MessageAttachment | null>(null);
   const resolvedInputsSignature = resolvedInputSignature(blocks);
   const hasResolvedInput = resolvedInputsSignature.length > 0;
   useEffect(() => {
@@ -570,7 +617,9 @@ function AgentMessage({
   // (visible) unless explicitly marked as narration (result === false).
   const isResultText = (block: AgentBlock): boolean => block.kind === "text" && block.result !== false && !live;
   const isAnswerBlock = (block: AgentBlock): boolean =>
-    isResultText(block) || (ANSWER_BLOCK_KINDS.has(block.kind) && block.kind !== "text" && (!isResolvedInputBlock(block) || !hideResolvedInputs));
+    readOnlyImageToolPath(block) != null ||
+    isResultText(block) ||
+    (ANSWER_BLOCK_KINDS.has(block.kind) && block.kind !== "text" && (!isResolvedInputBlock(block) || !hideResolvedInputs));
   const detailBlocks = [
     ...blocks.filter((block) => !isAnswerBlock(block) && block.kind !== DIFF_KIND && block.kind !== "plan"),
     ...archivedPlanBlocks,
@@ -581,33 +630,47 @@ function AgentMessage({
   // the reasoning header dots would otherwise hang awkwardly in the middle.
   const answerStreaming = answerBlocks.some((block) => block.kind === "text" && block.streaming === true);
   const showDetailSpinner = live && !answerStreaming;
+  const liveSeconds = (live || emptyLive) && message.startedAtMs !== undefined ? Math.round((Date.now() - message.startedAtMs) / 1000) : null;
   const profileLabel = agentMessageProfileLabel(message.profile ?? agentProfile);
+  useEffect(() => {
+    if (!emptyLive) {
+      return;
+    }
+    const id = setInterval(() => forceMessageTick((n) => n + 1), 1000);
+    return () => clearInterval(id);
+  }, [emptyLive]);
   return (
-    <Stack direction="row" spacing={1.25} sx={{ alignItems: "flex-start", ...rise(delay), ...revealActionsOnHover }}>
-      <AgentAvatar />
-      <Box sx={{ flex: 1, minWidth: 0 }}>
-        <Stack direction="row" spacing={1} sx={{ alignItems: "baseline", mb: 1 }}>
-          <Typography sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.8rem", fontWeight: 700, color: "text.primary" }}>
-            {t("agent")}
-          </Typography>
-          {profileLabel && (
-            <Typography noWrap sx={{ minWidth: 0, maxWidth: 260, fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.7rem", fontWeight: 700, color: "text.secondary" }}>
-              {profileLabel}
+    <>
+      <Stack direction="row" spacing={1.25} sx={{ alignItems: "flex-start", ...rise(delay), ...revealActionsOnHover }}>
+        <AgentAvatar />
+        <Box sx={{ flex: 1, minWidth: 0 }}>
+          <Stack direction="row" spacing={1} sx={{ alignItems: "baseline", mb: 1 }}>
+            <Typography sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.8rem", fontWeight: 700, color: "text.primary" }}>
+              {t("agent")}
             </Typography>
-          )}
-          {message.time && (
-            <Typography sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.66rem", color: "text.secondary" }}>
-              {message.time}
-            </Typography>
-          )}
-        </Stack>
-        <Stack spacing={1.25}>
+            {profileLabel && (
+              <Typography noWrap sx={{ minWidth: 0, maxWidth: 260, fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.7rem", fontWeight: 700, color: "text.secondary" }}>
+                {profileLabel}
+              </Typography>
+            )}
+            {message.time && (
+              <Typography sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.66rem", color: "text.secondary" }}>
+                {normalizeClockLabel(message.time)}
+              </Typography>
+            )}
+          </Stack>
+          <Stack spacing={1.25}>
           {/* The turn starts as an empty agent message; show the thinking dots in
               place until the first block streams in (no separate typing bubble). */}
-          {blocks.length === 0 && <TypingDots />}
+          {blocks.length === 0 && (
+            <Stack direction="row" spacing={0.75} sx={{ alignItems: "center" }}>
+              <TypingDots />
+              {liveSeconds !== null && <Typography component="span" sx={durationLabelSx}>{formatElapsedSeconds(liveSeconds, t)}</Typography>}
+            </Stack>
+          )}
           {detailBlocks.length > 0 && (
             <Box sx={rise(delay + 40)}>
-              <AgentDetails blocks={detailBlocks} actions={actions} autoExpand={displayPrefs.reasoningAutoExpand ?? false} live={live} showSpinner={showDetailSpinner} hasResultAfter={answerBlocks.length > 0} />
+              <AgentDetails blocks={detailBlocks} actions={actions} autoExpand={displayPrefs.reasoningAutoExpand ?? false} live={live} showSpinner={showDetailSpinner} hasResultAfter={answerBlocks.length > 0} startedAtMs={message.startedAtMs} />
             </Box>
           )}
           {/* Plan stays pinned and visible under the message, even mid-run. */}
@@ -616,29 +679,38 @@ function AgentMessage({
               <AgentBlockRenderer block={block} />
             </Box>
           ))}
-          {answerBlocks.map((block, index) => (
-            <Box key={index} sx={rise(delay + 80 + Math.min(index, 3) * 40)}>
-              <AgentBlockRenderer
-                block={block}
-                actions={actions ? { onApprovalDecision: actions.onApprovalDecision, onOptionSelection: actions.onOptionSelection } : undefined}
-              />
-            </Box>
-          ))}
-        </Stack>
-        {/* File changes from the turn: shown under the reply once the agent is
-            done (not folded into the reasoning container), above the copy action. */}
-        {!live && diffBlocks.length > 0 && (
-          <Stack spacing={1} sx={{ mt: 1.25 }}>
-            {diffBlocks.map((block, index) => (
-              <Box key={`diff-${index}`} sx={rise(delay + 100 + Math.min(index, 3) * 40)}>
-                <DiffCard block={block} />
-              </Box>
-            ))}
+            {answerBlocks.map((block, index) => {
+              const imagePath = readOnlyImageToolPath(block);
+              return (
+                <Box key={index} sx={rise(delay + 80 + Math.min(index, 3) * 40)}>
+                  {imagePath ? (
+                    <AgentImagePreview path={imagePath} onOpen={setPreviewImage} />
+                  ) : (
+                    <AgentBlockRenderer
+                      block={block}
+                      actions={actions ? { onApprovalDecision: actions.onApprovalDecision, onOptionSelection: actions.onOptionSelection } : undefined}
+                    />
+                  )}
+                </Box>
+              );
+            })}
           </Stack>
-        )}
-        <MessageActionBar message={message} actions={actions ? { onCopy: actions.onCopy, onRetry: actions.onRetry, onFork: actions.onFork } : undefined} />
-      </Box>
-    </Stack>
+          {/* File changes from the turn: shown under the reply once the agent is
+              done (not folded into the reasoning container), above the copy action. */}
+          {!live && diffBlocks.length > 0 && (
+            <Stack spacing={1} sx={{ mt: 1.25 }}>
+              {diffBlocks.map((block, index) => (
+                <Box key={`diff-${index}`} sx={rise(delay + 100 + Math.min(index, 3) * 40)}>
+                  <DiffCard block={block} />
+                </Box>
+              ))}
+            </Stack>
+          )}
+          <MessageActionBar message={message} actions={actions ? { onCopy: actions.onCopy, onRetry: actions.onRetry, onFork: actions.onFork } : undefined} />
+        </Box>
+      </Stack>
+      <ImageLightbox src={previewImage?.target ?? null} label={previewImage?.name} onClose={() => setPreviewImage(null)} />
+    </>
   );
 }
 

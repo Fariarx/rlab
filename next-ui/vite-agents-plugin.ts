@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { appendFileSync, chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
-import { request as httpRequest, type IncomingMessage, type ServerResponse } from "node:http";
+import { request as httpRequest, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
 import { homedir, tmpdir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import process from "node:process";
@@ -11,6 +11,8 @@ import { chromium, type Browser, type BrowserContext, type ConsoleMessage, type 
 import type { Plugin, ViteDevServer, PreviewServer } from "vite";
 import { parseGitStatusPorcelain, parseNumstatTotals } from "./src/lib/git-status";
 import { normalizeAgentToolOutput, truncateAgentToolOutput } from "./src/lib/agent-output";
+import { formatClock24, formatDateTime24 } from "./src/lib/time-format";
+import { attachPtyTerminalWebSockets, PtyTerminalManager } from "./src/server/pty-terminal";
 import {
   cloneAppSettings,
   defaultAppSettings,
@@ -89,6 +91,8 @@ const AGENT_CONFIG_FILE = join(WORKSPACE_STATE_DIR, "agent-config.json");
 const BACKGROUND_RUN_PERSIST_INTERVAL_MS = 1000;
 const STREAM_HEARTBEAT_INTERVAL_MS = 10_000;
 const DEFAULT_BROWSER_BRIDGE_ORIGIN = "http://127.0.0.1:4280";
+const terminalManager = new PtyTerminalManager();
+const terminalWebSocketServers = new WeakSet<object>();
 
 interface Detect {
   readonly bins: readonly string[];
@@ -114,7 +118,7 @@ interface AgentCliInfo {
 
 // Keys must match AgentId in src/components/agent/agents.ts.
 const DETECT: Record<string, Detect> = {
-  "claude-code": { bins: ["claude"] },
+  "claude-code": { bins: ["claude"], env: ["ANTHROPIC_API_KEY"], hasAuth: hasClaudeStoredAuth },
   codex: { bins: ["codex"], env: ["OPENAI_API_KEY", "CODEX_API_KEY"], hasAuth: hasCodexStoredAuth },
   gemini: { bins: ["gemini"], env: ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENAI_API_KEY"], hasAuth: hasGeminiStoredAuth },
   opencode: { bins: ["opencode"] },
@@ -183,6 +187,32 @@ export function writeAgentSecretConfig(config: AgentSecretConfig, file = AGENT_C
 
 function configuredEnvValueFrom(envName: string, config: AgentSecretConfig, env: NodeJS.ProcessEnv): string | undefined {
   return env[envName] ?? config.env[envName];
+}
+
+function claudeHome(): string {
+  return process.env.CLAUDE_HOME ?? join(homedir(), ".claude");
+}
+
+function hasClaudeStoredAuth(): boolean {
+  const credentialsFile = join(claudeHome(), ".credentials.json");
+  if (!existsSync(credentialsFile)) {
+    return false;
+  }
+  try {
+    const parsed = JSON.parse(readFileSync(credentialsFile, "utf8").replace(/^\uFEFF/, "")) as unknown;
+    if (!isRecord(parsed) || !isRecord(parsed.claudeAiOauth)) {
+      return false;
+    }
+    const oauth = parsed.claudeAiOauth;
+    return (
+      typeof oauth.accessToken === "string" &&
+      oauth.accessToken.trim().length > 0 &&
+      typeof oauth.refreshToken === "string" &&
+      oauth.refreshToken.trim().length > 0
+    );
+  } catch {
+    return false;
+  }
 }
 
 function codexHome(): string {
@@ -3394,15 +3424,15 @@ async function applyBrowserBridgeAction(action: BrowserActionPayload): Promise<{
   }
   const page = browserPreviewPageFor(session, action.tabId);
   const tabId = session.pageIds.get(page) ?? session.activeTabId;
-  if (session.freshness === "dirty") {
+  if (session.freshness === "dirty" || session.freshness === "blocked") {
     if (!session.dirtyUrl) {
-      return staleBrowserPreviewActionResult(session, action, tabId, "Preview mirror is stale; manual sync required.");
+      return staleBrowserPreviewActionResult(session, action, tabId, "Preview mirror is stale and has no Preview URL to synchronize.");
     }
     markBrowserPreviewFreshness(session, "syncing", session.freshnessReason, session.dirtyUrl);
     await navigateBrowserPreview(session, page, session.dirtyUrl);
     markBrowserPreviewSynced(session);
-  } else if (session.freshness === "blocked" || session.freshness === "error") {
-    return staleBrowserPreviewActionResult(session, action, tabId, "Preview mirror is stale; manual sync required.");
+  } else if (session.freshness === "error") {
+    return staleBrowserPreviewActionResult(session, action, tabId, "Preview mirror is in an error state; refresh the snapshot before continuing.");
   } else if (session.freshness === "syncing") {
     return staleBrowserPreviewActionResult(session, action, tabId, "Preview mirror is syncing; retry after sync finishes.");
   }
@@ -3465,11 +3495,7 @@ function handleBrowserBridgeSnapshot(req: IncomingMessage, res: ServerResponse):
   void (async () => {
     try {
       const query = browserPreviewQuery(req);
-      const session = currentBrowserPreviewSession(query.sessionId);
-      if (!session) {
-        sendJson(res, 404, { error: "No browser preview session is active." });
-        return;
-      }
+      const session = await ensureBrowserPreviewSession(query.sessionId);
       sendJson(res, 200, await browserPreviewState(session, query.tabId));
     } catch (error) {
       sendJson(res, browserPreviewErrorStatus(error), { error: errorMessage(error) });
@@ -3723,8 +3749,16 @@ function handleVersion(_req: IncomingMessage, res: ServerResponse): void {
  *  agent id). Empty until an agent reports one during a run. */
 function handleAgentLimits(_req: IncomingMessage, res: ServerResponse): void {
   const limits: Record<string, AgentRateLimit> = {};
+  let pruned = false;
   for (const [agent, acc] of latestAgentLimits.entries()) {
-    limits[agent] = serializeAgentLimit(acc);
+    pruned = pruneExpiredLimitWindows(acc) || pruned;
+    const snapshot = serializeAgentLimit(acc);
+    if (snapshot.windows.length > 0 || snapshot.plan) {
+      limits[agent] = snapshot;
+    }
+  }
+  if (pruned) {
+    persistAgentLimits();
   }
   sendJson(res, 200, { limits });
 }
@@ -3930,6 +3964,8 @@ const gitBadRequestMessages = new Set([
   "Project directory is required.",
   "Git file path is required.",
   "Git file path contains an invalid null byte.",
+  "Git branch is required.",
+  "Git branch contains an invalid null byte.",
   "Commit message is required.",
 ]);
 
@@ -3975,6 +4011,22 @@ export function parseGitCommitPayload(body: string): { readonly cwd: string; rea
     throw new Error("Commit message is required.");
   }
   return { cwd, message };
+}
+
+export function parseGitCheckoutPayload(body: string): { readonly cwd: string; readonly branch: string } {
+  const parsed = parseJsonObjectPayload(body, "Invalid git request payload.");
+  const cwd = typeof parsed.cwd === "string" ? parsed.cwd.trim() : "";
+  const branch = typeof parsed.branch === "string" ? parsed.branch.trim() : "";
+  if (!cwd) {
+    throw new Error("Project directory is required.");
+  }
+  if (!branch) {
+    throw new Error("Git branch is required.");
+  }
+  if (branch.includes("\0")) {
+    throw new Error("Git branch contains an invalid null byte.");
+  }
+  return { cwd, branch };
 }
 
 export function buildGitCommitArgs(message: string): string[] {
@@ -4046,7 +4098,18 @@ function respondWithGitStatus(cwd: string, res: ServerResponse): void {
         const lines = logResult.ok ? logResult.stdout.split("\n") : [];
         const commitHash = lines[0]?.trim() || undefined;
         const commitTitle = lines.slice(1).join("\n").trim() || undefined;
-        sendJson(res, 200, { ...payload, unstagedAdditions: totals.additions, unstagedDeletions: totals.deletions, commitHash, commitTitle });
+        runGit(cwd, ["branch", "--format=%(refname:short)"], (branchResult) => {
+          if (!branchResult.ok) {
+            sendJson(res, 500, { error: branchResult.error });
+            return;
+          }
+          const branches = branchResult.stdout
+            .split(/\r?\n/)
+            .map((branch) => branch.trim())
+            .filter((branch) => branch.length > 0);
+          const uniqueBranches = Array.from(new Set(branches.includes(payload.branch) || payload.branch === "HEAD" ? branches : [payload.branch, ...branches]));
+          sendJson(res, 200, { ...payload, branches: uniqueBranches, unstagedAdditions: totals.additions, unstagedDeletions: totals.deletions, commitHash, commitTitle });
+        });
       });
     });
   });
@@ -4058,6 +4121,17 @@ function sendGitStatusAfterMutation(cwd: string, res: ServerResponse): void {
 
 function runGitP(cwd: string, args: readonly string[]): Promise<GitCommandResult> {
   return new Promise((resolve) => runGit(cwd, args, resolve));
+}
+
+async function listLocalGitBranches(cwd: string): Promise<readonly string[]> {
+  const result = await runGitP(cwd, ["branch", "--format=%(refname:short)"]);
+  if (!result.ok) {
+    throw new Error(result.error);
+  }
+  return result.stdout
+    .split(/\r?\n/)
+    .map((branch) => branch.trim())
+    .filter((branch) => branch.length > 0);
 }
 
 export function isNoChangesGitCommitResult(result: Pick<GitCommandResult, "stdout" | "error">): boolean {
@@ -4139,6 +4213,43 @@ function handleGitWorktreeMerge(req: IncomingMessage, res: ServerResponse): void
         await runGitP(base, ["worktree", "remove", "--force", worktreePath]);
         await runGitP(base, ["branch", "-D", branch]);
         sendGitStatusAfterMutation(base, res);
+      } catch (error) {
+        sendJson(res, gitErrorStatus(error), { error: errorMessage(error) });
+      }
+    })();
+  });
+}
+
+function handleGitCheckout(req: IncomingMessage, res: ServerResponse): void {
+  readJsonBody(req, res, (body) => {
+    void (async () => {
+      try {
+        const { cwd, branch } = parseGitCheckoutPayload(body);
+        const cwdError = validateGitCwd(cwd);
+        if (cwdError) {
+          sendJson(res, 400, { error: cwdError });
+          return;
+        }
+        const statusResult = await runGitP(cwd, ["status", "--porcelain=v1"]);
+        if (!statusResult.ok) {
+          sendJson(res, 500, { error: statusResult.error });
+          return;
+        }
+        if (statusResult.stdout.trim().length > 0) {
+          sendJson(res, 409, { error: "Working tree has uncommitted changes." });
+          return;
+        }
+        const branches = await listLocalGitBranches(cwd);
+        if (!branches.includes(branch)) {
+          sendJson(res, 400, { error: `Git branch not found: ${branch}` });
+          return;
+        }
+        const checkoutResult = await runGitP(cwd, ["checkout", branch]);
+        if (!checkoutResult.ok) {
+          sendJson(res, 500, { error: checkoutResult.error });
+          return;
+        }
+        sendGitStatusAfterMutation(cwd, res);
       } catch (error) {
         sendJson(res, gitErrorStatus(error), { error: errorMessage(error) });
       }
@@ -4281,71 +4392,49 @@ function handleGitPush(req: IncomingMessage, res: ServerResponse): void {
   });
 }
 
-function parseTerminalPayload(body: string): { readonly cwd: string; readonly command: string } {
-  const parsed = parseJsonObjectPayload(body, "Invalid terminal request payload.");
-  const cwd = typeof parsed.cwd === "string" ? parsed.cwd.trim() : "";
-  const command = typeof parsed.command === "string" ? parsed.command : "";
+export function parseTerminalSessionRequest(req: IncomingMessage): { readonly cwd: string } {
+  const rawCwd = req.headers["x-rlab-terminal-cwd"];
+  const cwd = (Array.isArray(rawCwd) ? rawCwd[0] : rawCwd)?.trim() ?? "";
   if (!cwd) {
     throw new Error("Project directory is required.");
   }
-  if (!command.trim()) {
-    throw new Error("Command is required.");
-  }
-  return { cwd, command };
+  return { cwd: resolve(cwd) };
 }
 
-/** Runs one shell command in the chat folder and streams its output as NDJSON
- *  ({type:"out"|"err",chunk} … {type:"exit",code}). Stateless per command — an
- *  explicit user-driven shell, so a real (login) shell is fine here. */
-function handleTerminal(req: IncomingMessage, res: ServerResponse): void {
-  readJsonBody(req, res, (body) => {
-    let cwd: string;
-    let command: string;
-    try {
-      ({ cwd, command } = parseTerminalPayload(body));
-      const cwdError = validateGitCwd(cwd);
-      if (cwdError) {
-        sendJson(res, 400, { error: cwdError });
-        return;
-      }
-    } catch (error) {
-      sendJson(res, gitErrorStatus(error), { error: errorMessage(error) });
+function handleTerminalSession(req: IncomingMessage, res: ServerResponse): void {
+  if (req.method === "DELETE") {
+    const id = new URL(req.url ?? "/", "http://localhost").searchParams.get("id")?.trim() ?? "";
+    if (!id) {
+      sendJson(res, 400, { error: "Missing terminal session id." });
       return;
     }
-
-    res.setHeader("Content-Type", "application/x-ndjson");
-    res.setHeader("Cache-Control", "no-store");
-    const write = (event: Record<string, unknown>) => {
-      res.write(`${JSON.stringify(event)}\n`);
-    };
-
-    const shell = process.env.SHELL || "/bin/bash";
-    let child: ReturnType<typeof spawn> | null = null;
-    try {
-      child = spawn(shell, ["-lc", command], { cwd, env: process.env, stdio: ["ignore", "pipe", "pipe"] });
-    } catch (error) {
-      write({ type: "err", chunk: error instanceof Error ? error.message : String(error) });
-      write({ type: "exit", code: 1 });
-      res.end();
+    const closed = terminalManager.close(id);
+    sendJson(res, closed ? 200 : 404, closed ? { ok: true } : { error: "Terminal session not found." });
+    return;
+  }
+  if (req.method !== "POST") {
+    res.statusCode = 405;
+    res.end();
+    return;
+  }
+  let cwd: string;
+  try {
+    ({ cwd } = parseTerminalSessionRequest(req));
+    const cwdError = validateGitCwd(cwd);
+    if (cwdError) {
+      sendJson(res, 400, { error: cwdError });
       return;
     }
-    let done = false;
-    child.stdout?.on("data", (chunk: Buffer) => write({ type: "out", chunk: chunk.toString() }));
-    child.stderr?.on("data", (chunk: Buffer) => write({ type: "err", chunk: chunk.toString() }));
-    child.on("error", (error) => write({ type: "err", chunk: error.message }));
-    child.on("close", (code) => {
-      done = true;
-      write({ type: "exit", code: code ?? 0 });
-      res.end();
-    });
-    // Abort the command only if the client disconnects before it finishes (the
-    // request stream closing on its own must not kill a still-running command).
-    res.on("close", () => {
-      if (!done && !child.killed) {
-        child.kill();
-      }
-    });
-  });
+  } catch (error) {
+    sendJson(res, gitErrorStatus(error), { error: errorMessage(error) });
+    return;
+  }
+
+  try {
+    sendJson(res, 200, terminalManager.create({ cwd }));
+  } catch (error) {
+    sendJson(res, 500, { error: errorMessage(error) });
+  }
 }
 
 /* ------------------------------ Real agent run ------------------------------ */
@@ -4533,6 +4622,7 @@ function loadPersistedAgentLimits(): void {
     if (!isRecord(parsed)) {
       return;
     }
+    const nowSeconds = Date.now() / 1000;
     for (const [agent, value] of Object.entries(parsed)) {
       if (!isRecord(value)) {
         continue;
@@ -4540,7 +4630,10 @@ function loadPersistedAgentLimits(): void {
       const windows = new Map<RateLimitWindowKind, RateLimitWindow>();
       for (const window of Array.isArray(value.windows) ? value.windows : []) {
         if (isRecord(window) && typeof window.kind === "string" && RATE_LIMIT_WINDOW_KINDS.has(window.kind)) {
-          windows.set(window.kind as RateLimitWindowKind, window as unknown as RateLimitWindow);
+          const rateWindow = window as unknown as RateLimitWindow;
+          if (!rateLimitWindowExpired(rateWindow, nowSeconds)) {
+            windows.set(rateWindow.kind, rateWindow);
+          }
         }
       }
       latestAgentLimits.set(agent, {
@@ -4578,6 +4671,21 @@ function persistAgentLimits(): void {
 loadPersistedAgentLimits();
 const STATUS_SEVERITY: Record<string, number> = { allowed: 0, allowed_warning: 1, rejected: 2 };
 
+function rateLimitWindowExpired(window: Pick<RateLimitWindow, "resetsAt">, nowSeconds = Date.now() / 1000): boolean {
+  return typeof window.resetsAt === "number" && window.resetsAt <= nowSeconds;
+}
+
+function pruneExpiredLimitWindows(acc: AgentLimitAccumulator, nowSeconds = Date.now() / 1000): boolean {
+  let changed = false;
+  for (const [kind, window] of acc.windows.entries()) {
+    if (rateLimitWindowExpired(window, nowSeconds)) {
+      acc.windows.delete(kind);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 function limitAccumulator(agent: string): AgentLimitAccumulator {
   let acc = latestAgentLimits.get(agent);
   if (!acc) {
@@ -4591,6 +4699,13 @@ function limitAccumulator(agent: string): AgentLimitAccumulator {
  *  sparse update never wipes a value reported by an earlier one. */
 function upsertLimitWindow(agent: string, window: RateLimitWindow): void {
   const acc = limitAccumulator(agent);
+  pruneExpiredLimitWindows(acc);
+  if (rateLimitWindowExpired(window)) {
+    acc.windows.delete(window.kind);
+    acc.updatedAt = Date.now();
+    persistAgentLimits();
+    return;
+  }
   const prev = acc.windows.get(window.kind);
   acc.windows.set(window.kind, {
     kind: window.kind,
@@ -4605,7 +4720,7 @@ function upsertLimitWindow(agent: string, window: RateLimitWindow): void {
 /** Serialize an accumulator into the API shape: ordered windows + the
  *  most-severe window status as the overall status. */
 function serializeAgentLimit(acc: AgentLimitAccumulator): AgentRateLimit {
-  const windows = WINDOW_ORDER.map((kind) => acc.windows.get(kind)).filter((w): w is RateLimitWindow => Boolean(w));
+  const windows = WINDOW_ORDER.map((kind) => acc.windows.get(kind)).filter((w): w is RateLimitWindow => w !== undefined && !rateLimitWindowExpired(w));
   let status: string | undefined;
   for (const window of windows) {
     if (window.status && (status === undefined || (STATUS_SEVERITY[window.status] ?? 0) > (STATUS_SEVERITY[status] ?? 0))) {
@@ -4707,6 +4822,7 @@ export interface ActiveBackgroundRunUpdate {
   readonly conversationId: string;
   readonly userMessageId: string;
   readonly agentMessageId: string;
+  readonly startedAtMs?: number;
   readonly status: ConversationStatus;
   readonly snippet: string;
   readonly time: string;
@@ -4791,14 +4907,17 @@ interface RunSpec {
 
 const CLAUDE_READ_ONLY_TOOLS = ["Read", "Glob", "Grep", "LS", "AskUserQuestion", "ScheduleWakeup"] as const;
 const CLAUDE_EFFORT_LEVELS = new Set(["low", "medium", "high", "xhigh", "max"]);
-const CLAUDE_CHAT_UI_SYSTEM_PROMPT = [
+const RLAB_CHAT_TOOLS_PROMPT = [
   "When you need user input that blocks progress, use the AskUserQuestion tool instead of asking as plain text.",
   "Use AskUserQuestion for concrete choices, clarifying questions, or option selection that the chat UI should render as interactive controls.",
   "Do not create a numbered question list in prose when the question can be represented with AskUserQuestion options.",
   "When you need to wake up later in this same rlab chat, use ScheduleWakeup with the exact follow-up prompt; rlab persists and fires that wakeup server-side.",
-  "ScheduleWakeup supports delaySeconds/fireAt for time wakeups and script plus intervalSeconds for condition wakeups; the script is checked server-side and exit code 0 fires the wakeup.",
+  "Use ScheduleWakeup instead of sleeping, polling inside the agent, or keeping the turn open. After ScheduleWakeup succeeds, finish the current turn and wait for rlab to re-run you.",
+  "ScheduleWakeup supports delaySeconds/fireAt for time wakeups and script plus intervalSeconds for condition wakeups; the script runs server-side in the project cwd, exit code 0 fires the wakeup, and non-zero exit codes keep polling.",
+  "For condition wakeups, write a deterministic shell script in the ScheduleWakeup input: { prompt, script, intervalSeconds, reason }. Do not describe the script in prose instead of calling the tool.",
   "To cancel scheduled wakeups in this chat, call ScheduleWakeup with action=\"cancel\" and either wakeupId/id or all=true.",
 ].join("\n");
+const CLAUDE_CHAT_UI_SYSTEM_PROMPT = RLAB_CHAT_TOOLS_PROMPT;
 const CODEX_PLAN_PROMPT_PREFIX = [
   "Plan mode is active.",
   "Do not modify files or run commands that write to the filesystem.",
@@ -4847,14 +4966,14 @@ function browserBridgePromptAppendix(sessionId: string, origin: string): string 
   return [
     "",
     "<browser-preview-bridge>",
-    "The app's Preview tab is a native iframe for the user and a Playwright mirror for you. Use the bridge only when the task asks you to inspect or operate the in-app browser.",
+    "The app's Preview tab is a native iframe for the user and a Playwright mirror for you. Browser actions sent through this bridge are mirrored into the user's Preview tab so the user can open Preview later and see the current browser state without a manual sync.",
+    "Use the bridge only when the task asks you to inspect or operate the in-app browser.",
     `Base URL: ${origin}`,
     `sessionId: ${sessionId}`,
     `Snapshot: GET ${origin}/api/browser/bridge/snapshot?sessionId=${encodeURIComponent(sessionId)}`,
     `Action: POST ${origin}/api/browser/bridge/action with JSON {"sessionId":"${sessionId}","type":"..."}.`,
-    "Always read snapshot.domTargets first and choose typed actions from DOM targets before coordinates.",
-    "Freshness contract: snapshot.freshness is synced, dirty, blocked, syncing, or error. If an action returns actionResult.ok=false, read actionResult.error and refresh the snapshot. Do not treat bridge failures as permission denials.",
-    "If actionResult.error says the preview mirror is stale or manual sync is required, stop browser actions and ask the user to sync Preview.",
+    "Always read snapshot.domTargets first and choose typed actions from DOM targets before coordinates. If the snapshot URL is about:blank or domTargets is empty, navigate to the needed URL first, then read the snapshot again.",
+    "Freshness contract: snapshot.freshness is synced, dirty, blocked, syncing, or error. The server automatically resynchronizes dirty/blocked mirrors when it has a Preview URL. If an action returns actionResult.ok=false, read actionResult.error, refresh the snapshot, and report the exact bridge state if it still cannot continue.",
     "Preferred action order: fill, check, uncheck, select, click, press, scroll, wait-for. Use type only to append text. Use x/y coordinates only for canvas or custom widgets without a DOM target.",
     "Tabs: use snapshot.activeTabId and snapshot.tabs. Use select-tab before intentionally working in a non-active tab; include tabId only for that explicit tab.",
     "Supported actions: navigate, go-back, go-forward, refresh, scroll, click, fill, clear, check, uncheck, select, wait-for, hover, type, press, eval, select-tab.",
@@ -4864,8 +4983,27 @@ function browserBridgePromptAppendix(sessionId: string, origin: string): string 
   ].join("\n");
 }
 
+function rlabChatToolsPromptAppendix(): string {
+  return [
+    "",
+    "<rlab-chat-tools>",
+    "This rlab chat has server-side tools that are handled by the application, not by the user's project.",
+    RLAB_CHAT_TOOLS_PROMPT,
+    "Tool names accepted by rlab for wakeups: ScheduleWakeup, rlab_schedule_wakeup, schedule_wakeup, wakeup.",
+    "</rlab-chat-tools>",
+  ].join("\n");
+}
+
+export function appendRlabChatToolsPrompt(prompt: string): string {
+  return prompt.includes("<rlab-chat-tools>") ? prompt : `${prompt}${rlabChatToolsPromptAppendix()}`;
+}
+
 function appendBrowserBridgePrompt(prompt: string, binding: BackgroundRunBinding | null, origin: string): string {
   return binding ? `${prompt}${browserBridgePromptAppendix(binding.conversationId, origin)}` : prompt;
+}
+
+export function prepareAgentPrompt(prompt: string, binding: BackgroundRunBinding | null, origin: string): string {
+  return appendBrowserBridgePrompt(appendRlabChatToolsPrompt(prompt), binding, origin);
 }
 
 function profileForArgs(agent: AgentProfile["agent"], request: RunArgsRequest): AgentProfile {
@@ -5897,7 +6035,7 @@ function wakeupTimerDelay(targetMs: number): number {
 }
 
 function serverNowLabel(): string {
-  return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return formatClock24();
 }
 
 function scheduledWakeupId(): string {
@@ -5967,7 +6105,7 @@ function updateScheduledWakeupRecord(record: ScheduledWakeupRecord): void {
 
 function wakeupStatusText(record: ScheduledWakeupRecord, locale: Locale): string {
   if (record.trigger.type === "time") {
-    const when = new Date(record.trigger.fireAtMs).toLocaleString();
+    const when = formatDateTime24(new Date(record.trigger.fireAtMs));
     return locale === "ru" ? `Wakeup установлен · ${when}` : `Wakeup scheduled · ${when}`;
   }
   return locale === "ru"
@@ -6495,15 +6633,26 @@ function shouldPreserveCurrentThreadFromWorkspacePut(incomingThreads: WorkspaceS
   return true;
 }
 
+function backgroundRunStartedAtMs(binding: BackgroundRunBinding): number | undefined {
+  const startedAt = backgroundRunHandles.get(binding.runId)?.startedAt;
+  if (!startedAt) {
+    return undefined;
+  }
+  const time = Date.parse(startedAt);
+  return Number.isNaN(time) ? undefined : time;
+}
+
 function buildActiveRunUpdate(conversation: WorkspaceConversation, agentMessage: ChatMessage | undefined, binding: BackgroundRunBinding, done: boolean): ActiveBackgroundRunUpdate {
   const blocks = agentMessage?.blocks ?? [];
   const costUsd = conversation.costUsd ?? agentMessage?.costUsd;
   const usage = conversation.usage ?? agentMessage?.usage;
+  const startedAtMs = agentMessage?.startedAtMs ?? backgroundRunStartedAtMs(binding);
   return {
     runId: binding.runId,
     conversationId: binding.conversationId,
     userMessageId: binding.userMessageId,
     agentMessageId: binding.agentMessageId,
+    ...(startedAtMs === undefined ? {} : { startedAtMs }),
     status: conversation.status,
     snippet: conversation.snippet,
     time: conversation.time,
@@ -6699,6 +6848,7 @@ function putBackgroundAgentMessage(
     id: binding.agentMessageId,
     role: "agent",
     time: binding.agentMessageTime,
+    startedAtMs: backgroundRunStartedAtMs(binding),
     blocks: mergedBlocks,
     ...(metadata.costUsd === undefined ? {} : { costUsd: metadata.costUsd }),
     ...(metadata.usage === undefined ? {} : { usage: metadata.usage }),
@@ -6722,6 +6872,7 @@ function persistBackgroundRunSnapshot(binding: BackgroundRunBinding, accumulator
     id: binding.agentMessageId,
     role: "agent",
     time: binding.agentMessageTime,
+    startedAtMs: accumulator.start,
     blocks,
     ...(accumulator.costUsd === undefined ? {} : { costUsd: accumulator.costUsd }),
     ...(accumulator.usage === undefined ? {} : { usage: accumulator.usage }),
@@ -8436,7 +8587,6 @@ export function createOpenCodeStreamTranslator(): (line: string) => RunEvent[] {
 function setNdjsonStreamHeaders(res: ServerResponse): void {
   res.setHeader("Content-Type", "application/x-ndjson");
   res.setHeader("Cache-Control", "no-store");
-  res.setHeader("Connection", "keep-alive");
   res.setHeader("X-Accel-Buffering", "no");
 }
 
@@ -9397,6 +9547,30 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
         }
         return;
       }
+      if (event.type === "cancel_wakeup") {
+        const publicEvent: RunEvent = binding
+          ? (() => {
+              const canceled = cancelScheduledWakeups({ conversationId: binding.conversationId, wakeupId: event.wakeupId, all: event.all ?? !event.wakeupId });
+              if (canceled === 0) {
+                return { type: "status", level: "warn", text: cachedWorkspaceLocale === "ru" ? "Wakeup не найден." : "Wakeup not found." };
+              }
+              appendRunAuditEvent(RUN_AUDIT_FILE, {
+                type: "wakeup_canceled",
+                wakeupId: event.wakeupId,
+                sourceRunId: binding.runId,
+                conversationId: binding.conversationId,
+                count: canceled,
+                reason: event.reason,
+              });
+              return { type: "status", level: "ok", text: wakeupCancelStatusText(canceled, cachedWorkspaceLocale) };
+            })()
+          : { type: "error", text: "Wakeup cancellation requires a conversation-bound run." };
+        sender.send(publicEvent);
+        if (binding && accumulator) {
+          applyBackgroundRunEvent(binding, accumulator, publicEvent);
+        }
+        return;
+      }
       sender.send(event);
       if (binding && accumulator) {
         applyBackgroundRunEvent(binding, accumulator, event);
@@ -9422,7 +9596,7 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
     }
     const executionRequest: RunRequest = {
       ...request,
-      prompt: appendBrowserBridgePrompt(request.prompt, binding, origin),
+      prompt: prepareAgentPrompt(request.prompt, binding, origin),
     };
     if (binding) {
       accumulator = startPersistedBackgroundRun(binding, request);
@@ -9688,6 +9862,10 @@ function useExactApi(server: ViteDevServer | PreviewServer, path: string, handle
 
 function attach(server: ViteDevServer | PreviewServer): void {
   ensureScheduledWakeupsStarted();
+  if (server.httpServer && !terminalWebSocketServers.has(server.httpServer)) {
+    terminalWebSocketServers.add(server.httpServer);
+    attachPtyTerminalWebSockets(server.httpServer as unknown as HttpServer, terminalManager);
+  }
   server.middlewares.use(PREVIEW_PROXY_PREFIX, handlePreviewProxy);
   useExactApi(server, "/api/health", methodOnly("GET", (_req, res) => {
     const health = storageHealthSnapshot();
@@ -9741,13 +9919,14 @@ function attach(server: ViteDevServer | PreviewServer): void {
   useExactApi(server, "/api/git-stage", methodOnly("POST", handleGitStage));
   useExactApi(server, "/api/git-unstage", methodOnly("POST", handleGitUnstage));
   useExactApi(server, "/api/git-commit", methodOnly("POST", handleGitCommit));
+  useExactApi(server, "/api/git-checkout", methodOnly("POST", handleGitCheckout));
   useExactApi(server, "/api/git-push", methodOnly("POST", handleGitPush));
   useExactApi(server, "/api/git-worktree-create", methodOnly("POST", handleGitWorktreeCreate));
   useExactApi(server, "/api/git-worktree-merge", methodOnly("POST", handleGitWorktreeMerge));
   useExactApi(server, "/api/git-init", methodOnly("POST", handleGitInit));
-  useExactApi(server, "/api/terminal", methodOnly("POST", handleTerminal));
+  useExactApi(server, "/api/terminal", handleTerminalSession);
   useExactApi(server, "/api/runs", methodOnly("GET", handleActiveRuns));
-  useExactApi(server, "/api/wakeups", methodOnly("GET", handleWakeups));
+  useExactApi(server, "/api/wakeups", handleWakeups);
   useExactApi(server, "/api/run-attach", methodOnly("GET", handleRunAttach));
   useExactApi(server, "/api/run", methodOnly("POST", handleRun));
   useExactApi(server, "/api/run-approval", methodOnly("POST", handleRunApproval));

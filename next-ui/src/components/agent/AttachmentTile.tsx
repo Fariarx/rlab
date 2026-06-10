@@ -66,7 +66,8 @@ export function AttachmentTile({ name, mime, sizeBytes, previewSrc, onOpen, onRe
     <Box
       sx={{
         position: "relative",
-        width: showImage ? 72 : 84,
+        width: 76,
+        height: 76,
         flex: "0 0 auto",
         pointerEvents: "auto",
         borderRadius: (t) => `${t.custom.radii.md}px`,
@@ -82,8 +83,10 @@ export function AttachmentTile({ name, mime, sizeBytes, previewSrc, onOpen, onRe
         onClick={onOpen}
         aria-label={onOpen ? name : undefined}
         sx={{
-          display: "block",
+          display: "grid",
+          gridTemplateRows: "1fr auto",
           width: "100%",
+          height: "100%",
           p: 0,
           border: 0,
           textAlign: "left",
@@ -92,12 +95,37 @@ export function AttachmentTile({ name, mime, sizeBytes, previewSrc, onOpen, onRe
         }}
       >
         {showImage ? (
-          /* Image: just the preview, no caption (a square thumbnail). */
-          <Box component="img" src={previewSrc} alt={name} loading="lazy" onError={() => setImgFailed(true)} sx={{ width: 72, height: 72, objectFit: "cover", display: "block" }} />
+          <>
+            <Box component="img" src={previewSrc} alt={name} loading="lazy" onError={() => setImgFailed(true)} sx={{ gridRow: "1 / -1", width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+            {(ext || mime) && (
+              <Typography
+                noWrap
+                sx={{
+                  gridRow: "2",
+                  justifySelf: "start",
+                  minWidth: 0,
+                  maxWidth: "calc(100% - 8px)",
+                  ml: 0.375,
+                  mb: 0.375,
+                  px: 0.5,
+                  py: 0.125,
+                  alignSelf: "end",
+                  borderRadius: (t) => `${t.custom.radii.sm}px`,
+                  fontFamily: (t) => t.custom.fonts.mono,
+                  fontSize: "0.56rem",
+                  fontWeight: 800,
+                  color: "text.primary",
+                  backgroundColor: "rgba(0, 0, 0, 0.62)",
+                  backdropFilter: "blur(4px)",
+                }}
+              >
+                {ext || "IMG"}
+              </Typography>
+            )}
+          </>
         ) : (
           <>
-            {/* File: a glyph + extension badge over a name + size caption. */}
-            <Box sx={{ height: 46, display: "flex", alignItems: "center", justifyContent: "center", gap: 0.5, backgroundColor: (t) => t.custom.surfaces.s3 }}>
+            <Box sx={{ minHeight: 0, display: "flex", alignItems: "center", justifyContent: "center", gap: 0.5, backgroundColor: (t) => t.custom.surfaces.s3 }}>
               <FileGlyph name={name} mime={mime} />
               {ext && (
                 <Typography sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.58rem", fontWeight: 700, letterSpacing: "0.04em", color: "text.secondary" }}>
@@ -105,12 +133,12 @@ export function AttachmentTile({ name, mime, sizeBytes, previewSrc, onOpen, onRe
                 </Typography>
               )}
             </Box>
-            <Box sx={{ px: 0.625, py: 0.375, minWidth: 0 }}>
-              <Typography noWrap sx={{ fontSize: "0.66rem", fontWeight: 600, color: "text.primary" }}>
+            <Box sx={{ px: 0.5, py: 0.25, minWidth: 0, backgroundColor: (t) => t.custom.surfaces.s2 }}>
+              <Typography noWrap sx={{ fontSize: "0.6rem", lineHeight: 1.15, fontWeight: 600, color: "text.primary" }}>
                 {name}
               </Typography>
               {size && (
-                <Typography noWrap sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.58rem", color: "text.secondary" }}>
+                <Typography noWrap sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.52rem", lineHeight: 1.15, color: "text.secondary" }}>
                   {size}
                 </Typography>
               )}

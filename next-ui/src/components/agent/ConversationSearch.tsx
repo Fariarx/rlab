@@ -92,44 +92,48 @@ export function ConversationSearch({
           />
           {results.length > 0 ? (
             <Stack spacing={0.5} sx={{ maxHeight: 360, overflowY: "auto", overflowX: "hidden" }}>
-              {results.map(({ conversation, projectName }) => (
-                <Box
-                  key={conversation.id}
-                  component="button"
-                  type="button"
-                  aria-label={conversation.title}
-                  onClick={() => choose(conversation.id)}
-                  sx={{
-                    font: "inherit",
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 1.25,
-                    width: "100%",
-                    minWidth: 0,
-                    textAlign: "left",
-                    px: 1.25,
-                    py: 1,
-                    cursor: "pointer",
-                    border: 0,
-                    borderRadius: (theme) => `${theme.custom.radii.md}px`,
-                    backgroundColor: (theme) => theme.custom.surfaces.s2,
-                    transition: "background-color 120ms ease",
-                    "&:hover": { backgroundColor: (theme) => theme.custom.surfaces.s3 },
-                    "&:focus-visible": { outline: (theme) => `2px solid ${theme.custom.borders.focus}`, outlineOffset: "-2px" },
-                  }}
-                >
-                  <AgentMonogram agent={conversation.agent} size={26} />
-                  <Box sx={{ flex: 1, minWidth: 0 }}>
-                    <Typography noWrap sx={{ fontSize: "0.84rem", fontWeight: 600, color: "text.primary" }}>
-                      {conversation.title}
-                    </Typography>
-                    <Typography noWrap sx={{ fontSize: "0.72rem", color: "text.secondary" }}>
-                      {projectName ? `${projectName} · ${conversation.snippet}` : conversation.snippet}
-                    </Typography>
+              {results.map(({ conversation, projectName }) => {
+                const title = conversation.archived ? t("archivedConversationTitle", { title: conversation.title }) : conversation.title;
+                return (
+                  <Box
+                    key={conversation.id}
+                    component="button"
+                    type="button"
+                    aria-label={title}
+                    onClick={() => choose(conversation.id)}
+                    sx={{
+                      font: "inherit",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 1.25,
+                      width: "100%",
+                      minWidth: 0,
+                      textAlign: "left",
+                      px: 1.25,
+                      py: 1,
+                      cursor: "pointer",
+                      border: 0,
+                      borderRadius: (theme) => `${theme.custom.radii.md}px`,
+                      backgroundColor: (theme) => theme.custom.surfaces.s2,
+                      opacity: conversation.archived ? 0.58 : 1,
+                      transition: "background-color 120ms ease, opacity 120ms ease",
+                      "&:hover": { backgroundColor: (theme) => theme.custom.surfaces.s3, opacity: 1 },
+                      "&:focus-visible": { outline: (theme) => `2px solid ${theme.custom.borders.focus}`, outlineOffset: "-2px", opacity: 1 },
+                    }}
+                  >
+                    <AgentMonogram agent={conversation.agent} size={26} />
+                    <Box sx={{ flex: 1, minWidth: 0 }}>
+                      <Typography noWrap sx={{ fontSize: "0.84rem", fontWeight: 600, color: "text.primary" }}>
+                        {title}
+                      </Typography>
+                      <Typography noWrap sx={{ fontSize: "0.72rem", color: "text.secondary" }}>
+                        {projectName ? `${projectName} · ${conversation.snippet}` : conversation.snippet}
+                      </Typography>
+                    </Box>
+                    <StatusDot status={conversationStatusKey[conversation.status]} label={conversationStatus(conversation.status)} pulse={conversation.status === "running"} size="sm" />
                   </Box>
-                  <StatusDot status={conversationStatusKey[conversation.status]} label={conversationStatus(conversation.status)} pulse={conversation.status === "running"} size="sm" />
-                </Box>
-              ))}
+                );
+              })}
             </Stack>
           ) : (
             <Typography sx={{ py: 3, textAlign: "center", color: "text.secondary", fontSize: "0.82rem" }}>

@@ -322,8 +322,10 @@ function finishBlocks(blocks: readonly AgentBlock[], runState: "ok" | "error"): 
 }
 
 function cloneMessageForFork(message: ChatMessage): ChatMessage {
+  const idPrefix = message.role === "user" ? "u" : "a";
   return {
     ...message,
+    id: nextId(idPrefix),
     profile: message.profile ? normalizeAgentProfile(message.profile, message.profile.agent) : undefined,
     blocks: message.blocks?.map((block) => finishLiveBlock(JSON.parse(JSON.stringify(block)) as AgentBlock, "ok")),
   };
@@ -424,6 +426,7 @@ function patchActiveRunUpdate(state: WorkspaceState, update: ActiveRunUpdate): W
     id: update.agentMessageId,
     role: "agent",
     time: update.time,
+    ...(update.startedAtMs === undefined ? {} : { startedAtMs: update.startedAtMs }),
     profile,
     blocks,
     ...(update.costUsd === undefined ? {} : { costUsd: update.costUsd }),
@@ -469,8 +472,11 @@ export interface Workspace {
   readonly setConversationProfile: (id: string, profile: AgentProfile) => void;
   readonly rename: (id: string, title: string) => void;
   readonly togglePin: (id: string) => void;
+  readonly archive: (id: string) => void;
   readonly remove: (id: string) => void;
   readonly sendMessage: (id: string, text: string) => void;
+  readonly pendingMessageCount: (id: string) => number;
+  readonly sendQueuedMessageNow: (id: string) => boolean;
   readonly setCompaction: (id: string, patch: Partial<CompactionSettings>) => void;
   readonly compactConversation: (id: string) => boolean;
   readonly addReviewComments: (id: string, comments: readonly ReviewCommentEntry[]) => void;
@@ -1227,7 +1233,7 @@ class WorkspaceStore implements Workspace {
     this.patchConv(id, { pinned: !conversation?.pinned });
   }
 
-  remove(id: string): void {
+  private cancelActiveRun(id: string): void {
     const active = this.runs.get(id);
     if (active) {
       active.canceled = true;
@@ -1235,6 +1241,20 @@ class WorkspaceStore implements Workspace {
       active.controller.abort();
       this.runs.delete(id);
     }
+  }
+
+  archive(id: string): void {
+    this.cancelActiveRun(id);
+    this.setState((current) => ({
+      ...patchConversation(current, id, { archived: true, pinned: false, activeRunId: undefined, status: "idle" }),
+      selectedId: current.selectedId === id ? "" : current.selectedId,
+    }));
+    this.markThreadDirty(id);
+    this.persistCurrentStateNow();
+  }
+
+  remove(id: string): void {
+    this.cancelActiveRun(id);
     this.setState((current) => {
       const threads = { ...current.threads };
       const composerDrafts = { ...current.composerDrafts };
@@ -1272,6 +1292,26 @@ class WorkspaceStore implements Workspace {
     this.runTurn(id, userMsg);
   }
 
+  pendingMessageCount(id: string): number {
+    return this.pendingMessages.get(id)?.length ?? 0;
+  }
+
+  sendQueuedMessageNow(id: string): boolean {
+    const queue = this.pendingMessages.get(id);
+    if (!queue || queue.length === 0) {
+      return false;
+    }
+    const next = queue.shift();
+    if (queue.length === 0) {
+      this.pendingMessages.delete(id);
+    }
+    if (!next) {
+      return false;
+    }
+    this.runTurn(id, next);
+    return true;
+  }
+
   /** Dispatch the next queued user message for a conversation, if any. Called
    *  when a run settles so queued turns run in order without interrupting. */
   private drainPendingMessages(id: string): void {
@@ -1282,13 +1322,7 @@ class WorkspaceStore implements Workspace {
     if (!queue || queue.length === 0) {
       return;
     }
-    const next = queue.shift();
-    if (queue.length === 0) {
-      this.pendingMessages.delete(id);
-    }
-    if (next) {
-      this.runTurn(id, next);
-    }
+    this.sendQueuedMessageNow(id);
   }
 
   /** Update this conversation's compaction preferences (auto on/off + window
@@ -1419,6 +1453,7 @@ class WorkspaceStore implements Workspace {
 
     const aId = nextId("a");
     const agentTime = nowLabel();
+    const agentStartedAtMs = Date.now();
     // Create the agent message up-front (empty) so the thread shows a single
     // continuous "thinking" bubble that streams content in place — no separate
     // typing placeholder that pops out and gets replaced (which read as a flicker).
@@ -1427,7 +1462,7 @@ class WorkspaceStore implements Workspace {
       if (arr.some((m) => m.id === aId)) {
         return current;
       }
-      return { ...current, threads: { ...current.threads, [id]: upsertAgentMessageForUserTurn(arr, userMsg.id, { id: aId, role: "agent", time: agentTime, profile, blocks: [] }) } };
+      return { ...current, threads: { ...current.threads, [id]: upsertAgentMessageForUserTurn(arr, userMsg.id, { id: aId, role: "agent", time: agentTime, startedAtMs: agentStartedAtMs, profile, blocks: [] }) } };
     });
     this.markThreadDirty(id);
     const applyBlocks = (blocks: AgentBlock[]) => {
@@ -1441,7 +1476,7 @@ class WorkspaceStore implements Workspace {
           this.skipNextSave = true;
         }
         shouldFlush = needsInput || blocksHaveStatus(mergedBlocks);
-        const message: ChatMessage = { id: aId, role: "agent", time: agentTime, profile, blocks: mergedBlocks };
+        const message: ChatMessage = { id: aId, role: "agent", time: agentTime, startedAtMs: agentStartedAtMs, profile, blocks: mergedBlocks };
         const nextState = {
           ...current,
           threads: {

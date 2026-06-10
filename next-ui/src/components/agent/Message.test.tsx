@@ -51,6 +51,47 @@ describe("Message", () => {
     expect(onFork).toHaveBeenCalledWith(message);
   });
 
+  it("renders persisted AM/PM message times as 24-hour labels", () => {
+    const message: ChatMessage = {
+      id: "agent-time",
+      role: "agent",
+      time: "03:19 PM",
+      blocks: [{ kind: "text", text: "Готово" }],
+    };
+
+    renderMessage(message);
+
+    expect(screen.getByText("15:19")).toBeInTheDocument();
+    expect(screen.queryByText("03:19 PM")).not.toBeInTheDocument();
+  });
+
+  it("shows real elapsed time for an empty live agent message", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-10T12:00:07.000Z"));
+    const message: ChatMessage = {
+      id: "agent-live-empty",
+      role: "agent",
+      startedAtMs: new Date("2026-06-10T12:00:00.000Z").getTime(),
+      blocks: [],
+    };
+
+    renderMessage(message);
+
+    expect(screen.getByText("7с")).toBeInTheDocument();
+  });
+
+  it("does not invent elapsed time when a live start timestamp is missing", () => {
+    const message: ChatMessage = {
+      id: "agent-live-legacy",
+      role: "agent",
+      blocks: [],
+    };
+
+    renderMessage(message);
+
+    expect(screen.queryByText(/\d+с/)).not.toBeInTheDocument();
+  });
+
   it("renders agent details header as an accessible expandable button", () => {
     const message: ChatMessage = {
       id: "agent-2",
@@ -78,6 +119,24 @@ describe("Message", () => {
     renderMessage(message);
 
     expect(screen.getByRole("button", { name: /размышление/i })).toHaveStyle({ position: "sticky", top: "0px" });
+  });
+
+  it("keeps nested tool headers flush to the reasoning container when sticky", () => {
+    const message: ChatMessage = {
+      id: "agent-tool-sticky",
+      role: "agent",
+      blocks: [
+        { kind: "reasoning", text: "Проверяю контекст", duration: "2s" },
+        { kind: "command", command: "echo ok", output: "ok", state: "ok" },
+      ],
+    };
+
+    renderMessage(message);
+
+    fireEvent.click(screen.getByRole("button", { name: /размышление/i }));
+
+    expect(screen.getByTestId("agent-details-body")).toHaveStyle("--agent-sticky-top: 0px");
+    expect(screen.getByText("echo ok")).toBeInTheDocument();
   });
 
   it("archives a completed plan into agent details after a short delay", () => {
