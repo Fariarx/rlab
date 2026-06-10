@@ -9,7 +9,6 @@ import {
   appendJsonBodyChunk,
   attachmentUploadErrorStatus,
   buildClaudeRunArgs,
-  buildClaudeSdkOptions,
   buildCodexRunArgs,
   buildCodexThreadParams,
   codexAppServerItemEvents,
@@ -66,7 +65,7 @@ import {
   hasGeminiStoredAuthAt,
   installCommandForAgent,
   JSON_CONTENT_TYPE,
-  parseAnthropicModelInfos,
+  parseClaudeCliModelAliasesSource,
   parseCodexModelsOutput,
   parseClaudeAgentsOutput,
   parseGeminiCliModelConfigSource,
@@ -95,7 +94,6 @@ import {
 } from "../vite-agents-plugin";
 import { MAX_AGENT_TOOL_OUTPUT_CHARS } from "../src/lib/agent-output";
 import { buildInitialWorkspaceState } from "../src/components/workspace/workspace-state";
-import { type CanUseTool } from "@anthropic-ai/claude-agent-sdk";
 import { type AgentProfile } from "../src/components/agent";
 
 describe("vite agents plugin", () => {
@@ -360,29 +358,13 @@ describe("vite agents plugin", () => {
     });
   });
 
-  it("parses live model catalogs from Claude API", () => {
-    expect(
-      parseAnthropicModelInfos([
-        {
-          id: "claude-opus-4-8",
-          display_name: "Claude Opus 4.8",
-          created_at: "2026-01-01T00:00:00Z",
-          type: "model",
-          capabilities: null,
-          max_input_tokens: null,
-          max_tokens: null,
-        },
-        {
-          id: "not-a-claude-model",
-          display_name: "Ignored",
-          created_at: "2026-01-01T00:00:00Z",
-          type: "model",
-          capabilities: null,
-          max_input_tokens: null,
-          max_tokens: null,
-        },
-      ]),
-    ).toEqual([{ id: "claude-opus-4-8", label: "Claude Opus 4.8", value: "claude-opus-4-8" }]);
+  it("parses Claude CLI model aliases from the installed binary metadata", () => {
+    expect(parseClaudeCliModelAliasesSource("claude-fable-5 Fable 5 claude-sonnet-4-6 Sonnet 4.6 claude-haiku-4-5 Haiku 4.5")).toEqual([
+      { id: "default", label: "Default" },
+      { id: "fable", label: "Fable", value: "fable" },
+      { id: "sonnet", label: "Sonnet", value: "sonnet" },
+      { id: "haiku", label: "Haiku", value: "haiku" },
+    ]);
   });
 
   it("parses visible model options from Gemini CLI model config", () => {
@@ -559,36 +541,49 @@ Built-in agents:
   });
 
   it("starts Claude with partial message streaming enabled", () => {
-    expect(buildClaudeRunArgs({ prompt: "hello" })).toEqual([
+    const args = buildClaudeRunArgs({ prompt: "hello" });
+    expect(args).toEqual([
       "-p",
       "hello",
       "--output-format",
       "stream-json",
       "--verbose",
       "--include-partial-messages",
+      "--append-system-prompt",
+      expect.stringContaining("AskUserQuestion"),
+      "--settings",
+      JSON.stringify({ autoCompactEnabled: true }),
       "--permission-mode",
       "plan",
+      "--tools",
+      "Read,Glob,Grep,LS,AskUserQuestion,ScheduleWakeup",
     ]);
   });
 
-  it("builds Claude args with an exact selected model ID", () => {
-    expect(buildClaudeRunArgs({ prompt: "hello", model: "claude-opus-4-8", reasoning: "high", mode: "default", accessMode: "read-only" })).toEqual([
+  it("builds Claude args with a selected CLI model alias", () => {
+    expect(buildClaudeRunArgs({ prompt: "hello", model: "fable", reasoning: "high", mode: "default", accessMode: "read-only", autoCompact: false, compactWindow: 120000 })).toEqual([
       "-p",
       "hello",
       "--output-format",
       "stream-json",
       "--verbose",
       "--include-partial-messages",
+      "--append-system-prompt",
+      expect.stringContaining("AskUserQuestion"),
+      "--settings",
+      JSON.stringify({ autoCompactEnabled: false, autoCompactWindow: 120000 }),
       "--model",
-      "claude-opus-4-8",
+      "fable",
       "--effort",
       "high",
       "--permission-mode",
       "plan",
+      "--tools",
+      "Read,Glob,Grep,LS,AskUserQuestion,ScheduleWakeup",
     ]);
   });
 
-  it("passes selected Claude Code agent modes to the CLI and SDK", () => {
+  it("passes selected Claude Code agent modes to the CLI", () => {
     expect(buildClaudeRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "claude-agent:Goal", accessMode: "unrestricted" })).toEqual([
       "-p",
       "hello",
@@ -596,19 +591,14 @@ Built-in agents:
       "stream-json",
       "--verbose",
       "--include-partial-messages",
+      "--append-system-prompt",
+      expect.stringContaining("AskUserQuestion"),
+      "--settings",
+      JSON.stringify({ autoCompactEnabled: true }),
       "--agent",
       "Goal",
       "--dangerously-skip-permissions",
     ]);
-
-    expect(
-      buildClaudeSdkOptions(
-        { agent: "claude-code", model: "default", reasoning: "default", mode: "claude-agent:Goal", prompt: "hello", accessMode: "unrestricted" },
-        "C:/repo",
-        new AbortController(),
-        (() => Promise.resolve({ behavior: "deny", message: "test" })) satisfies CanUseTool,
-      ),
-    ).toMatchObject({ agent: "Goal" });
   });
 
   it("translates Claude text deltas without duplicating the final assistant message", () => {
@@ -719,6 +709,76 @@ Built-in agents:
         }),
       ),
     ).toEqual([{ type: "tool", id: "tool-1", name: "Bash", summary: "npm test", args: { command: "npm test" } }]);
+  });
+
+  it("translates Claude ScheduleWakeup tool results into scheduler events", () => {
+    const translate = createClaudeStreamTranslator();
+
+    expect(
+      translate(
+        JSON.stringify({
+          type: "assistant",
+          message: {
+            content: [
+              {
+                type: "tool_use",
+                id: "wake-1",
+                name: "ScheduleWakeup",
+                input: { delaySeconds: "180", prompt: "send OK", reason: "user asked for a reminder" },
+              },
+            ],
+          },
+        }),
+      ),
+    ).toEqual([{ type: "tool", id: "wake-1", name: "ScheduleWakeup", summary: "", args: { delaySeconds: "180", prompt: "send OK", reason: "user asked for a reminder" } }]);
+
+    expect(
+      translate(
+        JSON.stringify({
+          type: "user",
+          message: {
+            content: [{ type: "tool_result", tool_use_id: "wake-1", content: "scheduled" }],
+          },
+        }),
+      ),
+    ).toEqual([
+      { type: "tool_result", id: "wake-1", ok: true, output: "scheduled" },
+      { type: "wakeup", toolId: "wake-1", prompt: "send OK", reason: "user asked for a reminder", delaySeconds: 180 },
+    ]);
+  });
+
+  it("translates script wakeup tool input without requiring a timer-only trigger", () => {
+    const translate = createClaudeStreamTranslator();
+
+    translate(
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          content: [
+            {
+              type: "tool_use",
+              id: "wake-script",
+              name: "ScheduleWakeup",
+              input: { script: "test -f /tmp/ready", intervalSeconds: 15, prompt: "continue after ready file exists" },
+            },
+          ],
+        },
+      }),
+    );
+
+    expect(
+      translate(
+        JSON.stringify({
+          type: "user",
+          message: {
+            content: [{ type: "tool_result", tool_use_id: "wake-script", content: "installed" }],
+          },
+        }),
+      ),
+    ).toEqual([
+      { type: "tool_result", id: "wake-script", ok: true, output: "installed" },
+      { type: "wakeup", toolId: "wake-script", prompt: "continue after ready file exists", script: "test -f /tmp/ready", intervalSeconds: 15 },
+    ]);
   });
 
   it("maps Claude plan, search, and edit tools into rich chat events", () => {
@@ -870,12 +930,18 @@ Built-in agents:
       "stream-json",
       "--verbose",
       "--include-partial-messages",
+      "--append-system-prompt",
+      expect.stringContaining("AskUserQuestion"),
+      "--settings",
+      JSON.stringify({ autoCompactEnabled: true }),
       "--model",
       "opus",
       "--effort",
       "max",
       "--permission-mode",
       "plan",
+      "--tools",
+      "Read,Glob,Grep,LS,AskUserQuestion,ScheduleWakeup",
     ]);
     expect(buildCodexRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" })).toEqual([
       "exec",
@@ -989,13 +1055,9 @@ Built-in agents:
   });
 
   it("threads native session resume into each agent's run args", () => {
-    const claudeOptions = buildClaudeSdkOptions(
-      { agent: "claude-code", model: "default", reasoning: "default", mode: "default", prompt: "next", accessMode: "unrestricted", resume: "claude-sess" },
-      "/repo",
-      new AbortController(),
-      (() => Promise.resolve({ behavior: "deny", message: "x" })) satisfies CanUseTool,
+    expect(buildClaudeRunArgs({ prompt: "next", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted", resume: "claude-sess" })).toEqual(
+      expect.arrayContaining(["--resume", "claude-sess"]),
     );
-    expect(claudeOptions.resume).toBe("claude-sess");
     // Codex resume is a subcommand: `exec resume <id>`.
     expect(buildCodexRunArgs({ prompt: "next", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted", resume: "cdx-sess" }).slice(0, 4)).toEqual(["exec", "resume", "cdx-sess", "--json"]);
     // Gemini: --resume for an existing session, --session-id for a new assigned one.
@@ -2931,44 +2993,6 @@ Built-in agents:
     const merged = mergeWorkspacePutState(clientState, current);
 
     expect(merged.threads["chat-2"]).toEqual(prefix);
-  });
-
-  it("builds Claude SDK options with a live permission handler for unrestricted runs", () => {
-    const controller = new AbortController();
-    const canUseTool = (() => Promise.resolve({ behavior: "deny", message: "test" })) satisfies CanUseTool;
-
-    expect(
-      buildClaudeSdkOptions(
-        { agent: "claude-code", model: "default", reasoning: "default", mode: "default", prompt: "hello", accessMode: "unrestricted" },
-        "C:/repo",
-        controller,
-        canUseTool,
-      ),
-    ).toMatchObject({
-      abortController: controller,
-      allowedTools: ["Read", "Glob", "Grep", "LS"],
-      canUseTool,
-      cwd: "C:/repo",
-      permissionMode: "bypassPermissions",
-      systemPrompt: expect.objectContaining({
-        append: expect.stringContaining("AskUserQuestion"),
-      }),
-      tools: { type: "preset", preset: "claude_code" },
-    });
-
-    expect(
-      buildClaudeSdkOptions(
-        { agent: "claude-code", model: "opus", reasoning: "max", mode: "default", prompt: "hello", accessMode: "read-only" },
-        "C:/repo",
-        controller,
-        canUseTool,
-      ),
-    ).toMatchObject({
-      effort: "max",
-      model: "opus",
-      permissionMode: "plan",
-      tools: ["Read", "Glob", "Grep", "LS", "AskUserQuestion"],
-    });
   });
 
   it("marks persisted active background runs as interrupted when no server handle owns them", () => {

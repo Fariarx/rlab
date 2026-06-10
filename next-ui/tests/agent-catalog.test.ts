@@ -11,8 +11,8 @@ import {
 
 describe("agent catalog", () => {
   it("is the shared source for UI options and CLI model values", () => {
-    expect(getAgent("claude-code").models.map((option) => option.id)).toContain("claude-opus-4-7");
-    expect(resolveAgentModelValue("claude-code", "claude-opus-4-7")).toBe("claude-opus-4-7");
+    expect(getAgent("claude-code").models.map((option) => option.id)).toEqual(["default", "fable", "sonnet", "haiku"]);
+    expect(resolveAgentModelValue("claude-code", "fable")).toBe("fable");
     expect(resolveAgentModelValue("gemini", "gemini-2.5-flash-lite")).toBe("gemini-2.5-flash-lite");
     expect(resolveAgentModelValue("opencode", DEFAULT_AGENT_OPTION_ID)).toBe("opencode/deepseek-v4-flash-free");
     expect(resolveAgentModelValue("opencode", "anthropic-claude-opus-4-7")).toBe("anthropic/claude-opus-4-7");

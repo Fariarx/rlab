@@ -8,7 +8,6 @@ import RateReviewOutlinedIcon from "@mui/icons-material/RateReviewOutlined";
 import SendIcon from "@mui/icons-material/Send";
 import CompressRoundedIcon from "@mui/icons-material/CompressRounded";
 import StopCircleIcon from "@mui/icons-material/StopCircle";
-import TuneRoundedIcon from "@mui/icons-material/TuneRounded";
 import WarningAmberRoundedIcon from "@mui/icons-material/WarningAmberRounded";
 import { Box, Divider, InputBase, Menu, MenuItem, Stack, Switch, type SxProps, TextField, type Theme, Tooltip, Typography } from "@mui/material";
 import { type ChangeEvent, type ClipboardEvent, forwardRef, type KeyboardEvent, type MouseEvent, type ReactNode, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -747,9 +746,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // How full the context window is (raw ratio, may exceed 1 once the thread has
   // outgrown the window). Drives the gauge next to the options button and the
   // over-limit warning that offers compaction.
-  const hasContextGauge = typeof contextWindow === "number" && contextWindow > 0;
+  const hasKnownContextWindow = typeof contextWindow === "number" && contextWindow > 0;
+  const effectiveContextWindow = hasKnownContextWindow ? contextWindow : 1;
   const effectiveContextTokens = typeof contextTokens === "number" && Number.isFinite(contextTokens) && contextTokens > 0 ? contextTokens : 0;
-  const contextOverLimit = hasContextGauge && effectiveContextTokens / (contextWindow as number) >= 1;
+  const contextOverLimit = hasKnownContextWindow && effectiveContextTokens / effectiveContextWindow >= 1;
   const supportsAutoCompactToggle = agentId !== undefined && AUTO_COMPACT_TOGGLE_AGENTS.has(agentId);
   const supportsCompactionWindow = agentId !== undefined && COMPACTION_WINDOW_AGENTS.has(agentId);
 
@@ -834,7 +834,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           right: 0,
           bottom: `calc(100% + ${8 + overlayLift}px)`,
           // pl aligns the tile row's left edge with the text-input column start:
-          // 1px bar-border + 4px bar-padding + 30px TuneRounded btn + 4px flex-gap = 39px
+          // 1px bar-border + 4px bar-padding + 30px context control + 4px flex-gap = 39px
           pl: "39px",
           pr: "5px",
           display: "flex",
@@ -936,16 +936,16 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           onChange={chooseFiles}
           style={{ position: "absolute", width: 1, height: 1, opacity: 0, pointerEvents: "none" }}
         />
-        {/* One options control: attach files + per-chat work modes. Opens upward.
-            Its colour never changes with the active mode (that lives in a tag). */}
-        <IconButton
-          data-testid="composer-options-button"
-          aria-label={t("composerOptions")}
-          sx={{ flex: "0 0 auto" }}
-          onClick={(event: MouseEvent<HTMLElement>) => openOptionsMenu(event.currentTarget)}
-        >
-          <TuneRoundedIcon sx={{ fontSize: 16 }} />
-        </IconButton>
+        {/* One options control: the context ring replaces the old settings icon
+            and opens the same menu upward. */}
+        <ContextGauge
+          tokens={effectiveContextTokens}
+          window={effectiveContextWindow}
+          hitSize={30}
+          testId="composer-options-button"
+          ariaLabel={`${t("composerOptions")} · ${t("contextUsage")} · ${Math.round((effectiveContextTokens / effectiveContextWindow) * 100)}%`}
+          onClick={(event) => openOptionsMenu(event.currentTarget)}
+        />
         <Menu
           anchorEl={modeMenuAnchor}
           open={Boolean(modeMenuAnchor)}
@@ -1179,13 +1179,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           />
         </Box>
         <Stack direction="row" spacing={0.5} sx={{ alignItems: "center", flex: "0 0 auto" }}>
-          {hasContextGauge && (
-            <ContextGauge
-              tokens={effectiveContextTokens}
-              window={contextWindow as number}
-              onClick={(event) => openOptionsMenu(event.currentTarget)}
-            />
-          )}
           {running ? (
             <IconButton data-testid="composer-stop-button" aria-label={t("stopRun")} tone="danger" onClick={onStop}>
               <StopCircleIcon sx={{ fontSize: 19 }} />

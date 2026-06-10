@@ -1,14 +1,12 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { appendFileSync, chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { readdir, readFile } from "node:fs/promises";
 import { request as httpRequest, type IncomingMessage, type ServerResponse } from "node:http";
 import { homedir, tmpdir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
-import Anthropic from "@anthropic-ai/sdk";
-import type { ModelInfo as AnthropicModelInfo } from "@anthropic-ai/sdk/resources/models";
-import { query, type CanUseTool, type EffortLevel, type Options as ClaudeQueryOptions, type PermissionResult } from "@anthropic-ai/claude-agent-sdk";
 import { chromium, type Browser, type BrowserContext, type ConsoleMessage, type Frame, type FrameLocator, type Locator, type Page, type Request as PlaywrightRequest } from "playwright";
 import type { Plugin, ViteDevServer, PreviewServer } from "vite";
 import { parseGitStatusPorcelain, parseNumstatTotals } from "./src/lib/git-status";
@@ -76,6 +74,7 @@ const WORKSPACE_STATE_FILE = join(WORKSPACE_STATE_DIR, "workspace-state.json");
 const WORKSPACE_DB_FILE = join(WORKSPACE_STATE_DIR, "workspace.db");
 const WORKSPACE_STATE_LOCK_FILE = join(WORKSPACE_STATE_DIR, "workspace-state.lock");
 const RUN_AUDIT_FILE = join(WORKSPACE_STATE_DIR, "run-audit.ndjson");
+const SCHEDULED_WAKEUPS_FILE = join(WORKSPACE_STATE_DIR, "scheduled-wakeups.json");
 const ATTACHMENTS_DIR = join(WORKSPACE_STATE_DIR, "attachments");
 const AMP_READ_ONLY_SETTINGS_FILE = join(WORKSPACE_STATE_DIR, "amp-read-only-settings.json");
 // Account rate-limit snapshots survive restarts here so the composer keeps
@@ -370,7 +369,9 @@ function terminateAgentProcessTree(child: ReturnType<typeof spawn>, signal: Node
 }
 
 const MODEL_DISCOVERY_TIMEOUT_MS = 5_000;
-const ANTHROPIC_MODEL_API_KEY_ENV = ["ANTHROPIC_API_KEY"] as const;
+const AGENT_DETECTION_CACHE_TTL_MS = 5 * 60_000;
+const DISCOVERY_OUTPUT_LIMIT_CHARS = 1_000_000;
+const STDERR_TAIL_LIMIT_CHARS = 4_000;
 const REASONING_LABELS: Record<string, string> = {
   low: "Low",
   medium: "Medium",
@@ -543,12 +544,19 @@ export function parseCodexModelsOutput(output: string): { readonly models: reado
   return { models: uniqueAgentOptions(models), reasoning };
 }
 
-export function parseAnthropicModelInfos(models: readonly AnthropicModelInfo[]): AgentOption[] {
-  return uniqueAgentOptions(
-    models
-      .filter((model) => isDirectAgentModelValue("claude-code", model.id))
-      .map((model) => ({ id: model.id, label: model.display_name || modelLabelFromValue(model.id), value: model.id })),
-  );
+const CLAUDE_CLI_MODEL_ALIASES = [
+  { id: "fable", label: "Fable", markers: ["claude-fable-", "Fable 5"] },
+  { id: "sonnet", label: "Sonnet", markers: ["claude-sonnet-", "Sonnet 4"] },
+  { id: "haiku", label: "Haiku", markers: ["claude-haiku-", "Haiku 4"] },
+] as const;
+
+export function parseClaudeCliModelAliasesSource(source: string): AgentOption[] {
+  const models = CLAUDE_CLI_MODEL_ALIASES.filter((alias) => source.includes(alias.id) && alias.markers.some((marker) => source.includes(marker))).map((alias) => ({
+    id: alias.id,
+    label: alias.label,
+    value: alias.id,
+  }));
+  return models.length > 0 ? [{ id: DEFAULT_AGENT_OPTION_ID, label: "Default" }, ...models] : [];
 }
 
 function skipJsWhitespaceAndComments(source: string, index: number): number {
@@ -731,7 +739,7 @@ function geminiCliPackageRootFromBin(resolvedBin: string): string | null {
   return null;
 }
 
-function parseGeminiCliInstalledModelOptions(resolvedBin: string): TextDiscoveryResult & { readonly models: readonly AgentOption[] } {
+async function parseGeminiCliInstalledModelOptionsAsync(resolvedBin: string): Promise<TextDiscoveryResult & { readonly models: readonly AgentOption[] }> {
   const root = geminiCliPackageRootFromBin(resolvedBin);
   if (!root) {
     return { output: null, error: `${basename(resolvedBin)} package root was not found`, models: [] };
@@ -740,24 +748,38 @@ function parseGeminiCliInstalledModelOptions(resolvedBin: string): TextDiscovery
   if (!existsSync(bundleDir)) {
     return { output: null, error: `${basename(resolvedBin)} bundle directory was not found`, models: [] };
   }
-  const models: AgentOption[] = [];
-  for (const entry of readdirSync(bundleDir).filter((name) => name.endsWith(".js")).sort()) {
-    const file = join(bundleDir, entry);
-    let source: string;
-    try {
-      source = readFileSync(file, "utf8");
-    } catch {
-      continue;
-    }
-    if (!source.includes("modelDefinitions") || !source.includes("isVisible")) {
-      continue;
-    }
-    models.push(...parseGeminiCliModelConfigSource(source));
+  let entries: string[];
+  try {
+    entries = (await readdir(bundleDir)).filter((name) => name.endsWith(".js")).sort();
+  } catch (error) {
+    return { output: null, error: `${basename(resolvedBin)} bundle directory could not be read: ${errorMessage(error)}`, models: [] };
   }
-  const unique = uniqueAgentOptions(models);
-  return unique.length > 0
-    ? { output: null, error: null, models: unique }
+  const sources = await Promise.all(
+    entries.map(async (entry) => {
+      const file = join(bundleDir, entry);
+      try {
+        const source = await readFile(file, "utf8");
+        return source.includes("modelDefinitions") && source.includes("isVisible") ? source : null;
+      } catch {
+        return null;
+      }
+    }),
+  );
+  const models = uniqueAgentOptions(sources.flatMap((source) => (source ? parseGeminiCliModelConfigSource(source) : [])));
+  return models.length > 0
+    ? { output: null, error: null, models }
     : { output: null, error: `${basename(resolvedBin)} installed model config did not expose visible models`, models: [] };
+}
+
+async function parseClaudeCliInstalledModelAliasesAsync(resolvedBin: string): Promise<TextDiscoveryResult & { readonly models: readonly AgentOption[] }> {
+  let source: string;
+  try {
+    source = await readFile(resolvedBin, "latin1");
+  } catch (error) {
+    return { output: null, error: `${basename(resolvedBin)} model aliases could not be read: ${errorMessage(error)}`, models: [] };
+  }
+  const models = parseClaudeCliModelAliasesSource(source);
+  return models.length > 0 ? { output: null, error: null, models } : { output: null, error: `${basename(resolvedBin)} installed model aliases were not found`, models: [] };
 }
 
 interface TextDiscoveryResult {
@@ -765,32 +787,76 @@ interface TextDiscoveryResult {
   readonly error: string | null;
 }
 
-function runResolvedBinText(resolvedBin: string, args: readonly string[]): TextDiscoveryResult {
-  const launch = resolveLaunchCommand(resolvedBin, args);
-  const result = spawnSync(launch.command, launch.args, {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-    timeout: MODEL_DISCOVERY_TIMEOUT_MS,
-    windowsHide: true,
-  });
-  if (result.error || result.status !== 0 || typeof result.stdout !== "string") {
-    const detail =
-      result.error?.message ??
-      (typeof result.stderr === "string" && result.stderr.trim().length > 0 ? result.stderr.trim().split(/\r?\n/)[0] : null) ??
-      (result.signal ? `terminated by ${result.signal}` : `exited with status ${result.status ?? "unknown"}`);
-    return { output: null, error: `${basename(resolvedBin)} ${args.join(" ")} failed: ${detail}` };
-  }
-  const output = result.stdout.trim();
-  return { output: output.length > 0 ? output : null, error: null };
+function appendLimitedText(current: string, chunk: string, maxChars: number): string {
+  const next = `${current}${chunk}`;
+  return next.length > maxChars ? next.slice(next.length - maxChars) : next;
 }
 
-function discoveredAgentOptions(id: string, resolvedBin: string | null): Pick<AgentCliInfo, "models" | "reasoning" | "modes" | "modelDiscoveryError"> {
+function runResolvedBinTextAsync(resolvedBin: string, args: readonly string[]): Promise<TextDiscoveryResult> {
+  const launch = resolveLaunchCommand(resolvedBin, args);
+  return new Promise((resolve) => {
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    let timedOut = false;
+    let child: ReturnType<typeof spawn> | null = null;
+    const finish = (result: TextDiscoveryResult) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try {
+        if (child) {
+          terminateAgentProcessTree(child);
+        }
+      } catch {
+        // process may not have launched yet
+      }
+    }, MODEL_DISCOVERY_TIMEOUT_MS);
+
+    try {
+      child = spawn(launch.command, launch.args, agentProcessSpawnOptions({ stdio: ["ignore", "pipe", "pipe"], windowsHide: true }));
+    } catch (error) {
+      finish({ output: null, error: `${basename(resolvedBin)} ${args.join(" ")} failed: ${errorMessage(error)}` });
+      return;
+    }
+
+    child.stdout?.on("data", (chunk: Buffer) => {
+      stdout = appendLimitedText(stdout, chunk.toString("utf8"), DISCOVERY_OUTPUT_LIMIT_CHARS);
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderr = appendLimitedText(stderr, chunk.toString("utf8"), STDERR_TAIL_LIMIT_CHARS);
+    });
+    child.on("error", (error) => {
+      finish({ output: null, error: `${basename(resolvedBin)} ${args.join(" ")} failed: ${error.message}` });
+    });
+    child.on("close", (code, signal) => {
+      if (timedOut) {
+        finish({ output: null, error: `${basename(resolvedBin)} ${args.join(" ")} timed out after ${MODEL_DISCOVERY_TIMEOUT_MS}ms` });
+        return;
+      }
+      if (code !== 0) {
+        const detail = stderr.trim().split(/\r?\n/)[0] || (signal ? `terminated by ${signal}` : `exited with status ${code ?? "unknown"}`);
+        finish({ output: null, error: `${basename(resolvedBin)} ${args.join(" ")} failed: ${detail}` });
+        return;
+      }
+      const output = stdout.trim();
+      finish({ output: output.length > 0 ? output : null, error: null });
+    });
+  });
+}
+
+async function discoveredAgentOptionsAsync(id: string, resolvedBin: string | null): Promise<Pick<AgentCliInfo, "models" | "reasoning" | "modes" | "modelDiscoveryError">> {
   if (!resolvedBin) {
     return {};
   }
   if (id === "opencode") {
-    const modelOutput = runResolvedBinText(resolvedBin, ["models"]);
-    const agentOutput = runResolvedBinText(resolvedBin, ["agent", "list"]);
+    const [modelOutput, agentOutput] = await Promise.all([runResolvedBinTextAsync(resolvedBin, ["models"]), runResolvedBinTextAsync(resolvedBin, ["agent", "list"])]);
     const models = modelOutput.output ? parseOpenCodeModelsOutput(modelOutput.output) : [];
     const modes = agentOutput.output ? parseOpenCodeAgentsOutput(agentOutput.output) : [];
     const modelDiscoveryError = [modelOutput.error, agentOutput.error].filter((error): error is string => error !== null).join("; ");
@@ -801,16 +867,14 @@ function discoveredAgentOptions(id: string, resolvedBin: string | null): Pick<Ag
     };
   }
   if (id === "claude-code") {
-    const jsonAgentOutput = runResolvedBinText(resolvedBin, ["agents", "--json"]);
-    const agentOutput = jsonAgentOutput.error?.includes("unknown option") ? runResolvedBinText(resolvedBin, ["agents"]) : jsonAgentOutput;
-    const modes = agentOutput.output ? parseClaudeAgentsOutput(agentOutput.output) : [];
+    const parsed = await parseClaudeCliInstalledModelAliasesAsync(resolvedBin);
     return {
-      ...(modes.length > 0 ? { modes } : {}),
-      ...(agentOutput.error ? { modelDiscoveryError: agentOutput.error } : {}),
+      ...(parsed.models.length > 0 ? { models: parsed.models } : {}),
+      ...(parsed.error ? { modelDiscoveryError: parsed.error } : {}),
     };
   }
   if (id === "codex") {
-    const output = runResolvedBinText(resolvedBin, ["debug", "models"]);
+    const output = await runResolvedBinTextAsync(resolvedBin, ["debug", "models"]);
     const parsed = output.output ? parseCodexModelsOutput(output.output) : { models: [], reasoning: [] };
     return {
       ...(parsed.models.length > 0 ? { models: parsed.models } : {}),
@@ -819,49 +883,11 @@ function discoveredAgentOptions(id: string, resolvedBin: string | null): Pick<Ag
     };
   }
   if (id === "gemini") {
-    const parsed = parseGeminiCliInstalledModelOptions(resolvedBin);
+    const parsed = await parseGeminiCliInstalledModelOptionsAsync(resolvedBin);
     return {
       ...(parsed.models.length > 0 ? { models: parsed.models } : {}),
       ...(parsed.error ? { modelDiscoveryError: parsed.error } : {}),
     };
-  }
-  return {};
-}
-
-function firstConfiguredEnvValue(envNames: readonly string[], config: AgentSecretConfig, env: NodeJS.ProcessEnv): string | undefined {
-  for (const envName of envNames) {
-    const value = configuredEnvValueFrom(envName, config, env);
-    if (value && value.trim().length > 0) {
-      return value;
-    }
-  }
-  return undefined;
-}
-
-async function discoveredRemoteAgentOptions(
-  id: string,
-  config: AgentSecretConfig,
-  env: NodeJS.ProcessEnv = process.env,
-): Promise<Pick<AgentCliInfo, "models" | "modelDiscoveryError">> {
-  if (id === "claude-code") {
-    const apiKey = firstConfiguredEnvValue(ANTHROPIC_MODEL_API_KEY_ENV, config, env);
-    if (!apiKey) {
-      return {};
-    }
-    try {
-      const client = new Anthropic({ apiKey, maxRetries: 0, timeout: MODEL_DISCOVERY_TIMEOUT_MS });
-      const models: AnthropicModelInfo[] = [];
-      for await (const model of client.models.list({ limit: 100 })) {
-        models.push(model);
-      }
-      const parsed = parseAnthropicModelInfos(models);
-      return parsed.length > 0 ? { models: parsed } : {};
-    } catch (error) {
-      return { modelDiscoveryError: `Claude model discovery failed: ${errorMessage(error)}` };
-    }
-  }
-  if (id === "gemini") {
-    return {};
   }
   return {};
 }
@@ -896,7 +922,6 @@ export function agentCliInfoForDetection(
     selectable: status !== "unavailable" && status !== "unsupported",
     env: detect.env ?? [],
     installCommand: installCommandForAgent(id)?.join(" ") ?? null,
-    ...(status === "available" ? discoveredAgentOptions(id, resolvedBin) : {}),
   };
 }
 
@@ -909,20 +934,47 @@ function detectAgents(): Record<string, AgentCliInfo> {
   return result;
 }
 
+let agentDetectionCache: { readonly expiresAt: number; readonly value: Record<string, AgentCliInfo> } | null = null;
+let agentDetectionInflight: Promise<Record<string, AgentCliInfo>> | null = null;
+
+function clearAgentDetectionCache(): void {
+  agentDetectionCache = null;
+  agentDetectionInflight = null;
+}
+
+function prewarmAgentDetectionCache(): void {
+  void detectAgentsWithLiveModels().catch((error) => {
+    console.warn(`[rlab] Agent detection prewarm failed: ${errorMessage(error)}`);
+  });
+}
+
 async function detectAgentsWithLiveModels(): Promise<Record<string, AgentCliInfo>> {
+  const now = Date.now();
+  if (agentDetectionCache && agentDetectionCache.expiresAt > now) {
+    return agentDetectionCache.value;
+  }
+  if (agentDetectionInflight) {
+    return agentDetectionInflight;
+  }
+  agentDetectionInflight = detectAgentsWithLiveModelsUncached()
+    .then((value) => {
+      agentDetectionCache = { value, expiresAt: Date.now() + AGENT_DETECTION_CACHE_TTL_MS };
+      return value;
+    })
+    .finally(() => {
+      agentDetectionInflight = null;
+    });
+  return agentDetectionInflight;
+}
+
+async function detectAgentsWithLiveModelsUncached(): Promise<Record<string, AgentCliInfo>> {
   const result: Record<string, AgentCliInfo> = {};
   const config = readAgentSecretConfig();
   await Promise.all(
     Object.entries(DETECT).map(async ([id, cfg]) => {
       const cliInfo = agentCliInfoForDetection(id, cfg, config);
-      const remote = cliInfo.status === "available" ? await discoveredRemoteAgentOptions(id, config) : {};
-      const models = cliInfo.models || remote.models ? uniqueAgentOptions([...(cliInfo.models ?? []), ...(remote.models ?? [])]) : undefined;
-      result[id] = {
-        ...cliInfo,
-        ...remote,
-        ...(models ? { models } : {}),
-        modelDiscoveryError: [cliInfo.modelDiscoveryError, remote.modelDiscoveryError].filter((error): error is string => typeof error === "string" && error.length > 0).join("; ") || undefined,
-      };
+      const discovered = cliInfo.status === "available" ? await discoveredAgentOptionsAsync(id, cliInfo.resolvedBin) : {};
+      result[id] = { ...cliInfo, ...discovered };
     }),
   );
   return result;
@@ -2563,6 +2615,73 @@ export function readRunAuditEvents(file = RUN_AUDIT_FILE): readonly Record<strin
     .filter(isRecord);
 }
 
+function isScheduledWakeupTrigger(value: unknown): value is ScheduledWakeupTrigger {
+  if (!isRecord(value) || typeof value.type !== "string") {
+    return false;
+  }
+  if (value.type === "time") {
+    return typeof value.fireAtMs === "number" && Number.isFinite(value.fireAtMs);
+  }
+  return (
+    value.type === "script" &&
+    typeof value.script === "string" &&
+    value.script.trim().length > 0 &&
+    typeof value.intervalSeconds === "number" &&
+    Number.isFinite(value.intervalSeconds) &&
+    value.intervalSeconds > 0 &&
+    typeof value.nextCheckMs === "number" &&
+    Number.isFinite(value.nextCheckMs)
+  );
+}
+
+function isScheduledWakeupRecord(value: unknown): value is ScheduledWakeupRecord {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    typeof value.createdAtMs === "number" &&
+    typeof value.origin === "string" &&
+    typeof value.cwd === "string" &&
+    typeof value.conversationId === "string" &&
+    typeof value.sourceRunId === "string" &&
+    isRecord(value.request) &&
+    typeof value.request.agent === "string" &&
+    typeof value.request.model === "string" &&
+    typeof value.request.reasoning === "string" &&
+    typeof value.request.mode === "string" &&
+    typeof value.request.prompt === "string" &&
+    typeof value.request.accessMode === "string" &&
+    isScheduledWakeupTrigger(value.trigger)
+  );
+}
+
+function readScheduledWakeupRecords(file = SCHEDULED_WAKEUPS_FILE): ScheduledWakeupRecord[] {
+  if (!existsSync(file)) {
+    return [];
+  }
+  const parsed = JSON.parse(readFileSync(file, "utf8").replace(/^\uFEFF/, "")) as unknown;
+  if (!Array.isArray(parsed)) {
+    throw new Error(`${file} must contain an array of scheduled wakeups.`);
+  }
+  return parsed.filter(isScheduledWakeupRecord);
+}
+
+function writeScheduledWakeupRecords(records: readonly ScheduledWakeupRecord[], file = SCHEDULED_WAKEUPS_FILE): void {
+  writeJsonFileAtomic(file, records, 0o600, false);
+}
+
+function scheduledWakeupSummaries(conversationId?: string): ScheduledWakeupSummary[] {
+  return readScheduledWakeupRecords()
+    .filter((record) => !conversationId || record.conversationId === conversationId)
+    .map((record) => ({
+      id: record.id,
+      conversationId: record.conversationId,
+      agent: record.request.agent,
+      prompt: record.request.prompt,
+      reason: record.reason,
+      trigger: record.trigger,
+    }));
+}
+
 const SEED_PLACEHOLDER_PROJECT_PATHS = new Set(["/root/workspace/rlab", "/root/workspace/rlab/next-ui"]);
 
 function normalizeSeedProjectPaths(state: WorkspaceState): WorkspaceState {
@@ -3640,6 +3759,7 @@ function handleAgentConfig(req: IncomingMessage, res: ServerResponse): void {
         }
         const config = readAgentSecretConfig();
         writeAgentSecretConfig({ env: { ...config.env, [envVar]: apiKey } });
+        clearAgentDetectionCache();
         sendJson(res, 200, { ok: true, agent, envVar, configured: true });
       } catch (error) {
         sendJson(res, agentConfigErrorStatus(error), { error: errorMessage(error) });
@@ -3655,7 +3775,12 @@ function handleAgentConfig(req: IncomingMessage, res: ServerResponse): void {
 // Run an install command to completion and only respond once we know whether it
 // actually succeeded — so the UI can report real success/failure and refresh
 // agent/browser status afterwards (rather than reporting a fire-and-forget spawn).
-function runInstallToCompletion(launch: { readonly command: string; readonly args: readonly string[]; readonly displayCommand: string }, res: ServerResponse, extra: Record<string, unknown> = {}): void {
+function runInstallToCompletion(
+  launch: { readonly command: string; readonly args: readonly string[]; readonly displayCommand: string },
+  res: ServerResponse,
+  extra: Record<string, unknown> = {},
+  onSuccess?: () => void,
+): void {
   let responded = false;
   const respond = (status: number, payload: unknown) => {
     if (responded) {
@@ -3680,6 +3805,7 @@ function runInstallToCompletion(launch: { readonly command: string; readonly arg
   });
   child.on("close", (code) => {
     if (code === 0) {
+      onSuccess?.();
       respond(200, { ok: true, command: launch.displayCommand, ...extra });
       return;
     }
@@ -3701,7 +3827,7 @@ function handleAgentInstall(req: IncomingMessage, res: ServerResponse): void {
         sendJson(res, 500, { error: `Install executable ${command[0]} was not found on PATH.` });
         return;
       }
-      runInstallToCompletion(launch, res, { agent });
+      runInstallToCompletion(launch, res, { agent }, clearAgentDetectionCache);
     } catch (error) {
       sendJson(res, agentInstallErrorStatus(error), { error: errorMessage(error) });
     }
@@ -4194,7 +4320,7 @@ function handleTerminal(req: IncomingMessage, res: ServerResponse): void {
     };
 
     const shell = process.env.SHELL || "/bin/bash";
-    let child: ReturnType<typeof spawn>;
+    let child: ReturnType<typeof spawn> | null = null;
     try {
       child = spawn(shell, ["-lc", command], { cwd, env: process.env, stdio: ["ignore", "pipe", "pipe"] });
     } catch (error) {
@@ -4240,9 +4366,48 @@ export type RunEvent =
   | { type: "status"; level: "info" | "ok" | "warn" | "error"; text: string }
   | { type: "error"; text: string }
   | { type: "session"; id: string }
+  | { type: "wakeup"; prompt: string; reason?: string; toolId?: string; delaySeconds?: number; fireAt?: string; script?: string; intervalSeconds?: number }
+  | { type: "cancel_wakeup"; wakeupId?: string; all?: boolean; reason?: string; toolId?: string }
   | { type: "done"; costUsd?: number; usage?: RunUsage };
 
 type ApprovalDecision = "approved" | "rejected";
+
+interface PermissionUpdate {
+  readonly type: string;
+  readonly rules?: readonly unknown[];
+  readonly behavior?: string;
+  readonly destination?: string;
+}
+
+type PermissionResult =
+  | {
+      readonly behavior: "allow";
+      readonly updatedInput?: Record<string, unknown>;
+      readonly updatedPermissions?: readonly PermissionUpdate[];
+      readonly toolUseID?: string;
+      readonly decisionClassification?: string;
+    }
+  | {
+      readonly behavior: "deny";
+      readonly message: string;
+      readonly interrupt?: boolean;
+      readonly toolUseID?: string;
+      readonly decisionClassification?: string;
+    };
+
+interface CanUseToolContext {
+  readonly signal: AbortSignal;
+  readonly suggestions?: readonly PermissionUpdate[];
+  readonly blockedPath?: string;
+  readonly decisionReason?: string;
+  readonly title?: string;
+  readonly displayName?: string;
+  readonly description?: string;
+  readonly toolUseID: string;
+  readonly agentID?: string;
+}
+
+type CanUseTool = (toolName: string, input: Record<string, unknown>, context: CanUseToolContext) => Promise<PermissionResult>;
 
 interface RunApprovalDecision {
   readonly id: string;
@@ -4276,6 +4441,40 @@ interface RunRequest {
   /** Compaction window override in tokens (Claude `autoCompactWindow`); unset =
    *  the model's full context window. */
   readonly compactWindow?: number;
+}
+
+type ScheduledWakeupTrigger =
+  | { readonly type: "time"; readonly fireAtMs: number }
+  | {
+      readonly type: "script";
+      readonly script: string;
+      readonly intervalSeconds: number;
+      readonly nextCheckMs: number;
+      readonly lastCheckedAtMs?: number;
+      readonly lastExitCode?: number;
+      readonly lastError?: string;
+    };
+
+interface ScheduledWakeupRecord {
+  readonly id: string;
+  readonly createdAtMs: number;
+  readonly origin: string;
+  readonly cwd: string;
+  readonly conversationId: string;
+  readonly sourceRunId: string;
+  readonly sourceToolId?: string;
+  readonly reason?: string;
+  readonly trigger: ScheduledWakeupTrigger;
+  readonly request: RunRequest;
+}
+
+export interface ScheduledWakeupSummary {
+  readonly id: string;
+  readonly conversationId: string;
+  readonly agent: string;
+  readonly prompt: string;
+  readonly reason?: string;
+  readonly trigger: ScheduledWakeupTrigger;
 }
 
 /** A single rate-limit window. An account can be bounded by several at once —
@@ -4479,6 +4678,8 @@ interface RunArgsRequest {
   readonly accessMode?: AgentAccessMode;
   readonly resume?: string;
   readonly sessionId?: string;
+  readonly autoCompact?: boolean;
+  readonly compactWindow?: number;
 }
 
 // The in-app Preview tab is native iframe UI for the user; the /bridge endpoints
@@ -4588,13 +4789,15 @@ interface RunSpec {
   readonly createTranslator: () => (line: string) => RunEvent[];
 }
 
-const CLAUDE_SAFE_READ_TOOLS = ["Read", "Glob", "Grep", "LS"] as const;
-const CLAUDE_READ_ONLY_TOOLS = [...CLAUDE_SAFE_READ_TOOLS, "AskUserQuestion"] as const;
-const CLAUDE_EFFORT_LEVELS = new Set<EffortLevel>(["low", "medium", "high", "xhigh", "max"]);
+const CLAUDE_READ_ONLY_TOOLS = ["Read", "Glob", "Grep", "LS", "AskUserQuestion", "ScheduleWakeup"] as const;
+const CLAUDE_EFFORT_LEVELS = new Set(["low", "medium", "high", "xhigh", "max"]);
 const CLAUDE_CHAT_UI_SYSTEM_PROMPT = [
   "When you need user input that blocks progress, use the AskUserQuestion tool instead of asking as plain text.",
   "Use AskUserQuestion for concrete choices, clarifying questions, or option selection that the chat UI should render as interactive controls.",
   "Do not create a numbered question list in prose when the question can be represented with AskUserQuestion options.",
+  "When you need to wake up later in this same rlab chat, use ScheduleWakeup with the exact follow-up prompt; rlab persists and fires that wakeup server-side.",
+  "ScheduleWakeup supports delaySeconds/fireAt for time wakeups and script plus intervalSeconds for condition wakeups; the script is checked server-side and exit code 0 fires the wakeup.",
+  "To cancel scheduled wakeups in this chat, call ScheduleWakeup with action=\"cancel\" and either wakeupId/id or all=true.",
 ].join("\n");
 const CODEX_PLAN_PROMPT_PREFIX = [
   "Plan mode is active.",
@@ -4689,8 +4892,8 @@ function modeForProfile(profile: AgentProfile): string | undefined {
   return resolveAgentModeValue(profile.agent, profile.mode) ?? (profile.mode !== DEFAULT_AGENT_OPTION_ID && isDirectAgentModeValue(profile.agent, profile.mode) ? profile.mode : undefined);
 }
 
-function asClaudeEffort(value: string | undefined): EffortLevel | undefined {
-  return value && CLAUDE_EFFORT_LEVELS.has(value as EffortLevel) ? (value as EffortLevel) : undefined;
+function asClaudeEffort(value: string | undefined): string | undefined {
+  return value && CLAUDE_EFFORT_LEVELS.has(value) ? value : undefined;
 }
 
 function codexPromptForMode(prompt: string, mode: string | undefined): string {
@@ -4818,79 +5021,21 @@ export function parseRunRequestPayload(body: string): ParsedRunRequestPayload {
   };
 }
 
-function claudePermissionModeForRequest(request: RunRequest): ClaudeQueryOptions["permissionMode"] {
-  const profile = normalizeAgentProfile(request, "claude-code");
-  const mode = modeForProfile(profile);
-  if (request.accessMode === "read-only" || mode === "plan") {
-    return "plan";
-  }
-  // Unrestricted is the agent's "do anything" mode: bypass every permission gate
-  // so Claude runs tools without surfacing an approval prompt.
-  return "bypassPermissions";
-}
-
-function claudeToolsForRequest(request: RunRequest): ClaudeQueryOptions["tools"] {
-  const profile = normalizeAgentProfile(request, "claude-code");
-  const mode = modeForProfile(profile);
-  if (request.accessMode === "read-only" || mode === "plan") {
-    return [...CLAUDE_READ_ONLY_TOOLS];
-  }
-  return { type: "preset", preset: "claude_code" };
-}
-
-export function buildClaudeSdkOptions(request: RunRequest, cwd: string, abortController: AbortController, canUseTool: CanUseTool): ClaudeQueryOptions {
-  const options: ClaudeQueryOptions = {
-    abortController,
-    allowedTools: [...CLAUDE_SAFE_READ_TOOLS],
-    canUseTool,
-    cwd,
-    // Stream partial messages so the chat renders token-by-token; without this the
-    // SDK only emits complete turns and the UI updates in one jump per turn.
-    includePartialMessages: true,
-    // Auto-compact the conversation when the context window fills, exactly like
-    // the interactive Claude CLI (which enables this by default). Headless SDK
-    // runs don't load user settings, so without this a resumed session re-reads
-    // the full uncompacted history on every tool round-trip — millions of
-    // cache-read tokens per message on long threads. Keeps the active context
-    // bounded so per-message limit usage stays sane. The user can toggle this and
-    // set the compaction window per conversation from the composer options menu.
-    settings: {
-      autoCompactEnabled: request.autoCompact ?? true,
-      ...(typeof request.compactWindow === "number" && request.compactWindow > 0 ? { autoCompactWindow: request.compactWindow } : {}),
-    },
-    permissionMode: claudePermissionModeForRequest(request),
-    systemPrompt: { type: "preset", preset: "claude_code", append: CLAUDE_CHAT_UI_SYSTEM_PROMPT },
-    tools: claudeToolsForRequest(request),
-  };
-  const profile = normalizeAgentProfile(request, "claude-code");
-  const model = modelForProfile(profile);
-  if (model) {
-    options.model = model;
-  }
-  const effort = asClaudeEffort(reasoningForProfile(profile));
-  if (effort) {
-    options.effort = effort;
-  }
-  const agentName = claudeAgentNameFromMode(modeForProfile(profile) ?? "");
-  if (agentName) {
-    options.agent = agentName;
-  }
-  if (request.resume) {
-    options.resume = request.resume;
-  }
-  return options;
-}
-
 export function buildClaudeRunArgs(request: RunArgsRequest): string[] {
   const profile = profileForArgs("claude-code", request);
   const accessMode = request.accessMode ?? "read-only";
   const mode = modeForProfile(profile);
-  const args = ["-p", request.prompt, "--output-format", "stream-json", "--verbose", "--include-partial-messages"];
+  const args = ["-p", request.prompt, "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--append-system-prompt", CLAUDE_CHAT_UI_SYSTEM_PROMPT];
+  const settings: Record<string, boolean | number> = { autoCompactEnabled: request.autoCompact ?? true };
+  if (typeof request.compactWindow === "number" && request.compactWindow > 0) {
+    settings.autoCompactWindow = request.compactWindow;
+  }
+  args.push("--settings", JSON.stringify(settings));
   const model = modelForProfile(profile);
   if (model) {
     args.push("--model", model);
   }
-  const effort = reasoningForProfile(profile);
+  const effort = asClaudeEffort(reasoningForProfile(profile));
   if (effort) {
     args.push("--effort", effort);
   }
@@ -4899,10 +5044,16 @@ export function buildClaudeRunArgs(request: RunArgsRequest): string[] {
     args.push("--agent", agentName);
   }
   if (accessMode === "read-only" || mode === "plan") {
-    args.push("--permission-mode", "plan");
+    args.push("--permission-mode", "plan", "--tools", CLAUDE_READ_ONLY_TOOLS.join(","));
   } else if (accessMode === "unrestricted") {
     // The CLI's "do anything" flag — no permission prompts at all.
     args.push("--dangerously-skip-permissions");
+  }
+  if (request.sessionId) {
+    args.push("--session-id", request.sessionId);
+  }
+  if (request.resume) {
+    args.push("--resume", request.resume);
   }
   return args;
 }
@@ -5734,6 +5885,325 @@ export function activeBackgroundRunSnapshotsFromHandles(handles: ReadonlyMap<str
 
 function activeBackgroundRunSnapshots(): ActiveBackgroundRunSnapshot[] {
   return activeBackgroundRunSnapshotsFromHandles(backgroundRunHandles);
+}
+
+const scheduledWakeupTimers = new Map<string, ReturnType<typeof setTimeout>>();
+let scheduledWakeupsStarted = false;
+const MAX_WAKEUP_TIMER_DELAY_MS = 2_147_483_647;
+const SCRIPT_WAKEUP_TIMEOUT_MS = 30_000;
+
+function wakeupTimerDelay(targetMs: number): number {
+  return Math.max(0, Math.min(MAX_WAKEUP_TIMER_DELAY_MS, targetMs - Date.now()));
+}
+
+function serverNowLabel(): string {
+  return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function scheduledWakeupId(): string {
+  return `wakeup-${Date.now()}-${randomUUID().slice(0, 8)}`;
+}
+
+function scheduledRunId(prefix: "run" | "u" | "a"): string {
+  return `${prefix}-${Date.now()}-${randomUUID().slice(0, 8)}`;
+}
+
+function persistScheduledWakeupMap(records: Iterable<ScheduledWakeupRecord>): void {
+  writeScheduledWakeupRecords([...records].sort((a, b) => a.createdAtMs - b.createdAtMs));
+}
+
+function readScheduledWakeupMap(): Map<string, ScheduledWakeupRecord> {
+  return new Map(readScheduledWakeupRecords().map((record) => [record.id, record]));
+}
+
+function clearScheduledWakeupTimer(id: string): void {
+  const timer = scheduledWakeupTimers.get(id);
+  if (timer) {
+    clearTimeout(timer);
+    scheduledWakeupTimers.delete(id);
+  }
+}
+
+function removeScheduledWakeupRecord(id: string): void {
+  clearScheduledWakeupTimer(id);
+  const records = readScheduledWakeupMap();
+  if (records.delete(id)) {
+    persistScheduledWakeupMap(records.values());
+  }
+}
+
+function cancelScheduledWakeups(options: { readonly conversationId?: string; readonly wakeupId?: string; readonly all?: boolean }): number {
+  const records = readScheduledWakeupMap();
+  const removeIds: string[] = [];
+  for (const record of records.values()) {
+    if (options.conversationId && record.conversationId !== options.conversationId) {
+      continue;
+    }
+    if (options.wakeupId) {
+      if (record.id === options.wakeupId) {
+        removeIds.push(record.id);
+      }
+      continue;
+    }
+    if (options.all) {
+      removeIds.push(record.id);
+    }
+  }
+  for (const id of removeIds) {
+    clearScheduledWakeupTimer(id);
+    records.delete(id);
+  }
+  if (removeIds.length > 0) {
+    persistScheduledWakeupMap(records.values());
+  }
+  return removeIds.length;
+}
+
+function updateScheduledWakeupRecord(record: ScheduledWakeupRecord): void {
+  const records = readScheduledWakeupMap();
+  records.set(record.id, record);
+  persistScheduledWakeupMap(records.values());
+}
+
+function wakeupStatusText(record: ScheduledWakeupRecord, locale: Locale): string {
+  if (record.trigger.type === "time") {
+    const when = new Date(record.trigger.fireAtMs).toLocaleString();
+    return locale === "ru" ? `Wakeup установлен · ${when}` : `Wakeup scheduled · ${when}`;
+  }
+  return locale === "ru"
+    ? `Wakeup script установлен · каждые ${record.trigger.intervalSeconds}s`
+    : `Wakeup script installed · every ${record.trigger.intervalSeconds}s`;
+}
+
+function wakeupCancelStatusText(count: number, locale: Locale): string {
+  return locale === "ru" ? `Wakeup отменён · ${count}` : `Wakeup canceled · ${count}`;
+}
+
+function shellScriptLaunch(script: string): { readonly command: string; readonly args: readonly string[] } {
+  return process.platform === "win32"
+    ? { command: process.env.ComSpec ?? "cmd.exe", args: ["/d", "/s", "/c", script] }
+    : { command: "/bin/sh", args: ["-lc", script] };
+}
+
+function runWakeupScript(record: ScheduledWakeupRecord): Promise<{ readonly ok: boolean; readonly exitCode?: number; readonly error?: string }> {
+  if (record.trigger.type !== "script") {
+    return Promise.resolve({ ok: true });
+  }
+  const trigger = record.trigger;
+  return new Promise((resolveScript) => {
+    const launch = shellScriptLaunch(trigger.script);
+    let stderr = "";
+    let settled = false;
+    let child: ReturnType<typeof spawn> | null = null;
+    const finish = (result: { readonly ok: boolean; readonly exitCode?: number; readonly error?: string }) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeout);
+      resolveScript(result);
+    };
+    const timeout = setTimeout(() => {
+      try {
+        if (child) {
+          terminateAgentProcessTree(child);
+        }
+      } catch {
+        // already gone
+      }
+      finish({ ok: false, error: `script timed out after ${Math.round(SCRIPT_WAKEUP_TIMEOUT_MS / 1000)}s` });
+    }, SCRIPT_WAKEUP_TIMEOUT_MS);
+    try {
+      child = spawn(launch.command, [...launch.args], agentProcessSpawnOptions({ cwd: record.cwd, env: { ...process.env, ...readAgentSecretConfig().env }, stdio: ["ignore", "ignore", "pipe"] }));
+    } catch (error) {
+      finish({ ok: false, error: errorMessage(error) });
+      return;
+    }
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", (error) => finish({ ok: false, error: error.message }));
+    child.on("close", (code) => finish({ ok: code === 0, exitCode: code ?? undefined, error: code === 0 ? undefined : clip(stderr.trim() || `exit ${code ?? "unknown"}`, 300) }));
+  });
+}
+
+function wakeupRequestWithLatestSession(record: ScheduledWakeupRecord): RunRequest {
+  ensureWorkspaceDb();
+  const conversation = readConversation(record.conversationId);
+  const agent = isAgentId(record.request.agent) ? record.request.agent : null;
+  const resume = agent ? conversation?.agentSessions?.[agent] : undefined;
+  return resume ? { ...record.request, resume } : record.request;
+}
+
+async function fireScheduledWakeup(record: ScheduledWakeupRecord): Promise<void> {
+  removeScheduledWakeupRecord(record.id);
+  const request = wakeupRequestWithLatestSession(record);
+  const runId = scheduledRunId("run");
+  const userMessageTime = serverNowLabel();
+  const body = {
+    ...request,
+    cwd: record.cwd,
+    conversationId: record.conversationId,
+    runId,
+    userMessageId: scheduledRunId("u"),
+    userMessageTime,
+    agentMessageId: scheduledRunId("a"),
+    agentMessageTime: userMessageTime,
+  };
+  appendRunAuditEvent(RUN_AUDIT_FILE, {
+    type: "wakeup_fired",
+    wakeupId: record.id,
+    sourceRunId: record.sourceRunId,
+    runId,
+    conversationId: record.conversationId,
+    agent: request.agent,
+  });
+  try {
+    const response = await fetch(`${record.origin}/api/run`, {
+      method: "POST",
+      headers: { "Content-Type": JSON_CONTENT_TYPE },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      throw new Error(`HTTP ${response.status}${text ? ` ${clip(text, 300)}` : ""}`);
+    }
+    const reader = response.body?.getReader();
+    if (!reader) {
+      return;
+    }
+    for (;;) {
+      const { done } = await reader.read();
+      if (done) {
+        break;
+      }
+    }
+  } catch (error) {
+    appendRunAuditEvent(RUN_AUDIT_FILE, {
+      type: "wakeup_run_failed",
+      wakeupId: record.id,
+      sourceRunId: record.sourceRunId,
+      conversationId: record.conversationId,
+      error: errorMessage(error),
+    });
+  }
+}
+
+async function checkScriptWakeup(record: ScheduledWakeupRecord): Promise<void> {
+  if (record.trigger.type !== "script") {
+    await fireScheduledWakeup(record);
+    return;
+  }
+  const result = await runWakeupScript(record);
+  if (result.ok) {
+    await fireScheduledWakeup(record);
+    return;
+  }
+  const nextRecord: ScheduledWakeupRecord = {
+    ...record,
+    trigger: {
+      ...record.trigger,
+      nextCheckMs: Date.now() + record.trigger.intervalSeconds * 1000,
+      lastCheckedAtMs: Date.now(),
+      ...(result.exitCode === undefined ? {} : { lastExitCode: result.exitCode }),
+      ...(result.error ? { lastError: result.error } : {}),
+    },
+  };
+  updateScheduledWakeupRecord(nextRecord);
+  armScheduledWakeup(nextRecord);
+}
+
+function armScheduledWakeup(record: ScheduledWakeupRecord): void {
+  clearScheduledWakeupTimer(record.id);
+  const target = record.trigger.type === "time" ? record.trigger.fireAtMs : record.trigger.nextCheckMs;
+  scheduledWakeupTimers.set(
+    record.id,
+    setTimeout(() => {
+      scheduledWakeupTimers.delete(record.id);
+      void (record.trigger.type === "script" ? checkScriptWakeup(record) : fireScheduledWakeup(record));
+    }, wakeupTimerDelay(target)),
+  );
+}
+
+function ensureScheduledWakeupsStarted(): void {
+  if (scheduledWakeupsStarted) {
+    return;
+  }
+  scheduledWakeupsStarted = true;
+  for (const record of readScheduledWakeupRecords()) {
+    armScheduledWakeup(record);
+  }
+}
+
+function normalizeWakeupTrigger(event: Extract<RunEvent, { type: "wakeup" }>): ScheduledWakeupTrigger {
+  const now = Date.now();
+  if (event.script) {
+    if (event.intervalSeconds === undefined || event.intervalSeconds <= 0 || !Number.isFinite(event.intervalSeconds)) {
+      throw new Error("Script wakeup requires a positive intervalSeconds.");
+    }
+    let initialCheckMs = now + event.intervalSeconds * 1000;
+    if (event.fireAt) {
+      const fireAtMs = Date.parse(event.fireAt);
+      if (!Number.isFinite(fireAtMs)) {
+        throw new Error(`Invalid wakeup fireAt: ${event.fireAt}`);
+      }
+      initialCheckMs = fireAtMs;
+    } else if (event.delaySeconds !== undefined) {
+      if (event.delaySeconds <= 0 || !Number.isFinite(event.delaySeconds)) {
+        throw new Error("delaySeconds must be positive.");
+      }
+      initialCheckMs = now + event.delaySeconds * 1000;
+    }
+    return { type: "script", script: event.script, intervalSeconds: event.intervalSeconds, nextCheckMs: initialCheckMs };
+  }
+  if (event.fireAt) {
+    const fireAtMs = Date.parse(event.fireAt);
+    if (!Number.isFinite(fireAtMs)) {
+      throw new Error(`Invalid wakeup fireAt: ${event.fireAt}`);
+    }
+    return { type: "time", fireAtMs };
+  }
+  if (event.delaySeconds === undefined || event.delaySeconds <= 0 || !Number.isFinite(event.delaySeconds)) {
+    throw new Error("Wakeup requires positive delaySeconds, fireAt, or script.");
+  }
+  return { type: "time", fireAtMs: now + event.delaySeconds * 1000 };
+}
+
+function scheduleWakeupFromRunEvent(
+  event: Extract<RunEvent, { type: "wakeup" }>,
+  request: RunRequest,
+  cwd: string,
+  origin: string,
+  binding: BackgroundRunBinding | null,
+): ScheduledWakeupRecord {
+  if (!binding) {
+    throw new Error("Wakeup scheduling requires a conversation-bound run.");
+  }
+  const record: ScheduledWakeupRecord = {
+    id: scheduledWakeupId(),
+    createdAtMs: Date.now(),
+    origin,
+    cwd,
+    conversationId: binding.conversationId,
+    sourceRunId: binding.runId,
+    sourceToolId: event.toolId,
+    reason: event.reason,
+    trigger: normalizeWakeupTrigger(event),
+    request: { ...request, prompt: event.prompt },
+  };
+  const records = readScheduledWakeupMap();
+  records.set(record.id, record);
+  persistScheduledWakeupMap(records.values());
+  armScheduledWakeup(record);
+  appendRunAuditEvent(RUN_AUDIT_FILE, {
+    type: "wakeup_scheduled",
+    wakeupId: record.id,
+    sourceRunId: binding.runId,
+    conversationId: binding.conversationId,
+    agent: request.agent,
+    trigger: record.trigger.type,
+  });
+  return record;
 }
 
 function subscribeBackgroundRun(runId: string, subscriber: BackgroundRunSubscriber): (() => void) | null {
@@ -6678,6 +7148,65 @@ function toolInput(tool: StreamedTool): Record<string, unknown> | undefined {
   return tool.inputJson.trim() ? parseJsonRecord(tool.inputJson) ?? tool.input : tool.input;
 }
 
+function numericWakeupField(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value !== "string" || value.trim().length === 0) {
+    return undefined;
+  }
+  const parsed = Number(value.trim());
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function isWakeupToolName(name: string): boolean {
+  const leaf = name.split("/").at(-1)?.toLowerCase() ?? name.toLowerCase();
+  return leaf === "schedulewakeup" || leaf === "schedule_wakeup" || leaf === "rlab_schedule_wakeup" || leaf === "wakeup";
+}
+
+function wakeupFollowupEvents(id: string, name: string, input: Record<string, unknown> | undefined, ok: boolean): RunEvent[] {
+  if (!isWakeupToolName(name)) {
+    return [];
+  }
+  if (!ok) {
+    return [{ type: "error", text: `${name} failed; wakeup was not scheduled.` }];
+  }
+  const action = firstString(input, ["action", "operation", "mode"])?.toLowerCase();
+  const cancelRequested = action === "cancel" || action === "delete" || action === "remove" || input?.cancel === true || input?.cancelled === true || input?.canceled === true;
+  if (cancelRequested) {
+    const wakeupId = firstString(input, ["wakeupId", "wakeup_id", "id"]);
+    const target = firstString(input, ["target", "scope"])?.toLowerCase();
+    const all = input?.all === true || target === "all" || target === "chat" || !wakeupId;
+    return [{ type: "cancel_wakeup", toolId: id, ...(wakeupId ? { wakeupId } : {}), all, reason: firstString(input, ["reason", "description"]) }];
+  }
+  const prompt = firstString(input, ["prompt", "message", "task"]);
+  if (!prompt) {
+    return [{ type: "error", text: `${name} requires a non-empty prompt.` }];
+  }
+  const delaySeconds = numericWakeupField(input?.delaySeconds ?? input?.delay_seconds ?? input?.delay);
+  const fireAt = firstString(input, ["fireAt", "fire_at", "at", "time", "date"]);
+  const script = firstString(input, ["script", "conditionScript", "condition_script", "command"]);
+  const intervalSeconds = numericWakeupField(input?.intervalSeconds ?? input?.interval_seconds ?? input?.pollSeconds ?? input?.poll_seconds);
+  if (delaySeconds === undefined && !fireAt && !script) {
+    return [{ type: "error", text: `${name} requires delaySeconds, fireAt, or script.` }];
+  }
+  if (script && intervalSeconds === undefined) {
+    return [{ type: "error", text: `${name} script trigger requires intervalSeconds.` }];
+  }
+  return [
+    {
+      type: "wakeup",
+      toolId: id,
+      prompt,
+      reason: firstString(input, ["reason", "description"]),
+      ...(delaySeconds === undefined ? {} : { delaySeconds }),
+      ...(fireAt ? { fireAt } : {}),
+      ...(script ? { script } : {}),
+      ...(intervalSeconds === undefined ? {} : { intervalSeconds }),
+    },
+  ];
+}
+
 /** A running card for a diff tool, with the bulky diff-trigger fields stripped
  *  from its args so the frontend doesn't build a second (clipped) diff from the
  *  card — the backend's own diff event is the single source of truth. */
@@ -6714,6 +7243,10 @@ function toolResultEvents(tool: StreamedTool | undefined, id: string, ok: boolea
     return [];
   }
   if (tool) {
+    const wakeupEvents = wakeupFollowupEvents(id, tool.name, toolInput(tool), ok);
+    if (wakeupEvents.length > 0) {
+      return [{ type: "tool_result", id, ok, output: resultText(output) }, ...wakeupEvents];
+    }
     const rich = richToolEvents(id, tool.name, toolInput(tool), ok ? "ok" : "error", output);
     if (isDiffTool(tool.name)) {
       // Settle the diff tool's running card and refresh its diff.
@@ -6805,6 +7338,10 @@ function translateClaudeMessage(msg: Record<string, unknown>, state: ClaudeStrea
     return events;
   }
   const type = msg.type;
+  if (type === "rate_limit_event" && isRecord(msg.rate_limit_info)) {
+    recordClaudeRateLimit("claude-code", msg.rate_limit_info);
+    return events;
+  }
 
   if (type === "system" && msg.subtype === "init") {
     const model = typeof msg.model === "string" ? msg.model : "agent";
@@ -7404,6 +7941,7 @@ function geminiToolEvents(value: unknown): RunEvent[] {
           output: resultText(tool.resultDisplay ?? tool.result ?? tool.output ?? ""),
         });
       }
+      events.push(...wakeupFollowupEvents(id, name, input, ok));
     }
   });
   return events;
@@ -7635,6 +8173,7 @@ function opencodeToolEvents(msg: Record<string, unknown>, part: Record<string, u
         output: resultText(output ?? ""),
       });
     }
+    events.push(...wakeupFollowupEvents(id, name, input, ok));
   }
   return events;
 }
@@ -7689,6 +8228,7 @@ function opencodeToolLifecycleEvents(msg: Record<string, unknown>): RunEvent[] {
   const events: RunEvent[] = [{ type: "tool", id, name, summary: clip(summary, 80), args: toArgs(input) }];
   if (state === "ok" || state === "error") {
     events.push({ type: "tool_result", id, ok: state === "ok", output: resultText(output ?? "") });
+    events.push(...wakeupFollowupEvents(id, name, input, state === "ok"));
   }
   return events;
 }
@@ -7948,70 +8488,6 @@ function createRunEventSender(res: ServerResponse): { readonly send: (event: Run
     },
     isClosed: () => closed || res.writableEnded,
   };
-}
-
-function translateSdkMessage(translate: (line: string) => RunEvent[], message: unknown): RunEvent[] {
-  try {
-    return translate(JSON.stringify(message));
-  } catch (error) {
-    return [{ type: "error", text: error instanceof Error ? error.message : String(error) }];
-  }
-}
-
-async function runClaudeSdk(
-  request: RunRequest,
-  cwd: string,
-  res: ServerResponse,
-  send: (event: RunEvent) => void,
-  sendDone: () => void,
-  end: () => void,
-  binding: BackgroundRunBinding | null,
-  accumulator: BackgroundRunAccumulator | null,
-): Promise<void> {
-  const abortController = new AbortController();
-  res.on("close", () => {
-    if (!binding && !abortController.signal.aborted) {
-      abortController.abort();
-    }
-  });
-  if (binding) {
-    backgroundRunHandles.set(binding.runId, {
-      binding,
-      startedAt: new Date().toISOString(),
-      cancel: () => {
-        if (!abortController.signal.aborted) {
-          abortController.abort();
-        }
-      },
-    });
-  }
-  const translate = createClaudeStreamTranslator();
-  const canUseTool = createRunApprovalHandler(send, binding?.runId, request.accessMode === "unrestricted");
-
-  try {
-    for await (const message of query({ prompt: request.prompt, options: buildClaudeSdkOptions(request, cwd, abortController, canUseTool) })) {
-      // Capture account rate-limit snapshots Claude emits in the stream so the
-      // composer can show the current 5-hour / weekly window state.
-      if (message.type === "rate_limit_event" && isRecord(message.rate_limit_info)) {
-        recordClaudeRateLimit(request.agent, message.rate_limit_info);
-      }
-      for (const event of translateSdkMessage(translate, message)) {
-        send(event);
-      }
-    }
-  } catch (error) {
-    if (!abortController.signal.aborted) {
-      send({ type: "error", text: error instanceof Error ? error.message : String(error) });
-    }
-  } finally {
-    if (binding && accumulator) {
-      finishPersistedBackgroundRun(binding, accumulator, abortController.signal.aborted);
-      notifyBackgroundRunUpdate(binding, true);
-      backgroundRunHandles.delete(binding.runId);
-    }
-    sendDone();
-    end();
-  }
 }
 
 // --- OpenCode via its HTTP server (like vibe-kanban) ------------------------
@@ -8305,6 +8781,16 @@ export function codexAppServerItemEvents(item: Record<string, unknown>, complete
         const ok = String(item.status ?? "").toLowerCase() === "completed";
         const result = item.result ?? item.error;
         events.push({ type: "tool_result", id: callId, ok, output: resultText(result ?? "") });
+        const input = isRecord(item.input)
+          ? item.input
+          : isRecord(item.arguments)
+            ? item.arguments
+            : isRecord(item.args)
+              ? item.args
+              : isRecord(item.params)
+                ? item.params
+                : undefined;
+        events.push(...wakeupFollowupEvents(callId, tool, input, ok));
       }
       return events;
     }
@@ -8747,6 +9233,36 @@ function handleRunAttach(req: IncomingMessage, res: ServerResponse): void {
   sendUpdate(initial);
 }
 
+function handleWakeups(req: IncomingMessage, res: ServerResponse): void {
+  try {
+    const params = new URL(req.url ?? "/", "http://localhost").searchParams;
+    if (req.method === "DELETE") {
+      const id = params.get("id")?.trim() ?? "";
+      const conversationId = params.get("conversationId")?.trim() ?? "";
+      if (!id) {
+        sendJson(res, 400, { error: "Missing wakeup id." });
+        return;
+      }
+      const canceled = cancelScheduledWakeups({ wakeupId: id, conversationId: conversationId || undefined });
+      if (canceled === 0) {
+        sendJson(res, 404, { error: "Wakeup not found." });
+        return;
+      }
+      sendJson(res, 200, { ok: true, canceled });
+      return;
+    }
+    if (req.method !== "GET") {
+      res.statusCode = 405;
+      res.end();
+      return;
+    }
+    const conversationId = params.get("conversationId")?.trim() ?? "";
+    sendJson(res, 200, { wakeups: scheduledWakeupSummaries(conversationId || undefined) });
+  } catch (error) {
+    sendJson(res, 500, { error: errorMessage(error) });
+  }
+}
+
 function handleRun(req: IncomingMessage, res: ServerResponse): void {
   let bodyAccumulator: JsonBodyAccumulator = { body: "", bytes: 0 };
   let bodyReadError: Error | null = null;
@@ -8862,7 +9378,25 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
     setNdjsonStreamHeaders(res);
     const sender = createRunEventSender(res);
     let accumulator: BackgroundRunAccumulator | null = null;
+    let requestForWakeups: RunRequest | null = null;
     const send = (event: RunEvent) => {
+      if (event.type === "wakeup") {
+        const publicEvent: RunEvent = requestForWakeups
+          ? (() => {
+              try {
+                const record = scheduleWakeupFromRunEvent(event, requestForWakeups, cwd, origin, binding);
+                return { type: "status", level: "ok", text: wakeupStatusText(record, cachedWorkspaceLocale) };
+              } catch (error) {
+                return { type: "error", text: errorMessage(error) };
+              }
+            })()
+          : { type: "error", text: "Wakeup scheduling failed: run request is not initialised." };
+        sender.send(publicEvent);
+        if (binding && accumulator) {
+          applyBackgroundRunEvent(binding, accumulator, publicEvent);
+        }
+        return;
+      }
       sender.send(event);
       if (binding && accumulator) {
         applyBackgroundRunEvent(binding, accumulator, event);
@@ -8882,6 +9416,7 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
     // via a "session" event from their stream translators.
     const assignedSessionId = !resume && agent === "gemini" ? randomUUID() : undefined;
     const request: RunRequest = { agent, model, reasoning, mode, prompt, accessMode, resume, sessionId: assignedSessionId, autoCompact, compactWindow };
+    requestForWakeups = request;
     if (assignedSessionId) {
       send({ type: "session", id: assignedSessionId });
     }
@@ -8914,11 +9449,6 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
     } catch (error) {
       send({ type: "error", text: `Failed to write run audit event: ${errorMessage(error)}` });
       finishAndEnd();
-      return;
-    }
-
-    if (agent === "claude-code") {
-      void runClaudeSdk(executionRequest, cwd, res, send, sendDone, sender.end, binding, accumulator);
       return;
     }
 
@@ -8995,7 +9525,7 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
       }
     });
     child.stderr?.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString();
+      stderr = appendLimitedText(stderr, chunk.toString("utf8"), STDERR_TAIL_LIMIT_CHARS);
     });
     child.on("error", (err) => {
       send({ type: "error", text: `Failed to launch ${spec.bin}: ${err.message}` });
@@ -9157,6 +9687,7 @@ function useExactApi(server: ViteDevServer | PreviewServer, path: string, handle
 }
 
 function attach(server: ViteDevServer | PreviewServer): void {
+  ensureScheduledWakeupsStarted();
   server.middlewares.use(PREVIEW_PROXY_PREFIX, handlePreviewProxy);
   useExactApi(server, "/api/health", methodOnly("GET", (_req, res) => {
     const health = storageHealthSnapshot();
@@ -9193,6 +9724,7 @@ function attach(server: ViteDevServer | PreviewServer): void {
       }
     })();
   }));
+  prewarmAgentDetectionCache();
   useExactApi(server, "/api/agent-config", handleAgentConfig);
   useExactApi(server, "/api/agent-install", methodOnly("POST", handleAgentInstall));
   useExactApi(server, "/api/playwright-install", methodOnly("POST", handlePlaywrightInstall));
@@ -9215,6 +9747,7 @@ function attach(server: ViteDevServer | PreviewServer): void {
   useExactApi(server, "/api/git-init", methodOnly("POST", handleGitInit));
   useExactApi(server, "/api/terminal", methodOnly("POST", handleTerminal));
   useExactApi(server, "/api/runs", methodOnly("GET", handleActiveRuns));
+  useExactApi(server, "/api/wakeups", methodOnly("GET", handleWakeups));
   useExactApi(server, "/api/run-attach", methodOnly("GET", handleRunAttach));
   useExactApi(server, "/api/run", methodOnly("POST", handleRun));
   useExactApi(server, "/api/run-approval", methodOnly("POST", handleRunApproval));

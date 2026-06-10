@@ -15,6 +15,9 @@ export interface ContextGaugeProps {
   /** The model's full context window size, in tokens. */
   readonly window: number;
   readonly size?: number;
+  readonly hitSize?: number;
+  readonly ariaLabel?: string;
+  readonly testId?: string;
   readonly onClick?: (event: MouseEvent<HTMLElement>) => void;
 }
 
@@ -22,17 +25,19 @@ export interface ContextGaugeProps {
  *  next to the composer options button. Neutral until ~80% full, amber past it,
  *  red (and pulsing) once the conversation has outgrown the window. The tooltip
  *  carries the exact figures; clicking opens the options menu. */
-export function ContextGauge({ tokens, window, size = 22, onClick }: ContextGaugeProps) {
+export function ContextGauge({ tokens, window, size = 22, hitSize = size, ariaLabel, testId = "context-gauge", onClick }: ContextGaugeProps) {
   const { t } = useI18n();
   const ratio = window > 0 ? tokens / window : 0;
   const severity = contextSeverity(ratio);
   const pct = Math.round(ratio * 100);
   const thickness = 4.5;
   const tooltip = `${t("contextUsage")} · ${pct}%`;
+  const accessibleLabel = ariaLabel ?? tooltip;
 
   const fillSx: SxProps<Theme> = {
     position: "absolute",
-    left: 0,
+    inset: 0,
+    m: "auto",
     color: FILL_COLOR[severity],
     "& .MuiCircularProgress-circle": { strokeLinecap: "round" },
     ...(severity === "full"
@@ -47,16 +52,26 @@ export function ContextGauge({ tokens, window, size = 22, onClick }: ContextGaug
     <Tooltip title={tooltip}>
       <Box
         role={onClick ? "button" : "img"}
-        aria-label={tooltip}
+        aria-label={accessibleLabel}
         onClick={onClick}
-        data-testid="context-gauge"
+        data-testid={testId}
         data-severity={severity}
+        tabIndex={onClick ? 0 : undefined}
+        onKeyDown={(event) => {
+          if (!onClick || (event.key !== "Enter" && event.key !== " ")) {
+            return;
+          }
+          event.preventDefault();
+          onClick(event as unknown as MouseEvent<HTMLElement>);
+        }}
         sx={{
           position: "relative",
           display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
           flex: "0 0 auto",
-          width: size,
-          height: size,
+          width: hitSize,
+          height: hitSize,
           cursor: onClick ? "pointer" : "default",
         }}
       >
@@ -65,7 +80,7 @@ export function ContextGauge({ tokens, window, size = 22, onClick }: ContextGaug
           value={100}
           size={size}
           thickness={thickness}
-          sx={{ position: "absolute", left: 0, color: (theme) => theme.custom.borders.strong }}
+          sx={{ position: "absolute", inset: 0, m: "auto", color: (theme) => theme.custom.borders.strong }}
         />
         <CircularProgress variant="determinate" value={Math.min(100, pct)} size={size} thickness={thickness} sx={fillSx} />
       </Box>

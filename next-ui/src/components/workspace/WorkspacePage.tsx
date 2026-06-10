@@ -1,5 +1,6 @@
 import AddIcon from "@mui/icons-material/Add";
 import AccountTreeIcon from "@mui/icons-material/AccountTree";
+import AccessTimeIcon from "@mui/icons-material/AccessTime";
 import AttachFileIcon from "@mui/icons-material/AttachFile";
 import ChatBubbleOutlineIcon from "@mui/icons-material/ChatOutlined";
 import CreateNewFolderIcon from "@mui/icons-material/CreateNewFolder";
@@ -80,6 +81,45 @@ const COMPOSER_DRAFT_SAVE_DELAY_MS = 350;
 const EMPTY_COMPOSER_DRAFT: ComposerDraft = { text: "", attachments: [] };
 
 type WorkspaceView = "chat" | "git" | "resources" | "preview" | "terminal";
+
+type WakeupTrigger =
+  | { readonly type: "time"; readonly fireAtMs: number }
+  | { readonly type: "script"; readonly script: string; readonly intervalSeconds: number; readonly nextCheckMs: number; readonly lastCheckedAtMs?: number; readonly lastExitCode?: number; readonly lastError?: string };
+
+interface WakeupSummary {
+  readonly id: string;
+  readonly conversationId: string;
+  readonly agent: string;
+  readonly prompt: string;
+  readonly reason?: string;
+  readonly trigger: WakeupTrigger;
+}
+
+async function loadWakeups(conversationId: string): Promise<WakeupSummary[]> {
+  const query = new URLSearchParams({ conversationId });
+  const response = await fetch(`/api/wakeups?${query.toString()}`, { method: "GET", cache: "no-store" });
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => ({}))) as { error?: string };
+    throw new Error(payload.error ?? `Wakeups load failed (${response.status})`);
+  }
+  const payload = (await response.json()) as { wakeups?: WakeupSummary[] };
+  return Array.isArray(payload.wakeups) ? payload.wakeups : [];
+}
+
+function wakeupLabel(wakeup: WakeupSummary, locale: "ru" | "en"): string {
+  if (wakeup.trigger.type === "time") {
+    const when = new Date(wakeup.trigger.fireAtMs).toLocaleString();
+    return locale === "ru" ? `Wakeup установлен: ${when}` : `Wakeup scheduled: ${when}`;
+  }
+  const base = locale === "ru" ? `Wakeup script: каждые ${wakeup.trigger.intervalSeconds}s` : `Wakeup script: every ${wakeup.trigger.intervalSeconds}s`;
+  if (wakeup.trigger.lastError) {
+    return `${base} · ${wakeup.trigger.lastError}`;
+  }
+  if (wakeup.trigger.lastExitCode !== undefined) {
+    return `${base} · exit ${wakeup.trigger.lastExitCode}`;
+  }
+  return base;
+}
 
 async function createWorktree(cwd: string): Promise<{ readonly path: string; readonly branch: string }> {
   const response = await fetch("/api/git-worktree-create", {
@@ -273,7 +313,7 @@ export function WorkspacePageView({
   readonly route?: HashRoute;
   readonly onNavigate?: (route: HashRoute) => void;
 }) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const { toast } = useToast();
   const statusOf = useAgentStatus();
   const cliInfoOf = useAgentCliInfo();
@@ -359,6 +399,7 @@ export function WorkspacePageView({
 
   const selected = ws.find(ws.selectedId);
   const messages = ws.threads[ws.selectedId] ?? [];
+  const [wakeups, setWakeups] = useState<readonly WakeupSummary[]>([]);
   // Sent user messages (oldest first) for ArrowUp/ArrowDown recall in the
   // composer; attachment blocks / file-link markdown are stripped to the visible
   // text, and blank entries dropped.
@@ -374,6 +415,32 @@ export function WorkspacePageView({
   const lastTurnDiffs = useMemo(() => latestAgentDiffBlocks(messages), [messages]);
   const composerDraft = ws.composerDrafts[ws.selectedId] ?? { text: "", attachments: [] };
   const selectedCwd = ws.cwdOf(ws.selectedId);
+  useEffect(() => {
+    if (!selected) {
+      setWakeups([]);
+      return;
+    }
+    let canceled = false;
+    const refresh = () => {
+      loadWakeups(selected.id)
+        .then((items) => {
+          if (!canceled) {
+            setWakeups(items);
+          }
+        })
+        .catch(() => {
+          if (!canceled) {
+            setWakeups([]);
+          }
+        });
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 5000);
+    return () => {
+      canceled = true;
+      window.clearInterval(timer);
+    };
+  }, [selected?.id, selected?.status, messages.length]);
   const sendBrowserAnnotation = (message: string) => {
     if (!selected) {
       return;
@@ -1401,64 +1468,87 @@ export function WorkspacePageView({
             {workspaceHydrating ? (
               <Box aria-busy="true" sx={{ minHeight: 44 }} />
             ) : (
-              <Composer
-                key={ws.selectedId}
-                ref={composerRef}
-                placeholder={selected ? t("messagePlaceholder", { title: buildComposerLabel(profile) }) : t("startPlaceholder")}
-                initialValue={composerDraft.text}
-                initialAttachments={composerDraft.attachments}
-                onDraftChange={(draft) => {
-                  if (selected) {
-                    scheduleDraftSave(ws.selectedId, draft);
-                  }
-                }}
-                onSend={(text) => {
-                  if (!selected) {
-                    return;
-                  }
-                  pendingDraftValues.current.delete(ws.selectedId);
-                  cancelDraftSave(ws.selectedId);
-                  ws.updateComposerDraft(ws.selectedId, EMPTY_COMPOSER_DRAFT);
-                  notifiableRuns.current.add(ws.selectedId);
-                  ws.sendMessage(ws.selectedId, text);
-                }}
-                mentionableFiles={mentionableFiles}
-                modes={supportedModes}
-                activeMode={profile.mode}
-                onModeChange={handleModeChange}
-                onStop={() => ws.stopRun(ws.selectedId)}
-                onAttachmentError={(message) => toast({ message, severity: "error", duration: 3000 })}
-                running={selectedHasActiveWork}
-                reviewCount={reviewComments.length}
-                onSendReview={sendReviewComments}
-                onTagsHeightChange={setComposerTagsHeight}
-                onOverlayLiftChange={setComposerOverlayLift}
-                history={messageHistory}
-                agentId={profile.agent}
-                contextTokens={selected?.usage?.contextTokens}
-                contextWindow={contextWindowForAgentProfile(profile)}
-                autoCompact={selected?.compaction?.auto ?? true}
-                compactWindow={selected?.compaction?.window}
-                onAutoCompactChange={(enabled) => {
-                  if (selected) {
-                    ws.setCompaction(selected.id, { auto: enabled });
-                  }
-                }}
-                onCompactWindowChange={(window) => {
-                  if (selected) {
-                    ws.setCompaction(selected.id, { window });
-                  }
-                }}
-                onCompactNow={() => {
-                  if (!selected) {
-                    return;
-                  }
-                  if (!ws.compactConversation(selected.id)) {
-                    toast({ message: t("compactionNoSession"), severity: "info", duration: 3000 });
-                  }
-                }}
-                browserActivityEvents={view === "preview" ? browserActivityEvents : undefined}
-              />
+              <Stack spacing={1}>
+                {wakeups.length > 0 && (
+                  <Stack
+                    direction="row"
+                    spacing={1}
+                    sx={{
+                      alignItems: "center",
+                      px: 1.5,
+                      py: 0.9,
+                      borderRadius: (theme) => `${theme.custom.radii.md}px`,
+                      border: (theme) => `1px solid ${theme.custom.borders.subtle}`,
+                      bgcolor: (theme) => theme.custom.surfaces.s1,
+                      color: "text.secondary",
+                    }}
+                  >
+                    <AccessTimeIcon sx={{ fontSize: 16, color: "text.secondary", flex: "0 0 auto" }} />
+                    <Typography sx={{ minWidth: 0, flex: 1, fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.72rem", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {wakeupLabel(wakeups[0], locale)}
+                      {wakeups.length > 1 ? ` · +${wakeups.length - 1}` : ""}
+                    </Typography>
+                  </Stack>
+                )}
+                <Composer
+                  key={ws.selectedId}
+                  ref={composerRef}
+                  placeholder={selected ? t("messagePlaceholder", { title: buildComposerLabel(profile) }) : t("startPlaceholder")}
+                  initialValue={composerDraft.text}
+                  initialAttachments={composerDraft.attachments}
+                  onDraftChange={(draft) => {
+                    if (selected) {
+                      scheduleDraftSave(ws.selectedId, draft);
+                    }
+                  }}
+                  onSend={(text) => {
+                    if (!selected) {
+                      return;
+                    }
+                    pendingDraftValues.current.delete(ws.selectedId);
+                    cancelDraftSave(ws.selectedId);
+                    ws.updateComposerDraft(ws.selectedId, EMPTY_COMPOSER_DRAFT);
+                    notifiableRuns.current.add(ws.selectedId);
+                    ws.sendMessage(ws.selectedId, text);
+                  }}
+                  mentionableFiles={mentionableFiles}
+                  modes={supportedModes}
+                  activeMode={profile.mode}
+                  onModeChange={handleModeChange}
+                  onStop={() => ws.stopRun(ws.selectedId)}
+                  onAttachmentError={(message) => toast({ message, severity: "error", duration: 3000 })}
+                  running={selectedHasActiveWork}
+                  reviewCount={reviewComments.length}
+                  onSendReview={sendReviewComments}
+                  onTagsHeightChange={setComposerTagsHeight}
+                  onOverlayLiftChange={setComposerOverlayLift}
+                  history={messageHistory}
+                  agentId={profile.agent}
+                  contextTokens={selected?.usage?.contextTokens}
+                  contextWindow={contextWindowForAgentProfile(profile)}
+                  autoCompact={selected?.compaction?.auto ?? true}
+                  compactWindow={selected?.compaction?.window}
+                  onAutoCompactChange={(enabled) => {
+                    if (selected) {
+                      ws.setCompaction(selected.id, { auto: enabled });
+                    }
+                  }}
+                  onCompactWindowChange={(window) => {
+                    if (selected) {
+                      ws.setCompaction(selected.id, { window });
+                    }
+                  }}
+                  onCompactNow={() => {
+                    if (!selected) {
+                      return;
+                    }
+                    if (!ws.compactConversation(selected.id)) {
+                      toast({ message: t("compactionNoSession"), severity: "info", duration: 3000 });
+                    }
+                  }}
+                  browserActivityEvents={view === "preview" ? browserActivityEvents : undefined}
+                />
+              </Stack>
             )}
           </Box>
         </Box>

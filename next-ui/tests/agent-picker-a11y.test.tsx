@@ -123,14 +123,12 @@ describe("AgentPicker a11y", () => {
     expect(onSelect).toHaveBeenCalledWith({ agent: "opencode", model: "anthropic/claude-custom-lab", reasoning: "default", mode: "default" });
   });
 
-  it("exposes exact Claude Code model IDs and reasoning options but no work-mode control", () => {
+  it("exposes Claude Code CLI model aliases and reasoning options but no work-mode control", () => {
     renderWithTheme(<AgentPicker open value={DEFAULT_PROFILE} onClose={vi.fn()} onSelect={vi.fn()} />);
 
-    expect(screen.getByRole("button", { name: "Opus 4.8" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Opus 4.7" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Sonnet 4.6" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Haiku 4.5" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Opus alias" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Fable" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sonnet" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Haiku" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Max" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Plan" })).not.toBeInTheDocument();
   });

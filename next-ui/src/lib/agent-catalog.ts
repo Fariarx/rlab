@@ -75,12 +75,9 @@ const CLAUDE_REASONING_OPTIONS = [
 ] as const;
 const CLAUDE_MODEL_OPTIONS = [
   DEFAULT_OPTION,
-  { id: "claude-opus-4-8", label: "Opus 4.8", value: "claude-opus-4-8" },
-  { id: "claude-opus-4-7", label: "Opus 4.7", value: "claude-opus-4-7" },
-  { id: "claude-sonnet-4-6", label: "Sonnet 4.6", value: "claude-sonnet-4-6" },
-  { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5", value: "claude-haiku-4-5-20251001" },
-  { id: "opus", label: "Opus alias", value: "opus" },
-  { id: "sonnet", label: "Sonnet alias", value: "sonnet" },
+  { id: "fable", label: "Fable", value: "fable" },
+  { id: "sonnet", label: "Sonnet", value: "sonnet" },
+  { id: "haiku", label: "Haiku", value: "haiku" },
 ] as const;
 const CODEX_REASONING_OPTIONS = [
   DEFAULT_OPTION,
@@ -270,7 +267,7 @@ export function isDirectAgentModelValue(agent: AgentId, value: string): boolean 
   }
   switch (agent) {
     case "claude-code":
-      return /^(?:claude-[A-Za-z0-9._-]+|opus|sonnet|haiku)$/.test(value);
+      return /^(?:claude-[A-Za-z0-9._-]+|fable|opus|sonnet|haiku)$/.test(value);
     case "codex":
       return /^(?:gpt|codex)-[A-Za-z0-9._-]+$/.test(value);
     case "gemini":

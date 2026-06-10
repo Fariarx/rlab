@@ -10,7 +10,7 @@ describe("Composer", () => {
 
     expect(screen.getByTestId("composer-input")).toBe(screen.getByPlaceholderText("Написать"));
     expect(screen.getByTestId("composer-file-input")).toBe(screen.getByLabelText("Выбрать файлы"));
-    expect(screen.getByTestId("composer-options-button")).toBe(screen.getByRole("button", { name: "Опции" }));
+    expect(screen.getByTestId("composer-options-button")).toBe(screen.getByRole("button", { name: /Опции/ }));
     expect(screen.getByTestId("composer-send-button")).toBe(screen.getByRole("button", { name: "Отправить" }));
   });
 
@@ -131,7 +131,7 @@ describe("Composer", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Опции" }));
+    fireEvent.click(screen.getByRole("button", { name: /Опции/ }));
 
     const planItem = screen.getByRole("menuitem", { name: "Plan" });
     const switchRoot = within(planItem).getByRole("switch").closest(".MuiSwitch-root");
@@ -143,7 +143,7 @@ describe("Composer", () => {
   it("uses a restrained shadow for the options menu window", () => {
     renderWithTheme(<Composer placeholder="Написать" modes={[{ id: "plan", label: "Plan" }]} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Опции" }));
+    fireEvent.click(screen.getByRole("button", { name: /Опции/ }));
 
     const menuPaper = screen.getByRole("menu").closest(".MuiPaper-root");
 
@@ -153,7 +153,7 @@ describe("Composer", () => {
   it("shows browser agent activity in the options menu only when provided", () => {
     const { unmount } = renderWithTheme(<Composer placeholder="Написать" />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Опции" }));
+    fireEvent.click(screen.getByRole("button", { name: /Опции/ }));
     expect(screen.queryByTestId("composer-browser-activity-section")).not.toBeInTheDocument();
 
     unmount();
@@ -170,7 +170,7 @@ describe("Composer", () => {
         ]}
       />,
     );
-    fireEvent.click(screen.getByRole("button", { name: "Опции" }));
+    fireEvent.click(screen.getByRole("button", { name: /Опции/ }));
 
     expect(screen.getByTestId("composer-browser-activity-section")).toHaveTextContent("Агент в браузере");
     expect(screen.getByTestId("composer-browser-activity-section")).toHaveTextContent("Navigation finished");
@@ -180,14 +180,14 @@ describe("Composer", () => {
   it("shows compaction window controls only for agents with backend support", () => {
     const claude = renderWithTheme(<Composer placeholder="Написать" agentId="claude-code" />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Опции" }));
+    fireEvent.click(screen.getByRole("button", { name: /Опции/ }));
     expect(screen.getByText("Авто-сжатие контекста")).toBeInTheDocument();
     expect(screen.getByLabelText("Окно сжатия")).toBeInTheDocument();
 
     claude.unmount();
     const codex = renderWithTheme(<Composer placeholder="Написать" agentId="codex" />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Опции" }));
+    fireEvent.click(screen.getByRole("button", { name: /Опции/ }));
     expect(screen.queryByText("Авто-сжатие контекста")).not.toBeInTheDocument();
     expect(screen.getByLabelText("Окно сжатия")).toBeInTheDocument();
 
@@ -195,7 +195,7 @@ describe("Composer", () => {
     for (const agentId of ["gemini", "opencode"]) {
       const unsupported = renderWithTheme(<Composer placeholder="Написать" agentId={agentId} />);
 
-      fireEvent.click(screen.getByRole("button", { name: "Опции" }));
+      fireEvent.click(screen.getByRole("button", { name: /Опции/ }));
       expect(screen.queryByText("Авто-сжатие контекста")).not.toBeInTheDocument();
       expect(screen.queryByLabelText("Окно сжатия")).not.toBeInTheDocument();
       expect(screen.getByText("Сжать сейчас")).toBeInTheDocument();
@@ -207,13 +207,13 @@ describe("Composer", () => {
   it("shows the context gauge when context tokens and window are available", () => {
     renderWithTheme(<Composer placeholder="Написать" agentId="codex" contextTokens={120000} contextWindow={272000} />);
 
-    expect(screen.getByTestId("context-gauge")).toBeInTheDocument();
+    expect(screen.getByTestId("composer-options-button")).toHaveAttribute("aria-label", "Опции · Контекст · 44%");
   });
 
   it("keeps the context gauge visible when only the model window is known", () => {
     renderWithTheme(<Composer placeholder="Написать" agentId="codex" contextWindow={272000} />);
 
-    expect(screen.getByTestId("context-gauge")).toHaveAttribute("aria-label", "Контекст · 0%");
+    expect(screen.getByTestId("composer-options-button")).toHaveAttribute("aria-label", "Опции · Контекст · 0%");
   });
 
   it("uses a light shadow for floating work-mode tags", () => {
