@@ -27,6 +27,7 @@ import {
   createGeminiStreamTranslator,
   createOpenCodeStreamTranslator,
   createQwenStreamTranslator,
+  emitOpenCodeParts,
   activeBackgroundRunUpdateFromState,
   activeBackgroundRunSnapshotsFromHandles,
   applyBrowserStorageSnapshot,
@@ -1955,6 +1956,105 @@ Built-in agents:
         costUsd: 0.0017,
         usage: { totalTokens: 42, inputTokens: 30, outputTokens: 2, reasoningTokens: 10 },
         usageDebug: { source: "opencode.part.step-finish.tokens", payload: { total: 42, input: 30, output: 2, reasoning: 10 } },
+      },
+    ]);
+  });
+
+  it("emits OpenCode server response parts with persisted reasoning and tool state shapes", () => {
+    const events: unknown[] = [];
+
+    const emitted = emitOpenCodeParts(
+      [
+        {
+          type: "reasoning",
+          text: "The user wants me to connect via Tailscale.",
+        },
+        {
+          type: "tool",
+          tool: "bash",
+          callID: "call_00",
+          state: {
+            status: "completed",
+            input: {
+              command: "which tailscale && tailscale status",
+              description: "Check Tailscale status",
+            },
+            output: "/usr/bin/tailscale\n100.75.107.12 research-gpu",
+            title: "Check Tailscale status",
+          },
+        },
+        {
+          type: "tool",
+          tool: "read",
+          callID: "call_01",
+          state: {
+            status: "completed",
+            input: {
+              filePath: "/root/workspace/Research-Arch/.claude/settings.local.json",
+            },
+            output: "<file>settings</file>",
+            title: ".claude/settings.local.json",
+          },
+        },
+        {
+          type: "tool",
+          tool: "bash",
+          callID: "call_02",
+          state: {
+            status: "running",
+            input: {
+              command: "cat ~/.ssh/config",
+              description: "Check SSH config",
+            },
+          },
+        },
+      ],
+      (event) => events.push(event),
+    );
+
+    expect(emitted).toBe(6);
+    expect(events).toEqual([
+      { type: "reasoning", text: "The user wants me to connect via Tailscale." },
+      {
+        type: "tool",
+        id: "call_00",
+        name: "bash",
+        summary: "Check Tailscale status",
+        args: {
+          command: "which tailscale && tailscale status",
+          description: "Check Tailscale status",
+        },
+      },
+      {
+        type: "tool_result",
+        id: "call_00",
+        ok: true,
+        output: "/usr/bin/tailscale\n100.75.107.12 research-gpu",
+      },
+      {
+        type: "tool",
+        id: "call_01",
+        name: "read",
+        summary: ".claude/settings.local.json",
+        args: {
+          filePath: "/root/workspace/Research-Arch/.claude/settings.local.json",
+        },
+      },
+      {
+        type: "tool_result",
+        id: "call_01",
+        ok: true,
+        output: "<file>settings</file>",
+      },
+      {
+        type: "tool",
+        id: "call_02",
+        name: "bash",
+        summary: "cat ~/.ssh/config",
+        args: {
+          command: "cat ~/.ssh/config",
+          description: "Check SSH config",
+        },
       },
     ]);
   });

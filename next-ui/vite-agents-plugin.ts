@@ -57,6 +57,10 @@ import { pickDirectoryPathFromSystemDialog } from "./src/server/directory-picker
 
 export { parseGitStatusPorcelain } from "./src/lib/git-status";
 
+// `node:sqlite` is a built-in runtime dependency used by workspace-db too.
+// Keep it behind process.getBuiltinModule so Vite/Vitest do not try to bundle it.
+const { DatabaseSync: NodeSqliteDatabaseSync } = process.getBuiltinModule("node:sqlite");
+
 /**
  * Real agent detection. Scans PATH (and required env vars) for each coding
  * agent's CLI and reports its status — the live stand-in for vibe-kanban's
@@ -9434,7 +9438,7 @@ function opencodeToolEvents(msg: Record<string, unknown>, part: Record<string, u
             type: "tool",
             id,
             name,
-            summary: clip(part.description ?? part.title ?? part.command ?? name, 80),
+            summary: clip(part.description ?? part.title ?? part.command ?? stateRecord?.description ?? stateRecord?.title ?? firstString(input ?? {}, ["command", "query", "path", "file_path", "filePath"]) ?? name, 80),
             args,
           },
         ];
@@ -9825,28 +9829,98 @@ function waitForOpenCodeServerUrl(proc: ReturnType<typeof spawn>, signal: AbortS
   });
 }
 
-function emitOpenCodeParts(parts: unknown, send: (event: RunEvent) => void): void {
+export function emitOpenCodeParts(parts: unknown, send: (event: RunEvent) => void): number {
   if (!Array.isArray(parts)) {
-    return;
+    return 0;
   }
+  let emitted = 0;
   for (const part of parts) {
     if (!isRecord(part)) {
       continue;
     }
-    if (part.type === "text" && typeof part.text === "string" && part.text.trim().length > 0) {
-      send({ type: "text", text: part.text });
-    } else if (part.type === "reasoning" && typeof part.text === "string" && part.text.trim().length > 0) {
-      send({ type: "reasoning", text: part.text });
-    } else if (part.type === "tool") {
-      const callId = firstString(part, ["id", "callID", "call_id"]) ?? `opencode-tool-${firstString(part, ["tool", "name"]) ?? ""}`;
-      const name = firstString(part, ["tool", "name"]) ?? "tool";
-      send({ type: "tool", id: callId, name });
-      const state = isRecord(part.state) ? part.state : undefined;
-      if (state && (typeof state.output === "string" || state.status === "completed" || state.status === "error")) {
-        send({ type: "tool_result", id: callId, ok: state.status !== "error", output: resultText(state.output ?? "") });
+    const sessionId = firstString(part, ["sessionID", "sessionId"]);
+    const toolEvents = opencodeToolEvents(sessionId ? { sessionID: sessionId } : {}, part);
+    if (toolEvents.length > 0) {
+      for (const event of toolEvents) {
+        send(event);
+        emitted += 1;
+      }
+      continue;
+    }
+    if (part.type === "text") {
+      const text = textFromUnknown(part.text ?? part);
+      if (text.trim().length > 0) {
+        send({ type: "text", text });
+        emitted += 1;
+      }
+      continue;
+    }
+    if (part.type === "reasoning") {
+      const text = textFromUnknown(part.text ?? part);
+      if (text.trim().length > 0) {
+        send({ type: "reasoning", text });
+        emitted += 1;
       }
     }
   }
+  return emitted;
+}
+
+function opencodeDataDir(): string {
+  return process.env.OPENCODE_DATA_DIR ?? join(process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share"), "opencode");
+}
+
+function readOpenCodePersistedAssistantParts(sessionId: string, startedAtMs: number): Record<string, unknown>[] {
+  const dbPath = join(opencodeDataDir(), "opencode.db");
+  if (!existsSync(dbPath)) {
+    return [];
+  }
+  const db = new NodeSqliteDatabaseSync(dbPath, { readOnly: true });
+  try {
+    const rows = db
+      .prepare(
+        `SELECT p.data AS partData, m.data AS messageData
+         FROM part p
+         JOIN message m ON m.id = p.message_id
+         WHERE p.session_id = ? AND p.time_created >= ?
+         ORDER BY p.time_created ASC`,
+      )
+      .all(sessionId, Math.max(0, startedAtMs - 5_000));
+    const parts: Record<string, unknown>[] = [];
+    for (const row of rows) {
+      if (!isRecord(row) || typeof row.partData !== "string" || typeof row.messageData !== "string") {
+        continue;
+      }
+      const message = parseJsonRecord(row.messageData);
+      if (message?.role !== "assistant") {
+        continue;
+      }
+      const part = parseJsonRecord(row.partData);
+      if (part) {
+        parts.push(part);
+      }
+    }
+    return parts;
+  } finally {
+    db.close();
+  }
+}
+
+function openCodeServerErrorText(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return String(error);
+  }
+  const cause = error.cause;
+  if (isRecord(cause)) {
+    const detail = firstString(cause, ["code", "message"]);
+    if (detail && !error.message.includes(detail)) {
+      return `${error.message}: ${detail}`;
+    }
+  }
+  if (cause instanceof Error && cause.message && !error.message.includes(cause.message)) {
+    return `${error.message}: ${cause.message}`;
+  }
+  return error.message;
 }
 
 async function runOpenCodeServer(
@@ -9884,6 +9958,8 @@ async function runOpenCodeServer(
     }
   }, OPENCODE_RUN_TIMEOUT_MS);
   let serverProc: ReturnType<typeof spawn> | null = null;
+  let sessionId = request.resume;
+  const runStartedAtMs = Date.now();
   try {
     const resolvedBin = resolveBinOnPath("opencode", process.env.PATH ?? "");
     if (!resolvedBin) {
@@ -9900,7 +9976,6 @@ async function runOpenCodeServer(
     const headers = { "Content-Type": "application/json", Authorization: `Basic ${Buffer.from(`opencode:${password}`).toString("base64")}` };
     const dir = `directory=${encodeURIComponent(cwd)}`;
 
-    let sessionId = request.resume;
     if (!sessionId) {
       const sessionRes = await fetch(`${baseUrl}/session?${dir}`, { method: "POST", headers, body: "{}", signal: abortController.signal });
       if (!sessionRes.ok) {
@@ -9948,12 +10023,23 @@ async function runOpenCodeServer(
       ...(info?.tokens === undefined ? {} : { usageDebug: { source: "opencode.server.info.tokens", payload: info.tokens } }),
     });
   } catch (error) {
+    let recoveredParts = 0;
+    let recoveryError: string | null = null;
+    if (sessionId && (timedOut || !abortController.signal.aborted)) {
+      try {
+        recoveredParts = emitOpenCodeParts(readOpenCodePersistedAssistantParts(sessionId, runStartedAtMs), send);
+      } catch (persistedPartsError) {
+        recoveryError = openCodeServerErrorText(persistedPartsError);
+      }
+    }
+    const recoverySuffix = recoveryError ? ` Persisted OpenCode parts recovery failed: ${recoveryError}` : "";
     if (timedOut) {
       // Surface the timeout as an error in the chat — otherwise the abort
       // silently swallows it and the agent message hangs empty forever.
-      send({ type: "error", text: `opencode timed out after ${Math.round(OPENCODE_RUN_TIMEOUT_MS / 60000)} min.` });
+      send({ type: "error", text: recoveredParts > 0 ? `opencode timed out after ${Math.round(OPENCODE_RUN_TIMEOUT_MS / 60000)} min. Partial output was recovered from the OpenCode session.${recoverySuffix}` : `opencode timed out after ${Math.round(OPENCODE_RUN_TIMEOUT_MS / 60000)} min.${recoverySuffix}` });
     } else if (!abortController.signal.aborted) {
-      send({ type: "error", text: error instanceof Error ? error.message : String(error) });
+      const text = openCodeServerErrorText(error);
+      send({ type: "error", text: recoveredParts > 0 ? `opencode transport failed after partial output: ${text}${recoverySuffix}` : `${text}${recoverySuffix}` });
     }
   } finally {
     clearTimeout(runTimeout);

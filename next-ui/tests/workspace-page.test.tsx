@@ -1020,10 +1020,9 @@ describe("WorkspacePage", () => {
         }),
       );
     });
-    // The Git view shows the current branch as a switchable combobox.
-    const branchCombo = await screen.findByRole("combobox", { name: "Переключить ветку" });
-    expect(branchCombo).toHaveValue("main");
-    expect(branchCombo).toBeDisabled();
+    // The Git view shows the current branch as a switchable label.
+    const branchLabel = await screen.findByRole("button", { name: "Переключить ветку" });
+    expect(branchLabel).toHaveTextContent("main");
     expect(screen.getAllByText("src/auth.ts").length).toBeGreaterThan(0);
   });
 
@@ -1083,7 +1082,7 @@ describe("WorkspacePage", () => {
 
     await screen.findByPlaceholderText("Написать: CC");
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
-    fireEvent.click(await screen.findByRole("tab", { name: /Дерево/ }));
+    fireEvent.click(await screen.findByRole("tab", { name: /Граф коммитов/ }));
 
     expect((await screen.findAllByText("Refine webhook handling")).length).toBeGreaterThan(0);
     expect(screen.getByTestId("git-commit-graph")).toBeInTheDocument();
@@ -1129,13 +1128,12 @@ describe("WorkspacePage", () => {
 
     await screen.findByPlaceholderText("Написать: CC");
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
-    const combo = await screen.findByRole("combobox", { name: "Переключить ветку" });
-    fireEvent.mouseDown(combo);
-    fireEvent.click(await screen.findByRole("option", { name: "feature/ui" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Переключить ветку" }));
+    fireEvent.click(await screen.findByRole("button", { name: /feature\/ui/ }));
 
     await waitFor(() => {
       expect(checkoutRequests).toEqual([{ cwd: "/root/workspace/rlab", branch: "feature/ui" }]);
-      expect(screen.getByRole("combobox", { name: "Переключить ветку" })).toHaveValue("feature/ui");
+      expect(screen.getByRole("button", { name: "Переключить ветку" })).toHaveTextContent("feature/ui");
     });
   });
 
@@ -1220,7 +1218,7 @@ describe("WorkspacePage", () => {
     });
 
     resolveBaseStatus(Response.json({ branch: "main", ahead: 0, behind: 0, clean: true, files: [], unstagedAdditions: 0, unstagedDeletions: 0 }));
-    expect(await screen.findByRole("combobox", { name: "Переключить ветку" })).toHaveValue("main");
+    expect(await screen.findByRole("button", { name: "Переключить ветку" })).toHaveTextContent("main");
   });
 
   it("shows an explicit Git API status error when the backend omits an error message", async () => {

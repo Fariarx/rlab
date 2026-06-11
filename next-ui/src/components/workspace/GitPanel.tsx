@@ -6,7 +6,7 @@ import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
 import MergeIcon from "@mui/icons-material/Merge";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import RemoveIcon from "@mui/icons-material/Remove";
-import { Alert, Autocomplete, Box, Chip, CircularProgress, Collapse, Stack, Tab, Tabs, TextField, type Theme, Tooltip, Typography } from "@mui/material";
+import { Alert, Box, Chip, CircularProgress, Collapse, Divider, Popover, Stack, Tab, Tabs, TextField, type Theme, Tooltip, Typography } from "@mui/material";
 import { CommitGraph, type Branch, type Commit, type CommitNode, type GraphStyle } from "commit-graph";
 import { type ReactNode, type RefObject, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type I18nApi, useI18n } from "../../i18n/I18nProvider";
@@ -192,68 +192,265 @@ function branchOptionsFor(status: GitStatusPayload): readonly string[] {
   return Array.from(new Set([status.branch, ...(status.branches ?? [])].filter((branch) => branch.trim().length > 0)));
 }
 
-function GitBranchAutocomplete({
+function GitRefPicker({
   branches,
+  commits,
   disabled,
+  dirty,
+  loading,
+  onClose,
+  onOpen,
   onSelect,
   t,
-  value,
+  currentBranch,
+  currentHash,
+  currentTitle,
 }: {
   readonly branches: readonly string[];
+  readonly commits: readonly GitGraphCommit[];
   readonly disabled: boolean;
-  readonly onSelect: (branch: string) => void;
+  readonly dirty: boolean;
+  readonly loading: boolean;
+  readonly onClose: () => void;
+  readonly onOpen: () => void;
+  readonly onSelect: (ref: string) => void;
   readonly t: I18nApi["t"];
-  readonly value: string;
+  readonly currentBranch: string;
+  readonly currentHash?: string;
+  readonly currentTitle?: string;
+}) {
+  const [anchor, setAnchor] = useState<HTMLElement | null>(null);
+  const [query, setQuery] = useState("");
+  const open = Boolean(anchor);
+  const normalizedQuery = query.trim().toLowerCase();
+  const filteredBranches = useMemo(
+    () => branches.filter((branch) => normalizedQuery.length === 0 || branch.toLowerCase().includes(normalizedQuery)),
+    [branches, normalizedQuery],
+  );
+  const filteredCommits = useMemo(
+    () =>
+      commits
+        .filter((commit) => normalizedQuery.length === 0 || commit.shortHash.toLowerCase().includes(normalizedQuery) || commit.hash.toLowerCase().includes(normalizedQuery) || commit.subject.toLowerCase().includes(normalizedQuery))
+        .slice(0, 80),
+    [commits, normalizedQuery],
+  );
+  const blocked = dirty || disabled;
+  const close = () => {
+    setAnchor(null);
+    onClose();
+  };
+  const selectRef = (ref: string) => {
+    if (blocked) {
+      return;
+    }
+    close();
+    onSelect(ref);
+  };
+
+  return (
+    <>
+      <Tooltip title={dirty ? t("gitSwitchBranchDirty") : t("gitRefPickerOpen")}>
+        <Box
+          component="button"
+          type="button"
+          aria-label={t("gitSwitchBranch")}
+          disabled={disabled}
+          onClick={(event) => {
+            if (disabled) {
+              return;
+            }
+            setAnchor(event.currentTarget);
+            onOpen();
+          }}
+          sx={{
+            appearance: "none",
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 0.4,
+            maxWidth: { xs: "100%", sm: 300 },
+            minHeight: 24,
+            px: 0,
+            border: 0,
+            borderRadius: 0,
+            backgroundColor: "transparent",
+            color: open ? "status.running.main" : "text.secondary",
+            cursor: disabled ? "default" : "pointer",
+            font: "inherit",
+            minWidth: 0,
+            "&:hover": disabled
+              ? undefined
+              : {
+                  color: "text.primary",
+                  textDecoration: "underline",
+                  textUnderlineOffset: "3px",
+                },
+            "&:disabled": {
+              opacity: 0.65,
+            },
+          }}
+        >
+          <Typography component="span" noWrap sx={{ minWidth: 0, fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.82rem", fontWeight: 800 }}>
+            {currentBranch}
+          </Typography>
+          <KeyboardArrowDownIcon sx={{ fontSize: 16, color: "currentColor", flex: "0 0 auto", transform: open ? "rotate(180deg)" : "none", transition: "transform 160ms ease" }} />
+        </Box>
+      </Tooltip>
+      <Popover
+        open={open}
+        anchorEl={anchor}
+        onClose={close}
+        anchorOrigin={{ vertical: "bottom", horizontal: "left" }}
+        transformOrigin={{ vertical: "top", horizontal: "left" }}
+        sx={{ zIndex: (theme) => theme.zIndex.modal + 20 }}
+        slotProps={{
+          paper: {
+            sx: {
+              position: "relative",
+              zIndex: (theme) => theme.zIndex.modal + 21,
+              mt: 0.75,
+              width: 420,
+              maxWidth: "calc(100vw - 24px)",
+              border: (theme) => `1px solid ${theme.custom.borders.subtle}`,
+              borderRadius: (theme) => `${theme.custom.radii.lg}px`,
+              backgroundColor: (theme) => theme.custom.surfaces.s2,
+              backgroundImage: "none",
+              opacity: 1,
+              boxShadow: "0 18px 50px rgba(0,0,0,0.45)",
+              overflow: "hidden",
+            },
+          },
+        }}
+      >
+        <Stack spacing={1} sx={{ p: 1, backgroundColor: (theme) => theme.custom.surfaces.s2 }}>
+          <Stack spacing={0.25} sx={{ px: 0.5, pt: 0.25 }}>
+            <Typography sx={{ fontSize: "0.76rem", fontWeight: 800, color: "text.primary" }}>{t("gitRefPickerTitle")}</Typography>
+            <Typography noWrap sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.68rem", color: "text.secondary" }}>
+              {currentHash ? `${currentHash} · ${currentTitle || "-"}` : currentTitle || "-"}
+            </Typography>
+          </Stack>
+          <TextField
+            autoFocus
+            size="small"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder={t("gitRefPickerSearch")}
+            slotProps={{
+              htmlInput: { "aria-label": t("gitRefPickerSearch") },
+            }}
+            sx={{
+              "& .MuiInputBase-root": {
+                minHeight: 34,
+                borderRadius: (theme) => `${theme.custom.radii.md}px`,
+                backgroundColor: (theme) => theme.custom.surfaces.s1,
+              },
+              "& .MuiInputBase-input": {
+                fontFamily: (theme) => theme.custom.fonts.mono,
+                fontSize: "0.76rem",
+              },
+            }}
+          />
+          {dirty && <Alert severity="warning">{t("gitSwitchBranchDirty")}</Alert>}
+          <Stack spacing={0.5}>
+            <Typography sx={{ px: 0.5, fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.66rem", fontWeight: 900, letterSpacing: "0.12em", color: "text.tertiary", textTransform: "uppercase" }}>
+              {t("gitRefPickerBranches")}
+            </Typography>
+            <Stack sx={{ maxHeight: 132, overflow: "auto", borderRadius: (theme) => `${theme.custom.radii.md}px` }}>
+              {filteredBranches.length === 0 ? (
+                <Typography sx={{ px: 1, py: 0.8, color: "text.secondary", fontSize: "0.78rem" }}>{t("gitNoBranches")}</Typography>
+              ) : (
+                filteredBranches.map((branch) => (
+                  <GitRefPickerRow key={branch} disabled={blocked || branch === currentBranch} active={branch === currentBranch} label={branch} meta={branch === currentBranch ? t("gitRefCurrent") : t("gitBranch")} onClick={() => selectRef(branch)} />
+                ))
+              )}
+            </Stack>
+          </Stack>
+          <Divider sx={{ borderColor: (theme) => theme.custom.borders.subtle }} />
+          <Stack spacing={0.5}>
+            <Typography sx={{ px: 0.5, fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.66rem", fontWeight: 900, letterSpacing: "0.12em", color: "text.tertiary", textTransform: "uppercase" }}>
+              {t("gitRefPickerCommits")}
+            </Typography>
+            <Stack sx={{ maxHeight: 260, overflow: "auto", borderRadius: (theme) => `${theme.custom.radii.md}px` }}>
+              {loading ? (
+                <Stack direction="row" spacing={1} sx={{ alignItems: "center", px: 1, py: 1, color: "text.secondary" }}>
+                  <CircularProgress size={14} />
+                  <Typography sx={{ fontSize: "0.78rem" }}>{t("gitTreeLoading")}</Typography>
+                </Stack>
+              ) : filteredCommits.length === 0 ? (
+                <Typography sx={{ px: 1, py: 0.8, color: "text.secondary", fontSize: "0.78rem" }}>{t("gitTreeEmpty")}</Typography>
+              ) : (
+                filteredCommits.map((commit) => (
+                  <GitRefPickerRow
+                    key={commit.hash}
+                    disabled={blocked || commit.shortHash === currentHash || commit.hash === currentHash}
+                    active={commit.shortHash === currentHash || commit.hash === currentHash}
+                    label={commit.subject || "-"}
+                    meta={`${commit.shortHash} · ${commit.author} · ${commit.date}`}
+                    onClick={() => selectRef(commit.hash)}
+                  />
+                ))
+              )}
+            </Stack>
+          </Stack>
+        </Stack>
+      </Popover>
+    </>
+  );
+}
+
+function GitRefPickerRow({
+  active,
+  disabled,
+  label,
+  meta,
+  onClick,
+}: {
+  readonly active: boolean;
+  readonly disabled: boolean;
+  readonly label: string;
+  readonly meta: string;
+  readonly onClick: () => void;
 }) {
   return (
-    <Autocomplete
-      size="small"
-      disableClearable
+    <Box
+      component="button"
+      type="button"
       disabled={disabled}
-      value={value}
-      options={branches}
-      onChange={(_, next) => {
-        if (next !== null && next !== value) {
-          onSelect(next);
-        }
-      }}
-      noOptionsText={t("gitNoBranches")}
+      onClick={onClick}
       sx={{
-        width: { xs: "100%", sm: 220 },
-        minWidth: 150,
-        maxWidth: 280,
-        flex: "0 1 220px",
-        "& .MuiInputBase-root": {
-          minHeight: 28,
-          height: 28,
-          py: 0,
-          pr: "32px !important",
-          borderRadius: (theme) => `${theme.custom.radii.md}px`,
-          backgroundColor: (theme) => theme.custom.surfaces.s2,
+        appearance: "none",
+        width: "100%",
+        minWidth: 0,
+        display: "flex",
+        alignItems: "center",
+        gap: 1,
+        px: 1,
+        py: 0.75,
+        border: 0,
+        borderRadius: (theme) => `${theme.custom.radii.sm}px`,
+        backgroundColor: (theme) => (active ? theme.palette.status.running.soft : "transparent"),
+        color: "inherit",
+        textAlign: "left",
+        cursor: disabled ? "default" : "pointer",
+        "&:hover": disabled
+          ? undefined
+          : {
+              backgroundColor: (theme) => theme.custom.surfaces.s3,
+            },
+        "&:disabled": {
+          opacity: active ? 1 : 0.52,
         },
-        "& .MuiInputBase-input": {
-          py: "3px !important",
-          fontFamily: (theme) => theme.custom.fonts.mono,
-          fontSize: "0.78rem",
-          fontWeight: 700,
-        },
-        "& .MuiAutocomplete-endAdornment": { right: 5 },
-        "& .MuiAutocomplete-popupIndicator": { width: 24, height: 24 },
       }}
-      renderInput={(params) => (
-        <TextField
-          id={params.id}
-          disabled={params.disabled}
-          fullWidth={params.fullWidth}
-          size={params.size}
-          slotProps={{
-            inputLabel: params.slotProps.inputLabel,
-            input: params.slotProps.input,
-            htmlInput: { ...params.slotProps.htmlInput, "aria-label": t("gitSwitchBranch") },
-          }}
-        />
-      )}
-    />
+    >
+      <Box sx={{ width: 7, height: 7, borderRadius: 99, backgroundColor: (theme) => (active ? theme.palette.status.running.main : theme.palette.text.secondary), flex: "0 0 auto" }} />
+      <Stack sx={{ minWidth: 0 }}>
+        <Typography noWrap sx={{ fontSize: "0.78rem", fontWeight: 750, color: "text.primary" }}>
+          {label}
+        </Typography>
+        <Typography noWrap sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.66rem", color: "text.secondary" }}>
+          {meta}
+        </Typography>
+      </Stack>
+    </Box>
   );
 }
 
@@ -514,6 +711,7 @@ export function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnst
   const [treeError, setTreeError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const [activeTab, setActiveTab] = useState<GitPanelTab>("unstaged");
+  const [refPickerOpen, setRefPickerOpen] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
   const [commitMessage, setCommitMessage] = useState("");
   // The focused file plus a tick so re-selecting the same path re-scrolls.
@@ -531,6 +729,7 @@ export function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnst
     setGraphCommits([]);
     setTreeError(null);
     setTreeLoading(false);
+    setRefPickerOpen(false);
     setActiveTab("unstaged");
     setFocused({ path: "", tick: 0 });
   }, [cwd]);
@@ -568,7 +767,7 @@ export function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnst
   }, [applyStatus, cwd, reloadKey, reloadSignal, t]);
 
   useEffect(() => {
-    if (!cwd || !status || activeTab !== "tree") {
+    if (!cwd || !status || (activeTab !== "tree" && !refPickerOpen)) {
       setTreeLoading(false);
       return;
     }
@@ -599,7 +798,7 @@ export function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnst
     return () => {
       alive = false;
     };
-  }, [activeTab, cwd, status, statusVersion, t]);
+  }, [activeTab, cwd, refPickerOpen, status, statusVersion, t]);
 
   const unstagedFiles = useMemo(() => changedFilesForTab(status, "unstaged"), [status]);
   const stagedFiles = useMemo(() => changedFilesForTab(status, "staged"), [status]);
@@ -657,7 +856,7 @@ export function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnst
       runGitAction(() => commitGit(cwd, message), () => setCommitMessage(""));
     }
   };
-  const switchBranch = (branch: string) => cwd && branch !== status?.branch && runGitAction(() => checkoutGitBranch(cwd, branch));
+  const checkoutRef = (ref: string) => cwd && ref !== status?.branch && runGitAction(() => checkoutGitBranch(cwd, ref));
   const initRepo = () => cwd && runGitAction(() => initGitRepo(cwd));
 
   return (
@@ -680,11 +879,20 @@ export function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnst
           <Box sx={{ minWidth: 0, flex: "1 1 420px", display: "flex", alignItems: "center", gap: 0.75, rowGap: 0.75, flexWrap: "wrap" }}>
             <AccountTreeIcon sx={{ fontSize: 16, color: "text.secondary", flexShrink: 0 }} />
             {status ? (
-              <Tooltip title={!status.clean ? t("gitSwitchBranchDirty") : t("gitSwitchBranch")}>
-                <Box component="span" sx={{ display: "inline-flex", minWidth: 0 }}>
-                  <GitBranchAutocomplete branches={branchOptions} disabled={!cwd || loading || actionLoading || !status.clean} value={status.branch} onSelect={switchBranch} t={t} />
-                </Box>
-              </Tooltip>
+              <GitRefPicker
+                branches={branchOptions}
+                commits={graphCommits}
+                currentBranch={status.branch}
+                currentHash={status.commitHash}
+                currentTitle={status.commitTitle}
+                dirty={!status.clean}
+                disabled={!cwd || loading || actionLoading}
+                loading={treeLoading}
+                onClose={() => setRefPickerOpen(false)}
+                onOpen={() => setRefPickerOpen(true)}
+                onSelect={checkoutRef}
+                t={t}
+              />
             ) : (
               <Typography component="span" noWrap sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontWeight: 700, fontSize: "0.82rem" }}>
                 {t("git")}
@@ -880,10 +1088,10 @@ export function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnst
 const GIT_GRAPH_COLORS = ["#F59E0B", "#60A5FA", "#F87171", "#A78BFA", "#34D399", "#FBBF24", "#22D3EE", "#FB7185", "#C084FC", "#2DD4BF"];
 
 const GIT_GRAPH_STYLE: GraphStyle = {
-  commitSpacing: 44,
-  branchSpacing: 20,
+  commitSpacing: 40,
+  branchSpacing: 10,
   branchColors: GIT_GRAPH_COLORS,
-  nodeRadius: 4,
+  nodeRadius: 3,
 };
 
 function gitGraphRefName(ref: string): string | null {
@@ -998,7 +1206,7 @@ function GitTreeTab({
   const handleCommitClick = useCallback((commit: CommitNode) => setSelectedHash(commit.hash), []);
 
   return (
-    <Stack spacing={1.25} sx={{ minHeight: 0 }}>
+    <Stack spacing={1.25} sx={{ minHeight: 0, flex: "0 0 auto" }}>
       {loading && (
         <Stack direction="row" spacing={1} sx={{ alignItems: "center", color: "text.secondary" }}>
           <CircularProgress size={16} />
@@ -1008,139 +1216,158 @@ function GitTreeTab({
       {error && <Alert severity="error">{error}</Alert>}
       {!loading && !error && commits.length === 0 && <Alert severity="info">{t("gitTreeEmpty")}</Alert>}
       {commits.length > 0 && (
-        <Box
-          data-testid="git-commit-graph"
-          sx={{
-            border: (theme) => `1px solid ${theme.custom.borders.subtle}`,
-            borderRadius: (theme) => `${theme.custom.radii.md}px`,
-            bgcolor: (theme) => theme.custom.surfaces.s1,
-            minHeight: 0,
-            overflow: "auto",
-            px: 1,
-            py: 1.25,
-            color: "text.primary",
-            "& [class*='index-module_container__mhEMW']": {
-              minWidth: "860px",
-              fontFamily: (theme) => theme.custom.fonts.sans,
-            },
-            "& [class*='index-module_commitInfoContainer']": {
-              left: 0,
-              right: 0,
-              minWidth: "760px",
-            },
-            "& [class*='index-module_details']": {
-              minHeight: 42,
-              height: 42,
-              px: 1,
-              borderRadius: (theme) => `${theme.custom.radii.sm}px`,
-              color: "text.primary",
-              fontFamily: (theme) => theme.custom.fonts.sans,
-            },
-            "& [class*='index-module_details']:hover": {
-              backgroundColor: (theme) => theme.custom.surfaces.s2,
-            },
-            "& [class*='index-module_block']": {
-              height: 42,
-              borderRadius: (theme) => `${theme.custom.radii.sm}px`,
-            },
-            "& [class*='index-module_hovered']": {
-              backgroundColor: (theme) => theme.custom.surfaces.s3,
-              opacity: 1,
-            },
-            "& [class*='index-module_clicked']": {
-              backgroundColor: (theme) => theme.palette.status.running.soft,
-              opacity: 1,
-            },
-            "& [class*='index-module_svg']": {
-              maxWidth: "360px",
+        <Stack spacing={1.25} sx={{ minHeight: 0, flex: "0 0 auto" }}>
+          <Box
+            data-testid="git-commit-graph"
+            sx={{
               flex: "0 0 auto",
-            },
-            "& [class*='index-module_container__wEBx3']": {
-              width: "min(980px, calc(100% - 10px))",
-              maxWidth: "none",
-              fontFamily: (theme) => theme.custom.fonts.sans,
-              fontSize: "0.78rem",
+              minHeight: 0,
+              overflowX: "auto",
+              overflowY: "visible",
+              pt: 1,
+              pb: 1.5,
               color: "text.primary",
-            },
-            "& [class*='index-module_labelAndLink']": {
-              gap: 1.25,
-              justifyContent: "flex-start",
-            },
-            "& [class*='index-module_msg']": {
-              color: "text.primary",
-              fontSize: "0.82rem",
-              lineHeight: 1.35,
-              marginTop: "2px",
-              whiteSpace: "nowrap",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-            },
-            "& [class*='index-module_bold']": {
-              color: "text.secondary",
-              fontFamily: (theme) => theme.custom.fonts.mono,
-              fontSize: "0.72rem",
-            },
-            "& [class*='index-module_outer'], & [class*='index-module_number']": {
-              height: 20,
-              lineHeight: "18px",
-              px: 0.75,
-              borderRadius: (theme) => `${theme.custom.radii.sm}px`,
-              backgroundColor: (theme) => theme.custom.surfaces.s3,
-              fontFamily: (theme) => theme.custom.fonts.mono,
-              fontSize: "0.67rem",
-            },
-            "& [class*='index-module_dropdown']": {
-              backgroundColor: (theme) => theme.custom.surfaces.s2,
-              border: (theme) => `1px solid ${theme.custom.borders.subtle}`,
-              p: 0.5,
-            },
-            "& [class*='index-module_dropdownItem']": {
-              backgroundColor: "transparent",
-            },
-          }}
-        >
-          <CommitGraph
-            commits={graphCommits}
-            branchHeads={graphBranches}
-            currentBranch={currentBranch}
-            graphStyle={GIT_GRAPH_STYLE}
-            dateFormatFn={gitGraphDateLabel}
-            fullSha={false}
-            onCommitClick={handleCommitClick}
-          />
-          {visibleCommit && (
-            <Box
-              sx={{
-                mt: 1.25,
+              scrollbarWidth: "thin",
+              "& [class*='index-module_container__mhEMW']": {
+                minWidth: { xs: "680px", md: "820px" },
+                paddingTop: "6px",
+                fontFamily: (theme) => theme.custom.fonts.sans,
+              },
+              "& [class*='index-module_commitInfoContainer']": {
+                left: { xs: "170px !important", md: "210px !important" },
+                right: 0,
+                width: { xs: "calc(100% - 170px) !important", md: "calc(100% - 210px) !important" },
+                minWidth: { xs: "470px", md: "560px" },
+                paddingTop: "6px",
+              },
+              "& [class*='index-module_details']": {
+                minHeight: 36,
+                height: 36,
                 px: 1,
-                py: 0.85,
-                borderRadius: (theme) => `${theme.custom.radii.md}px`,
-                border: (theme) => `1px solid ${theme.custom.borders.subtle}`,
+                borderRadius: (theme) => `${theme.custom.radii.sm}px`,
+                borderBottom: (theme) => `1px solid ${theme.custom.borders.subtle}`,
+                color: "text.primary",
+                fontFamily: (theme) => theme.custom.fonts.sans,
+                transform: "translateY(14px)",
+              },
+              "& [class*='index-module_details'] + [class*='index-module_details']": {
+                marginTop: 0,
+              },
+              "& [class*='index-module_details']:hover": {
                 backgroundColor: (theme) => theme.custom.surfaces.s2,
-                display: "flex",
-                alignItems: "center",
-                gap: 1,
-                minWidth: 0,
-              }}
-            >
-              <Typography component="span" sx={{ flex: "0 0 auto", fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.72rem", fontWeight: 800, color: "text.secondary" }}>
-                {visibleCommit.shortHash}
-              </Typography>
-              {visibleCommit.refs.map((ref) => {
-                const label = gitGraphRefName(ref);
-                return label ? <GitGraphRefChip key={ref} label={label} active={label === currentBranch} /> : null;
-              })}
-              <Typography noWrap sx={{ minWidth: 0, flex: 1, fontSize: "0.82rem", color: "text.primary" }}>
-                {visibleCommit.subject || "-"}
-              </Typography>
-              <Typography component="span" sx={{ display: { xs: "none", md: "inline" }, flex: "0 0 auto", fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.68rem", color: "text.tertiary" }}>
-                {visibleCommit.author} · {visibleCommit.date}
-              </Typography>
-            </Box>
-          )}
-        </Box>
+              },
+              "& [class*='index-module_block']": {
+                height: 36,
+                borderRadius: (theme) => `${theme.custom.radii.sm}px`,
+                transform: "translateY(14px)",
+              },
+              "& [class*='index-module_hovered']": {
+                backgroundColor: (theme) => theme.custom.surfaces.s3,
+                opacity: 1,
+              },
+              "& [class*='index-module_clicked']": {
+                backgroundColor: (theme) => theme.palette.status.running.soft,
+                opacity: 1,
+              },
+              "& [class*='index-module_svg']": {
+                maxWidth: { xs: 170, md: 210 },
+                overflow: "hidden",
+                position: "relative",
+                zIndex: 0,
+                flex: "0 0 auto",
+              },
+              "& [class*='index-module_container__wEBx3']": {
+                width: "100%",
+                maxWidth: "none",
+                fontFamily: (theme) => theme.custom.fonts.sans,
+                fontSize: { xs: "0.72rem", md: "0.76rem" },
+                color: "text.primary",
+              },
+              "& [class*='index-module_labelAndLink']": {
+                gap: 1.25,
+                justifyContent: "flex-start",
+              },
+              "& [class*='index-module_msg']": {
+                color: "text.primary",
+                fontSize: { xs: "0.76rem", md: "0.8rem" },
+                lineHeight: 1.25,
+                marginTop: "1px",
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+              },
+              "& [class*='index-module_bold']": {
+                color: "text.secondary",
+                fontFamily: (theme) => theme.custom.fonts.mono,
+                fontSize: { xs: "0.66rem", md: "0.7rem" },
+              },
+              "& [class*='index-module_outer'], & [class*='index-module_number']": {
+                height: 20,
+                lineHeight: "18px",
+                px: 0.75,
+                borderRadius: (theme) => `${theme.custom.radii.sm}px`,
+                backgroundColor: (theme) => theme.custom.surfaces.s3,
+                fontFamily: (theme) => theme.custom.fonts.mono,
+                fontSize: "0.67rem",
+              },
+              "& [class*='index-module_dropdown']": {
+                backgroundColor: (theme) => theme.custom.surfaces.s2,
+                border: (theme) => `1px solid ${theme.custom.borders.subtle}`,
+                p: 0.5,
+              },
+              "& [class*='index-module_dropdownItem']": {
+                backgroundColor: "transparent",
+              },
+            }}
+          >
+            <CommitGraph
+              commits={graphCommits}
+              branchHeads={graphBranches}
+              currentBranch={currentBranch}
+              graphStyle={GIT_GRAPH_STYLE}
+              dateFormatFn={gitGraphDateLabel}
+              fullSha={false}
+              onCommitClick={handleCommitClick}
+            />
+          </Box>
+          {visibleCommit && <GitCommitSummaryRow commit={visibleCommit} currentBranch={currentBranch} />}
+        </Stack>
       )}
     </Stack>
+  );
+}
+
+function GitCommitSummaryRow({ commit, currentBranch }: { readonly commit: GitGraphCommit; readonly currentBranch: string }) {
+  return (
+    <Box
+      data-testid="git-current-commit-summary"
+      sx={{
+        flex: "0 0 auto",
+        px: 1,
+        py: 0.85,
+        borderRadius: (theme) => `${theme.custom.radii.md}px`,
+        border: (theme) => `1px solid ${theme.custom.borders.subtle}`,
+        backgroundColor: (theme) => theme.custom.surfaces.s2,
+        display: "flex",
+        alignItems: "center",
+        gap: 1,
+        minWidth: 0,
+      }}
+    >
+      <Typography component="span" sx={{ flex: "0 0 auto", fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.72rem", fontWeight: 800, color: "text.secondary" }}>
+        {commit.shortHash}
+      </Typography>
+      {commit.refs.map((ref) => {
+        const label = gitGraphRefName(ref);
+        return label ? <GitGraphRefChip key={ref} label={label} active={label === currentBranch} /> : null;
+      })}
+      <Typography noWrap sx={{ minWidth: 0, flex: 1, fontSize: "0.82rem", color: "text.primary" }}>
+        {commit.subject || "-"}
+      </Typography>
+      <Typography component="span" sx={{ display: { xs: "none", md: "inline" }, flex: "0 0 auto", fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.68rem", color: "text.tertiary" }}>
+        {commit.author} · {commit.date}
+      </Typography>
+    </Box>
   );
 }
 
