@@ -27,6 +27,12 @@ export interface TerminalRestoreSnapshot {
   readonly rows: number;
 }
 
+interface TerminalInitialReplay {
+  readonly chunks: readonly Buffer[];
+  readonly cols: number;
+  readonly rows: number;
+}
+
 type TerminalControlClientMessage =
   | { readonly type: "resize"; readonly cols: number; readonly rows: number; readonly pixelWidth?: number; readonly pixelHeight?: number }
   | { readonly type: "stop" }
@@ -51,6 +57,9 @@ interface TerminalSession {
   readonly ptyProcess: pty.IPty;
   readonly mirror: TerminalStateMirror;
   readonly listeners: Map<number, TerminalListener>;
+  replayChunks: Buffer[];
+  replayBytes: number;
+  initialReplayClaimed: boolean;
   listenerCounter: number;
   running: boolean;
   exitCode: number | null;
@@ -90,6 +99,7 @@ const OUTPUT_BUFFER_LOW_WATER_MARK_BYTES = 4 * 1024;
 const OUTPUT_ACK_HIGH_WATER_MARK_BYTES = 100_000;
 const OUTPUT_ACK_LOW_WATER_MARK_BYTES = 5_000;
 const OUTPUT_RESUME_CHECK_INTERVAL_MS = 16;
+const INITIAL_REPLAY_BUFFER_BYTES = 512 * 1024;
 
 type SerializeAddonConstructor = new () => SerializeAddonInstance;
 type HeadlessTerminalConstructorOptions = HeadlessTerminalOptions & { readonly cols?: number; readonly rows?: number };
@@ -189,6 +199,19 @@ function terminalSummary(session: TerminalSession): Extract<TerminalControlServe
   };
 }
 
+function appendInitialReplayChunk(session: TerminalSession, chunk: Buffer): void {
+  if (session.initialReplayClaimed) {
+    return;
+  }
+  const copy = Buffer.from(chunk);
+  session.replayChunks.push(copy);
+  session.replayBytes += copy.byteLength;
+  while (session.replayBytes > INITIAL_REPLAY_BUFFER_BYTES && session.replayChunks.length > 0) {
+    const removed = session.replayChunks.shift();
+    session.replayBytes -= removed?.byteLength ?? 0;
+  }
+}
+
 class TerminalStateMirror {
   private readonly terminal: HeadlessTerminalInstance;
   private readonly serializeAddon = new SerializeAddon();
@@ -220,6 +243,14 @@ class TerminalStateMirror {
     await this.operationQueue;
     return {
       snapshot: this.serializeAddon.serialize(),
+      cols: this.terminal.cols,
+      rows: this.terminal.rows,
+    };
+  }
+
+  async getSize(): Promise<{ readonly cols: number; readonly rows: number }> {
+    await this.operationQueue;
+    return {
       cols: this.terminal.cols,
       rows: this.terminal.rows,
     };
@@ -257,6 +288,9 @@ export class PtyTerminalManager {
       ptyProcess,
       mirror,
       listeners: new Map(),
+      replayChunks: [],
+      replayBytes: 0,
+      initialReplayClaimed: false,
       listenerCounter: 1,
       running: true,
       exitCode: null,
@@ -265,6 +299,7 @@ export class PtyTerminalManager {
     (ptyProcess.onData as unknown as (listener: (data: string | Buffer | Uint8Array) => void) => void)((data) => {
       const chunk = normalizePtyOutput(data);
       mirror.applyOutput(chunk);
+      appendInitialReplayChunk(session, chunk);
       for (const listener of session.listeners.values()) {
         listener.onOutput?.(chunk);
       }
@@ -320,6 +355,23 @@ export class PtyTerminalManager {
   async getSnapshot(id: string): Promise<TerminalRestoreSnapshot | null> {
     const session = this.sessions.get(id);
     return session ? await session.mirror.getSnapshot() : null;
+  }
+
+  async claimInitialReplay(id: string): Promise<TerminalInitialReplay | null> {
+    const session = this.sessions.get(id);
+    if (!session || session.initialReplayClaimed) {
+      return null;
+    }
+    session.initialReplayClaimed = true;
+    const chunks = session.replayChunks.map((chunk) => Buffer.from(chunk));
+    session.replayChunks = [];
+    session.replayBytes = 0;
+    const size = await session.mirror.getSize();
+    return {
+      chunks,
+      cols: size.cols,
+      rows: size.rows,
+    };
   }
 
   write(id: string, data: Buffer): boolean {
@@ -632,7 +684,13 @@ export function attachPtyTerminalWebSockets(server: Server, terminalManager: Pty
       previousSocket.close(1000, "Replaced by newer terminal control connection.");
     }
 
-    void terminalManager.getSnapshot(terminalId).then((snapshot) => {
+    void terminalManager.claimInitialReplay(terminalId).then(async (initialReplay) => {
+      if (initialReplay) {
+        viewer.pendingOutputChunks = [...initialReplay.chunks, ...viewer.pendingOutputChunks];
+        sendControlMessage(ws, { type: "restore", snapshot: "", cols: initialReplay.cols, rows: initialReplay.rows });
+        return;
+      }
+      const snapshot = await terminalManager.getSnapshot(terminalId);
       if (!snapshot) {
         sendControlMessage(ws, { type: "error", message: "Terminal session not found." });
         return;

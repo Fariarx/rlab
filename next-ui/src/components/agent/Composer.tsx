@@ -4,6 +4,8 @@ import AutoAwesomeRoundedIcon from "@mui/icons-material/AutoAwesomeRounded";
 import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
 import DescriptionOutlinedIcon from "@mui/icons-material/DescriptionOutlined";
 import ImageOutlinedIcon from "@mui/icons-material/ImageOutlined";
+import KeyboardArrowDownRoundedIcon from "@mui/icons-material/KeyboardArrowDownRounded";
+import MicRoundedIcon from "@mui/icons-material/MicRounded";
 import OpenInBrowserIcon from "@mui/icons-material/OpenInBrowser";
 import RateReviewOutlinedIcon from "@mui/icons-material/RateReviewOutlined";
 import SendIcon from "@mui/icons-material/Send";
@@ -11,14 +13,17 @@ import SendTimeExtensionIcon from "@mui/icons-material/SendTimeExtension";
 import CompressRoundedIcon from "@mui/icons-material/CompressRounded";
 import StopCircleIcon from "@mui/icons-material/StopCircle";
 import WarningAmberRoundedIcon from "@mui/icons-material/WarningAmberRounded";
-import { Box, Divider, InputBase, Menu, MenuItem, Stack, Switch, type SxProps, TextField, type Theme, Tooltip, Typography } from "@mui/material";
-import { type ChangeEvent, type ClipboardEvent, forwardRef, type KeyboardEvent, type MouseEvent, type ReactNode, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Box, Collapse, Divider, InputBase, Menu, MenuItem, Stack, Switch, type SxProps, TextField, type Theme, Tooltip, Typography } from "@mui/material";
+import type { PopoverActions } from "@mui/material/Popover";
+import { type ChangeEvent, type ClipboardEvent, forwardRef, type KeyboardEvent, type MouseEvent, type PointerEvent, type ReactNode, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import { localFileUrl } from "../../lib/external-url";
+import type { VoiceProviderId, VoiceProviderKind } from "../../lib/voice-providers";
 import { ImageLightbox } from "../workspace/ImageLightbox";
 import { Button, IconButton, KeyHint } from "../ui";
 import { AttachmentTile } from "./AttachmentTile";
 import { ContextGauge } from "./ContextGauge";
+import type { AgentRateLimit, RateLimitWindow } from "./agent-limits";
 import type { ComposerAttachmentDraft, ComposerDraft } from "./types";
 
 /** Pastes longer than this become a text-file attachment instead of flooding the input. */
@@ -106,6 +111,81 @@ function fileToBase64(file: File): Promise<string> {
   });
 }
 
+function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = typeof reader.result === "string" ? reader.result : "";
+      const comma = result.indexOf(",");
+      resolve(comma >= 0 ? result.slice(comma + 1) : result);
+    };
+    reader.onerror = () => reject(reader.error ?? new Error("Failed to read audio"));
+    reader.readAsDataURL(blob);
+  });
+}
+
+interface SpeechRecognitionAlternativeLike {
+  readonly transcript: string;
+}
+
+interface SpeechRecognitionResultLike {
+  readonly length: number;
+  readonly isFinal: boolean;
+  readonly [index: number]: SpeechRecognitionAlternativeLike;
+}
+
+interface SpeechRecognitionResultListLike {
+  readonly length: number;
+  readonly [index: number]: SpeechRecognitionResultLike;
+}
+
+interface SpeechRecognitionResultEventLike {
+  readonly resultIndex: number;
+  readonly results: SpeechRecognitionResultListLike;
+}
+
+interface SpeechRecognitionErrorEventLike {
+  readonly error?: string;
+  readonly message?: string;
+}
+
+interface SpeechRecognitionLike {
+  lang: string;
+  continuous: boolean;
+  interimResults: boolean;
+  onresult: ((event: SpeechRecognitionResultEventLike) => void) | null;
+  onerror: ((event: SpeechRecognitionErrorEventLike) => void) | null;
+  onend: (() => void) | null;
+  start: () => void;
+  stop: () => void;
+}
+
+type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
+
+function speechRecognitionConstructor(): SpeechRecognitionConstructor | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+  const candidate = window as Window & {
+    readonly SpeechRecognition?: SpeechRecognitionConstructor;
+    readonly webkitSpeechRecognition?: SpeechRecognitionConstructor;
+  };
+  return candidate.SpeechRecognition ?? candidate.webkitSpeechRecognition ?? null;
+}
+
+function preferredAudioMimeType(): string | undefined {
+  if (typeof MediaRecorder === "undefined") {
+    return undefined;
+  }
+  const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus", "audio/ogg"];
+  return candidates.find((candidate) => MediaRecorder.isTypeSupported(candidate));
+}
+
+async function readComposerResponseError(response: Response, fallback: string): Promise<string> {
+  const payload = (await response.json().catch(() => ({}))) as { error?: string };
+  return payload.error ?? fallback;
+}
+
 async function fileToAttachmentDraft(file: File): Promise<ComposerAttachmentDraft> {
   const base = {
     id: newAttachmentId(),
@@ -152,6 +232,134 @@ function composerDraftsEqual(left: ComposerDraft, right: ComposerDraft): boolean
 }
 
 const COMPOSER_TILE_SIZE = 76;
+const COMPOSER_BORDER_HOVER_RADIUS_PX = 42;
+const VOICE_DEFAULT_LEVEL_COUNT = 96;
+const VOICE_MIN_LEVEL_COUNT = 48;
+const VOICE_MAX_LEVEL_COUNT = 220;
+const VOICE_LEVEL_PITCH_PX = 6;
+const VOICE_IDLE_LEVEL = 0.025;
+const VOICE_IDLE_LEVELS = voiceIdleLevels(VOICE_DEFAULT_LEVEL_COUNT);
+const VOICE_NO_SPEECH_NOTICE_DELAY_MS = 800;
+
+function voiceIdleLevels(levelCount: number): readonly number[] {
+  return Array.from({ length: levelCount }, () => VOICE_IDLE_LEVEL);
+}
+
+export function voiceLevelCountFromWidth(width: number): number {
+  if (!Number.isFinite(width) || width <= 0) {
+    return VOICE_DEFAULT_LEVEL_COUNT;
+  }
+  return Math.max(VOICE_MIN_LEVEL_COUNT, Math.min(VOICE_MAX_LEVEL_COUNT, Math.round(width / VOICE_LEVEL_PITCH_PX)));
+}
+
+function formatVoiceDuration(startedAt: number | null): string {
+  if (startedAt === null) {
+    return "0:00";
+  }
+  const seconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+export function voiceLevelsFromTimeDomainData(data: Uint8Array, levelCount = VOICE_DEFAULT_LEVEL_COUNT): readonly number[] {
+  if (data.length === 0 || levelCount <= 0) {
+    return [];
+  }
+  return Array.from({ length: levelCount }, (_, index) => {
+    const start = Math.floor((index * data.length) / levelCount);
+    const end = Math.max(start + 1, Math.floor(((index + 1) * data.length) / levelCount));
+    let sum = 0;
+    for (let offset = start; offset < end; offset += 1) {
+      const centered = (data[offset] - 128) / 128;
+      sum += centered * centered;
+    }
+    return Math.min(1, Math.sqrt(sum / (end - start)) * 5);
+  });
+}
+
+function VoiceRecordingStrip({ label, duration, levels, onLevelCountChange }: { readonly label: string; readonly duration: string; readonly levels: readonly number[]; readonly onLevelCountChange: (levelCount: number) => void }) {
+  const waveformRef = useRef<HTMLDivElement | null>(null);
+
+  useLayoutEffect(() => {
+    const waveform = waveformRef.current;
+    if (!waveform || typeof ResizeObserver === "undefined") {
+      return;
+    }
+    const update = () => onLevelCountChange(voiceLevelCountFromWidth(waveform.getBoundingClientRect().width));
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(waveform);
+    return () => observer.disconnect();
+  }, [onLevelCountChange]);
+
+  return (
+    <Box
+      data-testid="composer-voice-recording-strip"
+      role="status"
+      aria-label={label}
+      sx={{
+        position: "absolute",
+        inset: 0,
+        zIndex: 6,
+        display: "grid",
+        gridTemplateColumns: "minmax(0, 1fr) auto",
+        alignItems: "center",
+        gap: 1.25,
+        px: 1,
+        color: "text.primary",
+        pointerEvents: "none",
+        backgroundColor: (theme) => theme.custom.surfaces.s2,
+      }}
+    >
+      <Box
+        ref={waveformRef}
+        sx={{
+          minWidth: 0,
+          height: 28,
+          position: "relative",
+          display: "grid",
+          gridTemplateColumns: `repeat(${Math.max(1, levels.length)}, minmax(0, 1fr))`,
+          alignItems: "center",
+          gap: "2px",
+          overflow: "hidden",
+        }}
+      >
+        {levels.map((level, index) => {
+          const height = Math.max(3, Math.min(28, 3 + level * 32));
+          return (
+          <Box
+            key={index}
+            component="span"
+            data-level={level.toFixed(3)}
+            sx={{
+              justifySelf: "stretch",
+              minWidth: 1,
+              height,
+              borderRadius: "999px",
+              backgroundColor: "text.primary",
+              opacity: Math.max(0.28, Math.min(0.96, 0.34 + level * 0.8)),
+              transformOrigin: "center",
+              transition: "height 80ms linear",
+            }}
+          />
+          );
+        })}
+      </Box>
+      <Typography
+        component="span"
+        sx={{
+          minWidth: 38,
+          fontFamily: (theme) => theme.custom.fonts.mono,
+          fontSize: "0.78rem",
+          color: "text.secondary",
+          textAlign: "right",
+        }}
+      >
+        {duration}
+      </Typography>
+    </Box>
+  );
+}
 
 /**
  * FloatingTile — a square control that "floats" above the composer with the
@@ -329,6 +537,14 @@ interface ComposerBrowserActivityEvent {
   readonly detail?: string;
 }
 
+interface ComposerVoiceProvider {
+  readonly id: VoiceProviderId;
+  readonly name: string;
+  readonly kind: Exclude<VoiceProviderKind, "none">;
+  readonly language: string;
+  readonly configured: boolean;
+}
+
 function browserActivityTone(type: string): "info" | "success" | "warning" | "error" {
   if (type === "console.error" || type === "page.error" || type === "network.failed") {
     return "error";
@@ -381,6 +597,12 @@ interface ComposerProps {
   readonly history?: readonly string[];
   /** Current agent id, used to show its account rate-limits in the options menu. */
   readonly agentId?: string;
+  /** Shared account rate-limits for the selected CLI agent, owned by WorkspacePage. */
+  readonly agentLimit?: AgentRateLimit | null;
+  readonly agentLimitLoaded?: boolean;
+  readonly agentLimitRefreshing?: boolean;
+  readonly agentLimitRefreshError?: string | null;
+  readonly onRefreshAgentLimits?: (requestRefresh: boolean) => void;
   /** The selected conversation's latest-turn context-window fill (tokens) and the
    *  model's window size, for the context gauge in the options menu. */
   readonly contextTokens?: number;
@@ -400,20 +622,9 @@ interface ComposerProps {
   /** User turns queued behind the current/last run; can be dispatched manually. */
   readonly queuedMessageCount?: number;
   readonly onSendQueuedNow?: () => void;
-}
-
-interface RateLimitWindow {
-  readonly kind: "five_hour" | "weekly" | "overage";
-  readonly usedPercent?: number;
-  readonly resetsAt?: number;
-  readonly status?: string;
-}
-
-interface AgentRateLimit {
-  readonly updatedAt: number;
-  readonly status?: string;
-  readonly plan?: string;
-  readonly windows: readonly RateLimitWindow[];
+  /** Selected and server-authorized voice dictation provider. Omitted for "none". */
+  readonly voiceProvider?: ComposerVoiceProvider;
+  readonly onVoiceError?: (message: string) => void;
 }
 
 /** Agents whose CLI/SDK does not surface account rate-limit data, so the menu
@@ -447,6 +658,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     onOverlayLiftChange,
     history = [],
     agentId,
+    agentLimit = null,
+    agentLimitLoaded = false,
+    agentLimitRefreshing = false,
+    agentLimitRefreshError = null,
+    onRefreshAgentLimits,
     contextTokens,
     contextWindow,
     autoCompact = true,
@@ -458,6 +674,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     scheduledWakeups = [],
     queuedMessageCount = 0,
     onSendQueuedNow,
+    voiceProvider,
+    onVoiceError,
   },
   ref,
 ) {
@@ -476,14 +694,33 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   onOverlayLiftChangeRef.current = onOverlayLiftChange;
   // An image attachment opened full-screen (click a thumbnail to view).
   const [previewAttachment, setPreviewAttachment] = useState<ComposerAttachmentDraft | null>(null);
-  // The current agent's account rate-limits, fetched when the options menu opens.
-  const [agentLimit, setAgentLimit] = useState<AgentRateLimit | null>(null);
-  const [limitLoaded, setLimitLoaded] = useState(false);
+  const [limitOpen, setLimitOpen] = useState(false);
+  const optionsMenuActionRef = useRef<PopoverActions | null>(null);
+  const optionsMenuListRef = useRef<HTMLUListElement | null>(null);
+  const optionsMenuPositionFrameRef = useRef<number | null>(null);
   const activeModeOption = modes.find((mode) => mode.id === activeMode) ?? null;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const tagsRef = useRef<HTMLDivElement | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const composerBarRef = useRef<HTMLDivElement | null>(null);
+  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const voiceAudioContextRef = useRef<AudioContext | null>(null);
+  const voiceAnalyserFrameRef = useRef<number | null>(null);
+  const voiceNoSpeechTimerRef = useRef<number | null>(null);
+  const voiceNoSpeechNotifiedRef = useRef(false);
+  const voiceRecognizedRef = useRef(false);
+  const voiceManualStopRef = useRef(false);
+  const voiceLevelValuesRef = useRef<readonly number[]>(VOICE_IDLE_LEVELS);
+  const voiceLevelLastPaintRef = useRef(0);
+  const voiceLevelCountRef = useRef(VOICE_DEFAULT_LEVEL_COUNT);
+  const [voiceState, setVoiceState] = useState<"idle" | "recording" | "transcribing">("idle");
+  const [voiceRecordingStartedAt, setVoiceRecordingStartedAt] = useState<number | null>(null);
+  const [voiceClock, setVoiceClock] = useState(0);
+  const [voiceLevels, setVoiceLevels] = useState<readonly number[]>(VOICE_IDLE_LEVELS);
+  const [browserVoiceSupported, setBrowserVoiceSupported] = useState(false);
   const singleRowRef = useRef(0);
   // Shell-style history navigation: -1 means "not browsing"; otherwise an index
   // into `history`. `historyDraftRef` holds the text being composed before the
@@ -586,6 +823,61 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   );
   const visibleSlashCommands = composerValue.startsWith("/") && !composerValue.includes(" ") ? slashCommands.filter((command) => command.label.startsWith(composerValue)) : [];
 
+  const updateComposerBorderHover = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    const composerBar = composerBarRef.current;
+    if (!composerBar) {
+      return;
+    }
+    const rect = composerBar.getBoundingClientRect();
+    composerBar.style.setProperty("--composer-border-x", `${Math.round(event.clientX - rect.left)}px`);
+    composerBar.style.setProperty("--composer-border-y", `${Math.round(event.clientY - rect.top)}px`);
+    composerBar.style.setProperty("--composer-border-hover-opacity", "1");
+  }, []);
+
+  const clearComposerBorderHover = useCallback(() => {
+    composerBarRef.current?.style.setProperty("--composer-border-hover-opacity", "0");
+  }, []);
+
+  const setVoiceLevelCountForWidth = useCallback((levelCount: number) => {
+    if (voiceLevelCountRef.current === levelCount) {
+      return;
+    }
+    voiceLevelCountRef.current = levelCount;
+    setVoiceLevels((current) => (current.length === levelCount ? current : voiceIdleLevels(levelCount)));
+  }, []);
+
+  const updateOptionsMenuPosition = useCallback(() => {
+    optionsMenuActionRef.current?.updatePosition();
+  }, []);
+
+  const scheduleOptionsMenuPositionUpdate = useCallback(() => {
+    if (optionsMenuPositionFrameRef.current !== null) {
+      cancelAnimationFrame(optionsMenuPositionFrameRef.current);
+    }
+    optionsMenuPositionFrameRef.current = requestAnimationFrame(() => {
+      optionsMenuPositionFrameRef.current = null;
+      updateOptionsMenuPosition();
+    });
+  }, [updateOptionsMenuPosition]);
+
+  useEffect(() => {
+    return () => {
+      if (optionsMenuPositionFrameRef.current !== null) {
+        cancelAnimationFrame(optionsMenuPositionFrameRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    const list = optionsMenuListRef.current;
+    if (!modeMenuAnchor || !list || typeof ResizeObserver === "undefined") {
+      return;
+    }
+    const observer = new ResizeObserver(scheduleOptionsMenuPositionUpdate);
+    observer.observe(list);
+    return () => observer.disconnect();
+  }, [modeMenuAnchor, scheduleOptionsMenuPositionUpdate]);
+
   const updateDraft = (draft: ComposerDraft) => {
     localDraftDirtyRef.current = true;
     latestDraftRef.current = draft;
@@ -648,6 +940,284 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const setComposerAttachments = (nextAttachments: readonly ComposerAttachmentDraft[]) => {
     updateDraft({ text: latestDraftRef.current.text, attachments: nextAttachments });
   };
+
+  const clearVoiceNoSpeechNotice = useCallback(() => {
+    if (voiceNoSpeechTimerRef.current !== null) {
+      window.clearTimeout(voiceNoSpeechTimerRef.current);
+      voiceNoSpeechTimerRef.current = null;
+    }
+  }, []);
+
+  const scheduleVoiceNoSpeechNotice = useCallback(() => {
+    if (voiceRecognizedRef.current || voiceNoSpeechNotifiedRef.current || voiceNoSpeechTimerRef.current !== null) {
+      return;
+    }
+    voiceNoSpeechTimerRef.current = window.setTimeout(() => {
+      voiceNoSpeechTimerRef.current = null;
+      if (!voiceRecognizedRef.current) {
+        voiceNoSpeechNotifiedRef.current = true;
+        onVoiceError?.(t("voiceNoSpeech"));
+      }
+    }, VOICE_NO_SPEECH_NOTICE_DELAY_MS);
+  }, [onVoiceError, t]);
+
+  const appendDictation = useCallback((text: string): boolean => {
+    const cleanText = text.trim();
+    if (!cleanText) {
+      return false;
+    }
+    voiceRecognizedRef.current = true;
+    clearVoiceNoSpeechNotice();
+    const currentText = latestDraftRef.current.text;
+    const separator = currentText.length === 0 || /\s$/.test(currentText) ? "" : " ";
+    updateDraft({ text: `${currentText}${separator}${cleanText}`, attachments: latestDraftRef.current.attachments });
+    requestAnimationFrame(() => textareaRef.current?.focus());
+    return true;
+  }, [clearVoiceNoSpeechNotice]);
+
+  const stopVoiceAnalyser = useCallback(() => {
+    if (voiceAnalyserFrameRef.current !== null) {
+      cancelAnimationFrame(voiceAnalyserFrameRef.current);
+      voiceAnalyserFrameRef.current = null;
+    }
+    const context = voiceAudioContextRef.current;
+    voiceAudioContextRef.current = null;
+    if (context && context.state !== "closed") {
+      void context.close();
+    }
+    const idleLevels = voiceIdleLevels(voiceLevelCountRef.current);
+    voiceLevelValuesRef.current = idleLevels;
+    setVoiceLevels(idleLevels);
+  }, []);
+
+  const stopVoiceTracks = useCallback(() => {
+    stopVoiceAnalyser();
+    mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+    mediaStreamRef.current = null;
+  }, [stopVoiceAnalyser]);
+
+  const startVoiceAnalyser = useCallback((stream: MediaStream) => {
+    stopVoiceAnalyser();
+    const AudioContextConstructor = window.AudioContext;
+    const context = new AudioContextConstructor();
+    const analyser = context.createAnalyser();
+    analyser.fftSize = 1024;
+    analyser.smoothingTimeConstant = 0.35;
+    context.createMediaStreamSource(stream).connect(analyser);
+    voiceAudioContextRef.current = context;
+    const data = new Uint8Array(analyser.fftSize);
+    const tick = (now: number) => {
+      analyser.getByteTimeDomainData(data);
+      const next = voiceLevelsFromTimeDomainData(data, voiceLevelCountRef.current);
+      voiceLevelValuesRef.current = next;
+      if (now - voiceLevelLastPaintRef.current > 70) {
+        voiceLevelLastPaintRef.current = now;
+        setVoiceLevels(next);
+      }
+      voiceAnalyserFrameRef.current = requestAnimationFrame(tick);
+    };
+    voiceAnalyserFrameRef.current = requestAnimationFrame(tick);
+  }, [stopVoiceAnalyser]);
+
+  useEffect(() => {
+    setBrowserVoiceSupported(voiceProvider?.kind === "browser" && speechRecognitionConstructor() !== null);
+  }, [voiceProvider?.kind, voiceProvider?.id]);
+
+  useEffect(() => () => {
+    clearVoiceNoSpeechNotice();
+    recognitionRef.current?.stop();
+    mediaRecorderRef.current?.stop();
+    stopVoiceTracks();
+  }, [clearVoiceNoSpeechNotice, stopVoiceTracks]);
+
+  useEffect(() => {
+    if (voiceState !== "recording") {
+      setVoiceRecordingStartedAt(null);
+      return undefined;
+    }
+    if (voiceRecordingStartedAt === null) {
+      setVoiceRecordingStartedAt(Date.now());
+    }
+    const timer = window.setInterval(() => setVoiceClock((value) => value + 1), 250);
+    return () => window.clearInterval(timer);
+  }, [voiceRecordingStartedAt, voiceState]);
+
+  const transcribeCloudAudio = useCallback(async (blob: Blob) => {
+    if (!voiceProvider || voiceProvider.kind !== "cloud") {
+      return;
+    }
+    const response = await fetch("/api/voice/transcribe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        provider: voiceProvider.id,
+        mimeType: blob.type || "application/octet-stream",
+        dataBase64: await blobToBase64(blob),
+        language: voiceProvider.language,
+      }),
+    });
+    if (!response.ok) {
+      throw new Error(await readComposerResponseError(response, `Voice transcription failed (${response.status})`));
+    }
+    const payload = (await response.json()) as { text?: unknown };
+    if (typeof payload.text !== "string") {
+      throw new Error("Voice transcription response is invalid.");
+    }
+    if (!appendDictation(payload.text)) {
+      scheduleVoiceNoSpeechNotice();
+    }
+  }, [appendDictation, scheduleVoiceNoSpeechNotice, voiceProvider]);
+
+  const startBrowserDictation = useCallback(async () => {
+    if (!voiceProvider || voiceProvider.kind !== "browser") {
+      return;
+    }
+    const Recognition = speechRecognitionConstructor();
+    if (!Recognition || !navigator.mediaDevices || typeof window.AudioContext === "undefined") {
+      onVoiceError?.(t("voiceInputUnavailable", { provider: voiceProvider.name }));
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaStreamRef.current = stream;
+      startVoiceAnalyser(stream);
+      const recognition = new Recognition();
+      recognition.lang = voiceProvider.language;
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.onresult = (event) => {
+        let transcript = "";
+        for (let index = event.resultIndex; index < event.results.length; index += 1) {
+          const result = event.results[index];
+          if (result?.isFinal) {
+            transcript += result[0]?.transcript ?? "";
+          }
+        }
+        appendDictation(transcript);
+      };
+      recognition.onerror = (event) => {
+        if (!voiceManualStopRef.current && event.error === "no-speech") {
+          scheduleVoiceNoSpeechNotice();
+          return;
+        }
+        clearVoiceNoSpeechNotice();
+        voiceManualStopRef.current = true;
+        stopVoiceTracks();
+        onVoiceError?.(t("voiceTranscriptionFailed", { error: event.message || event.error || "unknown" }));
+        setVoiceState("idle");
+      };
+      recognition.onend = () => {
+        if (!voiceManualStopRef.current && recognitionRef.current === recognition) {
+          window.setTimeout(() => {
+            if (voiceManualStopRef.current || recognitionRef.current !== recognition) {
+              return;
+            }
+            try {
+              recognition.start();
+            } catch (error) {
+              voiceManualStopRef.current = true;
+              recognitionRef.current = null;
+              clearVoiceNoSpeechNotice();
+              stopVoiceTracks();
+              setVoiceState("idle");
+              onVoiceError?.(t("voiceTranscriptionFailed", { error: error instanceof Error ? error.message : String(error) }));
+            }
+          }, 120);
+          return;
+        }
+        recognitionRef.current = null;
+        stopVoiceTracks();
+        setVoiceState("idle");
+      };
+      voiceManualStopRef.current = false;
+      voiceRecognizedRef.current = false;
+      voiceNoSpeechNotifiedRef.current = false;
+      clearVoiceNoSpeechNotice();
+      recognitionRef.current = recognition;
+      setVoiceRecordingStartedAt(Date.now());
+      setVoiceState("recording");
+      recognition.start();
+    } catch (error) {
+      clearVoiceNoSpeechNotice();
+      stopVoiceTracks();
+      setVoiceState("idle");
+      onVoiceError?.(t("voiceTranscriptionFailed", { error: error instanceof Error ? error.message : String(error) }));
+    }
+  }, [appendDictation, clearVoiceNoSpeechNotice, onVoiceError, scheduleVoiceNoSpeechNotice, startVoiceAnalyser, stopVoiceTracks, t, voiceProvider]);
+
+  const startCloudDictation = useCallback(async () => {
+    if (!voiceProvider || voiceProvider.kind !== "cloud") {
+      return;
+    }
+    if (!voiceProvider.configured || !navigator.mediaDevices || typeof MediaRecorder === "undefined") {
+      onVoiceError?.(t("voiceInputUnavailable", { provider: voiceProvider.name }));
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaStreamRef.current = stream;
+      startVoiceAnalyser(stream);
+      const chunks: Blob[] = [];
+      const mimeType = preferredAudioMimeType();
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      mediaRecorderRef.current = recorder;
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          chunks.push(event.data);
+        }
+      };
+      recorder.onerror = (event) => {
+        onVoiceError?.(t("voiceTranscriptionFailed", { error: event.error.message }));
+      };
+      recorder.onstop = () => {
+        const type = recorder.mimeType || mimeType || "audio/webm";
+        const audio = new Blob(chunks, { type });
+        mediaRecorderRef.current = null;
+        stopVoiceTracks();
+        if (audio.size === 0) {
+          setVoiceState("idle");
+          scheduleVoiceNoSpeechNotice();
+          return;
+        }
+        setVoiceState("transcribing");
+        void transcribeCloudAudio(audio)
+          .catch((error: unknown) => onVoiceError?.(t("voiceTranscriptionFailed", { error: error instanceof Error ? error.message : String(error) })))
+          .finally(() => setVoiceState("idle"));
+      };
+      voiceRecognizedRef.current = false;
+      voiceNoSpeechNotifiedRef.current = false;
+      clearVoiceNoSpeechNotice();
+      setVoiceRecordingStartedAt(Date.now());
+      setVoiceState("recording");
+      recorder.start();
+    } catch (error) {
+      clearVoiceNoSpeechNotice();
+      stopVoiceTracks();
+      setVoiceState("idle");
+      onVoiceError?.(t("voiceTranscriptionFailed", { error: error instanceof Error ? error.message : String(error) }));
+    }
+  }, [clearVoiceNoSpeechNotice, onVoiceError, scheduleVoiceNoSpeechNotice, startVoiceAnalyser, stopVoiceTracks, t, transcribeCloudAudio, voiceProvider]);
+
+  const toggleVoiceInput = useCallback(() => {
+    if (voiceState === "recording") {
+      voiceManualStopRef.current = true;
+      clearVoiceNoSpeechNotice();
+      recognitionRef.current?.stop();
+      if (mediaRecorderRef.current?.state === "recording") {
+        mediaRecorderRef.current.stop();
+      }
+      stopVoiceTracks();
+      return;
+    }
+    if (!voiceProvider || voiceState !== "idle") {
+      return;
+    }
+    if (voiceProvider.kind === "browser") {
+      void startBrowserDictation();
+      return;
+    }
+    void startCloudDictation();
+  }, [clearVoiceNoSpeechNotice, startBrowserDictation, startCloudDictation, voiceProvider, voiceState]);
 
   const send = async () => {
     const trimmed = composerValue.trim();
@@ -819,8 +1389,32 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   }, [suggestionKey]);
 
   const hasAttachments = composerAttachments.length > 0;
-  const canSend = (composerValue.trim().length > 0 || composerAttachments.length > 0 || reviewCount > 0) && !sending;
+  const hasComposerPayload = composerValue.trim().length > 0 || composerAttachments.length > 0;
+  const canSend = (hasComposerPayload || reviewCount > 0) && !sending;
+  const showAgentStopButton = running && !hasComposerPayload && reviewCount === 0;
   const sendLabel = reviewCount > 0 ? t("reviewSendComments") : t("send");
+  const browserProviderAvailable =
+    voiceProvider?.kind === "browser"
+    && browserVoiceSupported
+    && typeof navigator !== "undefined"
+    && Boolean(navigator.mediaDevices)
+    && typeof window !== "undefined"
+    && typeof window.AudioContext !== "undefined";
+  const cloudProviderAvailable =
+    voiceProvider?.kind === "cloud"
+    && voiceProvider.configured
+    && typeof navigator !== "undefined"
+    && Boolean(navigator.mediaDevices)
+    && typeof MediaRecorder !== "undefined";
+  const voiceAvailable = browserProviderAvailable || cloudProviderAvailable;
+  const voiceLabel =
+    voiceState === "recording"
+      ? t("stopVoiceInput")
+      : voiceState === "transcribing"
+        ? t("voiceInputTranscribing")
+        : t("startVoiceInput", { provider: voiceProvider?.name ?? "" });
+  const voiceInputActive = voiceState !== "idle";
+  const voiceDuration = voiceClock >= 0 ? formatVoiceDuration(voiceRecordingStartedAt) : "0:00";
 
   const floatingPanelSx: SxProps<Theme> = {
     pointerEvents: "auto",
@@ -842,6 +1436,19 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const contextOverLimit = hasKnownContextWindow && effectiveContextTokens / effectiveContextWindow >= 1;
   const supportsAutoCompactToggle = agentId !== undefined && AUTO_COMPACT_TOGGLE_AGENTS.has(agentId);
   const supportsCompactionWindow = agentId !== undefined && COMPACTION_WINDOW_AGENTS.has(agentId);
+  const limitWindowLabel = (kind: RateLimitWindow["kind"]): string =>
+    kind === "weekly" ? t("limitWindowWeekly") : kind === "overage" ? t("limitOverage") : t("limitWindow5h");
+  const lowLimitWindow = agentLimit?.windows.find((window) => typeof window.usedPercent === "number" && window.usedPercent >= 85) ?? null;
+  const lowLimitPercent = typeof lowLimitWindow?.usedPercent === "number" ? Math.round(lowLimitWindow.usedPercent) : null;
+  const limitWarningLabel =
+    lowLimitWindow && lowLimitPercent !== null
+      ? `${t("limitsLowTile")} · ${limitWindowLabel(lowLimitWindow.kind)} ${lowLimitPercent}%`
+      : null;
+  const limitWarningHint =
+    lowLimitWindow && lowLimitPercent !== null
+      ? t("limitsLowHint", { window: limitWindowLabel(lowLimitWindow.kind), percent: lowLimitPercent })
+      : null;
+  const limitWarningTone = agentLimit?.status === "rejected" || (lowLimitPercent !== null && lowLimitPercent >= 95) ? "danger" : "warn";
 
   // Compact, localized lines describing the agent's account rate-limits — one
   // row per window (5-hour, weekly, …) showing usage % and time-to-reset side
@@ -850,8 +1457,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     if (!agentLimit) {
       return [];
     }
-    const windowLabel = (kind: RateLimitWindow["kind"]): string =>
-      kind === "weekly" ? t("limitWindowWeekly") : kind === "overage" ? t("limitOverage") : t("limitWindow5h");
     const formatReset = (resetsAt: number): string => {
       const secs = Math.max(0, resetsAt * 1000 - Date.now()) / 1000;
       const h = Math.floor(secs / 3600);
@@ -877,7 +1482,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         parts.push(formatReset(window.resetsAt));
       }
       if (parts.length > 0) {
-        lines.push({ id: window.kind, label: windowLabel(window.kind), value: parts.join(" · "), percent: typeof window.usedPercent === "number" ? window.usedPercent : undefined });
+        lines.push({ id: window.kind, label: limitWindowLabel(window.kind), value: parts.join(" · "), percent: typeof window.usedPercent === "number" ? window.usedPercent : undefined });
       }
     }
     if (agentLimit.plan) {
@@ -889,42 +1494,28 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     return lines;
   })();
 
-  const refreshAgentLimits = useCallback(() => {
-    void (async () => {
-      try {
-        const response = await fetch("/api/agent-limits", { cache: "no-store" });
-        if (response.ok) {
-          const { limits } = (await response.json()) as { limits?: Record<string, AgentRateLimit> };
-          setAgentLimit((agentId && limits ? limits[agentId] : null) ?? null);
-        } else {
-          setAgentLimit(null);
-        }
-      } catch {
-        setAgentLimit(null);
-      } finally {
-        setLimitLoaded(true);
-      }
-    })();
+  useEffect(() => {
+    setLimitOpen(false);
   }, [agentId]);
 
-  useEffect(() => {
-    setAgentLimit(null);
-    setLimitLoaded(false);
-  }, [agentId]);
-
-  useEffect(() => {
-    if (!modeMenuAnchor) {
-      return undefined;
+  useLayoutEffect(() => {
+    if (modeMenuAnchor) {
+      scheduleOptionsMenuPositionUpdate();
     }
-    refreshAgentLimits();
-    const timer = window.setInterval(refreshAgentLimits, 5000);
-    return () => window.clearInterval(timer);
-  }, [modeMenuAnchor, refreshAgentLimits]);
+  }, [agentLimitLoaded, agentLimitRefreshError, agentLimitRefreshing, limitOpen, limitLines.length, modeMenuAnchor, scheduleOptionsMenuPositionUpdate]);
 
-  // Opens the options menu anchored to the clicked element; limits refresh while
-  // the menu remains open, so a running agent can update the numbers in-place.
+  const toggleLimitsOpen = () => {
+    const nextOpen = !limitOpen;
+    setLimitOpen(nextOpen);
+    if (nextOpen) {
+      onRefreshAgentLimits?.(true);
+    }
+  };
+
+  // Opens the options menu anchored to the clicked element. Account limits stay
+  // collapsed by default and refresh only when the user expands that section.
   const openOptionsMenu = (anchorEl: HTMLElement) => {
-    setLimitLoaded(false);
+    setLimitOpen(false);
     setModeMenuAnchor(anchorEl);
   };
 
@@ -974,6 +1565,16 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             testId="queued-message-send-now"
           />
         )}
+        {limitWarningLabel && (
+          <Tooltip title={limitWarningHint ?? ""}>
+            <FloatingTile
+              tone={limitWarningTone}
+              icon={<WarningAmberRoundedIcon sx={{ fontSize: 20 }} />}
+              label={limitWarningLabel}
+              testId="agent-limit-warning"
+            />
+          </Tooltip>
+        )}
         {contextOverLimit && (
           <Tooltip title={t("contextOverLimitHint")}>
             <FloatingTile
@@ -1020,16 +1621,49 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         })}
       </Box>
       <Box
+        data-testid="composer-bar"
+        ref={composerBarRef}
+        onPointerMove={updateComposerBorderHover}
+        onPointerLeave={clearComposerBorderHover}
+        onPointerCancel={clearComposerBorderHover}
         sx={{
+          "--composer-border-x": "50%",
+          "--composer-border-y": "50%",
+          "--composer-border-hover-opacity": 0,
           display: "flex",
           alignItems: "center",
           gap: 0.5,
           p: 0.5,
+          position: "relative",
           borderRadius: (t) => `${t.custom.radii.lg}px`,
           backgroundColor: (t) => t.custom.surfaces.s2,
           border: (t) => `1px solid ${t.custom.borders.subtle}`,
           transition: "border-color 140ms ease",
-          "& .MuiIconButton-root": { width: 30, height: 30 },
+          "& > *": {
+            position: "relative",
+            zIndex: 1,
+          },
+          "&::after": {
+            content: '""',
+            position: "absolute",
+            inset: 0,
+            zIndex: 0,
+            pointerEvents: "none",
+            borderRadius: "inherit",
+            padding: "1px",
+            opacity: "var(--composer-border-hover-opacity)",
+            transition: "opacity 180ms ease",
+            background: (theme) => {
+              const hot = theme.palette.mode === "dark" ? "rgba(255, 255, 255, 0.58)" : "rgba(11, 18, 32, 0.28)";
+              const soft = theme.palette.mode === "dark" ? "rgba(255, 255, 255, 0.18)" : "rgba(11, 18, 32, 0.10)";
+              return `radial-gradient(${COMPOSER_BORDER_HOVER_RADIUS_PX}px ${COMPOSER_BORDER_HOVER_RADIUS_PX}px at var(--composer-border-x) var(--composer-border-y), ${hot} 0, ${soft} 58%, transparent 100%)`;
+            },
+            WebkitMask: "linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0)",
+            WebkitMaskComposite: "xor",
+            mask: "linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0)",
+            maskComposite: "exclude",
+          },
+          "& .MuiIconButton-root:not([data-testid='composer-voice-button'])": { width: 30, height: 30 },
           "&:focus-within": {
             borderColor: (t) => t.custom.borders.strong,
           },
@@ -1055,12 +1689,29 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           onClick={(event) => openOptionsMenu(event.currentTarget)}
         />
         <Menu
+          action={optionsMenuActionRef}
           anchorEl={modeMenuAnchor}
           open={Boolean(modeMenuAnchor)}
-          onClose={() => setModeMenuAnchor(null)}
+          onClose={() => {
+            setModeMenuAnchor(null);
+          }}
           anchorOrigin={{ vertical: "top", horizontal: "left" }}
           transformOrigin={{ vertical: "bottom", horizontal: "left" }}
-          slotProps={{ paper: { sx: { boxShadow: "0 4px 12px rgba(0, 0, 0, 0.14)", minWidth: 304 } }, list: { dense: true, sx: { py: 0.5, width: "100%" } } }}
+          slotProps={{
+            paper: {
+              sx: {
+                boxShadow: "0 4px 12px rgba(0, 0, 0, 0.14)",
+                minWidth: 304,
+              },
+            },
+            list: {
+              dense: true,
+              ref: (node: HTMLUListElement | null) => {
+                optionsMenuListRef.current = node;
+              },
+              sx: { py: 0.5, width: "100%" },
+            },
+          }}
         >
           <MenuItem
             onClick={() => {
@@ -1072,13 +1723,17 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             <AttachFileIcon sx={{ fontSize: 16, color: "text.secondary" }} />
             <Box component="span">{t("attach")}</Box>
           </MenuItem>
-          {modes.map((mode) => (
-            <MenuItem key={mode.id} onClick={() => onModeChange?.(mode.id === activeMode ? "default" : mode.id)} sx={modeMenuItemSx}>
-              <AutoAwesomeRoundedIcon sx={{ fontSize: 15, color: "text.secondary" }} />
-              <Box component="span" sx={{ minWidth: 84 }}>{mode.label}</Box>
-              <Switch size="small" checked={mode.id === activeMode} onChange={() => undefined} tabIndex={-1} sx={modeSwitchSx} />
-            </MenuItem>
-          ))}
+          {modes.length > 0 && (
+            <>
+              {modes.map((mode) => (
+                <MenuItem key={mode.id} onClick={() => onModeChange?.(mode.id === activeMode ? "default" : mode.id)} sx={modeMenuItemSx}>
+                  <AutoAwesomeRoundedIcon sx={{ fontSize: 15, color: "text.secondary" }} />
+                  <Box component="span" sx={{ minWidth: 84 }}>{mode.label}</Box>
+                  <Switch size="small" checked={mode.id === activeMode} onChange={() => undefined} tabIndex={-1} sx={modeSwitchSx} />
+                </MenuItem>
+              ))}
+            </>
+          )}
           {showBrowserActivitySection && (
             <>
               <Divider sx={{ my: 0.5 }} />
@@ -1158,20 +1813,71 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           {/* Account rate limits (ЛИМИТЫ АККАУНТА) */}
           <Divider sx={{ my: 0.5 }} />
           <Box sx={{ px: 2, py: 0.75, cursor: "default" }} onClick={(event) => event.stopPropagation()}>
-            <Typography variant="microLabel" sx={{ color: "text.secondary", display: "block", mb: 0.5 }}>
-              {t("limitsLabel")}
-            </Typography>
-            {limitLines.length > 0 ? (
-              <Stack spacing={1}>
-                {limitLines.map((line) => (
-                  <MeterRow key={line.id} label={line.label} value={line.value} percent={line.percent} />
-                ))}
-              </Stack>
-            ) : (
-              <Typography sx={{ fontSize: "0.72rem", color: "text.tertiary" }}>
-                {!limitLoaded ? "…" : agentId && LIMIT_UNSUPPORTED_AGENTS.has(agentId) ? t("limitsUnavailable") : t("limitsNoData")}
+            <Box
+              component="button"
+              type="button"
+              aria-expanded={limitOpen}
+              aria-controls="composer-agent-limits"
+              onClick={toggleLimitsOpen}
+              sx={{
+                width: "100%",
+                border: 0,
+                p: 0,
+                m: 0,
+                display: "flex",
+                alignItems: "center",
+                gap: 0.75,
+                cursor: "pointer",
+                color: "inherit",
+                background: "transparent",
+                textAlign: "left",
+              }}
+            >
+              <Typography variant="microLabel" sx={{ color: "text.secondary", display: "block", flex: 1, minWidth: 0 }}>
+                {t("limitsLabel")}
               </Typography>
-            )}
+              {agentLimitRefreshing ? (
+                <Typography sx={{ fontSize: "0.72rem", color: "text.tertiary", fontFamily: (theme) => theme.custom.fonts.mono }}>…</Typography>
+              ) : null}
+              <KeyboardArrowDownRoundedIcon
+                sx={{
+                  fontSize: 16,
+                  color: "text.secondary",
+                  transform: limitOpen ? "rotate(180deg)" : "rotate(0deg)",
+                  transition: "transform 140ms ease",
+                }}
+              />
+            </Box>
+            <Collapse
+              in={limitOpen}
+              timeout={120}
+              unmountOnExit={false}
+              onEnter={updateOptionsMenuPosition}
+              onEntering={updateOptionsMenuPosition}
+              onEntered={updateOptionsMenuPosition}
+              onExit={updateOptionsMenuPosition}
+              onExiting={updateOptionsMenuPosition}
+              onExited={updateOptionsMenuPosition}
+            >
+              <Box id="composer-agent-limits" sx={{ pt: 0.75 }}>
+                {limitLines.length > 0 ? (
+                  <Stack spacing={1}>
+                    {limitLines.map((line) => (
+                      <MeterRow key={line.id} label={line.label} value={line.value} percent={line.percent} />
+                    ))}
+                  </Stack>
+                ) : (
+                  <Typography sx={{ fontSize: "0.72rem", color: "text.tertiary" }}>
+                    {!agentLimitLoaded ? "…" : agentId && LIMIT_UNSUPPORTED_AGENTS.has(agentId) ? t("limitsUnavailable") : t("limitsNoData")}
+                  </Typography>
+                )}
+                {agentLimitRefreshError ? (
+                  <Typography sx={{ mt: 0.75, fontSize: "0.72rem", color: "status.error" }}>
+                    {agentLimitRefreshError}
+                  </Typography>
+                ) : null}
+              </Box>
+            </Collapse>
           </Box>
           {/* Compaction — below both conversation info sections */}
           <Divider sx={{ my: 0.5 }} />
@@ -1285,27 +1991,69 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               }),
             }}
           />
+          {voiceState === "recording" && <VoiceRecordingStrip label={voiceLabel} duration={voiceDuration} levels={voiceLevels} onLevelCountChange={setVoiceLevelCountForWidth} />}
         </Box>
         <Stack direction="row" spacing={0.5} sx={{ alignItems: "center", flex: "0 0 auto" }}>
-          {running ? (
-            <IconButton data-testid="composer-stop-button" aria-label={t("stopRun")} tone="danger" onClick={onStop}>
-              <StopCircleIcon sx={{ fontSize: 19 }} />
-            </IconButton>
-          ) : (
+          {!running && !voiceInputActive ? (
             <Box sx={{ display: { xs: "none", sm: "flex" }, alignItems: "center", gap: 0.5 }}>
               <KeyHint keys="⏎" />
             </Box>
+          ) : null}
+          {voiceAvailable && (
+            <Tooltip title={voiceLabel}>
+              <span style={{ display: "flex" }}>
+                <IconButton
+                  data-testid="composer-voice-button"
+                  aria-label={voiceLabel}
+                  tone="subtle"
+                  disabled={voiceState === "transcribing"}
+                  onClick={toggleVoiceInput}
+                  sx={{
+                    width: 30,
+                    height: 30,
+                    borderRadius: (theme) => `${theme.custom.radii.md}px`,
+                    backgroundColor: (theme) => (voiceState === "recording" ? theme.palette.status.info.soft : theme.custom.surfaces.s3),
+                    borderColor: (theme) => (voiceState === "recording" ? theme.palette.status.info.border : theme.custom.borders.strong),
+                    color: (theme) => (voiceState === "recording" ? theme.palette.status.info.main : theme.palette.text.primary),
+                    "&:hover": {
+                      backgroundColor: (theme) => (voiceState === "recording" ? theme.palette.status.info.soft : theme.custom.surfaces.s4),
+                    },
+                  }}
+                >
+                  {voiceState === "recording" ? <StopCircleIcon sx={{ fontSize: 18 }} /> : <MicRoundedIcon sx={{ fontSize: 18 }} />}
+                </IconButton>
+              </span>
+            </Tooltip>
           )}
-          <Button
-            variant="contained"
-            onClick={() => void send()}
-            disabled={!canSend}
-            sx={{ minWidth: 0, px: 1, py: 0.5, borderRadius: (t) => `${t.custom.radii.md}px` }}
-            aria-label={sendLabel}
-            data-testid="composer-send-button"
-          >
-            <SendIcon sx={{ fontSize: 16 }} />
-          </Button>
+          {showAgentStopButton ? (
+            <IconButton
+              data-testid="composer-stop-button"
+              aria-label={t("stopRun")}
+              tone="danger"
+              onClick={onStop}
+              sx={{ width: 30, height: 30, borderRadius: (theme) => `${theme.custom.radii.md}px` }}
+            >
+              <StopCircleIcon sx={{ fontSize: 18 }} />
+            </IconButton>
+          ) : (
+            <Button
+              variant="contained"
+              onClick={() => void send()}
+              disabled={!canSend}
+              sx={{
+                height: 30,
+                width: 30,
+                minWidth: 30,
+                px: 0,
+                py: 0,
+                borderRadius: (t) => `${t.custom.radii.md}px`,
+              }}
+              aria-label={sendLabel}
+              data-testid="composer-send-button"
+            >
+              <SendIcon sx={{ fontSize: 16 }} />
+            </Button>
+          )}
         </Stack>
       </Box>
       {/* Full-screen preview of a clicked image attachment; closes on the X or a

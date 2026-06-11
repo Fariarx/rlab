@@ -11,6 +11,7 @@ import OpenInBrowserIcon from "@mui/icons-material/OpenInBrowser";
 import TerminalIcon from "@mui/icons-material/Terminal";
 import SearchIcon from "@mui/icons-material/Search";
 import SettingsIcon from "@mui/icons-material/Settings";
+import SystemUpdateAltIcon from "@mui/icons-material/SystemUpdateAlt";
 import {
   Alert,
   Box,
@@ -29,16 +30,18 @@ import {
   Tooltip,
   Typography,
 } from "@mui/material";
-import { type DragEvent, type MouseEvent as ReactMouseEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { type DragEvent, type MouseEvent as ReactMouseEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { I18nProvider, useI18n } from "../../i18n/I18nProvider";
 import { normalizeExternalUrl } from "../../lib/external-url";
 import { formatDateTime24 } from "../../lib/time-format";
 import { contextWindowForAgentProfile } from "../../lib/model-context";
 import type { HashRoute } from "../../lib/use-hash-route";
+import { getVoiceProvider, type VoiceProviderId } from "../../lib/voice-providers";
 import {
   type AgentProfile,
   type ApprovalDecision,
   AGENTS,
+  type AgentRateLimitMap,
   AgentBadge,
   AgentPicker,
   Composer,
@@ -46,6 +49,7 @@ import {
   Conversation,
   ConversationList,
   ConversationSearch,
+  DEFAULT_AGENT_OPTION_ID,
   DEFAULT_PROFILE,
   type DiffBlock,
   getAgent,
@@ -55,12 +59,14 @@ import {
   type ComposerDraft,
   type ConversationStatus,
   type ConversationSummary,
+  type ConversationView,
   type ReviewCommentEntry,
   useAgentCliInfo,
   useAgentStatus,
   useAgentStatusError,
   useAgentStatusLive,
   useReloadAgentStatus,
+  accessModeForAgentProfile,
   agentProfileEquals,
   agentProfileLabels,
 } from "../agent";
@@ -79,8 +85,17 @@ import { conversationProfile, type Workspace, useWorkspace } from "./use-workspa
 
 const COMPOSER_DRAFT_SAVE_DELAY_MS = 350;
 const EMPTY_COMPOSER_DRAFT: ComposerDraft = { text: "", attachments: [] };
+const CLI_UPDATE_POLL_MS = 5 * 60_000;
+const AGENT_LIMIT_REFRESH_MIN_INTERVAL_MS = 60_000;
 
-type WorkspaceView = "chat" | "git" | "resources" | "preview" | "terminal";
+const CONVERSATION_VIEWS = new Set<ConversationView>(["chat", "git", "resources", "preview", "terminal"]);
+
+function normalizeConversationView(view: ConversationView | undefined, terminalEnabled: boolean): ConversationView {
+  if (!view || !CONVERSATION_VIEWS.has(view)) {
+    return "chat";
+  }
+  return view === "terminal" && !terminalEnabled ? "chat" : view;
+}
 
 type WakeupTrigger =
   | { readonly type: "time"; readonly fireAtMs: number }
@@ -93,6 +108,95 @@ interface WakeupSummary {
   readonly prompt: string;
   readonly reason?: string;
   readonly trigger: WakeupTrigger;
+}
+
+interface CliUpdateInfo {
+  readonly agent: string;
+  readonly agentName: string;
+  readonly packageName: string;
+  readonly currentVersion: string;
+  readonly latestVersion: string;
+  readonly command: string;
+}
+
+interface CliUpdateSnapshot {
+  readonly checkedAt: number;
+  readonly checking: boolean;
+  readonly updates: readonly CliUpdateInfo[];
+  readonly errors: Record<string, string>;
+}
+
+interface AgentLimitSnapshot {
+  readonly limits: AgentRateLimitMap;
+  readonly refreshError?: string;
+}
+
+interface VoiceProviderConfigInfo {
+  readonly envVar: string;
+  readonly configured: boolean;
+}
+
+interface VoiceConfigSnapshot {
+  readonly providers: Partial<Record<VoiceProviderId, VoiceProviderConfigInfo>>;
+}
+
+async function loadAgentLimits(agent: string | undefined, refresh: boolean): Promise<AgentLimitSnapshot> {
+  const params = new URLSearchParams();
+  if (refresh && agent) {
+    params.set("refresh", "1");
+    params.set("agent", agent);
+  }
+  const response = await fetch(`/api/agent-limits${params.size > 0 ? `?${params.toString()}` : ""}`, { method: "GET", cache: "no-store" });
+  const payload = (await response.json().catch(() => ({}))) as { limits?: AgentRateLimitMap; refreshError?: string; error?: string };
+  if (!response.ok) {
+    throw new Error(payload.error ?? `Agent limits load failed (${response.status})`);
+  }
+  return { limits: payload.limits ?? {}, refreshError: payload.refreshError };
+}
+
+async function loadCliUpdates(refresh = false): Promise<CliUpdateSnapshot> {
+  const response = await fetch(`/api/cli-updates${refresh ? "?refresh=1" : ""}`, { method: "GET", cache: "no-store" });
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => ({}))) as { error?: string };
+    throw new Error(payload.error ?? `CLI update check failed (${response.status})`);
+  }
+  const payload = (await response.json()) as Partial<CliUpdateSnapshot>;
+  return {
+    checkedAt: typeof payload.checkedAt === "number" ? payload.checkedAt : 0,
+    checking: payload.checking === true,
+    updates: Array.isArray(payload.updates) ? payload.updates : [],
+    errors: payload.errors && typeof payload.errors === "object" ? payload.errors : {},
+  };
+}
+
+async function loadVoiceConfig(): Promise<VoiceConfigSnapshot> {
+  const response = await fetch("/api/voice-config", { method: "GET", cache: "no-store" });
+  const payload = (await response.json().catch(() => ({}))) as { providers?: VoiceConfigSnapshot["providers"]; error?: string };
+  if (!response.ok) {
+    throw new Error(payload.error ?? `Voice config load failed (${response.status})`);
+  }
+  return { providers: payload.providers && typeof payload.providers === "object" ? payload.providers : {} };
+}
+
+async function updateAgentCli(agent: string): Promise<void> {
+  const response = await fetch("/api/agent-install", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ agent }),
+  });
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => ({}))) as { error?: string };
+    throw new Error(payload.error ?? `CLI update failed (${response.status})`);
+  }
+}
+
+function clearCliUpdateForAgent(snapshot: CliUpdateSnapshot, agent: string): CliUpdateSnapshot {
+  return {
+    ...snapshot,
+    checkedAt: Date.now(),
+    updates: snapshot.updates.filter((update) => update.agent !== agent),
+    errors: Object.fromEntries(Object.entries(snapshot.errors).filter(([key]) => key !== agent && key !== "update")),
+  };
 }
 
 async function loadWakeups(conversationId?: string): Promise<WakeupSummary[]> {
@@ -191,21 +295,13 @@ function composerHistoryText(raw: string): string {
     .trim();
 }
 
-function abbreviateLabel(label: string): string {
-  return label
-    .split(/\s+/)
-    .map((w) => (/\d/.test(w) ? w : (w[0]?.toUpperCase() ?? "")))
-    .join(" ");
-}
-
 function buildComposerLabel(profile: AgentProfile): string {
   const agent = getAgent(profile.agent);
   const labels = agentProfileLabels(profile);
   if (labels.length === 0) {
     return agent?.short ?? profile.agent;
   }
-  const joined = labels.join(" · ");
-  return joined.length > 24 ? labels.map(abbreviateLabel).join(" · ") : joined;
+  return labels.join(" · ");
 }
 
 function liveModesOrCatalog<T extends { readonly id: string }>(catalogOptions: readonly T[], liveOptions: readonly T[] | undefined): readonly T[] {
@@ -235,6 +331,11 @@ function routeForConversation(workspace: Workspace, conversationId: string): Has
 
 function workspaceConversations(workspace: Workspace): readonly ConversationSummary[] {
   return [...workspace.chats, ...workspace.projects.flatMap((project) => project.conversations)];
+}
+
+function firstVisibleConversationId(workspace: Workspace): string {
+  const conversations = workspaceConversations(workspace);
+  return conversations.find((conversation) => !conversation.archived)?.id ?? conversations[0]?.id ?? "";
 }
 
 function latestAgentDiffBlocks(messages: readonly ChatMessage[]): readonly DiffBlock[] {
@@ -345,7 +446,7 @@ export function WorkspacePageView({
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
-  const [view, setView] = useState<WorkspaceView>("chat");
+  const [view, setView] = useState<ConversationView>("chat");
   // A URL requested from a chat link's "open in preview"; handed to BrowserPreview
   // via a nonce so re-opening the same link re-triggers the load.
   const [browserOpenRequest, setBrowserOpenRequest] = useState<{ readonly url: string; readonly nonce: number }>({ url: "", nonce: 0 });
@@ -354,6 +455,9 @@ export function WorkspacePageView({
   // Bumped to force the Git view to re-fetch status (after a worktree op).
   const [gitReloadSignal, setGitReloadSignal] = useState(0);
   const [worktreeBusy, setWorktreeBusy] = useState(false);
+  const [cliUpdateSnapshot, setCliUpdateSnapshot] = useState<CliUpdateSnapshot>({ checkedAt: 0, checking: false, updates: [], errors: {} });
+  const [cliUpdateBusyAgent, setCliUpdateBusyAgent] = useState<string | null>(null);
+  const [voiceConfig, setVoiceConfig] = useState<VoiceConfigSnapshot>({ providers: {} });
   // Unstaged line totals for the header Git-tab badge, reported by the Git view.
   const [gitUnstaged, setGitUnstaged] = useState<{ readonly additions: number; readonly deletions: number }>({ additions: 0, deletions: 0 });
   // Height of the composer's floating tags row; the thread/Git content reserves
@@ -372,7 +476,12 @@ export function WorkspacePageView({
   // composer menu for browser-agent activity.
   const composerVisible = view !== "terminal";
   const [browserActivityEvents, setBrowserActivityEvents] = useState<readonly BrowserActivityEvent[]>([]);
-  const showView = (next: WorkspaceView) => setView(next);
+  const showView = useCallback((next: ConversationView) => {
+    setView(next);
+    if (ws.find(ws.selectedId)) {
+      ws.setConversationView(ws.selectedId, next);
+    }
+  }, [ws]);
   // Pending code-review comments, attached to diff lines in the Git view and sent
   // to the thread as one block (without starting an agent run).
   const [reviewComments, setReviewComments] = useState<readonly ReviewCommentEntry[]>([]);
@@ -415,6 +524,56 @@ export function WorkspacePageView({
   const [wakeups, setWakeups] = useState<readonly WakeupSummary[]>([]);
   const selectedWakeups = useMemo(() => (selected ? wakeups.filter((wakeup) => wakeup.conversationId === selected.id) : []), [selected, wakeups]);
   const wakeupConversationIds = useMemo(() => new Set(wakeups.map((wakeup) => wakeup.conversationId)), [wakeups]);
+  const [agentLimits, setAgentLimits] = useState<AgentRateLimitMap>({});
+  const [agentLimitsLoaded, setAgentLimitsLoaded] = useState(false);
+  const [agentLimitRefreshing, setAgentLimitRefreshing] = useState<Readonly<Record<string, boolean>>>({});
+  const [agentLimitRefreshErrors, setAgentLimitRefreshErrors] = useState<Readonly<Record<string, string | undefined>>>({});
+  const agentLimitRefreshAttemptRef = useRef<Record<string, number>>({});
+  const refreshAgentLimits = useCallback((agentId: string | undefined, requestRefresh: boolean) => {
+    if (requestRefresh && agentId) {
+      const lastAttempt = agentLimitRefreshAttemptRef.current[agentId] ?? 0;
+      if (Date.now() - lastAttempt < AGENT_LIMIT_REFRESH_MIN_INTERVAL_MS) {
+        return;
+      }
+      agentLimitRefreshAttemptRef.current = { ...agentLimitRefreshAttemptRef.current, [agentId]: Date.now() };
+      setAgentLimitRefreshing((current) => ({ ...current, [agentId]: true }));
+      setAgentLimitRefreshErrors((current) => ({ ...current, [agentId]: undefined }));
+    }
+
+    loadAgentLimits(agentId, requestRefresh)
+      .then((snapshot) => {
+        setAgentLimits(snapshot.limits);
+        setAgentLimitsLoaded(true);
+        if (agentId) {
+          setAgentLimitRefreshErrors((current) => ({ ...current, [agentId]: snapshot.refreshError }));
+        }
+      })
+      .catch((error: unknown) => {
+        setAgentLimitsLoaded(true);
+        if (agentId) {
+          setAgentLimitRefreshErrors((current) => ({
+            ...current,
+            [agentId]: error instanceof Error ? error.message : t("limitsRefreshError"),
+          }));
+        } else {
+          toast({ message: error instanceof Error ? error.message : t("limitsRefreshError"), severity: "error", duration: 3000 });
+        }
+      })
+      .finally(() => {
+        if (agentId) {
+          setAgentLimitRefreshing((current) => ({ ...current, [agentId]: false }));
+        }
+      });
+  }, [t, toast]);
+
+  const refreshVoiceConfig = useCallback(() => {
+    loadVoiceConfig()
+      .then(setVoiceConfig)
+      .catch((error: unknown) => {
+        setVoiceConfig({ providers: {} });
+        toast({ message: error instanceof Error ? error.message : String(error), severity: "error", duration: 3000 });
+      });
+  }, [toast]);
   // Sent user messages (oldest first) for ArrowUp/ArrowDown recall in the
   // composer; attachment blocks / file-link markdown are stripped to the visible
   // text, and blank entries dropped.
@@ -429,8 +588,27 @@ export function WorkspacePageView({
   const selectedHasActiveWork = conversationHasActiveWork(selected, messages);
   const lastTurnDiffs = useMemo(() => latestAgentDiffBlocks(messages), [messages]);
   const composerDraft = ws.composerDrafts[ws.selectedId] ?? { text: "", attachments: [] };
+  const selectedVoiceProvider = getVoiceProvider(ws.settings.general.voice.provider);
+  const composerVoiceProvider =
+    selectedVoiceProvider.kind === "none"
+      ? undefined
+      : {
+          id: selectedVoiceProvider.id,
+          name: selectedVoiceProvider.name,
+          kind: selectedVoiceProvider.kind,
+          language: ws.settings.general.voice.language,
+          configured: selectedVoiceProvider.kind === "cloud" ? voiceConfig.providers[selectedVoiceProvider.id]?.configured === true : true,
+        };
   const selectedCwd = ws.cwdOf(ws.selectedId);
   const terminalCwd = selected ? (selectedCwd ?? ".") : undefined;
+  useEffect(() => {
+    refreshAgentLimits(undefined, false);
+  }, [refreshAgentLimits]);
+
+  useEffect(() => {
+    refreshVoiceConfig();
+  }, [refreshVoiceConfig]);
+
   useEffect(() => {
     let canceled = false;
     const refresh = () => {
@@ -483,24 +661,24 @@ export function WorkspacePageView({
         // before the browser preview, which only accepts http(s)/about:blank.
         const target = normalizeExternalUrl(url) ?? url;
         setBrowserOpenRequest((prev) => ({ url: target, nonce: prev.nonce + 1 }));
-        setView("preview");
+        showView("preview");
       },
       openGitFile: (file: string) => {
         setGitFocus((prev) => ({ path: file, nonce: prev.nonce + 1 }));
-        setView("git");
+        showView("git");
       },
     }),
-    [],
+    [showView],
   );
   const activeCwd = selectedCwd;
   const headerTitle = selected?.title ?? t("noConversation");
-  const accessMode = ws.settings.agents.accessMode;
+  const profileAccessMode = accessModeForAgentProfile(profile);
   const selectedBasePath = ws.basePathOf(ws.selectedId);
-  // Worktree controls for the Git tab. Only in unrestricted mode, only for a
-  // real project conversation (a base repo path exists).
+  // Worktree controls for the Git tab. Only for a real project conversation (a
+  // base repo path exists); agent run permissions are now selected per chat.
   const worktreeApi = selected && selectedBasePath
     ? {
-        active: accessMode === "unrestricted",
+        active: true,
         inWorktree: Boolean(selected.worktreePath),
         busy: worktreeBusy,
         onCreate: () => {
@@ -621,11 +799,15 @@ export function WorkspacePageView({
     return () => observer.disconnect();
   }, [composerVisible]);
 
+  useLayoutEffect(() => {
+    setView(normalizeConversationView(selected?.view, showTerminal));
+  }, [selected?.id, selected?.view, showTerminal]);
+
   useEffect(() => {
-    if (!showTerminal) {
-      setView((v) => (v === "terminal" ? "chat" : v));
+    if (!showTerminal && view === "terminal") {
+      showView("chat");
     }
-  }, [showTerminal]);
+  }, [showTerminal, showView, view]);
 
   useEffect(() => {
     let alive = true;
@@ -707,6 +889,30 @@ export function WorkspacePageView({
   }, [t, toast]);
 
   useEffect(() => {
+    let alive = true;
+    let timer: ReturnType<typeof setInterval> | null = null;
+    const refresh = async () => {
+      try {
+        const snapshot = await loadCliUpdates(false);
+        if (alive) {
+          setCliUpdateSnapshot(snapshot);
+        }
+      } catch {
+        // The card is for actionable updates, not transient status noise. Manual
+        // update failures are surfaced directly in handleCliUpdate.
+      }
+    };
+    void refresh();
+    timer = setInterval(refresh, CLI_UPDATE_POLL_MS);
+    return () => {
+      alive = false;
+      if (timer) {
+        clearInterval(timer);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLocaleLowerCase() === "k") {
         event.preventDefault();
@@ -725,18 +931,28 @@ export function WorkspacePageView({
     const targetConversationId = routeConversationId ?? (routeKind === "project" ? projectConversationId : undefined);
 
     if ((routeKind === "chat" || routeKind === "project") && targetConversationId) {
+      const conv = ws.find(targetConversationId);
+      if (!conv) {
+        const fallbackId = firstVisibleConversationId(ws);
+        if (fallbackId) {
+          onNavigate?.(routeForConversation(ws, fallbackId));
+          if (ws.selectedId !== fallbackId) {
+            ws.select(fallbackId);
+          }
+        } else {
+          onNavigate?.({ kind: "home" });
+        }
+        return;
+      }
       if (ws.selectedId !== targetConversationId) {
         ws.select(targetConversationId);
       }
-      const conv = ws.find(targetConversationId);
-      if (conv) {
-        setProfile((current) => {
-          const nextProfile = conversationProfile(conv);
-          return agentProfileEquals(current, nextProfile) ? current : nextProfile;
-        });
-      }
+      setProfile((current) => {
+        const nextProfile = conversationProfile(conv);
+        return agentProfileEquals(current, nextProfile) ? current : nextProfile;
+      });
     }
-  }, [routeKind, routeProjectId, routeConversationId, ws.projects, ws.selectedId, ws.select, ws.find]);
+  }, [routeKind, routeProjectId, routeConversationId, ws.chats, ws.projects, ws.selectedId, ws.select, ws.find, onNavigate]);
 
   useEffect(() => {
     const conversations = workspaceConversations(ws);
@@ -785,6 +1001,23 @@ export function WorkspacePageView({
     setRunKey((k) => k + 1);
   };
 
+  const navigateAfterConversationRemoval = (nextConversationId: string) => {
+    if (nextConversationId && ws.find(nextConversationId)) {
+      onNavigate?.(routeForConversation(ws, nextConversationId));
+    } else {
+      onNavigate?.({ kind: "home" });
+    }
+    setRunKey((k) => k + 1);
+  };
+
+  const removeConversation = (id: string) => {
+    cancelDraftSave(id);
+    pendingDraftValues.current.delete(id);
+    notifiableRuns.current.delete(id);
+    const nextConversationId = ws.remove(id);
+    navigateAfterConversationRemoval(nextConversationId);
+  };
+
   // Create a new conversation immediately (no draft/prelude step) and focus the
   // composer so the user can start typing right away. `projectId` undefined ⇒ a
   // standalone simple chat; otherwise the chat is created inside that project.
@@ -795,10 +1028,32 @@ export function WorkspacePageView({
     setNewChatMenuAnchor(null);
     setDrawerOpen(false);
     setView("chat");
+    ws.setConversationView(id, "chat");
     setRunKey((k) => k + 1);
     onNavigate?.(routeForConversation(ws, id));
     // Defer focus until the freshly-created conversation's composer has mounted.
     requestAnimationFrame(() => composerRef.current?.focus());
+  };
+
+  const handleCliUpdate = async (update: CliUpdateInfo) => {
+    setCliUpdateBusyAgent(update.agent);
+    toast({ message: t("cliUpdateStarted", { agent: update.agentName }), severity: "info", duration: 2500 });
+    try {
+      await updateAgentCli(update.agent);
+      reloadAgentStatus();
+      setCliUpdateSnapshot((snapshot) => clearCliUpdateForAgent(snapshot, update.agent));
+      const refreshed = await loadCliUpdates(true);
+      setCliUpdateSnapshot((snapshot) =>
+        refreshed.updates.some((candidate) => candidate.agent === update.agent)
+          ? clearCliUpdateForAgent(refreshed, update.agent)
+          : refreshed,
+      );
+      toast({ message: t("cliUpdateComplete", { agent: update.agentName }), severity: "success", duration: 2500 });
+    } catch (error) {
+      toast({ message: t("cliUpdateFailed", { error: error instanceof Error ? error.message : String(error) }), severity: "error", duration: 5000 });
+    } finally {
+      setCliUpdateBusyAgent(null);
+    }
   };
 
   const openPicker = () => {
@@ -823,8 +1078,17 @@ export function WorkspacePageView({
     }
   };
 
-  // Per-chat work modes were removed; agents run purely on the access mode.
-  const supportedModes: readonly { readonly id: string; readonly label: string }[] = [];
+  const supportedModes = useMemo<readonly { readonly id: string; readonly label: string }[]>(() => {
+    const def = getAgent(profile.agent);
+    const cliModes = cliInfoOf(profile.agent)?.modes;
+    const sourceModes = cliModes && cliModes.length > 0 ? cliModes : def.modes;
+    return sourceModes
+      .filter((mode) => mode.id !== DEFAULT_AGENT_OPTION_ID)
+      .map((mode) => ({
+        id: mode.id,
+        label: mode.id === "plan" ? t("agentModePlan") : mode.id === "auto" || mode.id === "bypass-permissions" ? t("agentModeAutoConfirm") : mode.label,
+      }));
+  }, [cliInfoOf, profile.agent, t]);
   const handleModeChange = (modeId: string) => {
     const next = normalizeAgentProfile({ ...profile, mode: modeId });
     setProfile(next);
@@ -955,14 +1219,14 @@ export function WorkspacePageView({
         setConfirmDelete(id);
         return;
       }
-      ws.remove(id);
+      removeConversation(id);
       toast({ message: t("conversationDeleted"), severity: "warning", duration: 2500 });
     },
   };
 
   const doDelete = () => {
     if (confirmDelete) {
-      ws.remove(confirmDelete);
+      removeConversation(confirmDelete);
       setConfirmDelete(null);
       toast({ message: t("conversationDeleted"), severity: "warning", duration: 2500 });
     }
@@ -995,6 +1259,7 @@ export function WorkspacePageView({
         setProfile(conversationProfile(fork));
       }
       setView("chat");
+      ws.setConversationView(forkId, "chat");
       setRunKey((k) => k + 1);
       onNavigate?.(routeForConversation(ws, forkId));
       toast({ message: t("forkedConversationCreated"), severity: "success", duration: 2200 });
@@ -1107,6 +1372,48 @@ export function WorkspacePageView({
     );
   }
 
+  const primaryCliUpdate = cliUpdateSnapshot.updates[0] ?? null;
+  const extraCliUpdateCount = Math.max(0, cliUpdateSnapshot.updates.length - 1);
+  const cliUpdateNotice = primaryCliUpdate ? (
+    <Box sx={{ px: 0.75, pb: 1, flex: "0 0 auto" }}>
+      <Stack
+        direction="row"
+        spacing={1}
+        sx={{
+          alignItems: "center",
+          px: 1.25,
+          py: 1,
+          borderRadius: (theme) => `${theme.custom.radii.md}px`,
+          backgroundColor: (theme) => theme.custom.surfaces.s2,
+          border: (theme) => `1px solid ${theme.palette.status.warn.main}`,
+          boxShadow: (theme) => `inset 3px 0 0 0 ${theme.palette.status.warn.main}`,
+        }}
+      >
+        <Box sx={{ display: "flex", color: (theme) => theme.palette.status.warn.main, flex: "0 0 auto" }}>
+          <SystemUpdateAltIcon sx={{ fontSize: 20 }} />
+        </Box>
+        <Box sx={{ flex: 1, minWidth: 0 }}>
+          <Typography noWrap sx={{ fontSize: "0.8rem", fontWeight: 700, color: "text.primary" }}>
+            {t("cliUpdateRequired")}
+          </Typography>
+          <Typography noWrap sx={{ fontSize: "0.72rem", color: "text.secondary", mt: 0.25 }}>
+            {t("cliUpdateAvailable", { agent: primaryCliUpdate.agentName, current: primaryCliUpdate.currentVersion, latest: primaryCliUpdate.latestVersion })}
+            {extraCliUpdateCount > 0 ? ` · ${t("cliUpdateMore", { count: extraCliUpdateCount })}` : ""}
+          </Typography>
+        </Box>
+        <Button
+          variant="subtle"
+          size="small"
+          disabled={cliUpdateBusyAgent !== null}
+          onClick={() => void handleCliUpdate(primaryCliUpdate)}
+          sx={{ flex: "0 0 auto", minWidth: 78 }}
+        >
+          {t("updateCli")}
+        </Button>
+      </Stack>
+    </Box>
+  ) : null;
+
   const sidebar = (
     <Stack sx={{ height: "100%", minHeight: 0, backgroundColor: (t) => t.custom.surfaces.s1 }}>
       <Stack
@@ -1172,6 +1479,7 @@ export function WorkspacePageView({
       </Stack>
 
       <ConversationList projects={ws.projects} chats={ws.chats} selectedId={ws.selectedId} onSelect={openConversation} actions={conversationActions} wakeupConversationIds={wakeupConversationIds} />
+      {cliUpdateNotice}
     </Stack>
   );
 
@@ -1294,7 +1602,7 @@ export function WorkspacePageView({
                 size="small"
                 exclusive
                 value={view}
-                onChange={(_, next: WorkspaceView | null) => next && showView(next)}
+                onChange={(_, next: ConversationView | null) => next && showView(next)}
                 aria-label={t("viewSwitcher")}
                 sx={{
                   // Single bordered container with borderless segments inside, so
@@ -1409,7 +1717,7 @@ export function WorkspacePageView({
                     <EmptyState
                       icon={<ChatBubbleOutlineIcon />}
                       title={t("startConversation")}
-                      description={t(accessMode === "unrestricted" ? "messageAgentAccess" : "messageAgentReadOnlyAccess", { title: selected.title })}
+                      description={t(profileAccessMode === "unrestricted" ? "messageAgentAccess" : "messageAgentReadOnlyAccess", { title: selected.title })}
                     />
                   </Stack>
                 ) : (
@@ -1529,6 +1837,11 @@ export function WorkspacePageView({
                   onOverlayLiftChange={setComposerOverlayLift}
                   history={messageHistory}
                   agentId={profile.agent}
+                  agentLimit={agentLimits[profile.agent] ?? null}
+                  agentLimitLoaded={agentLimitsLoaded}
+                  agentLimitRefreshing={agentLimitRefreshing[profile.agent] === true}
+                  agentLimitRefreshError={agentLimitRefreshErrors[profile.agent] ?? null}
+                  onRefreshAgentLimits={(requestRefresh) => refreshAgentLimits(profile.agent, requestRefresh)}
                   contextTokens={selected?.usage?.contextTokens}
                   contextWindow={contextWindowForAgentProfile(profile)}
                   autoCompact={selected?.compaction?.auto ?? true}
@@ -1557,6 +1870,8 @@ export function WorkspacePageView({
                       ws.sendQueuedMessageNow(selected.id);
                     }
                   }}
+                  voiceProvider={composerVoiceProvider}
+                  onVoiceError={(message) => toast({ message, severity: "error", duration: 3500 })}
                   browserActivityEvents={view === "preview" ? browserActivityEvents : undefined}
                   scheduledWakeups={selectedWakeups.map((wakeup) => ({
                     id: wakeup.id,
@@ -1588,6 +1903,7 @@ export function WorkspacePageView({
         onClose={() => setSettingsOpen(false)}
         settings={ws.settings}
         onSettingsChange={ws.updateSettings}
+        onVoiceConfigChange={refreshVoiceConfig}
       />
 
       <Dialog open={confirmDelete != null} onClose={() => setConfirmDelete(null)} maxWidth="xs" fullWidth>

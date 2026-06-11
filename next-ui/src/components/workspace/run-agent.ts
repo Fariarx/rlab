@@ -1,5 +1,6 @@
 import type {
   AgentBlock,
+  AgentAccessMode,
   AgentProfile,
   CodeBlockData,
   CompactionSettings,
@@ -14,7 +15,6 @@ import type {
 import { translate } from "../../i18n/I18nProvider";
 import { truncateAgentToolOutput } from "../../lib/agent-output";
 import type { Locale } from "./app-settings";
-import type { AgentAccessMode } from "./app-settings";
 import { truncate } from "./sample-data";
 
 type RunEvent =

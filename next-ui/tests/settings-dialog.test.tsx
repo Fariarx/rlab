@@ -61,6 +61,120 @@ describe("SettingsDialog agent configuration", () => {
     });
   });
 
+  it("saves a voice provider API key to the server config endpoint", async () => {
+    const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+      if (path === "/api/agent-config") {
+        return Response.json({ agents: {} });
+      }
+      if (path === "/api/voice-config" && (!init || init.method === "GET")) {
+        return Response.json({
+          providers: {
+            openai: { envVar: "OPENAI_API_KEY", configured: false },
+          },
+        });
+      }
+      if (path === "/api/voice-config" && init?.method === "PUT") {
+        return Response.json({ ok: true });
+      }
+      return Response.json({});
+    });
+    vi.stubGlobal("fetch", fetch);
+    const onVoiceConfigChange = vi.fn();
+
+    renderWithTheme(
+      <SettingsDialog
+        open
+        onClose={vi.fn()}
+        settings={defaultAppSettings}
+        onSettingsChange={vi.fn()}
+        onVoiceConfigChange={onVoiceConfigChange}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("tab", { name: "Голос" }));
+    fireEvent.click(await screen.findByRole("button", { name: "API-ключ для OpenAI Speech-to-Text" }));
+    fireEvent.change(screen.getByLabelText("OPENAI_API_KEY"), { target: { value: "sk-voice" } });
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить" }));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/voice-config",
+        expect.objectContaining({
+          body: JSON.stringify({ provider: "openai", apiKey: "sk-voice" }),
+          method: "PUT",
+        }),
+      );
+    });
+    expect(await screen.findByText("Ключ OpenAI Speech-to-Text сохранён")).toBeInTheDocument();
+    expect(onVoiceConfigChange).toHaveBeenCalledTimes(1);
+  });
+
+  it("syncs voice recognition language from the general language setting", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL | Request) => {
+        const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+        if (path === "/api/agent-config") {
+          return Response.json({ agents: {} });
+        }
+        return Response.json({});
+      }),
+    );
+    const onSettingsChange = vi.fn();
+
+    renderWithTheme(
+      <SettingsDialog
+        open
+        onClose={vi.fn()}
+        settings={defaultAppSettings}
+        onSettingsChange={onSettingsChange}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("tab", { name: "Общие" }));
+    fireEvent.click(screen.getByRole("button", { name: "Английский" }));
+
+    expect(onSettingsChange).toHaveBeenCalledWith({
+      general: {
+        locale: "en",
+        voice: {
+          ...defaultAppSettings.general.voice,
+          language: "en-US",
+        },
+      },
+    });
+  });
+
+  it("places the voice language field before the provider hint and uses a muted microphone icon for disabled voice input", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL | Request) => {
+        const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+        if (path === "/api/agent-config" || path === "/api/voice-config") {
+          return Response.json(path === "/api/voice-config" ? { providers: {} } : { agents: {} });
+        }
+        return Response.json({});
+      }),
+    );
+
+    renderWithTheme(
+      <SettingsDialog
+        open
+        onClose={vi.fn()}
+        settings={defaultAppSettings}
+        onSettingsChange={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("tab", { name: "Голос" }));
+
+    const languageField = screen.getByLabelText("Язык распознавания");
+    const providerHint = screen.getByText("Выберите провайдер диктовки для композера. Если провайдер не выбран, микрофон скрыт.");
+    expect(languageField.compareDocumentPosition(providerHint) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByTestId("voice-provider-none-icon")).toBeInTheDocument();
+  });
+
   it("reports a completed install request for unavailable agents", async () => {
     const fetch = vi.fn(async (url: string | URL | Request) => {
       const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
@@ -204,7 +318,7 @@ describe("SettingsDialog agent configuration", () => {
     });
   });
 
-  it("updates the server-backed agent filesystem access mode", async () => {
+  it("does not expose agent runtime modes in general settings", async () => {
     const fetch = vi.fn(async (url: string | URL | Request) => {
       const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
       if (path === "/api/agent-config") {
@@ -224,14 +338,9 @@ describe("SettingsDialog agent configuration", () => {
       />,
     );
 
-    // Default is unrestricted, so toggling to read-only is the change that fires.
-    fireEvent.click(screen.getByRole("button", { name: "Только чтение" }));
-
-    expect(onSettingsChange).toHaveBeenCalledWith({
-      agents: {
-        accessMode: "read-only",
-      },
-    });
+    expect(screen.queryByText("Доступ к файлам")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Только чтение" })).not.toBeInTheDocument();
+    expect(onSettingsChange).not.toHaveBeenCalled();
   });
 
   it("updates the high-contrast theme setting", async () => {

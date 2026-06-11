@@ -120,6 +120,63 @@ describe("ConversationList status dots", () => {
   });
 });
 
+describe("ConversationList activity ordering", () => {
+  it("floats active chats within their group with green status first", () => {
+    render([
+      { ...base, id: "idle", title: "Idle chat", status: "idle" },
+      { ...base, id: "waiting", title: "Waiting chat", status: "waiting" },
+      { ...base, id: "done", title: "Done chat", status: "done" },
+      { ...base, id: "running", title: "Running chat", status: "running" },
+    ]);
+
+    expect(screen.getAllByRole("option").map((row) => row.getAttribute("aria-label"))).toEqual([
+      "Done chat",
+      "Running chat",
+      "Waiting chat",
+      "Idle chat",
+    ]);
+  });
+
+  it("sorts active conversations inside each project without moving them between groups", () => {
+    renderWithThemeAndVirtuoso(
+      <ConversationList
+        projects={[
+          {
+            id: "p1",
+            name: "Project one",
+            path: "/project-one",
+            conversations: [
+              { ...base, id: "p1-idle", title: "P1 idle", status: "idle" },
+              { ...base, id: "p1-running", title: "P1 running", status: "running" },
+            ],
+          },
+          {
+            id: "p2",
+            name: "Project two",
+            path: "/project-two",
+            conversations: [
+              { ...base, id: "p2-wakeup", title: "P2 wakeup", status: "idle" },
+              { ...base, id: "p2-done", title: "P2 done", status: "done" },
+            ],
+          },
+        ]}
+        chats={[]}
+        selectedId={null}
+        onSelect={vi.fn()}
+        actions={noopActions()}
+        wakeupConversationIds={new Set(["p2-wakeup"])}
+      />,
+    );
+
+    expect(screen.getAllByRole("option").map((row) => row.getAttribute("aria-label"))).toEqual([
+      "P1 running",
+      "P1 idle",
+      "P2 done",
+      "P2 wakeup",
+    ]);
+  });
+});
+
 describe("ConversationList time labels", () => {
   it("renders persisted AM/PM labels as 24-hour time", () => {
     render([{ ...base, id: "pm", title: "PM chat", time: "03:19 PM" }]);

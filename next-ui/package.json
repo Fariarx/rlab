@@ -50,11 +50,13 @@
     "@fontsource/jetbrains-mono": "^5.2.8",
     "@mui/icons-material": "^9.0.1",
     "@mui/material": "^9.0.1",
+    "@mui/x-tree-view": "^9.4.0",
     "@vitejs/plugin-react": "^6.0.2",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-serialize": "^0.14.0",
     "@xterm/headless": "^6.0.0",
     "@xterm/xterm": "^6.0.0",
+    "commit-graph": "^2.4.0",
     "mobx": "^6.16.0",
     "mobx-react-lite": "^4.1.1",
     "node-pty": "^1.2.0-beta.11",
@@ -84,6 +86,18 @@
     "vitest": "^4.1.8"
   },
   "overrides": {
-    "protobufjs": "7.5.8"
+    "protobufjs": "7.5.8",
+    "commit-graph": {
+      "react": "$react"
+    },
+    "react-infinite-scroller": {
+      "react": "$react"
+    },
+    "react-tooltip": {
+      "react": "$react"
+    },
+    "reactjs-popup": {
+      "react": "$react"
+    }
   }
 }

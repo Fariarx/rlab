@@ -28,6 +28,7 @@ export const KNOWN_AGENT_WORK_MODE_IDS = [
 ] as const;
 export type KnownAgentWorkMode = (typeof KNOWN_AGENT_WORK_MODE_IDS)[number];
 export type AgentWorkMode = KnownAgentWorkMode | (string & {});
+export type AgentAccessMode = "read-only" | "unrestricted";
 
 export interface AgentOption {
   readonly id: string;
@@ -60,9 +61,11 @@ export const DEFAULT_AGENT_OPTION_ID = "default";
 const DEFAULT_OPTION: AgentOption = { id: DEFAULT_AGENT_OPTION_ID, label: "Default" };
 const DEFAULT_ONLY = [DEFAULT_OPTION] as const;
 export const CLAUDE_AGENT_MODE_PREFIX = "claude-agent:";
-// Per-message work modes were removed — filesystem access is governed solely by
-// the next-ui access mode (read-only vs unrestricted). Every agent now exposes
-// only the "default" work mode.
+const STANDARD_WORK_MODES = [
+  DEFAULT_OPTION,
+  { id: "plan", label: "Plan", value: "plan" },
+  { id: "auto", label: "Auto-confirm", value: "auto" },
+] as const;
 const OPENCODE_INTERNAL_AGENT_IDS = new Set(["title", "compaction"]);
 const CLAUDE_INTERNAL_AGENT_IDS = new Set(["statusline-setup"]);
 const CLAUDE_REASONING_OPTIONS = [
@@ -130,7 +133,7 @@ export const AGENTS: readonly AgentDef[] = [
     accent: "#D2A24C",
     models: CLAUDE_MODEL_OPTIONS,
     reasoning: CLAUDE_REASONING_OPTIONS,
-    modes: DEFAULT_ONLY,
+    modes: STANDARD_WORK_MODES,
   },
   {
     id: "codex",
@@ -148,7 +151,7 @@ export const AGENTS: readonly AgentDef[] = [
       { id: "gpt-5.3-codex", label: "GPT-5.3 Codex", value: "gpt-5.3-codex" },
     ],
     reasoning: CODEX_REASONING_OPTIONS,
-    modes: DEFAULT_ONLY,
+    modes: STANDARD_WORK_MODES,
   },
   {
     id: "gemini",
@@ -160,7 +163,7 @@ export const AGENTS: readonly AgentDef[] = [
     accent: "#4C8DF6",
     models: GEMINI_MODEL_OPTIONS,
     reasoning: DEFAULT_ONLY,
-    modes: DEFAULT_ONLY,
+    modes: STANDARD_WORK_MODES,
   },
   {
     id: "opencode",
@@ -172,7 +175,7 @@ export const AGENTS: readonly AgentDef[] = [
     accent: "#8B5CF6",
     models: OPENCODE_MODEL_OPTIONS,
     reasoning: CLAUDE_REASONING_OPTIONS,
-    modes: DEFAULT_ONLY,
+    modes: STANDARD_WORK_MODES,
   },
 ];
 
@@ -204,6 +207,10 @@ export const AGENT_STATUS: Record<AgentId, AgentSystemStatus> = {
 
 export function getAgentStatus(id: AgentId): AgentSystemStatus {
   return AGENT_STATUS[id];
+}
+
+export function isAgentAccessMode(value: unknown): value is AgentAccessMode {
+  return value === "read-only" || value === "unrestricted";
 }
 
 export interface AgentCliInfo {
@@ -378,6 +385,10 @@ export function legacyProfileFromVariant(agent: AgentId, variant: string): Agent
 
 export function agentProfileEquals(a: AgentProfile, b: AgentProfile): boolean {
   return a.agent === b.agent && a.model === b.model && a.reasoning === b.reasoning && a.mode === b.mode;
+}
+
+export function accessModeForAgentProfile(profile: AgentProfile): AgentAccessMode {
+  return profile.mode === "plan" ? "read-only" : "unrestricted";
 }
 
 function optionLabel(options: readonly AgentOption[], id: string): string | null {

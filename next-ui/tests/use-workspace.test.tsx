@@ -51,6 +51,9 @@ function Probe() {
       <button type="button" onClick={() => workspace.remove("chat-1")}>
         remove-chat-1
       </button>
+      <button type="button" onClick={() => workspace.remove(workspace.selectedId)}>
+        remove-selected
+      </button>
       <button type="button" onClick={() => workspace.archive("chat-1")}>
         archive-chat-1
       </button>
@@ -297,6 +300,23 @@ describe("useWorkspace", () => {
     expect(state.chats.some((chat) => chat.id === "chat-1")).toBe(false);
   });
 
+  it("moves selection to an existing conversation after deleting the selected conversation", async () => {
+    render(<Probe />);
+
+    await screen.findByText("chat-2");
+    screen.getByRole("button", { name: "remove-selected" }).click();
+
+    await waitFor(() => {
+      expect(screen.getByTestId("selected")).not.toHaveTextContent("chat-2");
+    });
+    const selectedId = screen.getByTestId("selected").textContent ?? "";
+    const conversations = [...state.chats, ...state.projects.flatMap((project) => project.conversations)];
+    expect(selectedId).not.toBe("");
+    expect(conversations.some((conversation) => conversation.id === selectedId)).toBe(true);
+    expect(state.chats.some((chat) => chat.id === "chat-2")).toBe(false);
+    expect(state.threads["chat-2"]).toBeUndefined();
+  });
+
   it("archives conversations without deleting their thread", async () => {
     render(<Probe />);
 
@@ -315,7 +335,28 @@ describe("useWorkspace", () => {
     expect(state.threads["chat-1"]).toEqual(originalThread);
   });
 
-  it("continues generated ids after persisted workspace ids", async () => {
+  it("unarchives an archived conversation when the user sends a message", async () => {
+    state = {
+      ...state,
+      selectedId: "chat-1",
+      chats: state.chats.map((chat) => (chat.id === "chat-1" ? { ...chat, archived: true } : chat)),
+    };
+
+    render(<Probe />);
+
+    await waitFor(() => expect(screen.getByTestId("selected")).toHaveTextContent("chat-1"));
+    expect(screen.getByTestId("archived")).toHaveTextContent("chat-1");
+
+    screen.getByRole("button", { name: "send" }).click();
+
+    await waitFor(() => {
+      expect(screen.getByTestId("archived")).not.toHaveTextContent("chat-1");
+    });
+    expect(state.chats.find((chat) => chat.id === "chat-1")?.archived).toBe(false);
+    expect(state.threads["chat-1"].some((message) => message.text === "Persist this message")).toBe(true);
+  });
+
+  it("generates fresh ids without reusing persisted workspace ids", async () => {
     state = {
       ...state,
       chats: [{ ...state.chats[0], id: "chat-5000" }, ...state.chats.slice(1)],
@@ -334,9 +375,12 @@ describe("useWorkspace", () => {
     await waitFor(() => {
       expect(runRequests).toHaveLength(1);
     });
-    expect(runRequests[0]?.userMessageId).toBe("u-5001");
-    expect(runRequests[0]?.runId).toBe("run-5002");
-    expect(runRequests[0]?.agentMessageId).toBe("a-5003");
+    expect(runRequests[0]?.userMessageId).toMatch(/^u-/);
+    expect(runRequests[0]?.runId).toMatch(/^run-/);
+    expect(runRequests[0]?.agentMessageId).toMatch(/^a-/);
+    expect(runRequests[0]?.userMessageId).not.toBe("u-5000");
+    expect(runRequests[0]?.runId).not.toBe("run-5000");
+    expect(runRequests[0]?.agentMessageId).not.toBe("a-5000");
 
     const ids = state.threads["chat-2"].map((message) => message.id);
     expect(new Set(ids).size).toBe(ids.length);
@@ -976,17 +1020,7 @@ describe("useWorkspace", () => {
     expect((state.threads["chat-2"] ?? []).filter((message) => message.role === "user" && message.text === "Persist this message")).toHaveLength(2);
   });
 
-  it("sends the configured filesystem access mode to the run API", async () => {
-    state = {
-      ...state,
-      settings: {
-        ...state.settings,
-        agents: {
-          ...state.settings.agents,
-          accessMode: "unrestricted",
-        },
-      },
-    };
+  it("derives unrestricted run access from the default chat agent mode", async () => {
     render(<Probe />);
 
     await screen.findByText("chat-2");
@@ -994,6 +1028,21 @@ describe("useWorkspace", () => {
 
     await waitFor(() => {
       expect(runRequests[0]).toMatchObject({ accessMode: "unrestricted" });
+    });
+  });
+
+  it("derives read-only run access from plan mode", async () => {
+    state = {
+      ...state,
+      chats: state.chats.map((chat) => (chat.id === "chat-2" ? { ...chat, profile: { agent: "codex", model: "default", reasoning: "default", mode: "plan" } } : chat)),
+    };
+    render(<Probe />);
+
+    await screen.findByText("chat-2");
+    screen.getByRole("button", { name: "send" }).click();
+
+    await waitFor(() => {
+      expect(runRequests[0]).toMatchObject({ accessMode: "read-only" });
     });
   });
 

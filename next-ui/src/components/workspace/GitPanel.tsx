@@ -7,6 +7,7 @@ import MergeIcon from "@mui/icons-material/Merge";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import RemoveIcon from "@mui/icons-material/Remove";
 import { Alert, Autocomplete, Box, Chip, CircularProgress, Collapse, Stack, Tab, Tabs, TextField, type Theme, Tooltip, Typography } from "@mui/material";
+import { CommitGraph, type Branch, type Commit, type CommitNode, type GraphStyle } from "commit-graph";
 import { type ReactNode, type RefObject, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type I18nApi, useI18n } from "../../i18n/I18nProvider";
 import type { GitFileStatus, GitStatusPayload } from "../../lib/git-status";
@@ -65,7 +66,28 @@ interface GitDiffPayload {
   readonly path: string;
 }
 
-type GitPanelTab = "unstaged" | "staged" | "commit" | "last-turn";
+interface GitTreePayload {
+  readonly commits: readonly GitGraphCommit[];
+  readonly branchHeads?: readonly GitGraphBranchHead[];
+}
+
+interface GitGraphBranchHead {
+  readonly name: string;
+  readonly hash: string;
+}
+
+interface GitGraphCommit {
+  readonly graph: string;
+  readonly hash: string;
+  readonly shortHash: string;
+  readonly parents: readonly string[];
+  readonly author: string;
+  readonly date: string;
+  readonly refs: readonly string[];
+  readonly subject: string;
+}
+
+type GitPanelTab = "tree" | "unstaged" | "staged" | "commit" | "last-turn";
 type GitDiffMode = GitDiffPayload["mode"];
 
 // A diff longer than this stays collapsed until the user opens it; one longer
@@ -104,6 +126,16 @@ async function fetchGitStatus(cwd: string): Promise<GitStatusPayload> {
   });
   const payload = await readGitApiPayload<GitStatusPayload>(response);
   return assertGitApiOk("Git status", response, payload);
+}
+
+async function fetchGitTree(cwd: string): Promise<GitTreePayload> {
+  const response = await fetch("/api/git-tree", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cwd }),
+  });
+  const payload = await readGitApiPayload<GitTreePayload>(response);
+  return assertGitApiOk("Git tree", response, payload);
 }
 
 async function fetchGitDiff(cwd: string, file: GitFileStatus, mode: GitDiffMode): Promise<GitDiffPayload> {
@@ -476,6 +508,10 @@ export function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnst
   const [statusVersion, setStatusVersion] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [graphCommits, setGraphCommits] = useState<readonly GitGraphCommit[]>([]);
+  const [graphBranchHeads, setGraphBranchHeads] = useState<readonly GitGraphBranchHead[]>([]);
+  const [treeLoading, setTreeLoading] = useState(false);
+  const [treeError, setTreeError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const [activeTab, setActiveTab] = useState<GitPanelTab>("unstaged");
   const [actionLoading, setActionLoading] = useState(false);
@@ -492,6 +528,9 @@ export function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnst
     setStatus(null);
     setStatusVersion((version) => version + 1);
     setError(null);
+    setGraphCommits([]);
+    setTreeError(null);
+    setTreeLoading(false);
     setActiveTab("unstaged");
     setFocused({ path: "", tick: 0 });
   }, [cwd]);
@@ -527,6 +566,40 @@ export function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnst
       alive = false;
     };
   }, [applyStatus, cwd, reloadKey, reloadSignal, t]);
+
+  useEffect(() => {
+    if (!cwd || !status || activeTab !== "tree") {
+      setTreeLoading(false);
+      return;
+    }
+
+    let alive = true;
+    setTreeLoading(true);
+    setTreeError(null);
+    void fetchGitTree(cwd)
+      .then((payload) => {
+        if (alive) {
+          setGraphCommits(payload.commits);
+          setGraphBranchHeads(payload.branchHeads ?? gitGraphBranchHeadsFromCommits(payload.commits));
+        }
+      })
+      .catch((loadError) => {
+        if (alive) {
+          setGraphCommits([]);
+          setGraphBranchHeads([]);
+          setTreeError(loadError instanceof Error && loadError.message ? loadError.message : t("gitTreeUnavailable"));
+        }
+      })
+      .finally(() => {
+        if (alive) {
+          setTreeLoading(false);
+        }
+      });
+
+    return () => {
+      alive = false;
+    };
+  }, [activeTab, cwd, status, statusVersion, t]);
 
   const unstagedFiles = useMemo(() => changedFilesForTab(status, "unstaged"), [status]);
   const stagedFiles = useMemo(() => changedFilesForTab(status, "staged"), [status]);
@@ -684,6 +757,7 @@ export function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnst
               "& .MuiTab-root": { minHeight: 40, py: 0, textTransform: "none", fontSize: "0.76rem", fontFamily: (theme) => theme.custom.fonts.mono },
             }}
           >
+            <Tab value="tree" label={tabLabel(t("gitTreeTab"), graphCommits.length)} />
             <Tab value="unstaged" label={tabLabel(t("gitUnstagedTab"), unstagedFiles.length)} />
             <Tab value="staged" label={tabLabel(t("gitStagedTab"), stagedFiles.length)} />
             <Tab value="commit" label={t("gitCommitTab")} />
@@ -710,6 +784,8 @@ export function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnst
           )}
           {status && (
             <Stack spacing={1.5} sx={{ minHeight: 0, pt: 1.5 }}>
+              {activeTab === "tree" && <GitTreeTab commits={graphCommits} branchHeads={graphBranchHeads} currentBranch={status.branch} currentHash={status.commitHash} error={treeError} loading={treeLoading} t={t} />}
+
               {activeTab === "unstaged" &&
                 cwd &&
                 (unstagedFiles.length === 0 ? (
@@ -797,6 +873,273 @@ export function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnst
             </Stack>
           )}
         </Stack>
+    </Stack>
+  );
+}
+
+const GIT_GRAPH_COLORS = ["#F59E0B", "#60A5FA", "#F87171", "#A78BFA", "#34D399", "#FBBF24", "#22D3EE", "#FB7185", "#C084FC", "#2DD4BF"];
+
+const GIT_GRAPH_STYLE: GraphStyle = {
+  commitSpacing: 44,
+  branchSpacing: 20,
+  branchColors: GIT_GRAPH_COLORS,
+  nodeRadius: 4,
+};
+
+function gitGraphRefName(ref: string): string | null {
+  const trimmed = ref.trim();
+  if (!trimmed || trimmed === "HEAD") {
+    return null;
+  }
+  const arrowIndex = trimmed.indexOf(" -> ");
+  if (arrowIndex >= 0) {
+    const target = trimmed.slice(arrowIndex + 4).trim();
+    return target.length > 0 ? target : null;
+  }
+  return trimmed;
+}
+
+function gitGraphBranchHeadsFromCommits(commits: readonly GitGraphCommit[]): readonly GitGraphBranchHead[] {
+  const branchHeads = new Map<string, string>();
+  for (const commit of commits) {
+    for (const ref of commit.refs) {
+      const name = gitGraphRefName(ref);
+      if (name && !branchHeads.has(name)) {
+        branchHeads.set(name, commit.hash);
+      }
+    }
+  }
+  return Array.from(branchHeads, ([name, hash]) => ({ name, hash }));
+}
+
+function gitGraphCommitToLibraryCommit(commit: GitGraphCommit): Commit {
+  return {
+    sha: commit.hash,
+    commit: {
+      author: {
+        name: commit.author,
+        date: commit.date,
+      },
+      message: commit.subject || "-",
+    },
+    parents: commit.parents.map((parent) => ({ sha: parent })),
+  };
+}
+
+function gitGraphBranchHeadToLibraryBranch(head: GitGraphBranchHead): Branch {
+  return {
+    name: head.name,
+    commit: { sha: head.hash },
+  };
+}
+
+function GitGraphRefChip({ active, label }: { readonly active: boolean; readonly label: string }) {
+  return (
+    <Box
+      component="span"
+      sx={{
+        display: "inline-flex",
+        alignItems: "center",
+        minHeight: 20,
+        maxWidth: 190,
+        px: 0.75,
+        borderRadius: (theme) => `${theme.custom.radii.sm}px`,
+        border: (theme) => `1px solid ${active ? theme.palette.status.running.border : theme.custom.borders.strong}`,
+        backgroundColor: (theme) => (active ? theme.palette.status.running.soft : theme.custom.surfaces.s3),
+        color: "text.primary",
+        fontFamily: (theme) => theme.custom.fonts.mono,
+        fontSize: "0.67rem",
+        fontWeight: 750,
+        whiteSpace: "nowrap",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+      }}
+    >
+      {label}
+    </Box>
+  );
+}
+
+function gitGraphDateLabel(value: string | number | Date): string {
+  if (typeof value === "string") {
+    return value;
+  }
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  return date.toLocaleDateString(undefined, { year: "numeric", month: "2-digit", day: "2-digit" });
+}
+
+function GitTreeTab({
+  commits,
+  branchHeads,
+  currentBranch,
+  currentHash,
+  error,
+  loading,
+  t,
+}: {
+  readonly commits: readonly GitGraphCommit[];
+  readonly branchHeads: readonly GitGraphBranchHead[];
+  readonly currentBranch: string;
+  readonly currentHash?: string;
+  readonly error: string | null;
+  readonly loading: boolean;
+  readonly t: I18nApi["t"];
+}) {
+  const graphCommits = useMemo<Commit[]>(() => commits.map(gitGraphCommitToLibraryCommit), [commits]);
+  const graphBranches = useMemo<Branch[]>(() => branchHeads.map(gitGraphBranchHeadToLibraryBranch), [branchHeads]);
+  const [selectedHash, setSelectedHash] = useState<string | null>(null);
+  const selectedCommit = selectedHash ? commits.find((commit) => commit.hash === selectedHash) ?? null : null;
+  const activeHash = currentHash ? commits.find((commit) => commit.shortHash === currentHash || commit.hash.startsWith(currentHash))?.hash ?? currentHash : null;
+  const activeCommit = activeHash ? commits.find((commit) => commit.hash === activeHash) ?? null : null;
+  const visibleCommit = selectedCommit ?? activeCommit;
+  const handleCommitClick = useCallback((commit: CommitNode) => setSelectedHash(commit.hash), []);
+
+  return (
+    <Stack spacing={1.25} sx={{ minHeight: 0 }}>
+      {loading && (
+        <Stack direction="row" spacing={1} sx={{ alignItems: "center", color: "text.secondary" }}>
+          <CircularProgress size={16} />
+          <Typography>{t("gitTreeLoading")}</Typography>
+        </Stack>
+      )}
+      {error && <Alert severity="error">{error}</Alert>}
+      {!loading && !error && commits.length === 0 && <Alert severity="info">{t("gitTreeEmpty")}</Alert>}
+      {commits.length > 0 && (
+        <Box
+          data-testid="git-commit-graph"
+          sx={{
+            border: (theme) => `1px solid ${theme.custom.borders.subtle}`,
+            borderRadius: (theme) => `${theme.custom.radii.md}px`,
+            bgcolor: (theme) => theme.custom.surfaces.s1,
+            minHeight: 0,
+            overflow: "auto",
+            px: 1,
+            py: 1.25,
+            color: "text.primary",
+            "& [class*='index-module_container__mhEMW']": {
+              minWidth: "860px",
+              fontFamily: (theme) => theme.custom.fonts.sans,
+            },
+            "& [class*='index-module_commitInfoContainer']": {
+              left: 0,
+              right: 0,
+              minWidth: "760px",
+            },
+            "& [class*='index-module_details']": {
+              minHeight: 42,
+              height: 42,
+              px: 1,
+              borderRadius: (theme) => `${theme.custom.radii.sm}px`,
+              color: "text.primary",
+              fontFamily: (theme) => theme.custom.fonts.sans,
+            },
+            "& [class*='index-module_details']:hover": {
+              backgroundColor: (theme) => theme.custom.surfaces.s2,
+            },
+            "& [class*='index-module_block']": {
+              height: 42,
+              borderRadius: (theme) => `${theme.custom.radii.sm}px`,
+            },
+            "& [class*='index-module_hovered']": {
+              backgroundColor: (theme) => theme.custom.surfaces.s3,
+              opacity: 1,
+            },
+            "& [class*='index-module_clicked']": {
+              backgroundColor: (theme) => theme.palette.status.running.soft,
+              opacity: 1,
+            },
+            "& [class*='index-module_svg']": {
+              maxWidth: "360px",
+              flex: "0 0 auto",
+            },
+            "& [class*='index-module_container__wEBx3']": {
+              width: "min(980px, calc(100% - 10px))",
+              maxWidth: "none",
+              fontFamily: (theme) => theme.custom.fonts.sans,
+              fontSize: "0.78rem",
+              color: "text.primary",
+            },
+            "& [class*='index-module_labelAndLink']": {
+              gap: 1.25,
+              justifyContent: "flex-start",
+            },
+            "& [class*='index-module_msg']": {
+              color: "text.primary",
+              fontSize: "0.82rem",
+              lineHeight: 1.35,
+              marginTop: "2px",
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+            },
+            "& [class*='index-module_bold']": {
+              color: "text.secondary",
+              fontFamily: (theme) => theme.custom.fonts.mono,
+              fontSize: "0.72rem",
+            },
+            "& [class*='index-module_outer'], & [class*='index-module_number']": {
+              height: 20,
+              lineHeight: "18px",
+              px: 0.75,
+              borderRadius: (theme) => `${theme.custom.radii.sm}px`,
+              backgroundColor: (theme) => theme.custom.surfaces.s3,
+              fontFamily: (theme) => theme.custom.fonts.mono,
+              fontSize: "0.67rem",
+            },
+            "& [class*='index-module_dropdown']": {
+              backgroundColor: (theme) => theme.custom.surfaces.s2,
+              border: (theme) => `1px solid ${theme.custom.borders.subtle}`,
+              p: 0.5,
+            },
+            "& [class*='index-module_dropdownItem']": {
+              backgroundColor: "transparent",
+            },
+          }}
+        >
+          <CommitGraph
+            commits={graphCommits}
+            branchHeads={graphBranches}
+            currentBranch={currentBranch}
+            graphStyle={GIT_GRAPH_STYLE}
+            dateFormatFn={gitGraphDateLabel}
+            fullSha={false}
+            onCommitClick={handleCommitClick}
+          />
+          {visibleCommit && (
+            <Box
+              sx={{
+                mt: 1.25,
+                px: 1,
+                py: 0.85,
+                borderRadius: (theme) => `${theme.custom.radii.md}px`,
+                border: (theme) => `1px solid ${theme.custom.borders.subtle}`,
+                backgroundColor: (theme) => theme.custom.surfaces.s2,
+                display: "flex",
+                alignItems: "center",
+                gap: 1,
+                minWidth: 0,
+              }}
+            >
+              <Typography component="span" sx={{ flex: "0 0 auto", fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.72rem", fontWeight: 800, color: "text.secondary" }}>
+                {visibleCommit.shortHash}
+              </Typography>
+              {visibleCommit.refs.map((ref) => {
+                const label = gitGraphRefName(ref);
+                return label ? <GitGraphRefChip key={ref} label={label} active={label === currentBranch} /> : null;
+              })}
+              <Typography noWrap sx={{ minWidth: 0, flex: 1, fontSize: "0.82rem", color: "text.primary" }}>
+                {visibleCommit.subject || "-"}
+              </Typography>
+              <Typography component="span" sx={{ display: { xs: "none", md: "inline" }, flex: "0 0 auto", fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.68rem", color: "text.tertiary" }}>
+                {visibleCommit.author} · {visibleCommit.date}
+              </Typography>
+            </Box>
+          )}
+        </Box>
+      )}
     </Stack>
   );
 }

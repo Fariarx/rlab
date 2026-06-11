@@ -192,7 +192,7 @@ function UserMessage({ message, delay, actions }: { readonly message: ChatMessag
   };
 
   return (
-    <Stack direction="row" spacing={1.25} sx={{ justifyContent: "flex-end", alignItems: "flex-start", ...rise(delay), ...revealActionsOnHover }}>
+    <Stack direction="row" spacing={1.25} sx={{ justifyContent: "flex-end", alignItems: "flex-start", width: "100%", minWidth: 0, ...rise(delay), ...revealActionsOnHover }}>
       {/* Editing breaks out of the narrow user-bubble width so there's room to
           rework a longer message comfortably. */}
       <Stack spacing={0.5} sx={{ alignItems: "flex-end", width: editing ? "100%" : "auto", maxWidth: editing ? "100%" : "82%", minWidth: 0 }}>
@@ -252,10 +252,12 @@ function UserMessage({ message, delay, actions }: { readonly message: ChatMessag
             </Stack>
           </Box>
         ) : (
-          <Stack spacing={0.5} sx={{ alignItems: "flex-end", minWidth: 0 }}>
+          <Stack spacing={0.5} sx={{ alignItems: "flex-end", minWidth: 0, maxWidth: "100%" }}>
             {displayText && (
               <Box
                 sx={{
+                  minWidth: 0,
+                  maxWidth: "100%",
                   px: 1.75,
                   py: 1.25,
                   borderRadius: (t) => `${t.custom.radii.lg}px`,
@@ -264,7 +266,7 @@ function UserMessage({ message, delay, actions }: { readonly message: ChatMessag
                   border: (t) => `1px solid ${t.custom.borders.subtle}`,
                 }}
               >
-                <Typography sx={{ fontSize: "0.9rem", lineHeight: 1.6, color: "text.primary", whiteSpace: "pre-line", overflowWrap: "anywhere", wordBreak: "break-word" }}>
+                <Typography sx={{ minWidth: 0, maxWidth: "100%", fontSize: "0.9rem", lineHeight: 1.6, color: "text.primary", whiteSpace: "pre-line", overflowWrap: "anywhere", wordBreak: "break-word" }}>
                   {displayText}
                 </Typography>
               </Box>
@@ -374,6 +376,91 @@ function isResolvedInputBlock(block: AgentBlock): boolean {
     return (block.selected?.length ?? 0) > 0;
   }
   return false;
+}
+
+function diffTotals(blocks: readonly DiffBlock[]): { readonly additions: number; readonly deletions: number } {
+  return blocks.reduce(
+    (total, block) => ({
+      additions: total.additions + block.additions,
+      deletions: total.deletions + block.deletions,
+    }),
+    { additions: 0, deletions: 0 },
+  );
+}
+
+function ChangedFilesAccordion({ blocks, delay }: { readonly blocks: readonly DiffBlock[]; readonly delay: number }) {
+  const [open, setOpen] = useState(false);
+  const panelId = useId();
+  const { t } = useI18n();
+  const totals = diffTotals(blocks);
+
+  return (
+    <Box
+      sx={{
+        mt: 1.25,
+        borderRadius: (theme) => `${theme.custom.radii.md}px`,
+        border: (theme) => `1px solid ${theme.custom.borders.subtle}`,
+        backgroundColor: (theme) => (theme.palette.mode === "dark" ? "rgba(0, 0, 0, 0.3)" : "rgba(17, 24, 39, 0.06)"),
+        boxShadow: "inset 0 1px 0 rgba(255, 255, 255, 0.02)",
+        overflow: "clip",
+        ...rise(delay),
+      }}
+      data-testid="changed-files-accordion"
+    >
+      <ButtonBase
+        aria-controls={panelId}
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+        sx={{
+          display: "flex",
+          alignItems: "center",
+          gap: 1,
+          width: "100%",
+          px: 1.5,
+          py: 1,
+          textAlign: "left",
+          backgroundColor: "transparent",
+          "&:hover": {
+            backgroundColor: (theme) => (theme.palette.mode === "dark" ? "rgba(255, 255, 255, 0.035)" : "rgba(17, 24, 39, 0.08)"),
+          },
+        }}
+        type="button"
+      >
+        <DescriptionOutlinedIcon sx={{ fontSize: 16, color: "text.secondary", flex: "0 0 auto" }} />
+        <Typography variant="microLabel" sx={{ color: "text.secondary", flex: 1, minWidth: 0 }}>
+          {t("gitChanges")}
+        </Typography>
+        <Typography component="span" sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.68rem", color: "text.tertiary", flex: "0 0 auto" }}>
+          {t("gitChangedFilesCount", { count: blocks.length })}
+        </Typography>
+        {(totals.additions > 0 || totals.deletions > 0) && (
+          <Stack direction="row" spacing={0.75} sx={{ alignItems: "center", flex: "0 0 auto", fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.72rem", fontWeight: 700 }}>
+            {totals.additions > 0 && <Box component="span" sx={{ color: (theme) => theme.palette.status.ok.main }}>+{totals.additions}</Box>}
+            {totals.deletions > 0 && <Box component="span" sx={{ color: (theme) => theme.palette.status.error.main }}>−{totals.deletions}</Box>}
+          </Stack>
+        )}
+        <KeyboardArrowDownIcon sx={{ fontSize: 18, color: "text.secondary", transition: "transform 180ms ease", transform: open ? "rotate(180deg)" : "none", flex: "0 0 auto" }} />
+      </ButtonBase>
+      <Collapse in={open} unmountOnExit>
+        <Stack
+          id={panelId}
+          spacing={1}
+          sx={{
+            px: 1,
+            py: 1,
+            borderTop: (theme) => `1px solid ${theme.custom.borders.subtle}`,
+            backgroundColor: (theme) => (theme.palette.mode === "dark" ? "rgba(0, 0, 0, 0.22)" : "rgba(17, 24, 39, 0.045)"),
+          }}
+        >
+          {blocks.map((block, index) => (
+            <Box key={`${block.file}-${index}`} sx={rise(Math.min(index, 3) * 40)}>
+              <DiffCard block={block} />
+            </Box>
+          ))}
+        </Stack>
+      </Collapse>
+    </Box>
+  );
 }
 
 export interface MessageDisplayPrefs {
@@ -539,20 +626,12 @@ function AgentDetails({
                 <AgentBlockRenderer
                   key={index}
                   // Strip `streaming` from narration text so it doesn't render its
-                  // own bare dots — the single live indicator below carries the timer.
+                  // own bare dots; the live indicator belongs only in the header.
                   block={block.kind === "text" ? { ...block, streaming: false } : block}
                   actions={actions ? { onApprovalDecision: actions.onApprovalDecision, onOptionSelection: actions.onOptionSelection } : undefined}
                 />
               ),
             )}
-          {/* Live "thinking" indicator inside the body, with the same elapsed
-              timer as the header (single instance — no duplicate). */}
-          {showSpinner && (
-            <Stack direction="row" spacing={0.75} sx={{ alignItems: "center" }}>
-              <TypingDots />
-              {liveSeconds !== null && <Typography component="span" sx={durationLabelSx}>{formatElapsedSeconds(liveSeconds, t)}</Typography>}
-            </Stack>
-          )}
         </Stack>
       </Collapse>
     </Box>
@@ -641,7 +720,7 @@ function AgentMessage({
   }, [emptyLive]);
   return (
     <>
-      <Stack direction="row" spacing={1.25} sx={{ alignItems: "flex-start", ...rise(delay), ...revealActionsOnHover }}>
+      <Stack direction="row" spacing={1.25} sx={{ alignItems: "flex-start", width: "100%", minWidth: 0, ...rise(delay), ...revealActionsOnHover }}>
         <AgentAvatar />
         <Box sx={{ flex: 1, minWidth: 0 }}>
           <Stack direction="row" spacing={1} sx={{ alignItems: "baseline", mb: 1 }}>
@@ -659,7 +738,7 @@ function AgentMessage({
               </Typography>
             )}
           </Stack>
-          <Stack spacing={1.25}>
+          <Stack spacing={1.25} sx={{ minWidth: 0, maxWidth: "100%" }}>
           {/* The turn starts as an empty agent message; show the thinking dots in
               place until the first block streams in (no separate typing bubble). */}
           {blocks.length === 0 && (
@@ -669,20 +748,20 @@ function AgentMessage({
             </Stack>
           )}
           {detailBlocks.length > 0 && (
-            <Box sx={rise(delay + 40)}>
+            <Box sx={{ minWidth: 0, maxWidth: "100%", ...rise(delay + 40) }}>
               <AgentDetails blocks={detailBlocks} actions={actions} autoExpand={displayPrefs.reasoningAutoExpand ?? false} live={live} showSpinner={showDetailSpinner} hasResultAfter={answerBlocks.length > 0} startedAtMs={message.startedAtMs} />
             </Box>
           )}
           {/* Plan stays pinned and visible under the message, even mid-run. */}
           {visiblePlanBlocks.map((block, index) => (
-            <Box key={`plan-${index}`} sx={rise(delay + 60)}>
+            <Box key={`plan-${index}`} sx={{ minWidth: 0, maxWidth: "100%", ...rise(delay + 60) }}>
               <AgentBlockRenderer block={block} />
             </Box>
           ))}
             {answerBlocks.map((block, index) => {
               const imagePath = readOnlyImageToolPath(block);
               return (
-                <Box key={index} sx={rise(delay + 80 + Math.min(index, 3) * 40)}>
+                <Box key={index} sx={{ minWidth: 0, maxWidth: "100%", ...rise(delay + 80 + Math.min(index, 3) * 40) }}>
                   {imagePath ? (
                     <AgentImagePreview path={imagePath} onOpen={setPreviewImage} />
                   ) : (
@@ -697,15 +776,7 @@ function AgentMessage({
           </Stack>
           {/* File changes from the turn: shown under the reply once the agent is
               done (not folded into the reasoning container), above the copy action. */}
-          {!live && diffBlocks.length > 0 && (
-            <Stack spacing={1} sx={{ mt: 1.25 }}>
-              {diffBlocks.map((block, index) => (
-                <Box key={`diff-${index}`} sx={rise(delay + 100 + Math.min(index, 3) * 40)}>
-                  <DiffCard block={block} />
-                </Box>
-              ))}
-            </Stack>
-          )}
+          {!live && diffBlocks.length > 0 && <ChangedFilesAccordion blocks={diffBlocks} delay={delay + 100} />}
           <MessageActionBar message={message} actions={actions ? { onCopy: actions.onCopy, onRetry: actions.onRetry, onFork: actions.onFork } : undefined} />
         </Box>
       </Stack>

@@ -16,11 +16,10 @@ import { attachPtyTerminalWebSockets, PtyTerminalManager } from "./src/server/pt
 import {
   cloneAppSettings,
   defaultAppSettings,
-  isAgentAccessMode,
   isAppSettings,
-  type AgentAccessMode,
   type Locale,
 } from "./src/lib/app-settings";
+import { getVoiceProvider, isVoiceProviderId, VOICE_PROVIDERS, type VoiceProviderId } from "./src/lib/voice-providers";
 import { buildEmptyWorkspaceState, buildInitialWorkspaceState, cloneWorkspaceState, type WorkspaceState } from "./src/lib/workspace-state";
 import { initWorkspaceDb, readConversation, readMessage, readMessageBlocks, readSelectedConversationId, readThreadFromDb, readWorkspaceStateFromDb, updateConversationData, upsertAgentMessageForUserTurn, upsertMessage, workspaceDbHasState, writeWorkspaceShellPreservingThreads, writeWorkspaceStateToDb } from "./workspace-db";
 import {
@@ -32,11 +31,13 @@ import {
   isDirectAgentModeValue,
   isDirectAgentModelValue,
   isAgentId,
+  isAgentAccessMode,
   normalizeAgentProfile,
   resolveAgentModeValue,
   resolveAgentModelValue,
   resolveAgentReasoningValue,
   type AgentId,
+  type AgentAccessMode,
   type AgentOption,
   type AgentProfile,
 } from "./src/lib/agent-catalog";
@@ -82,6 +83,7 @@ const AMP_READ_ONLY_SETTINGS_FILE = join(WORKSPACE_STATE_DIR, "amp-read-only-set
 // Account rate-limit snapshots survive restarts here so the composer keeps
 // showing the last-known 5h/weekly windows instead of going blank on reboot.
 const AGENT_LIMITS_FILE = join(WORKSPACE_STATE_DIR, "agent-limits.json");
+const CONTEXT_USAGE_MIGRATION_FILE = join(WORKSPACE_STATE_DIR, "context-usage-native-v1");
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 export const MAX_JSON_BODY_BYTES = 40 * 1024 * 1024;
 export const JSON_CONTENT_TYPE = "application/json; charset=utf-8";
@@ -400,6 +402,8 @@ function terminateAgentProcessTree(child: ReturnType<typeof spawn>, signal: Node
 
 const MODEL_DISCOVERY_TIMEOUT_MS = 5_000;
 const AGENT_DETECTION_CACHE_TTL_MS = 5 * 60_000;
+const CLI_UPDATE_CHECK_INTERVAL_MS = 60 * 60_000;
+const CLI_UPDATE_CHECK_TIMEOUT_MS = 20_000;
 const DISCOVERY_OUTPUT_LIMIT_CHARS = 1_000_000;
 const STDERR_TAIL_LIMIT_CHARS = 4_000;
 const REASONING_LABELS: Record<string, string> = {
@@ -822,7 +826,12 @@ function appendLimitedText(current: string, chunk: string, maxChars: number): st
   return next.length > maxChars ? next.slice(next.length - maxChars) : next;
 }
 
-function runResolvedBinTextAsync(resolvedBin: string, args: readonly string[]): Promise<TextDiscoveryResult> {
+function runResolvedBinTextAsync(
+  resolvedBin: string,
+  args: readonly string[],
+  options: Pick<NonNullable<Parameters<typeof spawn>[2]>, "cwd" | "env"> = {},
+  timeoutMs = MODEL_DISCOVERY_TIMEOUT_MS,
+): Promise<TextDiscoveryResult> {
   const launch = resolveLaunchCommand(resolvedBin, args);
   return new Promise((resolve) => {
     let stdout = "";
@@ -847,10 +856,10 @@ function runResolvedBinTextAsync(resolvedBin: string, args: readonly string[]): 
       } catch {
         // process may not have launched yet
       }
-    }, MODEL_DISCOVERY_TIMEOUT_MS);
+    }, timeoutMs);
 
     try {
-      child = spawn(launch.command, launch.args, agentProcessSpawnOptions({ stdio: ["ignore", "pipe", "pipe"], windowsHide: true }));
+      child = spawn(launch.command, launch.args, agentProcessSpawnOptions({ ...options, stdio: ["ignore", "pipe", "pipe"], windowsHide: true }));
     } catch (error) {
       finish({ output: null, error: `${basename(resolvedBin)} ${args.join(" ")} failed: ${errorMessage(error)}` });
       return;
@@ -867,7 +876,7 @@ function runResolvedBinTextAsync(resolvedBin: string, args: readonly string[]): 
     });
     child.on("close", (code, signal) => {
       if (timedOut) {
-        finish({ output: null, error: `${basename(resolvedBin)} ${args.join(" ")} timed out after ${MODEL_DISCOVERY_TIMEOUT_MS}ms` });
+        finish({ output: null, error: `${basename(resolvedBin)} ${args.join(" ")} timed out after ${timeoutMs}ms` });
         return;
       }
       if (code !== 0) {
@@ -1008,6 +1017,193 @@ async function detectAgentsWithLiveModelsUncached(): Promise<Record<string, Agen
     }),
   );
   return result;
+}
+
+export interface CliUpdateInfo {
+  readonly agent: string;
+  readonly agentName: string;
+  readonly packageName: string;
+  readonly currentVersion: string;
+  readonly latestVersion: string;
+  readonly command: string;
+}
+
+interface CliUpdateSnapshot {
+  readonly checkedAt: number;
+  readonly checking: boolean;
+  readonly updates: readonly CliUpdateInfo[];
+  readonly errors: Record<string, string>;
+}
+
+let cliUpdateSnapshot: CliUpdateSnapshot = { checkedAt: 0, checking: false, updates: [], errors: {} };
+let cliUpdateInflight: Promise<CliUpdateSnapshot> | null = null;
+let cliUpdateTimer: ReturnType<typeof setInterval> | null = null;
+
+export function npmPackageNameFromInstallSpec(spec: string): string | null {
+  const trimmed = spec.trim();
+  if (!trimmed || trimmed.startsWith("-")) {
+    return null;
+  }
+  if (trimmed.startsWith("@")) {
+    const secondAt = trimmed.indexOf("@", 1);
+    return secondAt > 0 ? trimmed.slice(0, secondAt) : trimmed;
+  }
+  const at = trimmed.indexOf("@");
+  return at > 0 ? trimmed.slice(0, at) : trimmed;
+}
+
+function npmPackageNameForAgent(agent: string): string | null {
+  const command = INSTALL_COMMANDS[agent];
+  if (!command || command[0] !== "npm") {
+    return null;
+  }
+  for (let i = command.length - 1; i >= 1; i -= 1) {
+    const name = npmPackageNameFromInstallSpec(command[i]);
+    if (name) {
+      return name;
+    }
+  }
+  return null;
+}
+
+function compareSemverish(a: string, b: string): number {
+  const parse = (value: string) =>
+    value
+      .replace(/^[^\d]*/, "")
+      .split(/[.+-]/)
+      .map((part) => Number.parseInt(part, 10))
+      .filter((part) => Number.isFinite(part));
+  const left = parse(a);
+  const right = parse(b);
+  const max = Math.max(left.length, right.length);
+  for (let i = 0; i < max; i += 1) {
+    const diff = (left[i] ?? 0) - (right[i] ?? 0);
+    if (diff !== 0) {
+      return diff;
+    }
+  }
+  return 0;
+}
+
+function npmBin(): string | null {
+  return resolveBinOnPath("npm");
+}
+
+function parseNpmListVersion(output: string, packageName: string): string | null {
+  try {
+    const parsed = JSON.parse(output) as unknown;
+    if (!isRecord(parsed) || !isRecord(parsed.dependencies)) {
+      return null;
+    }
+    const dependency = parsed.dependencies[packageName];
+    if (!isRecord(dependency) || typeof dependency.version !== "string") {
+      return null;
+    }
+    return dependency.version;
+  } catch {
+    return null;
+  }
+}
+
+async function npmText(args: readonly string[]): Promise<TextDiscoveryResult> {
+  const bin = npmBin();
+  if (!bin) {
+    return { output: null, error: "npm executable was not found on PATH." };
+  }
+  return runResolvedBinTextAsync(bin, args, { cwd: process.cwd(), env: process.env }, CLI_UPDATE_CHECK_TIMEOUT_MS);
+}
+
+async function checkCliUpdateForAgent(agent: string): Promise<{ readonly update?: CliUpdateInfo; readonly error?: string }> {
+  const packageName = npmPackageNameForAgent(agent);
+  if (!packageName) {
+    return {};
+  }
+  const command = INSTALL_COMMANDS[agent];
+  const agentName = isAgentId(agent) ? getAgent(agent).name : agent;
+  if (!command) {
+    return {};
+  }
+  const [installed, latest] = await Promise.all([
+    npmText(["list", "-g", packageName, "--json", "--depth=0"]),
+    npmText(["view", packageName, "version", "--json"]),
+  ]);
+  if (!installed.output) {
+    return { error: installed.error ?? `${packageName} installed version was not reported by npm.` };
+  }
+  if (!latest.output) {
+    return { error: latest.error ?? `${packageName} latest version was not reported by npm.` };
+  }
+  const currentVersion = parseNpmListVersion(installed.output, packageName);
+  const latestVersion = latest.output.trim().replace(/^"|"$/g, "");
+  if (!currentVersion || !latestVersion) {
+    return { error: `${packageName} version metadata is invalid.` };
+  }
+  return compareSemverish(currentVersion, latestVersion) < 0
+    ? { update: { agent, agentName, packageName, currentVersion, latestVersion, command: command.join(" ") } }
+    : {};
+}
+
+async function checkCliUpdatesNow(): Promise<CliUpdateSnapshot> {
+  if (cliUpdateInflight) {
+    return cliUpdateInflight;
+  }
+  cliUpdateSnapshot = { ...cliUpdateSnapshot, checking: true };
+  cliUpdateInflight = (async () => {
+    const updates: CliUpdateInfo[] = [];
+    const errors: Record<string, string> = {};
+    await Promise.all(
+      Object.keys(INSTALL_COMMANDS).map(async (agent) => {
+        const result = await checkCliUpdateForAgent(agent);
+        if (result.update) {
+          updates.push(result.update);
+        }
+        if (result.error) {
+          errors[agent] = result.error;
+        }
+      }),
+    );
+    updates.sort((a, b) => a.agentName.localeCompare(b.agentName));
+    cliUpdateSnapshot = { checkedAt: Date.now(), checking: false, updates, errors };
+    return cliUpdateSnapshot;
+  })().finally(() => {
+    cliUpdateInflight = null;
+  });
+  return cliUpdateInflight;
+}
+
+function clearCliUpdateSnapshotForAgent(agent: string): void {
+  cliUpdateSnapshot = {
+    ...cliUpdateSnapshot,
+    checkedAt: Date.now(),
+    checking: false,
+    updates: cliUpdateSnapshot.updates.filter((update) => update.agent !== agent),
+    errors: Object.fromEntries(Object.entries(cliUpdateSnapshot.errors).filter(([key]) => key !== agent && key !== "update")),
+  };
+}
+
+async function recheckCliUpdatesAfterInstall(agent: string): Promise<void> {
+  try {
+    const snapshot = await checkCliUpdatesNow();
+    if (snapshot.updates.some((update) => update.agent === agent)) {
+      clearCliUpdateSnapshotForAgent(agent);
+    }
+  } catch (error) {
+    cliUpdateSnapshot = { ...cliUpdateSnapshot, checkedAt: Date.now(), checking: false, errors: { ...cliUpdateSnapshot.errors, update: errorMessage(error) } };
+  }
+}
+
+function startCliUpdateMonitor(): void {
+  void checkCliUpdatesNow().catch((error) => {
+    cliUpdateSnapshot = { ...cliUpdateSnapshot, checkedAt: Date.now(), checking: false, errors: { ...cliUpdateSnapshot.errors, monitor: errorMessage(error) } };
+  });
+  if (cliUpdateTimer) {
+    return;
+  }
+  cliUpdateTimer = setInterval(() => {
+    void checkCliUpdatesNow().catch((error) => {
+      cliUpdateSnapshot = { ...cliUpdateSnapshot, checkedAt: Date.now(), checking: false, errors: { ...cliUpdateSnapshot.errors, monitor: errorMessage(error) } };
+    });
+  }, CLI_UPDATE_CHECK_INTERVAL_MS);
 }
 
 /* --------------------------- Server workspace state -------------------------- */
@@ -2461,6 +2657,69 @@ function ensureWorkspaceDb(): void {
     }
   }
   workspaceDbReady = true;
+  clearLegacyNonNativeContextUsageOnce();
+}
+
+function usageWithoutContextTokens(usage: RunUsage | undefined): RunUsage | undefined {
+  if (usage?.contextTokens === undefined) {
+    return usage;
+  }
+  const { contextTokens: _contextTokens, ...rest } = usage;
+  return compactUsage(rest);
+}
+
+function conversationAgentId(conversation: WorkspaceState["chats"][number]): AgentId | undefined {
+  return conversation.profile?.agent ?? conversation.agent;
+}
+
+function shouldClearLegacyContextUsage(agent: AgentId | undefined): boolean {
+  return agent !== "claude-code";
+}
+
+function clearLegacyNonNativeContextUsage(state: WorkspaceState): { readonly state: WorkspaceState; readonly changed: boolean } {
+  let changed = false;
+  const conversationAgents = new Map(state.chats.map((conversation) => [conversation.id, conversationAgentId(conversation)]));
+  const chats = state.chats.map((conversation) => {
+    if (!shouldClearLegacyContextUsage(conversationAgentId(conversation)) || conversation.usage?.contextTokens === undefined) {
+      return conversation;
+    }
+    changed = true;
+    return { ...conversation, usage: usageWithoutContextTokens(conversation.usage) };
+  });
+  const threads: WorkspaceState["threads"] = {};
+  for (const [conversationId, messages] of Object.entries(state.threads)) {
+    const conversationAgent = conversationAgents.get(conversationId);
+    threads[conversationId] = messages.map((message) => {
+      if (message.role !== "agent" || message.usage?.contextTokens === undefined) {
+        return message;
+      }
+      const agent = message.profile?.agent ?? conversationAgent;
+      if (!shouldClearLegacyContextUsage(agent)) {
+        return message;
+      }
+      changed = true;
+      return { ...message, usage: usageWithoutContextTokens(message.usage) };
+    });
+  }
+  return changed ? { state: { ...state, chats, threads }, changed } : { state, changed };
+}
+
+function clearLegacyNonNativeContextUsageOnce(): void {
+  if (existsSync(CONTEXT_USAGE_MIGRATION_FILE)) {
+    return;
+  }
+  try {
+    if (workspaceDbHasState()) {
+      const current = readWorkspaceStateFromDb();
+      const migrated = clearLegacyNonNativeContextUsage(current);
+      if (migrated.changed) {
+        writeWorkspaceStateToDb(migrated.state);
+      }
+    }
+    writeFileSync(CONTEXT_USAGE_MIGRATION_FILE, `${new Date().toISOString()}\n`, "utf8");
+  } catch (error) {
+    console.error(`[rlab] Failed to migrate legacy context usage: ${errorMessage(error)}`);
+  }
 }
 
 function readWorkspaceState(): WorkspaceState {
@@ -2645,6 +2904,25 @@ export function readRunAuditEvents(file = RUN_AUDIT_FILE): readonly Record<strin
     .filter(isRecord);
 }
 
+function usageAuditPayload(payload: unknown): unknown {
+  try {
+    const json = JSON.stringify(payload);
+    if (json.length <= 50_000) {
+      return payload;
+    }
+    return { truncated: true, json: json.slice(0, 50_000) };
+  } catch {
+    return String(payload);
+  }
+}
+
+function usageDebugEntries(debug: UsageDebugEntry | readonly UsageDebugEntry[] | undefined): readonly UsageDebugEntry[] {
+  if (debug === undefined) {
+    return [];
+  }
+  return Array.isArray(debug) ? debug : [debug as UsageDebugEntry];
+}
+
 function isScheduledWakeupTrigger(value: unknown): value is ScheduledWakeupTrigger {
   if (!isRecord(value) || typeof value.type !== "string") {
     return false;
@@ -2756,6 +3034,8 @@ export function attachmentUploadErrorStatus(error: unknown): 400 | 500 {
 
 const agentConfigBadRequestMessages = new Set(["Invalid agent config payload.", "Agent id is required.", "API key is required."]);
 const agentInstallBadRequestMessages = new Set(["Invalid agent install payload.", "Agent id is required."]);
+const voiceConfigBadRequestMessages = new Set(["Invalid voice provider config payload.", "Voice provider id is required.", "API key is required."]);
+const voiceTranscribeBadRequestMessages = new Set(["Invalid voice transcription payload.", "Voice provider id is required.", "Audio data is required."]);
 
 export function agentConfigErrorStatus(error: unknown): 400 | 500 {
   return error instanceof SyntaxError || agentConfigBadRequestMessages.has(errorMessage(error)) ? 400 : 500;
@@ -2763,6 +3043,14 @@ export function agentConfigErrorStatus(error: unknown): 400 | 500 {
 
 export function agentInstallErrorStatus(error: unknown): 400 | 500 {
   return error instanceof SyntaxError || agentInstallBadRequestMessages.has(errorMessage(error)) ? 400 : 500;
+}
+
+function voiceConfigErrorStatus(error: unknown): 400 | 500 {
+  return error instanceof SyntaxError || voiceConfigBadRequestMessages.has(errorMessage(error)) ? 400 : 500;
+}
+
+function voiceTranscribeErrorStatus(error: unknown): 400 | 500 {
+  return error instanceof SyntaxError || voiceTranscribeBadRequestMessages.has(errorMessage(error)) ? 400 : 500;
 }
 
 const projectDirectoryBadRequestMessages = new Set(["Invalid project directory payload.", "Project path is required.", "Project directory is required."]);
@@ -2872,6 +3160,57 @@ export function parseAgentInstallPayload(body: string): AgentInstallPayload {
     throw new Error(`Agent ${agent} is not supported.`);
   }
   return { agent };
+}
+
+export interface VoiceConfigPayload {
+  readonly provider: VoiceProviderId;
+  readonly apiKey: string;
+}
+
+export function parseVoiceConfigPayload(body: string): VoiceConfigPayload {
+  const parsed = JSON.parse(body || "{}") as unknown;
+  if (!isRecord(parsed)) {
+    throw new Error("Invalid voice provider config payload.");
+  }
+  const provider = typeof parsed.provider === "string" ? parsed.provider.trim() : "";
+  if (!provider) {
+    throw new Error("Voice provider id is required.");
+  }
+  if (!isVoiceProviderId(provider) || getVoiceProvider(provider).kind !== "cloud") {
+    throw new Error(`Voice provider ${provider} is not supported.`);
+  }
+  const apiKey = typeof parsed.apiKey === "string" ? parsed.apiKey.trim() : "";
+  if (!apiKey) {
+    throw new Error("API key is required.");
+  }
+  return { provider, apiKey };
+}
+
+export interface VoiceTranscribePayload {
+  readonly provider: VoiceProviderId;
+  readonly mimeType: string;
+  readonly dataBase64: string;
+  readonly language?: string;
+}
+
+export function parseVoiceTranscribePayload(body: string): VoiceTranscribePayload {
+  const parsed = JSON.parse(body || "{}") as unknown;
+  if (!isRecord(parsed)) {
+    throw new Error("Invalid voice transcription payload.");
+  }
+  const provider = typeof parsed.provider === "string" ? parsed.provider.trim() : "";
+  if (!provider) {
+    throw new Error("Voice provider id is required.");
+  }
+  if (!isVoiceProviderId(provider) || getVoiceProvider(provider).kind !== "cloud") {
+    throw new Error(`Voice provider ${provider} is not supported.`);
+  }
+  if (typeof parsed.dataBase64 !== "string" || parsed.dataBase64.length === 0) {
+    throw new Error("Audio data is required.");
+  }
+  const mimeType = typeof parsed.mimeType === "string" && parsed.mimeType.trim().length > 0 ? parsed.mimeType.trim() : "audio/webm";
+  const language = typeof parsed.language === "string" && parsed.language.trim().length > 0 ? parsed.language.trim() : undefined;
+  return language ? { provider, mimeType, dataBase64: parsed.dataBase64, language } : { provider, mimeType, dataBase64: parsed.dataBase64 };
 }
 
 const SKIPPED_FILE_DIRS = new Set([".git", "node_modules", "dist", "build", "coverage", ".next"]);
@@ -3745,9 +4084,7 @@ function handleVersion(_req: IncomingMessage, res: ServerResponse): void {
   }
 }
 
-/** Returns the latest known account rate-limit snapshot per agent (keyed by
- *  agent id). Empty until an agent reports one during a run. */
-function handleAgentLimits(_req: IncomingMessage, res: ServerResponse): void {
+function serializedAgentLimits(): Record<string, AgentRateLimit> {
   const limits: Record<string, AgentRateLimit> = {};
   let pruned = false;
   for (const [agent, acc] of latestAgentLimits.entries()) {
@@ -3760,7 +4097,343 @@ function handleAgentLimits(_req: IncomingMessage, res: ServerResponse): void {
   if (pruned) {
     persistAgentLimits();
   }
-  sendJson(res, 200, { limits });
+  return limits;
+}
+
+/** Returns the latest known account rate-limit snapshot per agent (keyed by
+ *  agent id). With `?refresh=1&agent=<id>`, first asks the agent CLI for a fresh
+ *  snapshot, throttled server-side to one attempt per minute per agent. */
+async function handleAgentLimits(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const url = new URL(req.url ?? "/", "http://localhost");
+  const refresh = url.searchParams.get("refresh") === "1";
+  const agent = url.searchParams.get("agent") ?? "";
+  let refreshError: string | undefined;
+  if (refresh) {
+    if (!RUNNABLE_AGENT_IDS.has(agent)) {
+      sendJson(res, 400, { error: `Unknown agent: ${agent || "(missing)"}.` });
+      return;
+    }
+    refreshError = await refreshAgentLimitsIfDue(agent);
+  }
+  sendJson(res, 200, { limits: serializedAgentLimits(), ...(refreshError ? { refreshError } : {}) });
+}
+
+async function handleCliUpdates(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const url = new URL(req.url ?? "/", "http://localhost");
+  const refresh = url.searchParams.get("refresh") === "1";
+  try {
+    const snapshot = refresh ? await checkCliUpdatesNow() : cliUpdateSnapshot;
+    sendJson(res, 200, snapshot);
+  } catch (error) {
+    sendJson(res, 500, { error: errorMessage(error) });
+  }
+}
+
+function voiceProviderEnv(provider: VoiceProviderId): string | null {
+  return getVoiceProvider(provider).envVar ?? null;
+}
+
+function configuredVoiceApiKey(provider: VoiceProviderId): string | null {
+  const envVar = voiceProviderEnv(provider);
+  if (!envVar) {
+    return null;
+  }
+  return configuredEnvValueFrom(envVar, readAgentSecretConfig(), process.env)?.trim() || null;
+}
+
+async function responseJson(response: Response): Promise<unknown> {
+  return (await response.json().catch(() => ({}))) as unknown;
+}
+
+async function responseTextError(response: Response, fallback: string): Promise<string> {
+  const payload = await responseJson(response);
+  if (isRecord(payload)) {
+    for (const key of ["error", "message", "detail"]) {
+      const value = payload[key];
+      if (typeof value === "string" && value.trim()) {
+        return value;
+      }
+      if (isRecord(value) && typeof value.message === "string") {
+        return value.message;
+      }
+    }
+  }
+  return fallback;
+}
+
+function audioBlob(payload: VoiceTranscribePayload): Blob {
+  return new Blob([Buffer.from(payload.dataBase64, "base64")], { type: payload.mimeType });
+}
+
+function twoLetterLanguage(language: string | undefined): string | undefined {
+  const value = language?.trim();
+  if (!value || value.toLowerCase() === "auto") {
+    return undefined;
+  }
+  return value.split(/[-_]/)[0]?.toLowerCase();
+}
+
+async function sleepMs(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function transcribeOpenAi(payload: VoiceTranscribePayload, apiKey: string): Promise<string> {
+  const form = new FormData();
+  form.set("model", "gpt-4o-mini-transcribe");
+  const language = twoLetterLanguage(payload.language);
+  if (language) {
+    form.set("language", language);
+  }
+  form.set("file", audioBlob(payload), `dictation.${payload.mimeType.includes("wav") ? "wav" : "webm"}`);
+  const response = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${apiKey}` },
+    body: form,
+  });
+  if (!response.ok) {
+    throw new Error(await responseTextError(response, `OpenAI transcription failed (${response.status})`));
+  }
+  const json = await responseJson(response);
+  return isRecord(json) && typeof json.text === "string" ? json.text.trim() : "";
+}
+
+async function transcribeGoogle(payload: VoiceTranscribePayload, apiKey: string): Promise<string> {
+  const encoding = payload.mimeType.includes("webm") ? "WEBM_OPUS" : payload.mimeType.includes("ogg") ? "OGG_OPUS" : "ENCODING_UNSPECIFIED";
+  const response = await fetch(`https://speech.googleapis.com/v1/speech:recognize?key=${encodeURIComponent(apiKey)}`, {
+    method: "POST",
+    headers: { "Content-Type": JSON_CONTENT_TYPE },
+    body: JSON.stringify({
+      config: {
+        encoding,
+        languageCode: payload.language || "ru-RU",
+        enableAutomaticPunctuation: true,
+      },
+      audio: { content: payload.dataBase64 },
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(await responseTextError(response, `Google Speech-to-Text failed (${response.status})`));
+  }
+  const json = await responseJson(response);
+  const results = isRecord(json) && Array.isArray(json.results) ? json.results : [];
+  return results
+    .map((result) => (isRecord(result) && Array.isArray(result.alternatives) && isRecord(result.alternatives[0]) && typeof result.alternatives[0].transcript === "string" ? result.alternatives[0].transcript : ""))
+    .filter(Boolean)
+    .join(" ")
+    .trim();
+}
+
+async function transcribeAssemblyAi(payload: VoiceTranscribePayload, apiKey: string): Promise<string> {
+  const upload = await fetch("https://api.assemblyai.com/v2/upload", {
+    method: "POST",
+    headers: { authorization: apiKey, "Content-Type": payload.mimeType },
+    body: Buffer.from(payload.dataBase64, "base64"),
+  });
+  if (!upload.ok) {
+    throw new Error(await responseTextError(upload, `AssemblyAI upload failed (${upload.status})`));
+  }
+  const uploadJson = await responseJson(upload);
+  const uploadUrl = isRecord(uploadJson) && typeof uploadJson.upload_url === "string" ? uploadJson.upload_url : "";
+  if (!uploadUrl) {
+    throw new Error("AssemblyAI upload response did not include upload_url.");
+  }
+  const start = await fetch("https://api.assemblyai.com/v2/transcript", {
+    method: "POST",
+    headers: { authorization: apiKey, "Content-Type": JSON_CONTENT_TYPE },
+    body: JSON.stringify({ audio_url: uploadUrl, punctuate: true, format_text: true, language_detection: !twoLetterLanguage(payload.language), ...(twoLetterLanguage(payload.language) ? { language_code: twoLetterLanguage(payload.language) } : {}) }),
+  });
+  if (!start.ok) {
+    throw new Error(await responseTextError(start, `AssemblyAI transcription failed (${start.status})`));
+  }
+  const startJson = await responseJson(start);
+  const id = isRecord(startJson) && typeof startJson.id === "string" ? startJson.id : "";
+  if (!id) {
+    throw new Error("AssemblyAI transcription response did not include id.");
+  }
+  for (let i = 0; i < 30; i += 1) {
+    await sleepMs(1000);
+    const poll = await fetch(`https://api.assemblyai.com/v2/transcript/${encodeURIComponent(id)}`, { headers: { authorization: apiKey } });
+    if (!poll.ok) {
+      throw new Error(await responseTextError(poll, `AssemblyAI polling failed (${poll.status})`));
+    }
+    const json = await responseJson(poll);
+    const status = isRecord(json) && typeof json.status === "string" ? json.status : "";
+    if (status === "completed") {
+      return isRecord(json) && typeof json.text === "string" ? json.text.trim() : "";
+    }
+    if (status === "error") {
+      throw new Error(isRecord(json) && typeof json.error === "string" ? json.error : "AssemblyAI transcription failed.");
+    }
+  }
+  throw new Error("AssemblyAI transcription timed out.");
+}
+
+async function transcribeSpeechmatics(payload: VoiceTranscribePayload, apiKey: string): Promise<string> {
+  const form = new FormData();
+  const language = twoLetterLanguage(payload.language) ?? "auto";
+  form.set("config", JSON.stringify({ type: "transcription", transcription_config: { language, operating_point: "enhanced" } }));
+  form.set("data_file", audioBlob(payload), "dictation.webm");
+  const start = await fetch("https://asr.api.speechmatics.com/v2/jobs/", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${apiKey}` },
+    body: form,
+  });
+  if (!start.ok) {
+    throw new Error(await responseTextError(start, `Speechmatics transcription failed (${start.status})`));
+  }
+  const startJson = await responseJson(start);
+  const id = isRecord(startJson) && typeof startJson.id === "string" ? startJson.id : isRecord(startJson) && isRecord(startJson.job) && typeof startJson.job.id === "string" ? startJson.job.id : "";
+  if (!id) {
+    throw new Error("Speechmatics job response did not include id.");
+  }
+  for (let i = 0; i < 30; i += 1) {
+    await sleepMs(1000);
+    const statusResponse = await fetch(`https://asr.api.speechmatics.com/v2/jobs/${encodeURIComponent(id)}`, { headers: { Authorization: `Bearer ${apiKey}` } });
+    if (!statusResponse.ok) {
+      throw new Error(await responseTextError(statusResponse, `Speechmatics polling failed (${statusResponse.status})`));
+    }
+    const statusJson = await responseJson(statusResponse);
+    const status = isRecord(statusJson) && isRecord(statusJson.job) && typeof statusJson.job.status === "string" ? statusJson.job.status : "";
+    if (status === "done") {
+      const transcript = await fetch(`https://asr.api.speechmatics.com/v2/jobs/${encodeURIComponent(id)}/transcript?format=txt`, { headers: { Authorization: `Bearer ${apiKey}` } });
+      if (!transcript.ok) {
+        throw new Error(await responseTextError(transcript, `Speechmatics transcript download failed (${transcript.status})`));
+      }
+      return (await transcript.text()).trim();
+    }
+    if (status === "rejected") {
+      throw new Error("Speechmatics rejected the transcription job.");
+    }
+  }
+  throw new Error("Speechmatics transcription timed out.");
+}
+
+async function transcribeGladia(payload: VoiceTranscribePayload, apiKey: string): Promise<string> {
+  const form = new FormData();
+  form.set("audio", audioBlob(payload), "dictation.webm");
+  const upload = await fetch("https://api.gladia.io/v2/upload", {
+    method: "POST",
+    headers: { "x-gladia-key": apiKey },
+    body: form,
+  });
+  if (!upload.ok) {
+    throw new Error(await responseTextError(upload, `Gladia upload failed (${upload.status})`));
+  }
+  const uploadJson = await responseJson(upload);
+  const audioUrl = isRecord(uploadJson) && typeof uploadJson.audio_url === "string" ? uploadJson.audio_url : "";
+  if (!audioUrl) {
+    throw new Error("Gladia upload response did not include audio_url.");
+  }
+  const language = twoLetterLanguage(payload.language);
+  const start = await fetch("https://api.gladia.io/v2/pre-recorded", {
+    method: "POST",
+    headers: { "x-gladia-key": apiKey, "Content-Type": JSON_CONTENT_TYPE },
+    body: JSON.stringify({ audio_url: audioUrl, detect_language: !language, ...(language ? { language } : {}) }),
+  });
+  if (!start.ok) {
+    throw new Error(await responseTextError(start, `Gladia transcription failed (${start.status})`));
+  }
+  const startJson = await responseJson(start);
+  const id = isRecord(startJson) && typeof startJson.id === "string" ? startJson.id : "";
+  if (!id) {
+    throw new Error("Gladia transcription response did not include id.");
+  }
+  for (let i = 0; i < 30; i += 1) {
+    await sleepMs(1000);
+    const poll = await fetch(`https://api.gladia.io/v2/pre-recorded/${encodeURIComponent(id)}`, { headers: { "x-gladia-key": apiKey } });
+    if (!poll.ok) {
+      throw new Error(await responseTextError(poll, `Gladia polling failed (${poll.status})`));
+    }
+    const json = await responseJson(poll);
+    const status = isRecord(json) && typeof json.status === "string" ? json.status : "";
+    if (status === "done") {
+      const result = isRecord(json) && isRecord(json.result) ? json.result : {};
+      const transcription = isRecord(result) && isRecord(result.transcription) ? result.transcription : {};
+      return typeof transcription.full_transcript === "string" ? transcription.full_transcript.trim() : "";
+    }
+    if (status === "error") {
+      throw new Error("Gladia transcription failed.");
+    }
+  }
+  throw new Error("Gladia transcription timed out.");
+}
+
+async function transcribeVoice(payload: VoiceTranscribePayload): Promise<string> {
+  const apiKey = configuredVoiceApiKey(payload.provider);
+  if (!apiKey) {
+    throw new Error(`${getVoiceProvider(payload.provider).name} API key is not configured.`);
+  }
+  switch (payload.provider) {
+    case "openai":
+      return transcribeOpenAi(payload, apiKey);
+    case "google":
+      return transcribeGoogle(payload, apiKey);
+    case "assemblyai":
+      return transcribeAssemblyAi(payload, apiKey);
+    case "speechmatics":
+      return transcribeSpeechmatics(payload, apiKey);
+    case "gladia":
+      return transcribeGladia(payload, apiKey);
+    default:
+      throw new Error(`Voice provider ${payload.provider} is not supported.`);
+  }
+}
+
+function handleVoiceConfig(req: IncomingMessage, res: ServerResponse): void {
+  if (req.method === "GET") {
+    try {
+      const config = readAgentSecretConfig();
+      const providers = Object.fromEntries(
+        VOICE_PROVIDERS.map((provider) => [
+          provider.id,
+          {
+            envVar: provider.envVar ?? "",
+            configured: provider.kind !== "cloud" || Boolean(provider.envVar && configuredEnvValueFrom(provider.envVar, config, process.env)?.trim()),
+          },
+        ]),
+      );
+      sendJson(res, 200, { providers });
+    } catch (error) {
+      sendJson(res, 500, { error: errorMessage(error) });
+    }
+    return;
+  }
+
+  if (req.method === "PUT") {
+    readJsonBody(req, res, (body) => {
+      try {
+        const { provider, apiKey } = parseVoiceConfigPayload(body);
+        const envVar = voiceProviderEnv(provider);
+        if (!envVar) {
+          sendJson(res, 400, { error: `Voice provider ${provider} does not accept API key configuration.` });
+          return;
+        }
+        const config = readAgentSecretConfig();
+        writeAgentSecretConfig({ env: { ...config.env, [envVar]: apiKey } });
+        sendJson(res, 200, { ok: true, provider, envVar, configured: true });
+      } catch (error) {
+        sendJson(res, voiceConfigErrorStatus(error), { error: errorMessage(error) });
+      }
+    });
+    return;
+  }
+
+  res.statusCode = 405;
+  res.end();
+}
+
+function handleVoiceTranscribe(req: IncomingMessage, res: ServerResponse): void {
+  readJsonBody(req, res, (body) => {
+    void (async () => {
+      try {
+        const payload = parseVoiceTranscribePayload(body);
+        const text = await transcribeVoice(payload);
+        sendJson(res, 200, { text });
+      } catch (error) {
+        sendJson(res, voiceTranscribeErrorStatus(error), { error: errorMessage(error) });
+      }
+    })();
+  });
 }
 
 function handleAgentConfig(req: IncomingMessage, res: ServerResponse): void {
@@ -3861,7 +4534,11 @@ function handleAgentInstall(req: IncomingMessage, res: ServerResponse): void {
         sendJson(res, 500, { error: `Install executable ${command[0]} was not found on PATH.` });
         return;
       }
-      runInstallToCompletion(launch, res, { agent }, clearAgentDetectionCache);
+      runInstallToCompletion(launch, res, { agent }, () => {
+        clearAgentDetectionCache();
+        clearCliUpdateSnapshotForAgent(agent);
+        void recheckCliUpdatesAfterInstall(agent);
+      });
     } catch (error) {
       sendJson(res, agentInstallErrorStatus(error), { error: errorMessage(error) });
     }
@@ -3922,6 +4599,39 @@ function handleGitStatus(req: IncomingMessage, res: ServerResponse): void {
     } catch (error) {
       sendJson(res, gitErrorStatus(error), { error: errorMessage(error) });
     }
+  });
+}
+
+function handleGitTree(req: IncomingMessage, res: ServerResponse): void {
+  readJsonBody(req, res, (body) => {
+    void (async () => {
+      try {
+        const { cwd } = parseGitCwdPayload(body);
+        const validation = validateGitCwd(cwd);
+        if (validation) {
+          sendJson(res, 400, { error: validation });
+          return;
+        }
+
+        const result = await runGitP(cwd, [
+          "log",
+          "--graph",
+          "--decorate=short",
+          "--all",
+          "--date=short",
+          "--max-count=160",
+          "--pretty=format:%x1f%H%x1f%h%x1f%P%x1f%an%x1f%ad%x1f%D%x1f%s",
+        ]);
+        if (!result.ok) {
+          sendJson(res, 500, { error: result.error });
+          return;
+        }
+        const commits = parseGitGraphLog(result.stdout);
+        sendJson(res, 200, { commits, branchHeads: gitGraphBranchHeads(commits) });
+      } catch (error) {
+        sendJson(res, gitErrorStatus(error), { error: errorMessage(error) });
+      }
+    })();
   });
 }
 
@@ -4121,6 +4831,77 @@ function sendGitStatusAfterMutation(cwd: string, res: ServerResponse): void {
 
 function runGitP(cwd: string, args: readonly string[]): Promise<GitCommandResult> {
   return new Promise((resolve) => runGit(cwd, args, resolve));
+}
+
+interface GitGraphCommitPayload {
+  readonly graph: string;
+  readonly hash: string;
+  readonly shortHash: string;
+  readonly parents: readonly string[];
+  readonly author: string;
+  readonly date: string;
+  readonly refs: readonly string[];
+  readonly subject: string;
+}
+
+interface GitGraphBranchHeadPayload {
+  readonly name: string;
+  readonly hash: string;
+}
+
+export function parseGitGraphLog(output: string): readonly GitGraphCommitPayload[] {
+  const commits: GitGraphCommitPayload[] = [];
+  for (const line of output.split(/\r?\n/)) {
+    const fields = line.split("\u001f");
+    if (fields.length < 8) {
+      continue;
+    }
+    const [graph, hash, shortHash, parents, author, date, refs, ...subjectParts] = fields;
+    if (!hash) {
+      continue;
+    }
+    const cleanRefs = refs
+      .split(",")
+      .map((ref) => ref.trim())
+      .filter((ref) => ref.length > 0);
+    commits.push({
+        graph: graph.trimEnd(),
+        hash,
+        shortHash,
+        parents: parents.split(/\s+/).filter((parent) => parent.length > 0),
+        author,
+        date,
+        refs: cleanRefs,
+        subject: subjectParts.join("\u001f"),
+    });
+  }
+  return commits;
+}
+
+function gitGraphRefName(ref: string): string | null {
+  const trimmed = ref.trim();
+  if (!trimmed || trimmed === "HEAD") {
+    return null;
+  }
+  const arrowIndex = trimmed.indexOf(" -> ");
+  if (arrowIndex >= 0) {
+    const target = trimmed.slice(arrowIndex + 4).trim();
+    return target.length > 0 ? target : null;
+  }
+  return trimmed;
+}
+
+export function gitGraphBranchHeads(commits: readonly GitGraphCommitPayload[]): readonly GitGraphBranchHeadPayload[] {
+  const branchHeads = new Map<string, string>();
+  for (const commit of commits) {
+    for (const ref of commit.refs) {
+      const name = gitGraphRefName(ref);
+      if (name && !branchHeads.has(name)) {
+        branchHeads.set(name, commit.hash);
+      }
+    }
+  }
+  return Array.from(branchHeads, ([name, hash]) => ({ name, hash }));
 }
 
 async function listLocalGitBranches(cwd: string): Promise<readonly string[]> {
@@ -4392,13 +5173,27 @@ function handleGitPush(req: IncomingMessage, res: ServerResponse): void {
   });
 }
 
-export function parseTerminalSessionRequest(req: IncomingMessage): { readonly cwd: string } {
+function optionalPositiveIntegerHeader(req: IncomingMessage, name: string): number | undefined {
+  const raw = req.headers[name];
+  const value = (Array.isArray(raw) ? raw[0] : raw)?.trim();
+  if (!value) {
+    return undefined;
+  }
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+export function parseTerminalSessionRequest(req: IncomingMessage): { readonly cwd: string; readonly cols?: number; readonly rows?: number } {
   const rawCwd = req.headers["x-rlab-terminal-cwd"];
   const cwd = (Array.isArray(rawCwd) ? rawCwd[0] : rawCwd)?.trim() ?? "";
   if (!cwd) {
     throw new Error("Project directory is required.");
   }
-  return { cwd: resolve(cwd) };
+  return {
+    cwd: resolve(cwd),
+    cols: optionalPositiveIntegerHeader(req, "x-rlab-terminal-cols"),
+    rows: optionalPositiveIntegerHeader(req, "x-rlab-terminal-rows"),
+  };
 }
 
 function handleTerminalSession(req: IncomingMessage, res: ServerResponse): void {
@@ -4418,8 +5213,10 @@ function handleTerminalSession(req: IncomingMessage, res: ServerResponse): void 
     return;
   }
   let cwd: string;
+  let cols: number | undefined;
+  let rows: number | undefined;
   try {
-    ({ cwd } = parseTerminalSessionRequest(req));
+    ({ cwd, cols, rows } = parseTerminalSessionRequest(req));
     const cwdError = validateGitCwd(cwd);
     if (cwdError) {
       sendJson(res, 400, { error: cwdError });
@@ -4431,7 +5228,7 @@ function handleTerminalSession(req: IncomingMessage, res: ServerResponse): void 
   }
 
   try {
-    sendJson(res, 200, terminalManager.create({ cwd }));
+    sendJson(res, 200, terminalManager.create({ cwd, cols, rows }));
   } catch (error) {
     sendJson(res, 500, { error: errorMessage(error) });
   }
@@ -4457,7 +5254,12 @@ export type RunEvent =
   | { type: "session"; id: string }
   | { type: "wakeup"; prompt: string; reason?: string; toolId?: string; delaySeconds?: number; fireAt?: string; script?: string; intervalSeconds?: number }
   | { type: "cancel_wakeup"; wakeupId?: string; all?: boolean; reason?: string; toolId?: string }
-  | { type: "done"; costUsd?: number; usage?: RunUsage };
+  | { type: "done"; costUsd?: number; usage?: RunUsage; usageDebug?: UsageDebugEntry | readonly UsageDebugEntry[] };
+
+interface UsageDebugEntry {
+  readonly source: string;
+  readonly payload: unknown;
+}
 
 type ApprovalDecision = "approved" | "rejected";
 
@@ -4610,6 +5412,8 @@ const latestAgentLimits = new Map<string, AgentLimitAccumulator>();
 
 const WINDOW_ORDER: readonly RateLimitWindowKind[] = ["five_hour", "weekly", "overage"];
 const RATE_LIMIT_WINDOW_KINDS: ReadonlySet<string> = new Set(WINDOW_ORDER);
+const AGENT_LIMIT_REFRESH_MIN_INTERVAL_MS = 60_000;
+const agentLimitRefreshAttempts = new Map<string, { readonly attemptedAt: number; readonly error?: string }>();
 
 /** Load persisted rate-limit snapshots into the in-memory store on boot, so a
  *  restart doesn't blank the composer's limits until the next run. */
@@ -4755,6 +5559,171 @@ function recordClaudeRateLimit(agent: string, info: Record<string, unknown>): vo
     // stores 0–100 like Codex's usedPercent, so scale it up.
     usedPercent: typeof info.utilization === "number" ? info.utilization * 100 : undefined,
   });
+}
+
+interface ClaudeOAuthCredentials {
+  readonly accessToken: string;
+  readonly subscriptionType?: string;
+  readonly rateLimitTier?: string;
+}
+
+function readClaudeOAuthCredentials(): ClaudeOAuthCredentials {
+  const credentialsFile = join(claudeHome(), ".credentials.json");
+  const parsed = JSON.parse(readFileSync(credentialsFile, "utf8").replace(/^\uFEFF/, "")) as unknown;
+  if (!isRecord(parsed) || !isRecord(parsed.claudeAiOauth)) {
+    throw new Error(`${credentialsFile} does not contain Claude OAuth credentials.`);
+  }
+  const oauth = parsed.claudeAiOauth;
+  if (typeof oauth.accessToken !== "string" || oauth.accessToken.trim().length === 0) {
+    throw new Error(`${credentialsFile} does not contain a Claude OAuth access token.`);
+  }
+  return {
+    accessToken: oauth.accessToken,
+    subscriptionType: typeof oauth.subscriptionType === "string" ? oauth.subscriptionType : undefined,
+    rateLimitTier: typeof oauth.rateLimitTier === "string" ? oauth.rateLimitTier : undefined,
+  };
+}
+
+export function parseClaudeRateLimitStream(output: string): readonly Record<string, unknown>[] {
+  const events: Record<string, unknown>[] = [];
+  for (const line of output.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{")) {
+      continue;
+    }
+    try {
+      const parsed = JSON.parse(trimmed) as unknown;
+      if (isRecord(parsed) && parsed.type === "rate_limit_event" && isRecord(parsed.rate_limit_info)) {
+        events.push(parsed.rate_limit_info);
+      }
+    } catch {
+      // Non-JSON terminal noise is ignored; malformed JSON is not a rate-limit event.
+    }
+  }
+  return events;
+}
+
+function parseEpochSeconds(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value !== "string" || value.trim().length === 0) {
+    return undefined;
+  }
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? Math.floor(ms / 1000) : undefined;
+}
+
+function rateLimitStatusFromPercent(percent: number | undefined): string | undefined {
+  if (percent === undefined) {
+    return undefined;
+  }
+  if (percent >= 100) {
+    return "rejected";
+  }
+  if (percent >= 90) {
+    return "allowed_warning";
+  }
+  return "allowed";
+}
+
+function claudePlanLabel(credentials: Pick<ClaudeOAuthCredentials, "subscriptionType" | "rateLimitTier">): string | undefined {
+  const subscription = credentials.subscriptionType?.trim();
+  if (subscription) {
+    return `Claude ${subscription.toUpperCase()}`;
+  }
+  return credentials.rateLimitTier?.trim() || undefined;
+}
+
+function claudeUsageWindow(kind: RateLimitWindowKind, value: unknown): RateLimitWindow | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const usedPercent = typeof value.utilization === "number" && Number.isFinite(value.utilization) ? value.utilization : undefined;
+  const resetsAt = parseEpochSeconds(value.resets_at ?? value.resetsAt);
+  if (usedPercent === undefined && resetsAt === undefined) {
+    return null;
+  }
+  return { kind, usedPercent, resetsAt, status: rateLimitStatusFromPercent(usedPercent) };
+}
+
+export function parseClaudeOAuthUsagePayload(
+  payload: unknown,
+  credentials: Pick<ClaudeOAuthCredentials, "subscriptionType" | "rateLimitTier"> = {},
+): Pick<AgentRateLimit, "plan" | "windows"> {
+  if (!isRecord(payload)) {
+    return { plan: claudePlanLabel(credentials), windows: [] };
+  }
+  const windows: RateLimitWindow[] = [];
+  const fiveHour = claudeUsageWindow("five_hour", payload.five_hour);
+  if (fiveHour) {
+    windows.push(fiveHour);
+  }
+  const weekly = claudeUsageWindow("weekly", payload.seven_day);
+  if (weekly) {
+    windows.push(weekly);
+  }
+  const overage = isRecord(payload.extra_usage) ? claudeUsageWindow("overage", payload.extra_usage) : null;
+  if (overage) {
+    windows.push(overage);
+  }
+  return { plan: claudePlanLabel(credentials), windows };
+}
+
+function recordAgentRateLimitSnapshot(agent: string, snapshot: Pick<AgentRateLimit, "plan" | "windows">): void {
+  const acc = limitAccumulator(agent);
+  acc.plan = snapshot.plan;
+  for (const window of snapshot.windows) {
+    upsertLimitWindow(agent, window);
+  }
+  acc.updatedAt = Date.now();
+  persistAgentLimits();
+}
+
+async function refreshClaudeRateLimitsFromCli(): Promise<void> {
+  const credentials = readClaudeOAuthCredentials();
+  const response = await fetch("https://api.anthropic.com/api/oauth/usage", {
+    headers: {
+      Authorization: `Bearer ${credentials.accessToken}`,
+      Accept: "application/json",
+      "User-Agent": "rlab-agent-limits",
+    },
+  });
+  if (!response.ok) {
+    throw new Error(`Claude OAuth usage request failed with HTTP ${response.status}.`);
+  }
+  const payload = (await response.json()) as unknown;
+  const snapshot = parseClaudeOAuthUsagePayload(payload, credentials);
+  if (snapshot.windows.length === 0) {
+    throw new Error("Claude OAuth usage response did not contain rate-limit windows.");
+  }
+  recordAgentRateLimitSnapshot("claude-code", snapshot);
+}
+
+async function refreshAgentLimitsFromCli(agent: string): Promise<void> {
+  if (agent === "claude-code") {
+    await refreshClaudeRateLimitsFromCli();
+    return;
+  }
+  throw new Error(`${agent} does not expose an on-demand CLI rate-limit refresh.`);
+}
+
+async function refreshAgentLimitsIfDue(agent: string): Promise<string | undefined> {
+  const now = Date.now();
+  const previous = agentLimitRefreshAttempts.get(agent);
+  if (previous && now - previous.attemptedAt < AGENT_LIMIT_REFRESH_MIN_INTERVAL_MS) {
+    return previous.error;
+  }
+  agentLimitRefreshAttempts.set(agent, { attemptedAt: now });
+  try {
+    await refreshAgentLimitsFromCli(agent);
+    agentLimitRefreshAttempts.set(agent, { attemptedAt: Date.now() });
+    return undefined;
+  } catch (error) {
+    const message = errorMessage(error);
+    agentLimitRefreshAttempts.set(agent, { attemptedAt: Date.now(), error: message });
+    return message;
+  }
 }
 
 /** Map one Codex window (`primary`/`secondary` of a RateLimitSnapshot) into our
@@ -4918,6 +5887,75 @@ const RLAB_CHAT_TOOLS_PROMPT = [
   "To cancel scheduled wakeups in this chat, call ScheduleWakeup with action=\"cancel\" and either wakeupId/id or all=true.",
 ].join("\n");
 const CLAUDE_CHAT_UI_SYSTEM_PROMPT = RLAB_CHAT_TOOLS_PROMPT;
+interface CodexDynamicToolSpec {
+  readonly namespace?: string;
+  readonly name: string;
+  readonly description: string;
+  readonly inputSchema: Record<string, unknown>;
+  readonly deferLoading?: boolean;
+}
+
+const CODEX_RLAB_DYNAMIC_TOOLS: readonly CodexDynamicToolSpec[] = [
+  {
+    name: "ScheduleWakeup",
+    description:
+      "Schedule or cancel a server-side wakeup in the current rlab chat. To schedule, provide prompt plus delaySeconds, fireAt, or script with intervalSeconds. To cancel, provide action='cancel' plus wakeupId/id or all=true. The script runs server-side in the project cwd; exit code 0 fires the wakeup and non-zero keeps polling.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        action: {
+          type: "string",
+          enum: ["schedule", "cancel"],
+          description: "Use 'schedule' or omit for a new wakeup. Use 'cancel' to remove scheduled wakeups.",
+        },
+        prompt: {
+          type: "string",
+          description: "Exact follow-up prompt rlab should send when the wakeup fires.",
+        },
+        reason: {
+          type: "string",
+          description: "Short human-readable reason shown in audit/status surfaces.",
+        },
+        delaySeconds: {
+          type: "number",
+          minimum: 1,
+          description: "Wake up after this many seconds.",
+        },
+        fireAt: {
+          type: "string",
+          description: "Absolute wakeup time, preferably ISO 8601.",
+        },
+        script: {
+          type: "string",
+          description: "Deterministic shell script to poll in the project cwd. Exit 0 fires the wakeup; non-zero keeps polling.",
+        },
+        intervalSeconds: {
+          type: "number",
+          minimum: 1,
+          description: "Polling interval for script wakeups.",
+        },
+        wakeupId: {
+          type: "string",
+          description: "Specific wakeup id to cancel.",
+        },
+        id: {
+          type: "string",
+          description: "Alias for wakeupId when cancelling.",
+        },
+        all: {
+          type: "boolean",
+          description: "Cancel all wakeups for this chat when action is 'cancel'.",
+        },
+      },
+    },
+  },
+];
+
+export function codexRlabDynamicTools(): readonly CodexDynamicToolSpec[] {
+  return CODEX_RLAB_DYNAMIC_TOOLS;
+}
+
 const CODEX_PLAN_PROMPT_PREFIX = [
   "Plan mode is active.",
   "Do not modify files or run commands that write to the filesystem.",
@@ -5054,7 +6092,7 @@ function requestedProfileError(agent: AgentProfile["agent"], model: string, reas
 
 function parseAccessMode(value: unknown): AgentAccessMode | null {
   if (value === undefined) {
-    return "read-only";
+    return "unrestricted";
   }
   return isAgentAccessMode(value) ? value : null;
 }
@@ -5092,7 +6130,7 @@ export function parseRunRequestPayload(body: string): ParsedRunRequestPayload {
   let mode: AgentProfile["mode"] = "default";
   let prompt = "";
   let requestedCwd = "";
-  let accessMode: AgentAccessMode = "read-only";
+  let accessMode: AgentAccessMode = "unrestricted";
   let accessModeValid = true;
   let profileValid = true;
   let profileError = "";
@@ -5161,7 +6199,7 @@ export function parseRunRequestPayload(body: string): ParsedRunRequestPayload {
 
 export function buildClaudeRunArgs(request: RunArgsRequest): string[] {
   const profile = profileForArgs("claude-code", request);
-  const accessMode = request.accessMode ?? "read-only";
+  const accessMode = request.accessMode ?? "unrestricted";
   const mode = modeForProfile(profile);
   const args = ["-p", request.prompt, "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--append-system-prompt", CLAUDE_CHAT_UI_SYSTEM_PROMPT];
   const settings: Record<string, boolean | number> = { autoCompactEnabled: request.autoCompact ?? true };
@@ -5198,7 +6236,7 @@ export function buildClaudeRunArgs(request: RunArgsRequest): string[] {
 
 export function buildCodexRunArgs(request: RunArgsRequest): string[] {
   const profile = profileForArgs("codex", request);
-  const accessMode = request.accessMode ?? "read-only";
+  const accessMode = request.accessMode ?? "unrestricted";
   const mode = modeForProfile(profile);
   const planMode = mode === "plan";
   const reviewMode = mode === "review";
@@ -5237,7 +6275,7 @@ function geminiApprovalModeForRequest(profile: AgentProfile, accessMode: AgentAc
 
 export function buildGeminiRunArgs(request: RunArgsRequest): string[] {
   const profile = profileForArgs("gemini", request);
-  const accessMode = request.accessMode ?? "read-only";
+  const accessMode = request.accessMode ?? "unrestricted";
   const args = ["--prompt", request.prompt, "--output-format", "stream-json", "--approval-mode", geminiApprovalModeForRequest(profile, accessMode), "--skip-trust"];
   // Continue a prior session (--resume <id>) or open a new one with the
   // server-assigned id (--session-id <uuid>) so the client can resume it later.
@@ -5255,7 +6293,7 @@ export function buildGeminiRunArgs(request: RunArgsRequest): string[] {
 
 export function buildAmpRunArgs(request: RunArgsRequest): string[] {
   const args: string[] = [];
-  if ((request.accessMode ?? "read-only") === "unrestricted") {
+  if ((request.accessMode ?? "unrestricted") === "unrestricted") {
     args.push("--dangerously-allow-all");
   } else {
     args.push("--settings-file", AMP_READ_ONLY_SETTINGS_FILE);
@@ -5266,7 +6304,7 @@ export function buildAmpRunArgs(request: RunArgsRequest): string[] {
 
 export function buildQwenRunArgs(request: RunArgsRequest): string[] {
   const profile = profileForArgs("qwen", request);
-  const accessMode = request.accessMode ?? "read-only";
+  const accessMode = request.accessMode ?? "unrestricted";
   const args = ["--prompt", request.prompt, "--output-format", "stream-json", "--include-partial-messages", "--approval-mode", accessMode === "unrestricted" && profile.mode !== "plan" ? "yolo" : "plan"];
   const model = modelForProfile(profile);
   if (model) {
@@ -5278,7 +6316,7 @@ export function buildQwenRunArgs(request: RunArgsRequest): string[] {
 export function buildCursorRunArgs(request: RunArgsRequest): string[] {
   const profile = profileForArgs("cursor", request);
   const args = ["-p", request.prompt, "--output-format", "stream-json"];
-  if ((request.accessMode ?? "read-only") === "unrestricted") {
+  if ((request.accessMode ?? "unrestricted") === "unrestricted") {
     args.push("--force");
   }
   const model = modelForProfile(profile);
@@ -5307,13 +6345,15 @@ function ensureAmpReadOnlySettingsFile(): void {
 
 export function buildOpenCodeRunArgs(request: RunArgsRequest): string[] {
   const profile = profileForArgs("opencode", request);
+  const accessMode = request.accessMode ?? "unrestricted";
+  const mode = modeForProfile(profile);
   const args = ["run", "--format", "json", "--thinking"];
   // Continue a prior session by id (opencode mints the id; we capture it from the
   // json stream and pass it back here on the next turn).
   if (request.resume) {
     args.push("--session", request.resume);
   }
-  if ((request.accessMode ?? "read-only") === "unrestricted") {
+  if (accessMode === "unrestricted" && mode !== "plan") {
     args.push("--dangerously-skip-permissions");
   } else {
     // Read-only: opencode's default `build` agent auto-allows edits/bash, so force
@@ -7277,6 +8317,7 @@ interface ClaudeStreamState {
    *  context window is at the end of the turn (the per-call figure, not the
    *  turn-summed usage the result message reports). */
   lastContextTokens?: number;
+  readonly usageDebug: UsageDebugEntry[];
 }
 
 function parseJsonRecord(value: string): Record<string, unknown> | null {
@@ -7313,6 +8354,63 @@ function numericWakeupField(value: unknown): number | undefined {
 function isWakeupToolName(name: string): boolean {
   const leaf = name.split("/").at(-1)?.toLowerCase() ?? name.toLowerCase();
   return leaf === "schedulewakeup" || leaf === "schedule_wakeup" || leaf === "rlab_schedule_wakeup" || leaf === "wakeup";
+}
+
+function wakeupInputValidationError(name: string, input: Record<string, unknown> | undefined): string | null {
+  if (!isWakeupToolName(name)) {
+    return `${name} is not a supported rlab dynamic tool.`;
+  }
+  if (!input) {
+    return `${name} requires a JSON object input.`;
+  }
+  const action = firstString(input, ["action", "operation", "mode"])?.toLowerCase();
+  const cancelRequested = action === "cancel" || action === "delete" || action === "remove" || input.cancel === true || input.cancelled === true || input.canceled === true;
+  if (cancelRequested) {
+    const wakeupId = firstString(input, ["wakeupId", "wakeup_id", "id"]);
+    const target = firstString(input, ["target", "scope"])?.toLowerCase();
+    const all = input.all === true || target === "all" || target === "chat";
+    return wakeupId || all ? null : `${name} cancellation requires wakeupId/id or all=true.`;
+  }
+  const prompt = firstString(input, ["prompt", "message", "task"]);
+  if (!prompt) {
+    return `${name} requires a non-empty prompt.`;
+  }
+  const delaySeconds = numericWakeupField(input.delaySeconds ?? input.delay_seconds ?? input.delay);
+  const fireAt = firstString(input, ["fireAt", "fire_at", "at", "time", "date"]);
+  const script = firstString(input, ["script", "conditionScript", "condition_script", "command"]);
+  const intervalSeconds = numericWakeupField(input.intervalSeconds ?? input.interval_seconds ?? input.pollSeconds ?? input.poll_seconds);
+  if (delaySeconds === undefined && !fireAt && !script) {
+    return `${name} requires delaySeconds, fireAt, or script.`;
+  }
+  if (script && intervalSeconds === undefined) {
+    return `${name} script trigger requires intervalSeconds.`;
+  }
+  return null;
+}
+
+export function codexDynamicToolCallResponse(params: Record<string, unknown>): Record<string, unknown> {
+  const tool = firstString(params, ["tool"]) ?? "";
+  const input = isRecord(params.arguments) ? params.arguments : undefined;
+  const validationError = wakeupInputValidationError(tool, input);
+  if (validationError) {
+    return {
+      contentItems: [{ type: "inputText", text: validationError }],
+      success: false,
+    };
+  }
+  const action = firstString(input, ["action", "operation", "mode"])?.toLowerCase();
+  const cancelRequested = action === "cancel" || input?.cancel === true || input?.cancelled === true || input?.canceled === true;
+  return {
+    contentItems: [
+      {
+        type: "inputText",
+        text: cancelRequested
+          ? "rlab accepted the wakeup cancellation. Finish this turn after reporting the cancellation."
+          : "rlab accepted the wakeup schedule. Finish this turn now and wait for rlab to re-run you when it fires.",
+      },
+    ],
+    success: true,
+  };
 }
 
 function wakeupFollowupEvents(id: string, name: string, input: Record<string, unknown> | undefined, ok: boolean): RunEvent[] {
@@ -7509,6 +8607,9 @@ function translateClaudeMessage(msg: Record<string, unknown>, state: ClaudeStrea
     // hanging forever on the empty "thinking" placeholder.
     state.producedContent = true;
     const meta = isRecord(msg.compact_metadata) ? msg.compact_metadata : undefined;
+    if (meta) {
+      state.usageDebug.push({ source: "claude.compact_metadata", payload: meta });
+    }
     const pre = meta && typeof meta.pre_tokens === "number" ? meta.pre_tokens : undefined;
     const post = meta && typeof meta.post_tokens === "number" ? meta.post_tokens : undefined;
     if (post !== undefined) {
@@ -7525,6 +8626,7 @@ function translateClaudeMessage(msg: Record<string, unknown>, state: ClaudeStrea
     const message = isRecord(msg.message) ? msg.message : undefined;
     const usageRec = message && isRecord(message.usage) ? message.usage : undefined;
     if (usageRec) {
+      state.usageDebug.push({ source: "claude.assistant.message.usage", payload: usageRec });
       const ctx = (firstNumber(usageRec, ["input_tokens"]) ?? 0) + (firstNumber(usageRec, ["cache_read_input_tokens"]) ?? 0) + (firstNumber(usageRec, ["cache_creation_input_tokens"]) ?? 0);
       if (ctx > 0) {
         state.lastContextTokens = ctx;
@@ -7572,7 +8674,15 @@ function translateClaudeMessage(msg: Record<string, unknown>, state: ClaudeStrea
     }
     const baseUsage = runUsageFromRecord(msg.usage);
     const usage = state.lastContextTokens !== undefined ? { ...(baseUsage ?? {}), contextTokens: state.lastContextTokens } : baseUsage;
-    events.push({ type: "done", costUsd: typeof msg.total_cost_usd === "number" ? msg.total_cost_usd : undefined, usage });
+    if (msg.usage !== undefined) {
+      state.usageDebug.push({ source: "claude.result.usage", payload: msg.usage });
+    }
+    events.push({
+      type: "done",
+      costUsd: typeof msg.total_cost_usd === "number" ? msg.total_cost_usd : undefined,
+      usage,
+      ...(state.usageDebug.length > 0 ? { usageDebug: state.usageDebug } : {}),
+    });
   }
   return events;
 }
@@ -7580,7 +8690,7 @@ function translateClaudeMessage(msg: Record<string, unknown>, state: ClaudeStrea
 /** Translate Claude `stream-json` lines into normalized events while preserving
  * cross-line state, which is required for partial stream deltas. */
 export function createClaudeStreamTranslator(): (line: string) => RunEvent[] {
-  const state: ClaudeStreamState = { sawPartialAssistantContent: false, toolsByIndex: new Map(), toolsById: new Map() };
+  const state: ClaudeStreamState = { sawPartialAssistantContent: false, toolsByIndex: new Map(), toolsById: new Map(), usageDebug: [] };
   return (line: string): RunEvent[] => {
     let msg: Record<string, unknown>;
     try {
@@ -7767,15 +8877,16 @@ function firstNumber(record: Record<string, unknown>, keys: readonly string[]): 
 }
 
 function compactUsage(usage: RunUsage): RunUsage | undefined {
-  return usage.totalTokens !== undefined ||
-    usage.inputTokens !== undefined ||
-    usage.outputTokens !== undefined ||
-    usage.reasoningTokens !== undefined ||
-    usage.cacheReadTokens !== undefined ||
-    usage.cacheWriteTokens !== undefined ||
-    usage.contextTokens !== undefined
-    ? usage
-    : undefined;
+  const compact: RunUsage = {
+    ...(usage.totalTokens === undefined ? {} : { totalTokens: usage.totalTokens }),
+    ...(usage.inputTokens === undefined ? {} : { inputTokens: usage.inputTokens }),
+    ...(usage.outputTokens === undefined ? {} : { outputTokens: usage.outputTokens }),
+    ...(usage.reasoningTokens === undefined ? {} : { reasoningTokens: usage.reasoningTokens }),
+    ...(usage.cacheReadTokens === undefined ? {} : { cacheReadTokens: usage.cacheReadTokens }),
+    ...(usage.cacheWriteTokens === undefined ? {} : { cacheWriteTokens: usage.cacheWriteTokens }),
+    ...(usage.contextTokens === undefined ? {} : { contextTokens: usage.contextTokens }),
+  };
+  return Object.keys(compact).length > 0 ? compact : undefined;
 }
 
 function runUsageFromRecord(value: unknown): RunUsage | undefined {
@@ -8026,7 +9137,13 @@ export function createCodexStreamTranslator(): (line: string) => RunEvent[] {
       case "turn.failed":
         return [{ type: "error", text: errorText(msg.error) }];
       case "turn.completed":
-        return [{ type: "done", usage: runUsageFromRecord(msg.usage) }];
+        return [
+          {
+            type: "done",
+            usage: runUsageFromRecord(msg.usage),
+            ...(msg.usage === undefined ? {} : { usageDebug: { source: "codex-cli.turn.completed.usage", payload: msg.usage } }),
+          },
+        ];
       default: {
         const text = textFromUnknown(msg);
         return text ? [{ type: "text", text }] : [];
@@ -8191,12 +9308,18 @@ export function createGeminiStreamTranslator(): (line: string) => RunEvent[] {
       return text ? [{ type: "text", text }] : [];
     }
     if (msg.type === "result") {
+      const usagePayload = msg.stats ?? msg.usage;
+      const doneEvent: Extract<RunEvent, { type: "done" }> = {
+        type: "done",
+        usage: runUsageFromRecord(usagePayload),
+        ...(usagePayload === undefined ? {} : { usageDebug: { source: msg.stats === undefined ? "gemini.result.usage" : "gemini.result.stats", payload: usagePayload } }),
+      };
       if (msg.status === "success") {
-        return [{ type: "done", usage: runUsageFromRecord(msg.stats ?? msg.usage) }];
+        return [doneEvent];
       }
       return [
         { type: "error", text: errorText(msg.error ?? msg.message ?? msg.status ?? "run failed") },
-        { type: "done", usage: runUsageFromRecord(msg.stats ?? msg.usage) },
+        doneEvent,
       ];
     }
     if (msg.type === "tool_group") {
@@ -8564,7 +9687,14 @@ export function createOpenCodeStreamTranslator(): (line: string) => RunEvent[] {
         return [{ type: "status", level: "info", text: "opencode step started" }];
       }
       if (part.type === "step-finish") {
-        return [{ type: "done", costUsd: typeof part.cost === "number" ? part.cost : undefined, usage: runUsageFromRecord(part.tokens) }];
+        return [
+          {
+            type: "done",
+            costUsd: typeof part.cost === "number" ? part.cost : undefined,
+            usage: runUsageFromRecord(part.tokens),
+            ...(part.tokens === undefined ? {} : { usageDebug: { source: "opencode.part.step-finish.tokens", payload: part.tokens } }),
+          },
+        ];
       }
     }
     if (msg.type === "error") {
@@ -8577,6 +9707,7 @@ export function createOpenCodeStreamTranslator(): (line: string) => RunEvent[] {
           type: "done",
           costUsd: finishPart && typeof finishPart.cost === "number" ? finishPart.cost : undefined,
           usage: finishPart ? runUsageFromRecord(finishPart.tokens) : undefined,
+          ...(finishPart?.tokens === undefined ? {} : { usageDebug: { source: "opencode.step_finish.tokens", payload: finishPart.tokens } }),
         },
       ];
     }
@@ -8608,6 +9739,14 @@ function startNdjsonHeartbeat(res: ServerResponse): () => void {
   return cleanup;
 }
 
+function publicRunEvent(event: RunEvent): RunEvent {
+  if (event.type !== "done" || event.usageDebug === undefined) {
+    return event;
+  }
+  const { usageDebug: _usageDebug, ...publicEvent } = event;
+  return publicEvent;
+}
+
 function createRunEventSender(res: ServerResponse): { readonly send: (event: RunEvent) => void; readonly sendDone: () => void; readonly end: () => void; readonly isClosed: () => boolean } {
   let doneSent = false;
   let closed = false;
@@ -8624,7 +9763,7 @@ function createRunEventSender(res: ServerResponse): { readonly send: (event: Run
       doneSent = true;
     }
     if (!closed && !res.writableEnded) {
-      res.write(`${JSON.stringify(event)}\n`);
+      res.write(`${JSON.stringify(publicRunEvent(event))}\n`);
     }
   };
   return {
@@ -8802,7 +9941,12 @@ async function runOpenCodeServer(
     }
     emitOpenCodeParts(parsed.parts, send);
     const info = isRecord(parsed.info) ? parsed.info : undefined;
-    send({ type: "done", costUsd: info && typeof info.cost === "number" ? info.cost : undefined, usage: info ? runUsageFromRecord(info.tokens) : undefined });
+    send({
+      type: "done",
+      costUsd: info && typeof info.cost === "number" ? info.cost : undefined,
+      usage: info ? runUsageFromRecord(info.tokens) : undefined,
+      ...(info?.tokens === undefined ? {} : { usageDebug: { source: "opencode.server.info.tokens", payload: info.tokens } }),
+    });
   } catch (error) {
     if (timedOut) {
       // Surface the timeout as an error in the chat — otherwise the abort
@@ -8853,7 +9997,7 @@ export function codexAppServerUsage(tokenUsage: unknown): RunUsage | undefined {
     outputTokens: firstNumber(total, ["outputTokens"]),
     reasoningTokens: firstNumber(total, ["reasoningOutputTokens"]),
     cacheReadTokens: firstNumber(total, ["cachedInputTokens"]),
-    contextTokens: firstNumber(total, ["contextTokens", "totalTokens"]),
+    contextTokens: firstNumber(total, ["contextTokens"]),
   });
 }
 
@@ -8944,6 +10088,23 @@ export function codexAppServerItemEvents(item: Record<string, unknown>, complete
       }
       return events;
     }
+    case "dynamicToolCall": {
+      const namespace = firstString(item, ["namespace"]);
+      const tool = firstString(item, ["tool"]) ?? "tool";
+      const callId = id ?? `codex-dynamic-${tool}`;
+      const input = isRecord(item.arguments) ? item.arguments : undefined;
+      const summary = firstString(input, ["prompt", "reason", "script", "fireAt", "fire_at", "command"]) ?? tool;
+      const name = namespace ? `${namespace}/${tool}` : tool;
+      const events: RunEvent[] = [{ type: "tool", id: callId, name, summary: clip(summary, 120), args: toArgs(input) }];
+      if (completed) {
+        const status = String(item.status ?? "").toLowerCase();
+        const ok = status === "completed" && item.success !== false;
+        const output = item.contentItems ?? item.error ?? "";
+        events.push({ type: "tool_result", id: callId, ok, output: resultText(output) });
+        events.push(...wakeupFollowupEvents(callId, tool, input, ok));
+      }
+      return events;
+    }
     case "webSearch": {
       const query = firstString(item, ["query"]) ?? "";
       return [{ type: "search", id, query, state: completed ? "ok" : "running" }];
@@ -8967,6 +10128,7 @@ export function buildCodexThreadParams(request: RunRequest): {
   readonly effort?: string;
   readonly prompt: string;
   readonly config?: Record<string, number>;
+  readonly dynamicTools: readonly CodexDynamicToolSpec[];
 } {
   const profile = normalizeAgentProfile(request, "codex");
   const mode = modeForProfile(profile);
@@ -8979,6 +10141,7 @@ export function buildCodexThreadParams(request: RunRequest): {
     effort: reasoningForProfile(profile),
     prompt: codexPromptForMode(request.prompt, mode),
     config: codexCompactionConfigForRequest(request),
+    dynamicTools: codexRlabDynamicTools(),
   };
 }
 
@@ -9022,6 +10185,7 @@ async function runCodexAppServer(
   const streamedText = new Set<string>();
   const streamedReasoning = new Set<string>();
   let latestUsage: RunUsage | undefined;
+  const usageDebug: UsageDebugEntry[] = [];
 
   // Minimal newline-delimited JSON-RPC peer over the app-server's stdio.
   let idCounter = 0;
@@ -9044,7 +10208,7 @@ async function runCodexAppServer(
     });
   };
 
-  const handleServerRequest = (id: unknown, method: string): void => {
+  const handleServerRequest = (id: unknown, method: string, params: Record<string, unknown>): void => {
     // We run with approvalPolicy "never", so these should not fire. Respond
     // defensively so a stray request never deadlocks the turn.
     let result: Record<string, unknown> = {};
@@ -9052,6 +10216,8 @@ async function runCodexAppServer(
       result = { decision: unrestricted ? "acceptForSession" : "decline" };
     } else if (method === "item/tool/requestUserInput") {
       result = { answers: {} };
+    } else if (method === "item/tool/call") {
+      result = codexDynamicToolCallResponse(params);
     }
     writeMessage({ jsonrpc: "2.0", id, result });
   };
@@ -9123,6 +10289,9 @@ async function runCodexAppServer(
         if (usage) {
           latestUsage = usage;
         }
+        if (params.tokenUsage !== undefined) {
+          usageDebug.push({ source: "codex-app-server.thread/tokenUsage/updated", payload: params.tokenUsage });
+        }
         return;
       }
       case "account/rateLimits/updated": {
@@ -9147,7 +10316,7 @@ async function runCodexAppServer(
           const turnError = isRecord(turn.error) ? turn.error : undefined;
           send({ type: "error", text: turnError ? (firstString(turnError, ["message"]) ?? "Codex turn failed") : "Codex turn failed" });
         }
-        send({ type: "done", usage: latestUsage });
+        send({ type: "done", usage: latestUsage, ...(usageDebug.length > 0 ? { usageDebug } : {}) });
         settleTurn?.();
         return;
       }
@@ -9213,7 +10382,7 @@ async function runCodexAppServer(
             }
           }
         } else if (typeof msg.method === "string" && msg.id !== undefined) {
-          handleServerRequest(msg.id, msg.method);
+          handleServerRequest(msg.id, msg.method, isRecord(msg.params) ? msg.params : {});
         } else if (typeof msg.method === "string") {
           handleNotification(msg.method, isRecord(msg.params) ? msg.params : {});
         }
@@ -9236,7 +10405,7 @@ async function runCodexAppServer(
     }
 
     const params = buildCodexThreadParams(request);
-    const threadParams: Record<string, unknown> = { cwd, sandbox: params.sandbox, approvalPolicy: params.approvalPolicy };
+    const threadParams: Record<string, unknown> = { cwd, sandbox: params.sandbox, approvalPolicy: params.approvalPolicy, dynamicTools: params.dynamicTools };
     if (params.model) {
       threadParams.model = params.model;
     }
@@ -9530,6 +10699,19 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
     let accumulator: BackgroundRunAccumulator | null = null;
     let requestForWakeups: RunRequest | null = null;
     const send = (event: RunEvent) => {
+      if (event.type === "done") {
+        for (const entry of usageDebugEntries(event.usageDebug)) {
+          appendRunAuditEvent(RUN_AUDIT_FILE, {
+            type: "agent_usage_raw",
+            agent,
+            model,
+            runId: binding?.runId,
+            conversationId: binding?.conversationId,
+            source: entry.source,
+            payload: usageAuditPayload(entry.payload),
+          });
+        }
+      }
       if (event.type === "wakeup") {
         const publicEvent: RunEvent = requestForWakeups
           ? (() => {
@@ -9904,6 +11086,8 @@ function attach(server: ViteDevServer | PreviewServer): void {
   }));
   prewarmAgentDetectionCache();
   useExactApi(server, "/api/agent-config", handleAgentConfig);
+  useExactApi(server, "/api/voice-config", handleVoiceConfig);
+  useExactApi(server, "/api/voice/transcribe", methodOnly("POST", handleVoiceTranscribe));
   useExactApi(server, "/api/agent-install", methodOnly("POST", handleAgentInstall));
   useExactApi(server, "/api/playwright-install", methodOnly("POST", handlePlaywrightInstall));
   useExactApi(server, "/api/folder-picker", methodOnly("POST", handleFolderPicker));
@@ -9914,7 +11098,9 @@ function attach(server: ViteDevServer | PreviewServer): void {
   useExactApi(server, "/api/local-file", methodOnly("GET", handleLocalFile));
   useExactApi(server, "/api/version", methodOnly("GET", handleVersion));
   useExactApi(server, "/api/agent-limits", methodOnly("GET", handleAgentLimits));
+  useExactApi(server, "/api/cli-updates", methodOnly("GET", handleCliUpdates));
   useExactApi(server, "/api/git-status", methodOnly("POST", handleGitStatus));
+  useExactApi(server, "/api/git-tree", methodOnly("POST", handleGitTree));
   useExactApi(server, "/api/git-diff", methodOnly("POST", handleGitDiff));
   useExactApi(server, "/api/git-stage", methodOnly("POST", handleGitStage));
   useExactApi(server, "/api/git-unstage", methodOnly("POST", handleGitUnstage));
@@ -9932,6 +11118,7 @@ function attach(server: ViteDevServer | PreviewServer): void {
   useExactApi(server, "/api/run-approval", methodOnly("POST", handleRunApproval));
   useExactApi(server, "/api/run-cancel", methodOnly("POST", handleRunCancel));
   useExactApi(server, "/api/run-input", methodOnly("POST", handleRunInput));
+  startCliUpdateMonitor();
 }
 
 export function agentsApiPlugin(): Plugin {

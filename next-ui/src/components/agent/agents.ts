@@ -8,6 +8,7 @@ export {
   DEFAULT_AGENT_OPTION_ID,
   DEFAULT_PROFILE,
   STATIC_AGENT_CLI_INFO,
+  accessModeForAgentProfile,
   agentProfileEquals,
   agentProfileLabels,
   compactCommandForAgent,
@@ -26,6 +27,7 @@ export {
 export type {
   AgentCliInfo,
   AgentCliMap,
+  AgentAccessMode,
   AgentDef,
   AgentId,
   AgentOption,

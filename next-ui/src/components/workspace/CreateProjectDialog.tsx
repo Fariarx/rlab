@@ -48,23 +48,12 @@ export function CreateProjectDialog({ open, defaultProfile, onClose, onCreate }:
   const [busy, setBusy] = useState(false);
   // The dialog flips between the form and an in-app folder browser (the OS dialog
   // can't open on a headless server), rendered inline so it works on mobile.
-  const [mode, setMode] = useState<"form" | "browse">("form");
+  const [mode, setMode] = useState<"form" | "browse">("browse");
+  const [browseCancelAction, setBrowseCancelAction] = useState<"close" | "form">("close");
   const [listing, setListing] = useState<DirectoryListing | null>(null);
   const [listingBusy, setListingBusy] = useState(false);
   // The editable path shown in the browser; type + Enter to jump anywhere.
   const [pathInput, setPathInput] = useState("");
-
-  useEffect(() => {
-    if (open) {
-      setName("");
-      setPath("");
-      setError(null);
-      setBusy(false);
-      setMode("form");
-      setListing(null);
-      setPathInput("");
-    }
-  }, [open]);
 
   const loadDirectory = async (target?: string) => {
     setListingBusy(true);
@@ -91,8 +80,24 @@ export function CreateProjectDialog({ open, defaultProfile, onClose, onCreate }:
     }
   };
 
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    setName("");
+    setPath("");
+    setError(null);
+    setBusy(false);
+    setMode("browse");
+    setBrowseCancelAction("close");
+    setListing(null);
+    setPathInput("");
+    void loadDirectory();
+  }, [open]);
+
   const openBrowser = () => {
     setError(null);
+    setBrowseCancelAction("form");
     setMode("browse");
     void loadDirectory(path.trim() || undefined);
   };
@@ -264,7 +269,7 @@ export function CreateProjectDialog({ open, defaultProfile, onClose, onCreate }:
             </List>
           </DialogContent>
           <DialogActions sx={{ px: 2.5, pb: 2, pt: 1 }}>
-            <Button variant="text" onClick={() => setMode("form")}>
+            <Button variant="text" onClick={browseCancelAction === "close" ? onClose : () => setMode("form")}>
               {t("cancel")}
             </Button>
             <Button variant="contained" startIcon={<CheckIcon sx={{ fontSize: 16 }} />} disabled={!listing} onClick={chooseCurrentFolder}>

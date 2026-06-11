@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   AGENTS,
   DEFAULT_AGENT_OPTION_ID,
+  accessModeForAgentProfile,
   agentProfileLabels,
   getAgent,
   resolveAgentModeValue,
@@ -19,13 +20,14 @@ describe("agent catalog", () => {
     expect(resolveAgentReasoningValue("codex", "xhigh")).toBe("xhigh");
   });
 
-  it("no longer exposes per-message work modes (agents run on access mode only)", () => {
+  it("exposes chat work modes for every runnable agent", () => {
     for (const agent of ["claude-code", "codex", "gemini", "opencode"] as const) {
-      expect(getAgent(agent).modes.map((option) => option.id)).toEqual(["default"]);
+      expect(getAgent(agent).modes.map((option) => option.id)).toEqual(["default", "plan", "auto"]);
     }
-    // Removed modes normalize away — no stale value resolves.
-    expect(resolveAgentModeValue("codex", "review")).toBeUndefined();
-    expect(resolveAgentModeValue("opencode", "explore")).toBeUndefined();
+    expect(resolveAgentModeValue("codex", "plan")).toBe("plan");
+    expect(resolveAgentModeValue("gemini", "auto")).toBe("auto");
+    expect(accessModeForAgentProfile({ agent: "codex", model: "default", reasoning: "default", mode: "plan" })).toBe("read-only");
+    expect(accessModeForAgentProfile({ agent: "codex", model: "default", reasoning: "default", mode: "auto" })).toBe("unrestricted");
   });
 
   it("only exposes the four currently supported visible agents", () => {

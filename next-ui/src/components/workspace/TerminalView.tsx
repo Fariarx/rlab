@@ -1,6 +1,5 @@
 import "@xterm/xterm/css/xterm.css";
 
-import ChevronRightIcon from "@mui/icons-material/ChevronRight";
 import PlayArrowRoundedIcon from "@mui/icons-material/PlayArrowRounded";
 import ReplayRoundedIcon from "@mui/icons-material/ReplayRounded";
 import StopCircleOutlinedIcon from "@mui/icons-material/StopCircleOutlined";
@@ -34,15 +33,45 @@ interface TerminalCreateResponse {
   readonly error?: string;
 }
 
+interface TerminalGeometry {
+  readonly cols: number;
+  readonly rows: number;
+  readonly pixelWidth: number;
+  readonly pixelHeight: number;
+}
+
+interface TerminalInputModifiers {
+  readonly ctrl: boolean;
+  readonly alt: boolean;
+}
+
+type TerminalInputModifier = keyof TerminalInputModifiers;
+
 const terminals = new Map<string, RlabTerminal>();
 const RESIZE_DEBOUNCE_MS = 50;
-const MOBILE_POPULAR_COMMANDS: readonly { readonly label: string; readonly command: string }[] = [
-  { label: "pwd", command: "pwd" },
-  { label: "ls", command: "ls -la" },
-  { label: "git", command: "git status --short" },
-  { label: "diff", command: "git diff --stat" },
-  { label: "test", command: "npm test" },
-  { label: "build", command: "npm run build" },
+const START_LAYOUT_RETRY_MS = 50;
+const MIN_START_PIXEL_WIDTH = 160;
+const MIN_START_COLS = 20;
+const TERMINAL_RECONNECT_DELAY_MS = 250;
+const TERMINAL_RECONNECT_ATTEMPTS = 1;
+const INACTIVE_TERMINAL_MODIFIERS: TerminalInputModifiers = { ctrl: false, alt: false };
+const MOBILE_STICKY_MODIFIERS: readonly { readonly key: TerminalInputModifier; readonly label: string }[] = [
+  { key: "ctrl", label: "Ctrl" },
+  { key: "alt", label: "Alt" },
+];
+const MOBILE_KEY_SEQUENCES: readonly { readonly label: string; readonly ariaLabel?: string; readonly sequence: string }[] = [
+  { label: "Esc", sequence: "\x1b" },
+  { label: "Tab", sequence: "\t" },
+  { label: "Ctrl+C", sequence: "\x03" },
+  { label: "Ctrl+D", sequence: "\x04" },
+  { label: "Ctrl+L", sequence: "\x0c" },
+  { label: "Ctrl+R", sequence: "\x12" },
+  { label: "Ctrl+A", sequence: "\x01" },
+  { label: "Ctrl+E", sequence: "\x05" },
+  { label: "Ctrl+U", sequence: "\x15" },
+  { label: "Ctrl+K", sequence: "\x0b" },
+  { label: "↑", ariaLabel: "Up", sequence: "\x1b[A" },
+  { label: "↓", ariaLabel: "Down", sequence: "\x1b[B" },
 ];
 
 function getTerminalClientId(): string {
@@ -102,6 +131,53 @@ function socketChunkByteLength(data: string | ArrayBuffer | Blob): number {
   return 0;
 }
 
+function controlSequenceForInput(data: string): string | null {
+  if (data.length !== 1) {
+    return null;
+  }
+  const codePoint = data.codePointAt(0);
+  if (codePoint === undefined) {
+    return null;
+  }
+  if (codePoint >= 97 && codePoint <= 122) {
+    return String.fromCharCode(codePoint - 96);
+  }
+  if (codePoint >= 64 && codePoint <= 95) {
+    return String.fromCharCode(codePoint - 64);
+  }
+  if (data === " ") {
+    return "\x00";
+  }
+  if (data === "?") {
+    return "\x7f";
+  }
+  if (data === "\r") {
+    return "\r";
+  }
+  if (data === "\x7f" || data === "\b") {
+    return "\b";
+  }
+  return null;
+}
+
+function applyTerminalInputModifiers(data: string, modifiers: TerminalInputModifiers): { readonly data: string; readonly consumed: boolean } {
+  let output = data;
+  let consumed = false;
+  if (modifiers.ctrl) {
+    const controlSequence = controlSequenceForInput(output);
+    if (controlSequence === null) {
+      return { data, consumed: false };
+    }
+    output = controlSequence;
+    consumed = true;
+  }
+  if (modifiers.alt) {
+    output = `\x1b${output}`;
+    consumed = true;
+  }
+  return { data: output, consumed };
+}
+
 class RlabTerminal {
   private readonly terminal: Terminal;
   private readonly fitAddon = new FitAddon();
@@ -117,15 +193,22 @@ class RlabTerminal {
   private visibleContainer: HTMLDivElement | null = null;
   private resizeObserver: ResizeObserver | null = null;
   private resizeTimer: ReturnType<typeof setTimeout> | null = null;
+  private startLayoutTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private inputModifiers: TerminalInputModifiers = INACTIVE_TERMINAL_MODIFIERS;
+  private onInputModifiersConsumed: (() => void) | null = null;
   private terminalWriteQueue: Promise<void> = Promise.resolve();
   private opened = false;
   private stopped = false;
+  private started = false;
+  private starting = false;
+  private reconnectAttempts = 0;
+  private reconnecting = false;
 
   constructor(private readonly cwd: string) {
     this.terminal = new Terminal({
       allowProposedApi: true,
       cursorBlink: true,
-      convertEol: true,
       fontFamily: "JetBrains Mono, Consolas, monospace",
       fontSize: 12,
       lineHeight: 1.2,
@@ -149,9 +232,8 @@ class RlabTerminal {
     this.hostElement.style.height = "100%";
     this.terminal.loadAddon(this.fitAddon);
     this.terminal.onData((data) => {
-      this.sendInput(data);
+      this.sendTerminalInput(data);
     });
-    void this.start();
   }
 
   subscribe(subscriber: TerminalSubscriber): () => void {
@@ -175,7 +257,7 @@ class RlabTerminal {
       this.resizeObserver.observe(container);
     }
     window.requestAnimationFrame(() => {
-      this.requestResize();
+      this.startWhenLayoutReady();
       this.terminal.focus();
     });
   }
@@ -190,6 +272,10 @@ class RlabTerminal {
       clearTimeout(this.resizeTimer);
       this.resizeTimer = null;
     }
+    if (this.startLayoutTimer !== null) {
+      clearTimeout(this.startLayoutTimer);
+      this.startLayoutTimer = null;
+    }
     this.visibleContainer = null;
     if (this.opened) {
       this.parkingRoot.appendChild(this.hostElement);
@@ -198,6 +284,7 @@ class RlabTerminal {
 
   async stop(): Promise<void> {
     this.stopped = true;
+    this.clearReconnectTimer();
     this.controlSocket?.send(JSON.stringify({ type: "stop" }));
     if (this.sessionId) {
       await fetch(`/api/terminal?id=${encodeURIComponent(this.sessionId)}`, { method: "DELETE" }).catch(() => undefined);
@@ -207,13 +294,25 @@ class RlabTerminal {
     this.updateStatus({ connecting: false, running: false, exitCode: 0, error: null });
   }
 
-  sendCommand(command: string): void {
-    this.sendInput(`${command}\r`);
+  setInputModifiers(modifiers: TerminalInputModifiers, onConsumed: () => void): void {
+    this.inputModifiers = modifiers;
+    this.onInputModifiersConsumed = onConsumed;
+  }
+
+  clearInputModifiers(): void {
+    this.inputModifiers = INACTIVE_TERMINAL_MODIFIERS;
+    this.onInputModifiersConsumed?.();
+  }
+
+  sendKeySequence(sequence: string): void {
+    this.clearInputModifiers();
+    this.sendInput(sequence);
     this.terminal.focus();
   }
 
   dispose(): void {
     this.stopped = true;
+    this.clearReconnectTimer();
     this.unmount(this.visibleContainer);
     this.ioSocket?.close();
     this.controlSocket?.close();
@@ -222,22 +321,40 @@ class RlabTerminal {
     this.subscribers.clear();
   }
 
-  private async start(): Promise<void> {
+  private async start(initialGeometry: TerminalGeometry | null): Promise<void> {
+    if (this.started || this.starting || this.stopped) {
+      if (this.started) {
+        this.requestResize();
+      }
+      return;
+    }
+    this.starting = true;
     try {
+      const headers: Record<string, string> = { "X-Rlab-Terminal-Cwd": this.cwd };
+      if (initialGeometry) {
+        headers["X-Rlab-Terminal-Cols"] = String(initialGeometry.cols);
+        headers["X-Rlab-Terminal-Rows"] = String(initialGeometry.rows);
+        headers["X-Rlab-Terminal-Pixel-Width"] = String(initialGeometry.pixelWidth);
+        headers["X-Rlab-Terminal-Pixel-Height"] = String(initialGeometry.pixelHeight);
+      }
       const response = await fetch("/api/terminal", {
         method: "POST",
-        headers: { "X-Rlab-Terminal-Cwd": this.cwd },
+        headers,
       });
       const payload = (await response.json().catch(() => ({}))) as TerminalCreateResponse;
       if (!response.ok || !payload.id) {
         throw new Error(payload.error ?? `Terminal failed (${response.status})`);
       }
+      this.started = true;
       this.sessionId = payload.id;
+      this.reconnectAttempts = 0;
       this.connectControl(payload.id);
       this.connectIo(payload.id);
       this.updateStatus({ connecting: false, running: true, error: null, exitCode: null });
     } catch (error) {
       this.updateStatus({ connecting: false, running: false, error: error instanceof Error ? error.message : String(error), exitCode: 1 });
+    } finally {
+      this.starting = false;
     }
   }
 
@@ -275,7 +392,7 @@ class RlabTerminal {
       }
       this.ioSocket = null;
       if (!this.stopped) {
-        this.updateStatus({ running: false, error: "Terminal stream closed." });
+        this.scheduleReconnect("Terminal stream closed.");
       }
     };
   }
@@ -310,17 +427,71 @@ class RlabTerminal {
       }
       this.controlSocket = null;
       if (!this.stopped) {
-        this.updateStatus({ running: false, error: "Terminal control connection closed." });
+        this.scheduleReconnect("Terminal control connection closed.");
       }
     };
   }
 
+  private scheduleReconnect(reason: string): void {
+    if (this.stopped || !this.started || !this.sessionId) {
+      return;
+    }
+    if (this.reconnecting || this.reconnectTimer !== null) {
+      return;
+    }
+    if (this.reconnectAttempts >= TERMINAL_RECONNECT_ATTEMPTS) {
+      this.updateStatus({ connecting: false, running: false, error: reason });
+      return;
+    }
+    this.reconnectAttempts += 1;
+    this.reconnecting = true;
+    this.updateStatus({ connecting: true, running: true, error: null, exitCode: null });
+    this.closeSocketsForReconnect();
+    const terminalId = this.sessionId;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (this.stopped || this.sessionId !== terminalId) {
+        this.reconnecting = false;
+        return;
+      }
+      this.connectControl(terminalId);
+      this.connectIo(terminalId);
+    }, TERMINAL_RECONNECT_DELAY_MS);
+  }
+
+  private closeSocketsForReconnect(): void {
+    const io = this.ioSocket;
+    const control = this.controlSocket;
+    this.ioSocket = null;
+    this.controlSocket = null;
+    if (io) {
+      io.onclose = null;
+      io.close();
+    }
+    if (control) {
+      control.onclose = null;
+      control.close();
+    }
+  }
+
+  private clearReconnectTimer(): void {
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.reconnecting = false;
+  }
+
   private handleControlMessage(message: TerminalControlMessage): void {
     if (message.type === "restore") {
+      this.reconnectAttempts = 0;
+      this.reconnecting = false;
       void this.restore(message.snapshot, message.cols, message.rows);
       return;
     }
     if (message.type === "state") {
+      this.reconnectAttempts = 0;
+      this.reconnecting = false;
       this.updateStatus({ running: message.running, exitCode: message.exitCode, error: null });
       return;
     }
@@ -367,7 +538,19 @@ class RlabTerminal {
     this.ioSocket.send(data);
   }
 
+  private sendTerminalInput(data: string): void {
+    const transformed = applyTerminalInputModifiers(data, this.inputModifiers);
+    this.sendInput(transformed.data);
+    if (transformed.consumed) {
+      this.clearInputModifiers();
+    }
+  }
+
   private scheduleResize(): void {
+    if (!this.started) {
+      this.startWhenLayoutReady();
+      return;
+    }
     if (this.resizeTimer !== null) {
       clearTimeout(this.resizeTimer);
     }
@@ -377,21 +560,59 @@ class RlabTerminal {
     }, RESIZE_DEBOUNCE_MS);
   }
 
+  private startWhenLayoutReady(): void {
+    if (this.started || this.starting || this.stopped) {
+      return;
+    }
+    const geometry = this.fitToContainer();
+    if (geometry && geometry.pixelWidth >= MIN_START_PIXEL_WIDTH && geometry.cols >= MIN_START_COLS) {
+      if (this.startLayoutTimer !== null) {
+        clearTimeout(this.startLayoutTimer);
+        this.startLayoutTimer = null;
+      }
+      void this.start(geometry);
+      return;
+    }
+    if (this.startLayoutTimer !== null) {
+      return;
+    }
+    this.startLayoutTimer = setTimeout(() => {
+      this.startLayoutTimer = null;
+      this.startWhenLayoutReady();
+    }, START_LAYOUT_RETRY_MS);
+  }
+
   private requestResize(): void {
     if (!this.visibleContainer || !this.controlSocket || this.controlSocket.readyState !== WebSocket.OPEN) {
       return;
     }
-    this.fitAddon.fit();
-    const bounds = this.visibleContainer.getBoundingClientRect();
+    const geometry = this.fitToContainer();
+    if (!geometry) {
+      return;
+    }
     this.controlSocket.send(
       JSON.stringify({
         type: "resize",
-        cols: this.terminal.cols,
-        rows: this.terminal.rows,
-        pixelWidth: Math.max(1, Math.round(bounds.width)),
-        pixelHeight: Math.max(1, Math.round(bounds.height)),
+        cols: geometry.cols,
+        rows: geometry.rows,
+        pixelWidth: geometry.pixelWidth,
+        pixelHeight: geometry.pixelHeight,
       }),
     );
+  }
+
+  private fitToContainer(): TerminalGeometry | null {
+    if (!this.visibleContainer) {
+      return null;
+    }
+    this.fitAddon.fit();
+    const bounds = this.visibleContainer.getBoundingClientRect();
+    return {
+      cols: this.terminal.cols,
+      rows: this.terminal.rows,
+      pixelWidth: Math.max(1, Math.round(bounds.width)),
+      pixelHeight: Math.max(1, Math.round(bounds.height)),
+    };
   }
 
   private updateStatus(patch: Partial<TerminalStatus>): void {
@@ -427,6 +648,7 @@ export function TerminalView({ cwd }: { readonly cwd?: string }) {
   const terminalRef = useRef<RlabTerminal | null>(null);
   const [status, setStatus] = useState<TerminalStatus>({ connecting: Boolean(cwd), running: false, error: null, exitCode: null });
   const [terminalEpoch, setTerminalEpoch] = useState(0);
+  const [inputModifiers, setInputModifiers] = useState<TerminalInputModifiers>(INACTIVE_TERMINAL_MODIFIERS);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -435,6 +657,7 @@ export function TerminalView({ cwd }: { readonly cwd?: string }) {
     }
     const terminal = ensureTerminal(cwd);
     terminalRef.current = terminal;
+    terminal.setInputModifiers(inputModifiers, () => setInputModifiers(INACTIVE_TERMINAL_MODIFIERS));
     const unsubscribe = terminal.subscribe({ onStatus: setStatus });
     terminal.mount(container);
     return () => {
@@ -445,6 +668,10 @@ export function TerminalView({ cwd }: { readonly cwd?: string }) {
       }
     };
   }, [cwd, terminalEpoch]);
+
+  useEffect(() => {
+    terminalRef.current?.setInputModifiers(inputModifiers, () => setInputModifiers(INACTIVE_TERMINAL_MODIFIERS));
+  }, [inputModifiers]);
 
   const stopTerminal = () => {
     if (!cwd || !terminalRef.current) {
@@ -465,10 +692,15 @@ export function TerminalView({ cwd }: { readonly cwd?: string }) {
     disposeTerminal(cwd);
     terminalRef.current = null;
     setStatus({ connecting: true, running: false, error: null, exitCode: null });
+    setInputModifiers(INACTIVE_TERMINAL_MODIFIERS);
     setTerminalEpoch((value) => value + 1);
   };
-  const sendPopularCommand = (command: string) => {
-    terminalRef.current?.sendCommand(command);
+  const toggleInputModifier = (modifier: TerminalInputModifier) => {
+    setInputModifiers((current) => ({ ...current, [modifier]: !current[modifier] }));
+  };
+  const sendKeySequence = (sequence: string) => {
+    setInputModifiers(INACTIVE_TERMINAL_MODIFIERS);
+    terminalRef.current?.sendKeySequence(sequence);
   };
 
   if (!cwd) {
@@ -519,7 +751,7 @@ export function TerminalView({ cwd }: { readonly cwd?: string }) {
       </Stack>
       <Stack
         direction="row"
-        aria-label={t("terminalPopularCommands")}
+        aria-label={t("terminalKeyboardControls")}
         sx={{
           display: { xs: "flex", sm: "none" },
           flex: "0 0 auto",
@@ -536,20 +768,82 @@ export function TerminalView({ cwd }: { readonly cwd?: string }) {
           "&::-webkit-scrollbar": { display: "none" },
         }}
       >
-        {MOBILE_POPULAR_COMMANDS.map((item) => (
+        {MOBILE_STICKY_MODIFIERS.map((item) => {
+          const active = inputModifiers[item.key];
+          return (
+            <Box
+              key={item.key}
+              component="button"
+              type="button"
+              disabled={!status.running}
+              aria-label={t("terminalToggleModifier", { key: item.label })}
+              aria-pressed={active}
+              onClick={() => toggleInputModifier(item.key)}
+              sx={{
+                position: "relative",
+                flex: "0 0 auto",
+                scrollSnapAlign: "start",
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                minWidth: 56,
+                minHeight: 34,
+                px: 1.1,
+                borderRadius: (theme) => `${theme.custom.radii.md}px`,
+                border: (theme) => `1px solid ${active ? theme.palette.primary.main : theme.custom.borders.subtle}`,
+                backgroundColor: active ? "rgba(76, 201, 255, 0.2)" : (theme) => theme.custom.surfaces.s2,
+                color: active ? "primary.light" : "text.primary",
+                fontFamily: (theme) => theme.custom.fonts.mono,
+                fontSize: "0.72rem",
+                fontWeight: 800,
+                whiteSpace: "nowrap",
+                cursor: status.running ? "pointer" : "default",
+                opacity: status.running ? 1 : 0.5,
+                boxShadow: active ? "0 0 0 1px rgba(76, 201, 255, 0.35) inset" : "none",
+                "&::after": {
+                  content: '""',
+                  position: "absolute",
+                  right: 6,
+                  top: 6,
+                  width: 6,
+                  height: 6,
+                  borderRadius: "999px",
+                  backgroundColor: active ? "primary.light" : "transparent",
+                },
+                "&:active": {
+                  backgroundColor: active ? "rgba(76, 201, 255, 0.28)" : (theme) => theme.custom.surfaces.s4,
+                },
+              }}
+            >
+              {item.label}
+            </Box>
+          );
+        })}
+        <Box
+          aria-hidden="true"
+          sx={{
+            flex: "0 0 auto",
+            alignSelf: "stretch",
+            width: 1,
+            mx: 0.25,
+            backgroundColor: (theme) => theme.custom.borders.subtle,
+          }}
+        />
+        {MOBILE_KEY_SEQUENCES.map((item) => (
           <Box
-            key={item.command}
+            key={item.label}
             component="button"
             type="button"
             disabled={!status.running}
-            aria-label={t("terminalRunCommand", { command: item.command })}
-            onClick={() => sendPopularCommand(item.command)}
+            aria-label={t("terminalSendKeySequence", { keys: item.ariaLabel ?? item.label })}
+            onClick={() => sendKeySequence(item.sequence)}
             sx={{
               flex: "0 0 auto",
               scrollSnapAlign: "start",
               display: "inline-flex",
               alignItems: "center",
-              gap: 0.5,
+              justifyContent: "center",
+              minWidth: 42,
               minHeight: 34,
               px: 1,
               borderRadius: (theme) => `${theme.custom.radii.md}px`,
@@ -567,8 +861,7 @@ export function TerminalView({ cwd }: { readonly cwd?: string }) {
               },
             }}
           >
-            <Box component="span">{item.label}</Box>
-            <ChevronRightIcon sx={{ fontSize: 14, color: "text.secondary" }} />
+            {item.label}
           </Box>
         ))}
       </Stack>

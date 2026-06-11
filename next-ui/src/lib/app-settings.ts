@@ -1,9 +1,9 @@
 import { DEFAULT_PROFILE, isAgentId, normalizeAgentProfile, type AgentProfile } from "./agent-catalog";
+import { DEFAULT_VOICE_SETTINGS, normalizeVoiceSettings, voiceLanguageForLocale, type VoiceSettings } from "./voice-providers";
 
 export type ThemeMode = "dark" | "light" | "high-contrast";
 export type Locale = "en" | "ru";
 export type DensityMode = "comfortable" | "compact";
-export type AgentAccessMode = "read-only" | "unrestricted";
 
 export const DEFAULT_SIDEBAR_WIDTH = 300;
 export const MIN_SIDEBAR_WIDTH = 240;
@@ -29,10 +29,10 @@ export interface GeneralSettings {
    *  host (e.g. "203.0.113.10" or "dev.example.com:8080"). Empty ⇒ route such
    *  URLs through rlab's same-origin /preview-proxy instead. */
   readonly previewServerHost: string;
+  readonly voice: VoiceSettings;
 }
 
 export interface AgentSettings {
-  readonly accessMode: AgentAccessMode;
   readonly defaultProfile: AgentProfile;
 }
 
@@ -63,19 +63,16 @@ export const defaultAppSettings: AppSettings = {
     locale: "ru",
     telemetry: false,
     previewServerHost: "",
+    voice: DEFAULT_VOICE_SETTINGS,
   },
   agents: {
-    // Default to unrestricted: each agent receives its own "do anything" CLI flag
-    // (Claude: bypassPermissions, codex: --dangerously-bypass-approvals-and-sandbox,
-    // amp: --dangerously-allow-all, gemini/qwen: yolo, cursor: --force).
-    accessMode: "unrestricted",
     defaultProfile: DEFAULT_PROFILE,
   },
 };
 
 export function cloneAppSettings(settings: AppSettings): AppSettings {
   const appearance = { ...defaultAppSettings.appearance, ...settings.appearance };
-  const general = { ...defaultAppSettings.general, ...settings.general };
+  const general = { ...defaultAppSettings.general, ...settings.general, voice: normalizeVoiceSettings(settings.general.voice) };
 
   return {
     appearance: {
@@ -88,27 +85,32 @@ export function cloneAppSettings(settings: AppSettings): AppSettings {
     },
     general,
     agents: {
-      accessMode: isAgentAccessMode(settings.agents.accessMode) ? settings.agents.accessMode : defaultAppSettings.agents.accessMode,
       defaultProfile: normalizeAgentProfile(settings.agents.defaultProfile, defaultAppSettings.agents.defaultProfile.agent),
     },
   };
 }
 
 export function mergeAppSettings(current: AppSettings, patch: AppSettingsPatch): AppSettings {
+  const nextLocale = patch.general?.locale ?? current.general.locale;
+  const voicePatch =
+    patch.general?.locale !== undefined && patch.general.voice?.language === undefined
+      ? { ...patch.general.voice, language: voiceLanguageForLocale(nextLocale) }
+      : patch.general?.voice;
+  const general = {
+    ...current.general,
+    ...patch.general,
+    voice: normalizeVoiceSettings({ ...current.general.voice, ...voicePatch }),
+  };
   return {
     appearance: {
       ...current.appearance,
       ...patch.appearance,
       sidebarWidth: normalizeSidebarWidth(patch.appearance?.sidebarWidth ?? current.appearance.sidebarWidth),
     },
-    general: {
-      ...current.general,
-      ...patch.general,
-    },
+    general,
     agents: {
       ...current.agents,
       ...patch.agents,
-      accessMode: patch.agents?.accessMode ?? current.agents.accessMode,
       defaultProfile: normalizeAgentProfile(patch.agents?.defaultProfile ?? current.agents.defaultProfile),
     },
   };
@@ -135,10 +137,6 @@ export function normalizeSidebarWidth(value: unknown): number {
     return DEFAULT_SIDEBAR_WIDTH;
   }
   return Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, Math.round(value)));
-}
-
-export function isAgentAccessMode(value: unknown): value is AgentAccessMode {
-  return value === "read-only" || value === "unrestricted";
 }
 
 function isAgentProfile(value: unknown): value is AgentProfile {
@@ -172,7 +170,7 @@ export function isAppSettings(value: unknown): value is AppSettings {
     typeof general.confirmDestructiveActions === "boolean" &&
     typeof general.telemetry === "boolean" &&
     (general.previewServerHost === undefined || typeof general.previewServerHost === "string") &&
-    (agents.accessMode === undefined || isAgentAccessMode(agents.accessMode)) &&
+    (general.voice === undefined || isRecord(general.voice)) &&
     isAgentProfile(agents.defaultProfile)
   );
 }

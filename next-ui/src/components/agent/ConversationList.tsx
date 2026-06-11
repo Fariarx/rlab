@@ -35,6 +35,14 @@ export function conversationMatches(conversation: ConversationSummary, query: st
 // (green) render the bare avatar.
 const STATUSES_WITH_DOT: ReadonlySet<ConversationStatus> = new Set<ConversationStatus>(["running", "waiting", "error"]);
 const ACTIVE_STATUS_PRIORITY: ReadonlySet<ConversationStatus> = new Set<ConversationStatus>(["running", "waiting", "error"]);
+const VISUAL_STATUS_SORT_RANK = {
+  ok: 0,
+  running: 1,
+  warn: 2,
+  error: 3,
+  info: 4,
+  idle: 5,
+} as const;
 
 type ConversationListItem =
   | {
@@ -114,6 +122,17 @@ function visualStatusKey(conversation: ConversationSummary, hasWakeup: boolean) 
     return statusToKey[conversation.status];
   }
   return statusToKey[conversation.status];
+}
+
+function sortedConversationsByActivity(conversations: readonly ConversationSummary[], wakeupConversationIds: ReadonlySet<string>): readonly ConversationSummary[] {
+  return conversations
+    .map((conversation, index) => ({ conversation, index }))
+    .sort((left, right) => {
+      const leftRank = VISUAL_STATUS_SORT_RANK[visualStatusKey(left.conversation, wakeupConversationIds.has(left.conversation.id))];
+      const rightRank = VISUAL_STATUS_SORT_RANK[visualStatusKey(right.conversation, wakeupConversationIds.has(right.conversation.id))];
+      return leftRank - rightRank || left.index - right.index;
+    })
+    .map((entry) => entry.conversation);
 }
 
 function ConversationAvatar({ conversation, hasWakeup }: { readonly conversation: ConversationSummary; readonly hasWakeup: boolean }) {
@@ -448,21 +467,22 @@ export function ConversationList({
   const [collapsedGroups, setCollapsedGroups] = useState<ReadonlySet<string>>(() => new Set());
   const { t } = useI18n();
 
+  const wakeupConversationKey = useMemo(() => [...wakeupConversationIds].sort().join("\n"), [wakeupConversationIds]);
+
   // Pinned conversations are lifted into a top group and removed from their
   // original project / chats list.
   const pinned = useMemo(
-    () => [...chats, ...projects.flatMap((project) => project.conversations)].filter((c) => c.pinned && !c.archived),
-    [projects, chats],
+    () => sortedConversationsByActivity([...chats, ...projects.flatMap((project) => project.conversations)].filter((c) => c.pinned && !c.archived), wakeupConversationIds),
+    [projects, chats, wakeupConversationKey, wakeupConversationIds],
   );
   const visibleProjects = useMemo(
     () =>
       projects
-        .map((project) => ({ ...project, conversations: project.conversations.filter((c) => !c.pinned && !c.archived) }))
+        .map((project) => ({ ...project, conversations: sortedConversationsByActivity(project.conversations.filter((c) => !c.pinned && !c.archived), wakeupConversationIds) }))
         .filter((project) => project.conversations.length > 0),
-    [projects],
+    [projects, wakeupConversationKey, wakeupConversationIds],
   );
-  const visibleChats = useMemo(() => chats.filter((c) => !c.pinned && !c.archived), [chats]);
-  const wakeupConversationKey = useMemo(() => [...wakeupConversationIds].sort().join("\n"), [wakeupConversationIds]);
+  const visibleChats = useMemo(() => sortedConversationsByActivity(chats.filter((c) => !c.pinned && !c.archived), wakeupConversationIds), [chats, wakeupConversationKey, wakeupConversationIds]);
 
   const empty = pinned.length === 0 && visibleProjects.length === 0 && visibleChats.length === 0;
   const toggleGroup = (idBase: string) => {

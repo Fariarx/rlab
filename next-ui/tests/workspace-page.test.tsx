@@ -4,6 +4,7 @@ vi.mock("../src/components/workspace/TerminalView", () => ({
   TerminalView: ({ cwd }: { readonly cwd?: string }) => <div data-testid="terminal-cwd">{cwd ?? "none"}</div>,
 }));
 
+import { App } from "../src/App";
 import { WorkspacePage } from "../src/components/workspace/WorkspacePage";
 import { buildInitialWorkspaceState } from "../src/components/workspace/workspace-state";
 import { renderWithThemeAndVirtuoso } from "./util/render-with-virtuoso";
@@ -27,6 +28,7 @@ function activeRunsResponse(path: string): Response | null {
 
 describe("WorkspacePage", () => {
   beforeEach(() => {
+    window.location.hash = "";
     let workspace = buildInitialWorkspaceState();
     vi.stubGlobal(
       "fetch",
@@ -46,6 +48,15 @@ describe("WorkspacePage", () => {
         if (path === "/api/project-files") {
           return Response.json({ files: [] });
         }
+        if (path === "/api/git-status") {
+          return Response.json({ branch: "main", branches: ["main"], ahead: 0, behind: 0, clean: true, files: [] });
+        }
+        if (path === "/api/list-directories") {
+          return Response.json({ path: "/root/workspace/rlab", parent: "/root/workspace", entries: [] });
+        }
+        if (path === "/api/folder-info") {
+          return Response.json({ path: "/root/workspace/rlab", name: "rlab" });
+        }
         if (path === "/api/run") {
           return new Response(`${JSON.stringify({ type: "done" })}\n`, {
             headers: { "Content-Type": "application/x-ndjson" },
@@ -60,6 +71,7 @@ describe("WorkspacePage", () => {
   });
 
   afterEach(() => {
+    window.location.hash = "";
     vi.unstubAllGlobals();
   });
 
@@ -77,6 +89,136 @@ describe("WorkspacePage", () => {
     renderWithThemeAndVirtuoso(<WorkspacePage />);
 
     expect(screen.getByText("auth-service")).toBeInTheDocument();
+  });
+
+  it("shows full selected agent model and reasoning labels in the composer placeholder", async () => {
+    const workspace = buildInitialWorkspaceState();
+    const profile = { agent: "opencode", model: "opencode-big-pickle", reasoning: "max", mode: "default" } as const;
+    const selectedId = workspace.selectedId;
+    vi.mocked(fetch).mockImplementation(async (url: string | URL | Request, init?: RequestInit) => {
+      const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+      const activeRuns = activeRunsResponse(path);
+      if (activeRuns) {
+        return activeRuns;
+      }
+      if (path === "/api/workspace" && (!init || init.method === "GET")) {
+        return Response.json({
+          ...workspace,
+          chats: workspace.chats.map((chat) => (chat.id === selectedId ? { ...chat, agent: "opencode", profile } : chat)),
+        });
+      }
+      if (path === "/api/project-files") {
+        return Response.json({ files: [] });
+      }
+      if (path === "/api/git-status") {
+        return Response.json({ branch: "main", branches: ["main"], ahead: 0, behind: 0, clean: true, files: [] });
+      }
+      if (path === "/api/agent-config") {
+        return Response.json({ agents: {} });
+      }
+      return Response.json({});
+    });
+
+    renderWithThemeAndVirtuoso(<WorkspacePage />);
+
+    expect(await screen.findByPlaceholderText("Написать: OpenCode Big Pickle · Max")).toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("Написать: O · M")).not.toBeInTheDocument();
+  });
+
+  it("shows a bottom sidebar notice when a CLI update is available", async () => {
+    const workspace = buildInitialWorkspaceState();
+    const installRequests: string[] = [];
+    vi.mocked(fetch).mockImplementation(async (url: string | URL | Request, init?: RequestInit) => {
+      const path = typeof url === "string" ? url : url instanceof URL ? `${url.pathname}${url.search}` : url.url;
+      const activeRuns = activeRunsResponse(path);
+      if (activeRuns) {
+        return activeRuns;
+      }
+      if (path === "/api/workspace" && (!init || init.method === "GET")) {
+        return Response.json(workspace);
+      }
+      if (path === "/api/project-files") {
+        return Response.json({ files: [] });
+      }
+      if (path.startsWith("/api/cli-updates")) {
+        return Response.json({
+          checkedAt: Date.now(),
+          checking: false,
+          updates: [
+            {
+              agent: "codex",
+              agentName: "Codex",
+              packageName: "@openai/codex",
+              currentVersion: "1.0.0",
+              latestVersion: "1.1.0",
+              command: "npm install -g @openai/codex@latest",
+            },
+          ],
+          errors: {},
+        });
+      }
+      if (path === "/api/agent-install" && init?.method === "POST") {
+        installRequests.push(String(init.body));
+        return Response.json({ ok: true, agent: "codex" });
+      }
+      return Response.json({});
+    });
+
+    renderWithThemeAndVirtuoso(<WorkspacePage />);
+
+    expect(await screen.findByText("Нужно обновить CLI")).toBeInTheDocument();
+    expect(screen.getByText("Codex: 1.0.0 -> 1.1.0")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Обновить" }));
+
+    await waitFor(() => expect(installRequests).toHaveLength(1));
+    expect(JSON.parse(installRequests[0] ?? "{}")).toEqual({ agent: "codex" });
+    await waitFor(() => expect(screen.queryByText("Нужно обновить CLI")).not.toBeInTheDocument());
+    expect(screen.queryByText("Codex: 1.0.0 -> 1.1.0")).not.toBeInTheDocument();
+  });
+
+  it("restores the last opened workspace tab per conversation", async () => {
+    const initial = buildInitialWorkspaceState();
+    let workspace = {
+      ...initial,
+      selectedId: "chat-2",
+      chats: initial.chats.map((chat) =>
+        chat.id === "chat-2" ? { ...chat, view: "git" as const } : chat.id === "chat-3" ? { ...chat, view: "resources" as const } : chat,
+      ),
+    };
+    vi.mocked(fetch).mockImplementation(async (url: string | URL | Request, init?: RequestInit) => {
+      const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+      const activeRuns = activeRunsResponse(path);
+      if (activeRuns) {
+        return activeRuns;
+      }
+      if (path === "/api/workspace" && (!init || init.method === "GET")) {
+        return Response.json(workspace);
+      }
+      if (path === "/api/workspace" && init?.method === "PUT") {
+        workspace = JSON.parse(String(init.body)) as typeof workspace;
+        return Response.json(workspace);
+      }
+      if (path === "/api/project-files") {
+        return Response.json({ files: [] });
+      }
+      if (path === "/api/agent-config") {
+        return Response.json({ agents: {} });
+      }
+      return Response.json({});
+    });
+
+    renderWithThemeAndVirtuoso(<WorkspacePage />);
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Git" })).toHaveAttribute("aria-pressed", "true"));
+
+    fireEvent.click(screen.getByRole("option", { name: /Postgres или SQLite/i }));
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Ресурсы" })).toHaveAttribute("aria-pressed", "true"));
+
+    fireEvent.click(screen.getByRole("option", { name: /Release notes/i }));
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Git" })).toHaveAttribute("aria-pressed", "true"));
   });
 
   it("opens the terminal for a non-project chat in the app workspace directory", async () => {
@@ -223,14 +365,24 @@ describe("WorkspacePage", () => {
     expect(screen.getByText("auth-service")).toBeInTheDocument();
   });
 
-  it("opens the create project dialog", () => {
+  it("picks a folder before showing the create project form", async () => {
     renderWithThemeAndVirtuoso(<WorkspacePage />);
 
     fireEvent.click(screen.getByRole("button", { name: "Новый проект" }));
 
+    expect(await screen.findByRole("dialog", { name: "Выбор папки" })).toBeInTheDocument();
+    expect(screen.queryByLabelText("Название проекта")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Выбрать эту папку" }));
+
     expect(screen.getByRole("dialog", { name: "Создать проект" })).toBeInTheDocument();
-    expect(screen.getByLabelText("Название проекта")).toBeInTheDocument();
-    expect(screen.getByLabelText("Папка проекта")).toBeInTheDocument();
+    expect(screen.getByLabelText("Название проекта")).toHaveValue("rlab");
+    expect(screen.getByLabelText("Папка проекта")).toHaveValue("/root/workspace/rlab");
+
+    fireEvent.change(screen.getByLabelText("Название проекта"), { target: { value: "Custom Project" } });
+    fireEvent.click(screen.getByRole("button", { name: "Создать" }));
+
+    await waitFor(() => expect(screen.getByText("Custom Project")).toBeInTheDocument());
   });
 
   it("deletes a conversation immediately when destructive confirmations are disabled", async () => {
@@ -260,11 +412,15 @@ describe("WorkspacePage", () => {
       if (path === "/api/project-files") {
         return Response.json({ files: [] });
       }
+      if (path === "/api/agent-config") {
+        return Response.json({ agents: {} });
+      }
       return Response.json({});
     });
     vi.stubGlobal("fetch", fetch);
 
-    renderWithThemeAndVirtuoso(<WorkspacePage />);
+    window.location.hash = "#/chat/chat-2";
+    renderWithThemeAndVirtuoso(<App />);
 
     // Projects and chats share one list, so target chat-2's row explicitly
     // rather than relying on which conversation happens to be first.
@@ -275,6 +431,8 @@ describe("WorkspacePage", () => {
     await waitFor(() => {
       expect(workspace.chats.some((chat) => chat.id === "chat-2")).toBe(false);
     });
+    expect(window.location.hash).not.toBe("#/chat/chat-2");
+    expect(workspace.chats.some((chat) => chat.id === workspace.selectedId)).toBe(true);
     expect(screen.queryByRole("dialog", { name: "Удалить диалог?" })).not.toBeInTheDocument();
   });
 
@@ -867,6 +1025,72 @@ describe("WorkspacePage", () => {
     expect(branchCombo).toHaveValue("main");
     expect(branchCombo).toBeDisabled();
     expect(screen.getAllByText("src/auth.ts").length).toBeGreaterThan(0);
+  });
+
+  it("shows the Git commit graph in a separate Git tab", async () => {
+    const workspace = { ...buildInitialWorkspaceState(), selectedId: "c-flaky" };
+    const treeRequests: Array<{ readonly cwd?: string }> = [];
+    const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+      const activeRuns = activeRunsResponse(path);
+      if (activeRuns) {
+        return activeRuns;
+      }
+      if (path === "/api/workspace" && (!init || init.method === "GET")) {
+        return Response.json(workspace);
+      }
+      if (path === "/api/workspace" && init?.method === "PUT") {
+        return Response.json(workspace);
+      }
+      if (path === "/api/project-files") {
+        return Response.json({ files: [] });
+      }
+      if (path === "/api/git-status") {
+        return Response.json({ branch: "main", branches: ["main"], ahead: 0, behind: 0, clean: true, files: [], commitHash: "a1b2c3d" });
+      }
+      if (path === "/api/git-tree") {
+        treeRequests.push(JSON.parse(String(init?.body ?? "{}")) as { cwd?: string });
+        return Response.json({
+          commits: [
+            {
+              graph: "*",
+              hash: "a1b2c3d4",
+              shortHash: "a1b2c3d",
+              parents: ["0000000"],
+              author: "Luis",
+              date: "2026-06-11",
+              refs: ["HEAD -> main", "origin/main"],
+              subject: "Refine webhook handling",
+            },
+            {
+              graph: "| *",
+              hash: "b2c3d4e5",
+              shortHash: "b2c3d4e",
+              parents: ["1111111", "2222222"],
+              author: "Ada",
+              date: "2026-06-10",
+              refs: ["feature/api"],
+              subject: "Merge API branch",
+            },
+          ],
+        });
+      }
+      return new Response("not found", { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetch);
+
+    renderWithThemeAndVirtuoso(<WorkspacePage />);
+
+    await screen.findByPlaceholderText("Написать: CC");
+    fireEvent.click(screen.getByRole("button", { name: "Git" }));
+    fireEvent.click(await screen.findByRole("tab", { name: /Дерево/ }));
+
+    expect((await screen.findAllByText("Refine webhook handling")).length).toBeGreaterThan(0);
+    expect(screen.getByTestId("git-commit-graph")).toBeInTheDocument();
+    expect(screen.getAllByText("main").length).toBeGreaterThan(0);
+    expect(screen.getByText("origin/main")).toBeInTheDocument();
+    expect(screen.getByText("feature/api")).toBeInTheDocument();
+    expect(treeRequests).toEqual([{ cwd: "/root/workspace/rlab" }]);
   });
 
   it("switches Git branches from the header autocomplete when the worktree is clean", async () => {

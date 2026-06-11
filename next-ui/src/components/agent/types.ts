@@ -215,6 +215,8 @@ export interface CompactionSettings {
   readonly window?: number;
 }
 
+export type ConversationView = "chat" | "git" | "resources" | "preview" | "terminal";
+
 export interface ConversationSummary {
   readonly id: string;
   readonly title: string;
@@ -225,6 +227,8 @@ export interface ConversationSummary {
   readonly profile?: AgentProfile;
   /** Per-conversation auto-/manual-compaction preferences. */
   readonly compaction?: CompactionSettings;
+  /** Last workspace pane opened for this conversation. */
+  readonly view?: ConversationView;
   readonly activeRunId?: string;
   readonly unread?: boolean;
   /** Pinned conversations surface in a dedicated top group and are hidden from

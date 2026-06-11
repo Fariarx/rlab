@@ -1,5 +1,5 @@
 import { fireEvent, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const terminalMock = vi.hoisted(() => {
   class FakeTerminal {
@@ -110,9 +110,28 @@ function socketFor(path: string): FakeWebSocket {
   return socket;
 }
 
+function socketsFor(path: string): FakeWebSocket[] {
+  return FakeWebSocket.instances.filter((candidate) => candidate.url.includes(path));
+}
+
 describe("TerminalView", () => {
+  beforeEach(() => {
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
+      x: 0,
+      y: 0,
+      width: 640,
+      height: 360,
+      top: 0,
+      right: 640,
+      bottom: 360,
+      left: 0,
+      toJSON: () => ({}),
+    });
+  });
+
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
     FakeWebSocket.instances = [];
     terminalMock.FakeTerminal.instances.length = 0;
   });
@@ -135,7 +154,16 @@ describe("TerminalView", () => {
     await waitFor(() =>
       expect(fetch).toHaveBeenCalledWith(
         "/api/terminal",
-        expect.objectContaining({ method: "POST", headers: { "X-Rlab-Terminal-Cwd": "/root/workspace/rlab" } }),
+        expect.objectContaining({
+          method: "POST",
+          headers: {
+            "X-Rlab-Terminal-Cwd": "/root/workspace/rlab",
+            "X-Rlab-Terminal-Cols": "80",
+            "X-Rlab-Terminal-Rows": "24",
+            "X-Rlab-Terminal-Pixel-Width": "640",
+            "X-Rlab-Terminal-Pixel-Height": "360",
+          },
+        }),
       ),
     );
 
@@ -206,12 +234,61 @@ describe("TerminalView", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Перезапустить терминал" }));
 
-    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/terminal", expect.objectContaining({ method: "POST", headers: { "X-Rlab-Terminal-Cwd": "/root/workspace/rlab-restart" } })));
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/terminal",
+        expect.objectContaining({
+          method: "POST",
+          headers: expect.objectContaining({
+            "X-Rlab-Terminal-Cwd": "/root/workspace/rlab-restart",
+            "X-Rlab-Terminal-Cols": "80",
+            "X-Rlab-Terminal-Rows": "24",
+          }),
+        }),
+      ),
+    );
     await waitFor(() => expect(createCount).toBe(2));
     expect(FakeWebSocket.instances.length).toBe(4);
   });
 
-  it("runs a popular mobile command in the active terminal session", async () => {
+  it("reconnects the terminal websocket once when the connection is lost", async () => {
+    const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const path = typeof url === "string" ? url : url instanceof URL ? `${url.pathname}${url.search}` : url.url;
+      if (path === "/api/terminal" && init?.method === "POST") {
+        return Response.json({ id: "term-1", pid: 1234 });
+      }
+      return new Response("not found", { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetch);
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+
+    renderWithTheme(<TerminalView cwd="/root/workspace/rlab-reconnect" />);
+    await waitFor(() => expect(FakeWebSocket.instances.length).toBe(2));
+    const control = socketFor("/api/terminal/control");
+    const io = socketFor("/api/terminal/io");
+    control.open();
+    io.open();
+    control.message(JSON.stringify({ type: "restore", snapshot: "before\n", cols: 80, rows: 24 }));
+    expect(await screen.findByText("before")).toBeInTheDocument();
+
+    control.close();
+
+    await waitFor(() => expect(FakeWebSocket.instances.length).toBe(4));
+    const reconnectedControl = socketsFor("/api/terminal/control")[1];
+    const reconnectedIo = socketsFor("/api/terminal/io")[1];
+    expect(reconnectedControl?.url).toContain("id=term-1");
+    expect(reconnectedIo?.url).toContain("id=term-1");
+    expect(fetch).toHaveBeenCalledTimes(1);
+
+    reconnectedControl?.open();
+    reconnectedIo?.open();
+    reconnectedControl?.message(JSON.stringify({ type: "restore", snapshot: "after\n", cols: 80, rows: 24 }));
+
+    expect(await screen.findByText("after")).toBeInTheDocument();
+    expect(reconnectedControl?.sent).toContain(JSON.stringify({ type: "restore_complete" }));
+  });
+
+  it("sends mobile terminal key controls", async () => {
     const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const path = typeof url === "string" ? url : url instanceof URL ? `${url.pathname}${url.search}` : url.url;
       if (path === "/api/terminal" && init?.method === "POST") {
@@ -228,9 +305,18 @@ describe("TerminalView", () => {
     socketFor("/api/terminal/control").open();
     io.open();
 
-    expect(screen.getByLabelText("Популярные команды")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Выполнить pwd" }));
+    expect(screen.getByLabelText("Клавиши терминала")).toBeInTheDocument();
+    const ctrlButton = screen.getByRole("button", { name: "Переключить Ctrl" });
 
-    expect(io.sent).toContain("pwd\r");
+    fireEvent.click(ctrlButton);
+    expect(ctrlButton).toHaveAttribute("aria-pressed", "true");
+    terminalMock.FakeTerminal.instances[0]?.emitInput("c");
+
+    expect(io.sent).toContain("\x03");
+    await waitFor(() => expect(ctrlButton).toHaveAttribute("aria-pressed", "false"));
+
+    fireEvent.click(screen.getByRole("button", { name: "Отправить Ctrl+C" }));
+
+    expect(io.sent.filter((item) => item === "\x03")).toHaveLength(2);
   });
 });

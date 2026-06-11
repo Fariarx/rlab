@@ -1,5 +1,5 @@
 import { ThemeProvider } from "@mui/material/styles";
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../../i18n/I18nProvider";
 import { appTheme } from "../../theme/app-theme";
@@ -80,6 +80,22 @@ describe("Message", () => {
     expect(screen.getByText("7с")).toBeInTheDocument();
   });
 
+  it("keeps live thinking dots and elapsed time only in the details header", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-10T12:00:07.000Z"));
+    const message: ChatMessage = {
+      id: "agent-live-reasoning",
+      role: "agent",
+      startedAtMs: new Date("2026-06-10T12:00:00.000Z").getTime(),
+      blocks: [{ kind: "reasoning", text: "Проверяю контекст", active: true, startedAtMs: new Date("2026-06-10T12:00:00.000Z").getTime() }],
+    };
+
+    renderMessage(message);
+
+    expect(screen.getAllByText("7с")).toHaveLength(1);
+    expect(within(screen.getByTestId("agent-details-body")).queryByText("7с")).not.toBeInTheDocument();
+  });
+
   it("does not invent elapsed time when a live start timestamp is missing", () => {
     const message: ChatMessage = {
       id: "agent-live-legacy",
@@ -107,6 +123,34 @@ describe("Message", () => {
     fireEvent.click(disclosure);
 
     expect(disclosure).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("collapses changed files by default and summarizes their diff totals", () => {
+    const message: ChatMessage = {
+      id: "agent-diff-summary",
+      role: "agent",
+      blocks: [
+        { kind: "text", text: "Готово" },
+        { kind: "diff", file: "src/added.ts", additions: 10, deletions: 0, lines: [{ type: "add", text: "export const added = true;" }] },
+        { kind: "diff", file: "src/removed.ts", additions: 0, deletions: 10, lines: [{ type: "del", text: "export const removed = true;" }] },
+      ],
+    };
+
+    renderMessage(message);
+
+    const disclosure = screen.getByRole("button", { name: /изменённые файлы/i });
+    expect(disclosure).toHaveAttribute("aria-expanded", "false");
+    expect(within(disclosure).getByText("2 файлов")).toBeInTheDocument();
+    expect(within(disclosure).getByText("+10")).toBeInTheDocument();
+    expect(within(disclosure).getByText("−10")).toBeInTheDocument();
+    expect(screen.queryByText((content) => content.includes("src/added.ts"))).not.toBeInTheDocument();
+    expect(screen.getByTestId("changed-files-accordion")).toBeInTheDocument();
+
+    fireEvent.click(disclosure);
+
+    expect(disclosure).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText((content) => content.includes("src/added.ts"))).toBeInTheDocument();
+    expect(screen.getByText((content) => content.includes("src/removed.ts"))).toBeInTheDocument();
   });
 
   it("keeps the agent details header sticky while expanded", () => {
@@ -213,5 +257,51 @@ describe("Message", () => {
 
     expect(screen.getByText("Агент")).toBeInTheDocument();
     expect(screen.getByText("Codex · GPT-5.5")).toBeInTheDocument();
+  });
+
+  it("renders read-only image tool calls as openable images instead of tool cards", () => {
+    const imagePath = "C:\\tmp\\picked-element.png";
+    const message: ChatMessage = {
+      id: "agent-image-read",
+      role: "agent",
+      blocks: [{ kind: "tool", name: "Read", summary: imagePath, args: { path: imagePath }, state: "ok", output: "image bytes" }],
+    };
+
+    renderMessage(message);
+
+    expect(screen.queryByText("Read")).not.toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "picked-element.png" })).toHaveAttribute("src", `/api/local-file?path=${encodeURIComponent(imagePath)}`);
+
+    fireEvent.click(screen.getByRole("button", { name: "picked-element.png" }));
+
+    expect(screen.getAllByRole("img", { name: "picked-element.png" })).toHaveLength(2);
+  });
+
+  it("keeps long unbroken agent text inside the message column", () => {
+    const longToken = "x".repeat(180);
+    const message: ChatMessage = {
+      id: "agent-long-line",
+      role: "agent",
+      blocks: [{ kind: "text", text: `prefix ${longToken} suffix` }],
+    };
+
+    renderMessage(message);
+
+    const paragraph = screen.getByText(`prefix ${longToken} suffix`);
+    expect(paragraph).toHaveStyle({ overflowWrap: "anywhere", wordBreak: "break-word", maxWidth: "100%" });
+  });
+
+  it("keeps long code blocks scrolling inside their own frame", () => {
+    const longCode = `const token = "${"x".repeat(180)}";`;
+    const message: ChatMessage = {
+      id: "agent-long-code",
+      role: "agent",
+      blocks: [{ kind: "text", text: `\`\`\`ts\n${longCode}\n\`\`\`` }],
+    };
+
+    renderMessage(message);
+
+    const codeBlock = screen.getByText(longCode);
+    expect(codeBlock).toHaveStyle({ overflow: "auto", maxWidth: "100%" });
   });
 });

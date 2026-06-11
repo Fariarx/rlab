@@ -1,6 +1,6 @@
 import { type IReactionDisposer, makeAutoObservable, reaction, runInAction } from "mobx";
 import { useEffect, useState } from "react";
-import { compactCommandForAgent, normalizeAgentProfile, type AgentBlock, type AgentId, type AgentProfile, type ApprovalDecision, type ChatMessage, type CompactionSettings, type ComposerDraft, type ConversationStatus, type ConversationSummary, type Project, type ReviewCommentEntry } from "../agent";
+import { accessModeForAgentProfile, compactCommandForAgent, normalizeAgentProfile, type AgentBlock, type AgentId, type AgentProfile, type ApprovalDecision, type ChatMessage, type CompactionSettings, type ComposerDraft, type ConversationStatus, type ConversationSummary, type ConversationView, type Project, type ReviewCommentEntry } from "../agent";
 import { translate } from "../../i18n/I18nProvider";
 import { attachRunUpdates, cancelRun, loadActiveRuns, runConversation, type ActiveRunSnapshot, type ActiveRunUpdate, type RunConversationResult } from "./run-agent";
 import { nowLabel, starterThread, truncate } from "./sample-data";
@@ -13,7 +13,10 @@ const WORKSPACE_SAVE_RETRY_MS = 2_000;
 const BACKGROUND_ATTACH_SILENCE_RECONCILE_MS = 20_000;
 
 let idSeq = 1000;
-const nextId = (prefix: string) => `${prefix}-${++idSeq}`;
+const nextId = (prefix: string) => {
+  const uuid = globalThis.crypto?.randomUUID?.();
+  return uuid ? `${prefix}-${uuid}` : `${prefix}-${++idSeq}-${Date.now().toString(36)}`;
+};
 
 function generatedIdSequence(value: string | undefined): number {
   if (!value) {
@@ -473,11 +476,12 @@ export interface Workspace {
   readonly rename: (id: string, title: string) => void;
   readonly togglePin: (id: string) => void;
   readonly archive: (id: string) => void;
-  readonly remove: (id: string) => void;
+  readonly remove: (id: string) => string;
   readonly sendMessage: (id: string, text: string) => void;
   readonly pendingMessageCount: (id: string) => number;
   readonly sendQueuedMessageNow: (id: string) => boolean;
   readonly setCompaction: (id: string, patch: Partial<CompactionSettings>) => void;
+  readonly setConversationView: (id: string, view: ConversationView) => void;
   readonly compactConversation: (id: string) => boolean;
   readonly addReviewComments: (id: string, comments: readonly ReviewCommentEntry[]) => void;
   readonly stopRun: (id: string) => void;
@@ -862,6 +866,7 @@ class WorkspaceStore implements Workspace {
   reloadWorkspace(): void {
     const seq = ++this.loadSeq;
     this.loading = true;
+    this.loadError = null;
     loadWorkspaceState()
       .then((loadedState) => {
         if (seq !== this.loadSeq) {
@@ -1121,9 +1126,22 @@ class WorkspaceStore implements Workspace {
     this.patchConv(id, { worktreePath });
   }
 
+  setConversationView(id: string, view: ConversationView): void {
+    this.patchConv(id, { view });
+  }
+
   select(id: string): void {
-    this.setState((current) => patchConversation({ ...current, selectedId: id }, id, { unread: false }));
-    void this.loadThread(id);
+    let selected = false;
+    this.setState((current) => {
+      if (!findConversation(current, id)) {
+        return current;
+      }
+      selected = true;
+      return patchConversation({ ...current, selectedId: id }, id, { unread: false });
+    });
+    if (selected) {
+      void this.loadThread(id);
+    }
   }
 
   newChat(profile: AgentProfile): string {
@@ -1253,32 +1271,53 @@ class WorkspaceStore implements Workspace {
     this.persistCurrentStateNow();
   }
 
-  remove(id: string): void {
+  remove(id: string): string {
     this.cancelActiveRun(id);
+    this.pendingMessages.delete(id);
+    this.fullyLoadedThreadIds.delete(id);
+    this.threadLoads.delete(id);
+    let nextSelectedId = this.state.selectedId;
     this.setState((current) => {
       const threads = { ...current.threads };
       const composerDrafts = { ...current.composerDrafts };
       delete threads[id];
       delete composerDrafts[id];
-      return {
+      const nextState = {
         ...current,
         chats: current.chats.filter((c) => c.id !== id),
         projects: current.projects.map((p) => ({ ...p, conversations: p.conversations.filter((c) => c.id !== id) })),
         threads,
         composerDrafts,
-        selectedId: current.selectedId === id ? "" : current.selectedId,
+      };
+      nextSelectedId =
+        current.selectedId === id || !findConversation(nextState, current.selectedId)
+          ? (workspaceConversations(nextState).find((conversation) => !conversation.archived)?.id ?? workspaceConversations(nextState)[0]?.id ?? "")
+          : current.selectedId;
+      return {
+        ...nextState,
+        selectedId: nextSelectedId,
       };
     });
     this.dirtyThreadVersions.delete(id);
     this.persistCurrentStateNow();
+    if (nextSelectedId) {
+      void this.loadThread(nextSelectedId);
+    }
+    return nextSelectedId;
   }
 
   sendMessage(id: string, text: string): void {
     const userMsg: ChatMessage = { id: nextId("u"), role: "user", text, time: nowLabel() };
-    this.setState((current) => ({
-      ...current,
-      threads: { ...current.threads, [id]: [...(current.threads[id] ?? []), userMsg] },
-    }));
+    this.setState((current) =>
+      patchConversation(
+        {
+          ...current,
+          threads: { ...current.threads, [id]: [...(current.threads[id] ?? []), userMsg] },
+        },
+        id,
+        { archived: false },
+      ),
+    );
     this.markThreadDirty(id);
     // If the agent is still working, queue this turn instead of cancelling it —
     // it dispatches automatically when the current run settles (see drainPendingMessages).
@@ -1467,6 +1506,7 @@ class WorkspaceStore implements Workspace {
     this.markThreadDirty(id);
     const applyBlocks = (blocks: AgentBlock[]) => {
       let shouldFlush = false;
+      let shouldPersistBlocks = true;
       this.setState((current) => {
         const arr = current.threads[id] ?? [];
         const previousBlocks = arr.find((m) => m.id === aId)?.blocks;
@@ -1474,6 +1514,7 @@ class WorkspaceStore implements Workspace {
         const needsInput = blocksNeedInput(mergedBlocks);
         if (runHandle.serverOwned && !needsInput && blocksHaveLiveOutput(mergedBlocks)) {
           this.skipNextSave = true;
+          shouldPersistBlocks = false;
         }
         shouldFlush = needsInput || blocksHaveStatus(mergedBlocks);
         const message: ChatMessage = { id: aId, role: "agent", time: agentTime, startedAtMs: agentStartedAtMs, profile, blocks: mergedBlocks };
@@ -1494,7 +1535,9 @@ class WorkspaceStore implements Workspace {
           ? patchConversation(nextState, id, { status: "waiting", snippet: translate(current.settings.general.locale, "runNeedsInputSnippet"), time: nowLabel() })
           : nextState;
       });
-      this.markThreadDirty(id);
+      if (shouldPersistBlocks) {
+        this.markThreadDirty(id);
+      }
       if (shouldFlush) {
         this.persistCurrentStateNow();
       }
@@ -1510,7 +1553,7 @@ class WorkspaceStore implements Workspace {
       resume,
       compaction: conv?.compaction,
       cwd: this.cwdOf(id),
-      accessMode: this.state.settings.agents.accessMode,
+      accessMode: accessModeForAgentProfile(profile),
       locale: this.state.settings.general.locale,
       binding: {
         conversationId: id,

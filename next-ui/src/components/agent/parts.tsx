@@ -24,6 +24,8 @@ const linkSx = {
   textDecorationColor: "currentColor",
   textUnderlineOffset: 3,
   cursor: "pointer",
+  overflowWrap: "anywhere",
+  wordBreak: "break-word",
   "&:hover": { color: "primary.light" },
 } as const;
 
@@ -50,16 +52,15 @@ function BrokenLink({ children }: { readonly children: ReactNode }) {
     <Box
       component="span"
       sx={{
-        display: "inline-flex",
-        alignItems: "baseline",
-        gap: 0.25,
         color: (t) => t.palette.status.error.main,
         textDecoration: "underline",
         textDecorationStyle: "wavy",
         textUnderlineOffset: 3,
+        overflowWrap: "anywhere",
+        wordBreak: "break-word",
       }}
     >
-      <LinkOffIcon sx={{ fontSize: 13, alignSelf: "center" }} />
+      <LinkOffIcon sx={{ fontSize: 13, mr: 0.25, verticalAlign: "-0.15em" }} />
       {children}
     </Box>
   );
@@ -97,9 +98,9 @@ export function MessageLink({ href, children }: { readonly href?: string; readon
           event.preventDefault();
           ui.openGitFile(raw);
         }}
-        sx={{ ...linkSx, display: "inline-flex", alignItems: "baseline", gap: 0.25 }}
+        sx={linkSx}
       >
-        <DescriptionOutlinedIcon sx={{ fontSize: 13, alignSelf: "center" }} />
+        <DescriptionOutlinedIcon sx={{ fontSize: 13, mr: 0.25, verticalAlign: "-0.15em" }} />
         {children}
       </Box>
     );
@@ -232,28 +233,28 @@ function textFromReactNode(children: ReactNode): string {
 const markdownComponents = {
   p({ children }) {
     return (
-      <Typography component="p" sx={{ m: 0, color: "text.primary", fontSize: "0.9rem", lineHeight: 1.65, overflowWrap: "anywhere", wordBreak: "break-word" }}>
+      <Typography component="p" sx={{ m: 0, minWidth: 0, maxWidth: "100%", color: "text.primary", fontSize: "0.9rem", lineHeight: 1.65, overflowWrap: "anywhere", wordBreak: "break-word" }}>
         {children}
       </Typography>
     );
   },
   ol({ children }) {
     return (
-      <Box component="ol" sx={{ m: 0, pl: 2.5, color: "text.primary", fontSize: "0.9rem", lineHeight: 1.65 }}>
+      <Box component="ol" sx={{ m: 0, pl: 2.5, minWidth: 0, maxWidth: "100%", color: "text.primary", fontSize: "0.9rem", lineHeight: 1.65, overflowWrap: "anywhere", wordBreak: "break-word" }}>
         {children}
       </Box>
     );
   },
   ul({ children }) {
     return (
-      <Box component="ul" sx={{ m: 0, pl: 2.5, color: "text.primary", fontSize: "0.9rem", lineHeight: 1.65 }}>
+      <Box component="ul" sx={{ m: 0, pl: 2.5, minWidth: 0, maxWidth: "100%", color: "text.primary", fontSize: "0.9rem", lineHeight: 1.65, overflowWrap: "anywhere", wordBreak: "break-word" }}>
         {children}
       </Box>
     );
   },
   li({ children }) {
     return (
-      <Box component="li" sx={{ pl: 0.25, mb: 0.5, "&:last-child": { mb: 0 } }}>
+      <Box component="li" sx={{ pl: 0.25, mb: 0.5, minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere", wordBreak: "break-word", "&:last-child": { mb: 0 } }}>
         {children}
       </Box>
     );
@@ -326,6 +327,9 @@ const markdownComponents = {
           fontSize: "0.82em",
           color: "text.primary",
           backgroundColor: (t) => t.custom.surfaces.s3,
+          whiteSpace: "pre-wrap",
+          overflowWrap: "anywhere",
+          wordBreak: "break-word",
         }}
       >
         {children}
@@ -333,11 +337,11 @@ const markdownComponents = {
     );
   },
   pre({ children }) {
-    return <Box sx={{ my: 0.5 }}>{children}</Box>;
+    return <Box sx={{ my: 0.5, minWidth: 0, maxWidth: "100%" }}>{children}</Box>;
   },
   table({ children }) {
     return (
-      <Box sx={{ overflowX: "auto" }}>
+      <Box sx={{ minWidth: 0, maxWidth: "100%", overflowX: "auto" }}>
         <Box component="table" sx={{ width: "100%", borderCollapse: "collapse", fontSize: "0.84rem", color: "text.primary" }}>
           {children}
         </Box>
@@ -346,14 +350,14 @@ const markdownComponents = {
   },
   th({ children }) {
     return (
-      <Box component="th" sx={{ px: 1, py: 0.75, border: (t) => `1px solid ${t.custom.borders.subtle}`, textAlign: "left", fontWeight: 700 }}>
+      <Box component="th" sx={{ px: 1, py: 0.75, border: (t) => `1px solid ${t.custom.borders.subtle}`, textAlign: "left", fontWeight: 700, overflowWrap: "anywhere", wordBreak: "break-word" }}>
         {children}
       </Box>
     );
   },
   td({ children }) {
     return (
-      <Box component="td" sx={{ px: 1, py: 0.75, border: (t) => `1px solid ${t.custom.borders.subtle}`, verticalAlign: "top" }}>
+      <Box component="td" sx={{ px: 1, py: 0.75, border: (t) => `1px solid ${t.custom.borders.subtle}`, verticalAlign: "top", overflowWrap: "anywhere", wordBreak: "break-word" }}>
         {children}
       </Box>
     );
@@ -362,7 +366,7 @@ const markdownComponents = {
 
 function MarkdownMessage({ text }: { readonly text: string }) {
   return (
-    <Stack spacing={1} sx={{ minWidth: 0 }}>
+    <Stack spacing={1} sx={{ width: "100%", minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }}>
       <Markdown remarkPlugins={[remarkGfm]} skipHtml components={markdownComponents}>
         {text}
       </Markdown>
@@ -372,7 +376,7 @@ function MarkdownMessage({ text }: { readonly text: string }) {
 
 export function MessageText({ text, streaming }: { readonly text: string; readonly streaming?: boolean }) {
   return (
-    <Box sx={{ minWidth: 0 }}>
+    <Box sx={{ width: "100%", minWidth: 0, maxWidth: "100%" }}>
       <MarkdownMessage text={text} />
       {streaming && (
         <Box sx={{ mt: 0.5 }}>
@@ -398,12 +402,14 @@ export function StatusNote({ level, children }: { readonly level: StatusKey; rea
         borderRadius: (t) => `${t.custom.radii.md}px`,
         backgroundColor: (t) => t.palette.status[level].soft,
         border: (t) => `1px solid ${t.palette.status[level].border}`,
+        minWidth: 0,
+        maxWidth: "100%",
       }}
     >
       <Box sx={{ display: "flex" }}>
         <StatusDot status={level} label={level} pulse={false} size="sm" />
       </Box>
-      <Typography sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.74rem", color: "text.primary" }}>
+      <Typography sx={{ minWidth: 0, fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.74rem", color: "text.primary", overflowWrap: "anywhere", wordBreak: "break-word" }}>
         {children}
       </Typography>
     </Stack>
@@ -422,6 +428,8 @@ export function CodeBlock({ language, code }: { readonly language: string; reado
         border: (t) => `1px solid ${t.custom.borders.subtle}`,
         overflow: "hidden",
         backgroundColor: (t) => t.custom.surfaces.s1,
+        minWidth: 0,
+        maxWidth: "100%",
       }}
     >
       <Stack
@@ -447,6 +455,7 @@ export function CodeBlock({ language, code }: { readonly language: string; reado
           m: 0,
           p: 1.5,
           overflow: "auto",
+          maxWidth: "100%",
           fontFamily: (t) => t.custom.fonts.mono,
           fontSize: "0.78rem",
           lineHeight: 1.6,

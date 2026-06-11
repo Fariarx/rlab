@@ -11,7 +11,9 @@ import {
   buildClaudeRunArgs,
   buildCodexRunArgs,
   buildCodexThreadParams,
+  codexDynamicToolCallResponse,
   codexAppServerItemEvents,
+  codexRlabDynamicTools,
   codexAppServerUsage,
   buildGeminiRunArgs,
   buildGitCommitArgs,
@@ -48,6 +50,8 @@ import {
   parseGitFilePayload,
   parseGitCommitPayload,
   parseGitCheckoutPayload,
+    gitGraphBranchHeads,
+    parseGitGraphLog,
   parseTerminalSessionRequest,
   gitErrorStatus,
   gitPushRequestErrorStatus,
@@ -63,12 +67,15 @@ import {
   finishBackgroundRunState,
   backgroundRunStatusPatch,
   mergeWorkspacePutState,
+  npmPackageNameFromInstallSpec,
   listMentionableFiles,
   reconcileStaleBackgroundRuns,
   hasGeminiStoredAuthAt,
   installCommandForAgent,
   JSON_CONTENT_TYPE,
   parseClaudeCliModelAliasesSource,
+  parseClaudeOAuthUsagePayload,
+  parseClaudeRateLimitStream,
   parseCodexModelsOutput,
   parseClaudeAgentsOutput,
   parseGeminiCliModelConfigSource,
@@ -120,6 +127,13 @@ describe("vite agents plugin", () => {
     } as unknown as Parameters<typeof browserBridgeOrigin>[0];
 
     expect(browserBridgeOrigin(req)).toBe("http://127.0.0.1:4280");
+  });
+
+  it("extracts npm package names from CLI update install specs", () => {
+    expect(npmPackageNameFromInstallSpec("@anthropic-ai/claude-code@latest")).toBe("@anthropic-ai/claude-code");
+    expect(npmPackageNameFromInstallSpec("@openai/codex@0.42.0")).toBe("@openai/codex");
+    expect(npmPackageNameFromInstallSpec("opencode-ai@latest")).toBe("opencode-ai");
+    expect(npmPackageNameFromInstallSpec("-g")).toBeNull();
   });
 
   it("adds rlab chat tool instructions to every agent prompt once", () => {
@@ -581,10 +595,7 @@ Built-in agents:
       expect.stringContaining("AskUserQuestion"),
       "--settings",
       JSON.stringify({ autoCompactEnabled: true }),
-      "--permission-mode",
-      "plan",
-      "--tools",
-      "Read,Glob,Grep,LS,AskUserQuestion,ScheduleWakeup",
+      "--dangerously-skip-permissions",
     ]);
   });
 
@@ -698,7 +709,14 @@ Built-in agents:
 
     // A trailing empty result must not re-emit a status (producedContent is set),
     // but still settles the run with a done event.
-    expect(translate(JSON.stringify({ type: "result", status: "success", result: "" }))).toEqual([{ type: "done", usage: { contextTokens: 38000 } }]);
+    expect(translate(JSON.stringify({ type: "result", status: "success", result: "" }))).toEqual([
+      {
+        type: "done",
+        costUsd: undefined,
+        usage: { contextTokens: 38000 },
+        usageDebug: [{ source: "claude.compact_metadata", payload: { trigger: "manual", pre_tokens: 120000, post_tokens: 38000 } }],
+      },
+    ]);
   });
 
   it("renders a `/compact` result summary that arrived without a chat turn", () => {
@@ -1156,6 +1174,63 @@ Built-in agents:
     ).toBeUndefined();
   });
 
+  it("registers rlab dynamic tools for Codex app-server threads", () => {
+    const tools = codexRlabDynamicTools();
+    expect(tools).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "ScheduleWakeup",
+          inputSchema: expect.objectContaining({
+            type: "object",
+            properties: expect.objectContaining({
+              prompt: expect.objectContaining({ type: "string" }),
+              script: expect.objectContaining({ type: "string" }),
+              intervalSeconds: expect.objectContaining({ type: "number" }),
+            }),
+          }),
+        }),
+      ]),
+    );
+
+    expect(
+      buildCodexThreadParams({
+        agent: "codex",
+        model: "default",
+        reasoning: "default",
+        mode: "default",
+        prompt: "hello",
+        accessMode: "read-only",
+      }).dynamicTools,
+    ).toBe(tools);
+  });
+
+  it("answers Codex dynamic ScheduleWakeup calls with tool-call results", () => {
+    expect(
+      codexDynamicToolCallResponse({
+        tool: "ScheduleWakeup",
+        arguments: { prompt: "report result", delaySeconds: 60 },
+      }),
+    ).toEqual({
+      contentItems: [
+        {
+          type: "inputText",
+          text: "rlab accepted the wakeup schedule. Finish this turn now and wait for rlab to re-run you when it fires.",
+        },
+      ],
+      success: true,
+    });
+
+    expect(
+      codexDynamicToolCallResponse({
+        tool: "ScheduleWakeup",
+        arguments: { prompt: "missing trigger" },
+      }),
+    ).toEqual({
+      contentItems: [{ type: "inputText", text: "ScheduleWakeup requires delaySeconds, fireAt, or script." }],
+      success: false,
+    });
+  });
+
   it("captures each agent's native session id from its stream", () => {
     expect(createCodexStreamTranslator()(JSON.stringify({ type: "thread.started", thread_id: "cdx-123" }))).toEqual([{ type: "session", id: "cdx-123" }]);
     expect(createOpenCodeStreamTranslator()(JSON.stringify({ type: "step_start", sessionID: "ses_abc", part: { sessionID: "ses_abc" } }))).toEqual([{ type: "session", id: "ses_abc" }]);
@@ -1204,6 +1279,27 @@ Built-in agents:
       { type: "tool", id: "t1", name: "srv/fetch" },
       { type: "tool_result", id: "t1", ok: false, output: JSON.stringify({ message: "boom" }) },
     ]);
+    expect(codexAppServerItemEvents({ type: "dynamicToolCall", id: "wake-1", tool: "ScheduleWakeup", arguments: { prompt: "send OK", delaySeconds: 180 } }, false)).toEqual([
+      { type: "tool", id: "wake-1", name: "ScheduleWakeup", summary: "send OK", args: { prompt: "send OK", delaySeconds: "180" } },
+    ]);
+    expect(
+      codexAppServerItemEvents(
+        {
+          type: "dynamicToolCall",
+          id: "wake-1",
+          tool: "ScheduleWakeup",
+          status: "completed",
+          arguments: { prompt: "send OK", delaySeconds: 180 },
+          contentItems: [{ type: "inputText", text: "accepted" }],
+          success: true,
+        },
+        true,
+      ),
+    ).toEqual([
+      { type: "tool", id: "wake-1", name: "ScheduleWakeup", summary: "send OK", args: { prompt: "send OK", delaySeconds: "180" } },
+      { type: "tool_result", id: "wake-1", ok: true, output: "accepted" },
+      { type: "wakeup", toolId: "wake-1", prompt: "send OK", delaySeconds: 180 },
+    ]);
     // webSearch -> search
     expect(codexAppServerItemEvents({ type: "webSearch", id: "w1", query: "rust" }, true)).toEqual([{ type: "search", id: "w1", query: "rust", state: "ok" }]);
   });
@@ -1215,7 +1311,10 @@ Built-in agents:
       outputTokens: 20,
       reasoningTokens: 5,
       cacheReadTokens: 60,
-      contextTokens: 100,
+    });
+    expect(codexAppServerUsage({ total: { totalTokens: 100, contextTokens: 42 } })).toEqual({
+      totalTokens: 100,
+      contextTokens: 42,
     });
     expect(codexAppServerUsage(undefined)).toBeUndefined();
   });
@@ -1246,8 +1345,51 @@ Built-in agents:
       { type: "text", text: "done" },
     ]);
     expect(translate(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "done", usage: { totalTokens: 12 } }))).toEqual([
-      { type: "done", costUsd: undefined, usage: { totalTokens: 12 } },
+      {
+        type: "done",
+        costUsd: undefined,
+        usage: { totalTokens: 12 },
+        usageDebug: [
+          { source: "claude.assistant.message.usage", payload: { totalTokens: 12 } },
+          { source: "claude.result.usage", payload: { totalTokens: 12 } },
+        ],
+      },
     ]);
+  });
+
+  it("extracts Claude rate-limit events from CLI stream-json output", () => {
+    expect(
+      parseClaudeRateLimitStream(
+        [
+          JSON.stringify({ type: "system", subtype: "init" }),
+          JSON.stringify({ type: "rate_limit_event", rate_limit_info: { rateLimitType: "five_hour", utilization: 0.42, resetsAt: 1_800_000_000, status: "allowed" } }),
+          "not-json",
+          JSON.stringify({ type: "rate_limit_event", rate_limit_info: { rateLimitType: "seven_day", utilization: 0.8, resetsAt: 1_800_360_000, status: "allowed_warning" } }),
+        ].join("\n"),
+      ),
+    ).toEqual([
+      { rateLimitType: "five_hour", utilization: 0.42, resetsAt: 1_800_000_000, status: "allowed" },
+      { rateLimitType: "seven_day", utilization: 0.8, resetsAt: 1_800_360_000, status: "allowed_warning" },
+    ]);
+  });
+
+  it("maps Claude OAuth usage response into account limit windows", () => {
+    expect(
+      parseClaudeOAuthUsagePayload(
+        {
+          five_hour: { utilization: 12.4, resets_at: "2026-06-11T13:30:00.000Z" },
+          seven_day: { utilization: 91, resets_at: "2026-06-17T13:00:00.000Z" },
+          extra_usage: { utilization: null, resets_at: null },
+        },
+        { subscriptionType: "max", rateLimitTier: "claude_max" },
+      ),
+    ).toEqual({
+      plan: "Claude MAX",
+      windows: [
+        { kind: "five_hour", usedPercent: 12.4, resetsAt: 1781184600, status: "allowed" },
+        { kind: "weekly", usedPercent: 91, resetsAt: 1781701200, status: "allowed_warning" },
+      ],
+    });
   });
 
   it("translates Cursor stream JSON into normalized run events", () => {
@@ -1764,7 +1906,13 @@ Built-in agents:
     expect(translate(JSON.stringify({ type: "init", model: "auto-gemini-3" }))).toEqual([{ type: "status", level: "info", text: "model · auto-gemini-3" }]);
     expect(translate(JSON.stringify({ type: "message", role: "user", content: "Say exactly: hi" }))).toEqual([]);
     expect(translate(JSON.stringify({ type: "message", role: "assistant", content: "hi", delta: true }))).toEqual([{ type: "text", text: "hi" }]);
-    expect(translate(JSON.stringify({ type: "result", status: "success", stats: { total_tokens: 9653 } }))).toEqual([{ type: "done", usage: { totalTokens: 9653 } }]);
+    expect(translate(JSON.stringify({ type: "result", status: "success", stats: { total_tokens: 9653 } }))).toEqual([
+      {
+        type: "done",
+        usage: { totalTokens: 9653 },
+        usageDebug: { source: "gemini.result.stats", payload: { total_tokens: 9653 } },
+      },
+    ]);
   });
 
   it("translates Gemini assistant deltas without duplicating the final message", () => {
@@ -1801,7 +1949,14 @@ Built-in agents:
           part: { id: "part-3", type: "step-finish", cost: 0.0017, tokens: { total: 42, input: 30, output: 2, reasoning: 10 } },
         }),
       ),
-    ).toEqual([{ type: "done", costUsd: 0.0017, usage: { totalTokens: 42, inputTokens: 30, outputTokens: 2, reasoningTokens: 10 } }]);
+    ).toEqual([
+      {
+        type: "done",
+        costUsd: 0.0017,
+        usage: { totalTokens: 42, inputTokens: 30, outputTokens: 2, reasoningTokens: 10 },
+        usageDebug: { source: "opencode.part.step-finish.tokens", payload: { total: 42, input: 30, output: 2, reasoning: 10 } },
+      },
+    ]);
   });
 
   it("translates OpenCode SDK assistant text deltas without duplicating the final part", () => {
@@ -2023,13 +2178,55 @@ Built-in agents:
     });
   });
 
+  it("parses decorated git graph log rows", () => {
+    const commits = parseGitGraphLog(
+        [
+          "* \u001fabcd1234\u001fabcd123\u001f1111 2222\u001fAda\u001f2026-06-11\u001fHEAD -> main, origin/main\u001fMerge branch 'feature'",
+          "| * \u001fbeef5678\u001fbeef567\u001f3333\u001fLuis\u001f2026-06-10\u001ffeature/api\u001fRefine webhook handling",
+        ].join("\n"),
+      );
+
+    expect(commits).toEqual([
+      {
+        graph: "*",
+        hash: "abcd1234",
+        shortHash: "abcd123",
+        parents: ["1111", "2222"],
+        author: "Ada",
+        date: "2026-06-11",
+        refs: ["HEAD -> main", "origin/main"],
+        subject: "Merge branch 'feature'",
+      },
+      {
+        graph: "| *",
+        hash: "beef5678",
+        shortHash: "beef567",
+        parents: ["3333"],
+        author: "Luis",
+        date: "2026-06-10",
+        refs: ["feature/api"],
+        subject: "Refine webhook handling",
+      },
+    ]);
+    expect(gitGraphBranchHeads(commits)).toEqual([
+      { name: "main", hash: "abcd1234" },
+      { name: "origin/main", hash: "abcd1234" },
+      { name: "feature/api", hash: "beef5678" },
+    ]);
+  });
+
   it("parses terminal session cwd from request headers and resolves relative paths", () => {
     expect(() => parseTerminalSessionRequest({ headers: {} } as unknown as Parameters<typeof parseTerminalSessionRequest>[0])).toThrow("Project directory is required.");
     expect(
       parseTerminalSessionRequest({
-        headers: { "x-rlab-terminal-cwd": " . " },
+        headers: { "x-rlab-terminal-cwd": " . ", "x-rlab-terminal-cols": "123", "x-rlab-terminal-rows": "37" },
       } as unknown as Parameters<typeof parseTerminalSessionRequest>[0]),
-    ).toEqual({ cwd: resolve(".") });
+    ).toEqual({ cwd: resolve("."), cols: 123, rows: 37 });
+    expect(
+      parseTerminalSessionRequest({
+        headers: { "x-rlab-terminal-cwd": " . ", "x-rlab-terminal-cols": "0", "x-rlab-terminal-rows": "bad" },
+      } as unknown as Parameters<typeof parseTerminalSessionRequest>[0]),
+    ).toEqual({ cwd: resolve("."), cols: undefined, rows: undefined });
   });
 
   it("classifies git validation errors separately from runtime errors", () => {
@@ -2336,7 +2533,7 @@ Built-in agents:
   it("rejects removed read-write run requests", () => {
     expect(parseRunRequestPayload(JSON.stringify({ agent: "codex", accessMode: "read-write", prompt: "hello" }))).toMatchObject({
       ok: true,
-      accessMode: "read-only",
+      accessMode: "unrestricted",
       accessModeValid: false,
     });
   });

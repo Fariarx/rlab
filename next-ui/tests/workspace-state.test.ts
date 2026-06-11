@@ -31,9 +31,12 @@ describe("workspace state", () => {
         locale: "ru",
         telemetry: false,
         previewServerHost: "",
+        voice: {
+          provider: "none",
+          language: "ru-RU",
+        },
       },
       agents: {
-        accessMode: "unrestricted",
         defaultProfile: {
           agent: "claude-code",
           model: "default",

@@ -3,11 +3,14 @@ import ContrastIcon from "@mui/icons-material/Contrast";
 import DarkModeIcon from "@mui/icons-material/DarkMode";
 import LightModeIcon from "@mui/icons-material/LightMode";
 import OpenInBrowserIcon from "@mui/icons-material/OpenInBrowser";
+import KeyboardVoiceIcon from "@mui/icons-material/KeyboardVoice";
+import MicOffOutlinedIcon from "@mui/icons-material/MicOffOutlined";
 import VpnKeyOutlinedIcon from "@mui/icons-material/VpnKeyOutlined";
-import { Alert, Box, Dialog, Divider, Popover, Radio, Stack, Switch, Tab, Tabs, TextField, ToggleButton, ToggleButtonGroup, Tooltip, Typography } from "@mui/material";
+import { Alert, Box, Dialog, Divider, Popover, Radio, Stack, Switch, Tab, Tabs, TextField, ToggleButton, ToggleButtonGroup, Tooltip, Typography, type SxProps, type Theme } from "@mui/material";
 import { type ReactNode, useCallback, useEffect, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
-import type { AgentAccessMode, AppSettings, AppSettingsPatch, DensityMode, Locale, ThemeMode } from "../workspace/app-settings";
+import type { AppSettings, AppSettingsPatch, DensityMode, Locale, ThemeMode } from "../workspace/app-settings";
+import { getVoiceProvider, VOICE_PROVIDERS, voiceLanguageForLocale, type VoiceProviderId } from "../../lib/voice-providers";
 import {
   AGENTS,
   type AgentDef,
@@ -28,19 +31,41 @@ interface SettingsDialogProps {
   readonly onClose: () => void;
   readonly settings: AppSettings;
   readonly onSettingsChange: (patch: AppSettingsPatch) => void;
+  readonly onVoiceConfigChange?: () => void;
 }
 
 function SettingRow({ title, description, control }: { readonly title: string; readonly description: string; readonly control: ReactNode }) {
   return (
-    <Stack direction="row" spacing={2} sx={{ alignItems: "center", justifyContent: "space-between", py: 1.25 }}>
+    <Stack
+      direction={{ xs: "column", sm: "row" }}
+      spacing={{ xs: 1, sm: 2 }}
+      sx={{ alignItems: { xs: "stretch", sm: "center" }, justifyContent: "space-between", py: 1.25 }}
+    >
       <Box sx={{ minWidth: 0 }}>
         <Typography sx={{ fontSize: "0.86rem", fontWeight: 600, color: "text.primary" }}>{title}</Typography>
         <Typography sx={{ fontSize: "0.78rem", color: "text.secondary" }}>{description}</Typography>
       </Box>
-      <Box sx={{ flex: "0 0 auto" }}>{control}</Box>
+      <Box sx={{ display: "flex", flex: "0 0 auto", justifyContent: { xs: "flex-start", sm: "flex-end" }, minWidth: 0, width: { xs: "100%", sm: "auto" } }}>
+        {control}
+      </Box>
     </Stack>
   );
 }
+
+const settingToggleGroupSx: SxProps<Theme> = {
+  display: "flex",
+  flexWrap: "wrap",
+  gap: { xs: 0.5, sm: 0 },
+  width: { xs: "100%", sm: "auto" },
+  borderRadius: (theme) => ({ xs: `${theme.custom.radii.pill}px`, sm: undefined }),
+  "& .MuiToggleButtonGroup-grouped": {
+    flex: { xs: "1 1 auto", sm: "0 0 auto" },
+    minWidth: 0,
+    whiteSpace: "nowrap",
+    borderLeft: (theme) => ({ xs: `1px solid ${theme.palette.divider}`, sm: undefined }),
+    borderRadius: (theme) => ({ xs: `${theme.custom.radii.pill}px !important`, sm: undefined }),
+  },
+};
 
 function ProfileToggleRow({
   label,
@@ -75,6 +100,15 @@ interface AgentConfigInfo {
 
 interface AgentConfigResponse {
   readonly agents: Partial<Record<AgentId, AgentConfigInfo>>;
+}
+
+interface VoiceProviderConfigInfo {
+  readonly envVar: string;
+  readonly configured: boolean;
+}
+
+interface VoiceConfigResponse {
+  readonly providers: Partial<Record<VoiceProviderId, VoiceProviderConfigInfo>>;
 }
 
 type AgentOperationNotice =
@@ -113,6 +147,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isAgentConfigResponse(value: unknown): value is AgentConfigResponse {
   return isRecord(value) && isRecord(value.agents);
+}
+
+function isVoiceConfigResponse(value: unknown): value is VoiceConfigResponse {
+  return isRecord(value) && isRecord(value.providers);
 }
 
 async function readResponseError(response: Response, fallback: string): Promise<string> {
@@ -213,14 +251,10 @@ function BrowserPreviewSetupRow() {
 }
 
 function AgentsSection({
-  accessMode,
   defaultProfile,
-  onAccessModeChange,
   onDefaultProfileChange,
 }: {
-  readonly accessMode: AgentAccessMode;
   readonly defaultProfile: AgentProfile;
-  readonly onAccessModeChange: (mode: AgentAccessMode) => void;
   readonly onDefaultProfileChange: (profile: AgentProfile) => void;
 }) {
   const statusOf = useAgentStatus();
@@ -350,25 +384,6 @@ function AgentsSection({
 
   return (
     <Stack spacing={1}>
-      <SettingRow
-        title={t("agentAccessMode")}
-        description={t("agentAccessModeDescription")}
-        control={
-          <TagSelect
-            value={accessMode}
-            ariaLabel={t("agentAccessMode")}
-            options={[
-              { id: "read-only", label: t("agentReadOnly") },
-              { id: "unrestricted", label: t("agentUnrestricted") },
-            ]}
-            onSelect={(next) => {
-              if (next !== accessMode) {
-                onAccessModeChange(next as AgentAccessMode);
-              }
-            }}
-          />
-        }
-      />
       <Typography variant="body2" sx={{ color: "text.secondary", mb: 0.5 }}>
         {t("settingsAgentsHint")}
       </Typography>
@@ -544,6 +559,7 @@ function AppearanceSection({ settings, onSettingsChange }: Pick<SettingsDialogPr
           <ToggleButtonGroup
             exclusive
             value={mode}
+            sx={settingToggleGroupSx}
             onChange={(_, next: ThemeMode | null) => {
               if (next && next !== mode) {
                 setTheme(next);
@@ -569,6 +585,7 @@ function AppearanceSection({ settings, onSettingsChange }: Pick<SettingsDialogPr
           <ToggleButtonGroup
             exclusive
             value={density}
+            sx={settingToggleGroupSx}
             onChange={(_, next: DensityMode | null) => {
               if (next && next !== density) {
                 setDensity(next);
@@ -602,7 +619,7 @@ function AppearanceSection({ settings, onSettingsChange }: Pick<SettingsDialogPr
 function GeneralSection({ settings, onSettingsChange }: Pick<SettingsDialogProps, "settings" | "onSettingsChange">) {
   const { t } = useI18n();
   const locale = settings.general.locale;
-  const setLocale = (nextLocale: Locale) => onSettingsChange({ general: { locale: nextLocale } });
+  const setLocale = (nextLocale: Locale) => onSettingsChange({ general: { locale: nextLocale, voice: { ...settings.general.voice, language: voiceLanguageForLocale(nextLocale) } } });
   return (
     <Stack divider={<Divider flexItem />}>
       <SettingRow
@@ -612,6 +629,7 @@ function GeneralSection({ settings, onSettingsChange }: Pick<SettingsDialogProps
           <ToggleButtonGroup
             exclusive
             value={locale}
+            sx={settingToggleGroupSx}
             onChange={(_, next: Locale | null) => {
               if (next && next !== locale) {
                 setLocale(next);
@@ -636,7 +654,7 @@ function GeneralSection({ settings, onSettingsChange }: Pick<SettingsDialogProps
             placeholder={t("previewServerHostPlaceholder")}
             onChange={(e) => onSettingsChange({ general: { previewServerHost: e.target.value } })}
             slotProps={{ htmlInput: { "aria-label": t("previewServerHost"), spellCheck: false, autoCapitalize: "none", autoCorrect: "off" } }}
-            sx={{ minWidth: 240, "& .MuiInputBase-root": { fontFamily: (th) => th.custom.fonts.mono, fontSize: "0.82rem" } }}
+            sx={{ width: { xs: "100%", sm: "auto" }, minWidth: { sm: 240 }, "& .MuiInputBase-root": { fontFamily: (th) => th.custom.fonts.mono, fontSize: "0.82rem" } }}
           />
         }
       />
@@ -644,7 +662,207 @@ function GeneralSection({ settings, onSettingsChange }: Pick<SettingsDialogProps
   );
 }
 
-export function SettingsDialog({ open, onClose, settings, onSettingsChange }: SettingsDialogProps) {
+function VoiceSection({ settings, onSettingsChange, onVoiceConfigChange }: Pick<SettingsDialogProps, "settings" | "onSettingsChange" | "onVoiceConfigChange">) {
+  const { t } = useI18n();
+  const [config, setConfig] = useState<VoiceConfigResponse>({ providers: {} });
+  const [configError, setConfigError] = useState<string | null>(null);
+  const [reloadToken, setReloadToken] = useState(0);
+  const [draftKeys, setDraftKeys] = useState<Partial<Record<VoiceProviderId, string>>>({});
+  const [savingKey, setSavingKey] = useState<VoiceProviderId | null>(null);
+  const [notice, setNotice] = useState<{ readonly severity: "success" | "error"; readonly message: string } | null>(null);
+  const [keyPopover, setKeyPopover] = useState<{ readonly id: VoiceProviderId; readonly anchor: HTMLElement } | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      setConfigError(null);
+      try {
+        const response = await fetch("/api/voice-config");
+        if (!response.ok) {
+          throw new Error(await readResponseError(response, `Voice config load failed (${response.status})`));
+        }
+        const payload = (await response.json()) as unknown;
+        if (!isVoiceConfigResponse(payload)) {
+          throw new Error("Voice config response is invalid.");
+        }
+        if (active) {
+          setConfig(payload);
+        }
+      } catch (error) {
+        if (active) {
+          setConfigError(errorMessage(error));
+        }
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [reloadToken]);
+
+  const selectedProvider = settings.general.voice.provider;
+  const setProvider = (provider: VoiceProviderId) => onSettingsChange({ general: { voice: { ...settings.general.voice, provider } } });
+  const setLanguage = (language: string) => onSettingsChange({ general: { voice: { ...settings.general.voice, language } } });
+
+  const saveApiKey = (provider: VoiceProviderId) => {
+    const apiKey = draftKeys[provider]?.trim();
+    if (!apiKey) {
+      return;
+    }
+    setSavingKey(provider);
+    setNotice(null);
+    void (async () => {
+      try {
+        const response = await fetch("/api/voice-config", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ provider, apiKey }),
+        });
+        if (!response.ok) {
+          throw new Error(await readResponseError(response, `Voice provider config save failed (${response.status})`));
+        }
+        const envVar = getVoiceProvider(provider).envVar ?? "";
+        setConfig((current) => ({ providers: { ...current.providers, [provider]: { envVar, configured: true } } }));
+        setDraftKeys((current) => ({ ...current, [provider]: "" }));
+        setNotice({ severity: "success", message: t("voiceApiKeySaved", { provider: getVoiceProvider(provider).name }) });
+        onVoiceConfigChange?.();
+      } catch (error) {
+        setNotice({ severity: "error", message: t("voiceApiKeySaveFailed", { provider: getVoiceProvider(provider).name, error: errorMessage(error) }) });
+      } finally {
+        setSavingKey(null);
+      }
+    })();
+  };
+
+  return (
+    <Stack spacing={1.25}>
+      <TextField
+        size="small"
+        label={t("voiceLanguage")}
+        value={settings.general.voice.language}
+        onChange={(event) => setLanguage(event.target.value)}
+        helperText={t("voiceLanguageHint")}
+        slotProps={{ htmlInput: { "aria-label": t("voiceLanguage"), spellCheck: false, autoCapitalize: "none", autoCorrect: "off" } }}
+        sx={{ maxWidth: 260, "& .MuiInputBase-root": { fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.82rem" } }}
+      />
+      <Typography variant="body2" sx={{ color: "text.secondary" }}>
+        {t("voiceProvidersHint")}
+      </Typography>
+      {configError && (
+        <Alert
+          severity="error"
+          action={
+            <Button size="small" variant="text" onClick={() => setReloadToken((current) => current + 1)}>
+              {t("retryAgentConfig")}
+            </Button>
+          }
+        >
+          {t("voiceConfigError", { error: configError })}
+        </Alert>
+      )}
+      {notice && <Alert severity={notice.severity}>{notice.message}</Alert>}
+      {VOICE_PROVIDERS.map((provider) => {
+        const selected = selectedProvider === provider.id;
+        const configured = config.providers[provider.id]?.configured === true || provider.kind !== "cloud";
+        const status = provider.id === "none" ? "idle" : configured ? "ok" : "warn";
+        const statusLabel = provider.id === "none" ? t("voiceProviderDisabled") : configured ? t("configured") : t("apiKeyRequired");
+        return (
+          <Stack
+            key={provider.id}
+            direction="row"
+            spacing={1.5}
+            sx={{
+              alignItems: "center",
+              p: 1.25,
+              borderRadius: (theme) => `${theme.custom.radii.md}px`,
+              border: (theme) => `1px solid ${selected ? theme.palette.status.running.border : theme.custom.borders.subtle}`,
+              backgroundColor: (theme) => (selected ? theme.palette.status.running.soft : theme.custom.surfaces.s2),
+            }}
+          >
+            <Box sx={{ display: "flex", color: selected ? "primary.main" : "text.secondary", flex: "0 0 auto", px: { xs: 0, sm: 1.5 } }}>
+              {provider.id === "none" ? (
+                <MicOffOutlinedIcon data-testid="voice-provider-none-icon" sx={{ fontSize: 28 }} />
+              ) : (
+                <KeyboardVoiceIcon data-testid={`voice-provider-${provider.id}-icon`} sx={{ fontSize: 28 }} />
+              )}
+            </Box>
+            <Box sx={{ flex: 1, minWidth: 0 }}>
+              <Typography noWrap sx={{ fontSize: "0.85rem", fontWeight: 600, color: "text.primary" }}>
+                {provider.name}
+              </Typography>
+              <Stack direction="row" spacing={0.75} sx={{ alignItems: "center" }}>
+                <StatusDot status={status} label={statusLabel} size="sm" pulse={false} />
+                <Typography noWrap sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.7rem", color: "text.secondary" }}>
+                  {statusLabel}
+                  {provider.envVar ? ` · ${provider.envVar}` : ""}
+                </Typography>
+              </Stack>
+              <Typography sx={{ mt: 0.25, fontSize: "0.72rem", color: "text.secondary" }}>{provider.languageHint}</Typography>
+            </Box>
+            <Stack direction="row" spacing={0.5} sx={{ alignItems: "center", flex: "0 0 auto" }}>
+              {provider.kind === "cloud" && (
+                <Tooltip title={configured ? t("apiKeyConfigured", { agent: provider.name }) : t("apiKey")}>
+                  <IconButton
+                    aria-label={t("voiceApiKeyFor", { provider: provider.name })}
+                    onClick={(event) => setKeyPopover({ id: provider.id, anchor: event.currentTarget })}
+                    sx={configured ? { color: (theme) => theme.palette.status.ok.main } : undefined}
+                  >
+                    <VpnKeyOutlinedIcon sx={{ fontSize: 17 }} />
+                  </IconButton>
+                </Tooltip>
+              )}
+              <Radio checked={selected} onChange={() => setProvider(provider.id)} size="small" aria-label={t("voiceMakeProvider", { provider: provider.name })} />
+            </Stack>
+          </Stack>
+        );
+      })}
+
+      <Popover
+        open={Boolean(keyPopover)}
+        anchorEl={keyPopover?.anchor ?? null}
+        onClose={() => setKeyPopover(null)}
+        anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+        transformOrigin={{ vertical: "top", horizontal: "right" }}
+        slotProps={{ paper: { sx: { mt: 0.5, borderRadius: (theme) => `${theme.custom.radii.md}px`, border: (theme) => `1px solid ${theme.custom.borders.subtle}`, backgroundImage: "none" } } }}
+      >
+        {keyPopover &&
+          (() => {
+            const provider = getVoiceProvider(keyPopover.id);
+            return (
+              <Stack spacing={1.25} sx={{ p: 2, width: 320 }}>
+                <Typography sx={{ fontSize: "0.82rem", fontWeight: 700, color: "text.primary" }}>{provider.name}</Typography>
+                <TextField
+                  fullWidth
+                  autoFocus
+                  type="password"
+                  size="small"
+                  label={provider.envVar ?? t("apiKey")}
+                  value={draftKeys[keyPopover.id] ?? ""}
+                  placeholder={config.providers[keyPopover.id]?.configured ? t("configured") : undefined}
+                  onChange={(event) => setDraftKeys((current) => ({ ...current, [keyPopover.id]: event.target.value }))}
+                />
+                <Typography sx={{ fontSize: "0.72rem", color: "text.secondary" }}>{t("voiceApiKeyHint", { env: provider.envVar ?? "" })}</Typography>
+                <Stack direction="row" spacing={1} sx={{ justifyContent: "flex-end" }}>
+                  <Button variant="text" size="small" onClick={() => setKeyPopover(null)}>
+                    {t("cancel")}
+                  </Button>
+                  <Button
+                    variant="contained"
+                    size="small"
+                    disabled={savingKey === keyPopover.id || !(draftKeys[keyPopover.id]?.trim())}
+                    onClick={() => saveApiKey(keyPopover.id)}
+                  >
+                    {t("save")}
+                  </Button>
+                </Stack>
+              </Stack>
+            );
+          })()}
+      </Popover>
+    </Stack>
+  );
+}
+
+export function SettingsDialog({ open, onClose, settings, onSettingsChange, onVoiceConfigChange }: SettingsDialogProps) {
   const [tab, setTab] = useState(0);
   const { t } = useI18n();
   const titleId = "settings-dialog-title";
@@ -661,6 +879,7 @@ export function SettingsDialog({ open, onClose, settings, onSettingsChange }: Se
       <Box sx={{ px: 2.5 }}>
         <Tabs value={tab} onChange={(_, v: number) => setTab(v)}>
           <Tab label={t("agent")} />
+          <Tab label={t("voice")} />
           <Tab label={t("appearance")} />
           <Tab label={t("general")} />
         </Tabs>
@@ -669,14 +888,13 @@ export function SettingsDialog({ open, onClose, settings, onSettingsChange }: Se
       <Box sx={{ px: 2.5, py: 2, minHeight: 280, maxHeight: 440, overflow: "auto" }}>
         {tab === 0 && (
           <AgentsSection
-            accessMode={settings.agents.accessMode}
             defaultProfile={settings.agents.defaultProfile}
-            onAccessModeChange={(accessMode) => onSettingsChange({ agents: { accessMode } })}
             onDefaultProfileChange={(defaultProfile) => onSettingsChange({ agents: { defaultProfile } })}
           />
         )}
-        {tab === 1 && <AppearanceSection settings={settings} onSettingsChange={onSettingsChange} />}
-        {tab === 2 && <GeneralSection settings={settings} onSettingsChange={onSettingsChange} />}
+        {tab === 1 && <VoiceSection settings={settings} onSettingsChange={onSettingsChange} onVoiceConfigChange={onVoiceConfigChange} />}
+        {tab === 2 && <AppearanceSection settings={settings} onSettingsChange={onSettingsChange} />}
+        {tab === 3 && <GeneralSection settings={settings} onSettingsChange={onSettingsChange} />}
       </Box>
     </Dialog>
   );

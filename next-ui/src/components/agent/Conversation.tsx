@@ -280,7 +280,7 @@ export function Conversation({
         components={{ Footer: bottomInset > 0 ? () => <Box sx={{ height: bottomInset }} /> : undefined }}
         itemContent={(index, item) =>
           item ? (
-            <Box sx={{ width: "100%", maxWidth: contentMaxWidth, mx: "auto", px: contentPaddingX, pt: index === 0 ? { xs: 2.5, sm: 4 } : 0, pb: 3 }}>
+            <Box sx={{ width: "100%", minWidth: 0, maxWidth: contentMaxWidth, mx: "auto", px: contentPaddingX, pt: index === 0 ? { xs: 2.5, sm: 4 } : 0, pb: 3, overflowX: "clip" }}>
               {item.kind === "message" ? <Message actions={actions} displayPrefs={displayPrefs} agentProfile={agentProfile} message={item.message} index={index} /> : <TypingRow delay={messages.length * 120} />}
             </Box>
           ) : null
