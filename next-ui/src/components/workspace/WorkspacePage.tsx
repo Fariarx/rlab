@@ -57,6 +57,7 @@ import {
   messageToPlainText,
   type ChatMessage,
   type ComposerDraft,
+  type ComposerPluginLink,
   type ConversationStatus,
   type ConversationSummary,
   type ConversationView,
@@ -87,6 +88,8 @@ const COMPOSER_DRAFT_SAVE_DELAY_MS = 350;
 const EMPTY_COMPOSER_DRAFT: ComposerDraft = { text: "", attachments: [] };
 const CLI_UPDATE_POLL_MS = 5 * 60_000;
 const AGENT_LIMIT_REFRESH_MIN_INTERVAL_MS = 60_000;
+const AGENT_LIMIT_ON_DEMAND_REFRESH_AGENTS = new Set(["claude-code", "gemini"]);
+const AGENT_AUTO_CONFIRM_AGENTS = new Set(["claude-code", "codex", "gemini", "opencode"]);
 
 const CONVERSATION_VIEWS = new Set<ConversationView>(["chat", "git", "resources", "preview", "terminal"]);
 
@@ -99,7 +102,8 @@ function normalizeConversationView(view: ConversationView | undefined, terminalE
 
 type WakeupTrigger =
   | { readonly type: "time"; readonly fireAtMs: number }
-  | { readonly type: "script"; readonly script: string; readonly intervalSeconds: number; readonly nextCheckMs: number; readonly lastCheckedAtMs?: number; readonly lastExitCode?: number; readonly lastError?: string };
+  | { readonly type: "cron"; readonly cron: string; readonly nextFireMs: number }
+  | { readonly type: "script"; readonly script: string; readonly intervalSeconds?: number; readonly cron?: string; readonly nextCheckMs: number; readonly lastCheckedAtMs?: number; readonly lastExitCode?: number; readonly lastError?: string };
 
 interface WakeupSummary {
   readonly id: string;
@@ -140,6 +144,10 @@ interface VoiceConfigSnapshot {
   readonly providers: Partial<Record<VoiceProviderId, VoiceProviderConfigInfo>>;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
 async function loadAgentLimits(agent: string | undefined, refresh: boolean): Promise<AgentLimitSnapshot> {
   const params = new URLSearchParams();
   if (refresh && agent) {
@@ -176,6 +184,21 @@ async function loadVoiceConfig(): Promise<VoiceConfigSnapshot> {
     throw new Error(payload.error ?? `Voice config load failed (${response.status})`);
   }
   return { providers: payload.providers && typeof payload.providers === "object" ? payload.providers : {} };
+}
+
+async function loadRlabPlugins(): Promise<readonly ComposerPluginLink[]> {
+  const response = await fetch("/api/rlab-plugins", { method: "GET", cache: "no-store" });
+  const payload = (await response.json().catch(() => ({}))) as { plugins?: unknown; error?: string };
+  if (!response.ok) {
+    throw new Error(payload.error ?? `rlab plugins load failed (${response.status})`);
+  }
+  if (!Array.isArray(payload.plugins)) {
+    return [];
+  }
+  return payload.plugins.filter(isRecord).flatMap((plugin) => {
+    const { id, label, token } = plugin;
+    return typeof id === "string" && typeof label === "string" && typeof token === "string" ? [{ id, label, token }] : [];
+  });
 }
 
 async function updateAgentCli(agent: string): Promise<void> {
@@ -226,9 +249,14 @@ async function deleteWakeup(conversationId: string, wakeupId: string): Promise<v
 function wakeupLabel(wakeup: WakeupSummary, locale: "ru" | "en"): string {
   if (wakeup.trigger.type === "time") {
     const when = formatDateTime24(new Date(wakeup.trigger.fireAtMs));
-    return locale === "ru" ? `Wakeup установлен: ${when}` : `Wakeup scheduled: ${when}`;
+    return locale === "ru" ? `TaskWakeup: ${when}` : `TaskWakeup: ${when}`;
   }
-  const base = locale === "ru" ? `Wakeup script: каждые ${wakeup.trigger.intervalSeconds}s` : `Wakeup script: every ${wakeup.trigger.intervalSeconds}s`;
+  if (wakeup.trigger.type === "cron") {
+    const when = formatDateTime24(new Date(wakeup.trigger.nextFireMs));
+    return locale === "ru" ? `TaskWakeup cron: ${when}` : `TaskWakeup cron: ${when}`;
+  }
+  const scriptSchedule = wakeup.trigger.cron ? `cron ${wakeup.trigger.cron}` : locale === "ru" ? `каждые ${wakeup.trigger.intervalSeconds}s` : `every ${wakeup.trigger.intervalSeconds}s`;
+  const base = `TaskWakeup script: ${scriptSchedule}`;
   if (wakeup.trigger.lastError) {
     return `${base} · ${wakeup.trigger.lastError}`;
   }
@@ -458,6 +486,7 @@ export function WorkspacePageView({
   const [cliUpdateSnapshot, setCliUpdateSnapshot] = useState<CliUpdateSnapshot>({ checkedAt: 0, checking: false, updates: [], errors: {} });
   const [cliUpdateBusyAgent, setCliUpdateBusyAgent] = useState<string | null>(null);
   const [voiceConfig, setVoiceConfig] = useState<VoiceConfigSnapshot>({ providers: {} });
+  const [registeredPlugins, setRegisteredPlugins] = useState<readonly ComposerPluginLink[]>([]);
   // Unstaged line totals for the header Git-tab badge, reported by the Git view.
   const [gitUnstaged, setGitUnstaged] = useState<{ readonly additions: number; readonly deletions: number }>({ additions: 0, deletions: 0 });
   // Height of the composer's floating tags row; the thread/Git content reserves
@@ -530,7 +559,11 @@ export function WorkspacePageView({
   const [agentLimitRefreshErrors, setAgentLimitRefreshErrors] = useState<Readonly<Record<string, string | undefined>>>({});
   const agentLimitRefreshAttemptRef = useRef<Record<string, number>>({});
   const refreshAgentLimits = useCallback((agentId: string | undefined, requestRefresh: boolean) => {
-    if (requestRefresh && agentId) {
+    const canRequestRefresh = Boolean(requestRefresh && agentId && AGENT_LIMIT_ON_DEMAND_REFRESH_AGENTS.has(agentId));
+    if (requestRefresh && agentId && !canRequestRefresh) {
+      setAgentLimitRefreshErrors((current) => ({ ...current, [agentId]: undefined }));
+    }
+    if (canRequestRefresh && agentId) {
       const lastAttempt = agentLimitRefreshAttemptRef.current[agentId] ?? 0;
       if (Date.now() - lastAttempt < AGENT_LIMIT_REFRESH_MIN_INTERVAL_MS) {
         return;
@@ -540,7 +573,7 @@ export function WorkspacePageView({
       setAgentLimitRefreshErrors((current) => ({ ...current, [agentId]: undefined }));
     }
 
-    loadAgentLimits(agentId, requestRefresh)
+    loadAgentLimits(agentId, canRequestRefresh)
       .then((snapshot) => {
         setAgentLimits(snapshot.limits);
         setAgentLimitsLoaded(true);
@@ -608,6 +641,25 @@ export function WorkspacePageView({
   useEffect(() => {
     refreshVoiceConfig();
   }, [refreshVoiceConfig]);
+
+  useEffect(() => {
+    let canceled = false;
+    loadRlabPlugins()
+      .then((plugins) => {
+        if (!canceled) {
+          setRegisteredPlugins(plugins);
+        }
+      })
+      .catch((error: unknown) => {
+        if (!canceled) {
+          setRegisteredPlugins([]);
+          toast({ message: error instanceof Error ? error.message : String(error), severity: "error", duration: 3000 });
+        }
+      });
+    return () => {
+      canceled = true;
+    };
+  }, [toast]);
 
   useEffect(() => {
     let canceled = false;
@@ -1083,14 +1135,21 @@ export function WorkspacePageView({
     const cliModes = cliInfoOf(profile.agent)?.modes;
     const sourceModes = cliModes && cliModes.length > 0 ? cliModes : def.modes;
     return sourceModes
-      .filter((mode) => mode.id !== DEFAULT_AGENT_OPTION_ID)
+      .filter((mode) => mode.id !== DEFAULT_AGENT_OPTION_ID && mode.id !== "auto" && mode.id !== "bypass-permissions")
       .map((mode) => ({
         id: mode.id,
-        label: mode.id === "plan" ? t("agentModePlan") : mode.id === "auto" || mode.id === "bypass-permissions" ? t("agentModeAutoConfirm") : mode.label,
+        label: mode.id === "plan" ? t("agentModePlan") : mode.label,
       }));
   }, [cliInfoOf, profile.agent, t]);
   const handleModeChange = (modeId: string) => {
     const next = normalizeAgentProfile({ ...profile, mode: modeId });
+    setProfile(next);
+    if (selected) {
+      ws.setConversationProfile(ws.selectedId, next);
+    }
+  };
+  const handleAutoConfirmChange = (enabled: boolean) => {
+    const next = normalizeAgentProfile({ ...profile, autoConfirm: enabled });
     setProfile(next);
     if (selected) {
       ws.setConversationProfile(ws.selectedId, next);
@@ -1828,6 +1887,9 @@ export function WorkspacePageView({
                   modes={supportedModes}
                   activeMode={profile.mode}
                   onModeChange={handleModeChange}
+                  autoConfirm={profile.autoConfirm ?? false}
+                  supportsAutoConfirm={AGENT_AUTO_CONFIRM_AGENTS.has(profile.agent)}
+                  onAutoConfirmChange={handleAutoConfirmChange}
                   onStop={() => ws.stopRun(ws.selectedId)}
                   onAttachmentError={(message) => toast({ message, severity: "error", duration: 3000 })}
                   running={selectedHasActiveWork}
@@ -1873,6 +1935,7 @@ export function WorkspacePageView({
                   voiceProvider={composerVoiceProvider}
                   onVoiceError={(message) => toast({ message, severity: "error", duration: 3500 })}
                   browserActivityEvents={view === "preview" ? browserActivityEvents : undefined}
+                  registeredPlugins={registeredPlugins}
                   scheduledWakeups={selectedWakeups.map((wakeup) => ({
                     id: wakeup.id,
                     label: wakeupLabel(wakeup, locale),

@@ -13,7 +13,8 @@ describe("app settings", () => {
       agent: "gemini",
       model: "default",
       reasoning: "default",
-      mode: "auto",
+      mode: "default",
+      autoConfirm: true,
     });
   });
 

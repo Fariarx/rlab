@@ -13,7 +13,7 @@ export { ConversationList, conversationMatches, type ConversationActions } from 
 export { ConversationSearch } from "./ConversationSearch";
 export { Message } from "./Message";
 export { messageToPlainText, type MessageActionHandlers } from "./message-actions";
-export { Composer, type ComposerHandle } from "./Composer";
+export { Composer, type ComposerHandle, type ComposerPluginLink } from "./Composer";
 export { AgentBlockRenderer } from "./AgentBlockRenderer";
 export { Reasoning } from "./Reasoning";
 export { DiffCard } from "./DiffCard";

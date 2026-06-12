@@ -11,6 +11,7 @@ import RateReviewOutlinedIcon from "@mui/icons-material/RateReviewOutlined";
 import SendIcon from "@mui/icons-material/Send";
 import SendTimeExtensionIcon from "@mui/icons-material/SendTimeExtension";
 import CompressRoundedIcon from "@mui/icons-material/CompressRounded";
+import ExtensionOutlinedIcon from "@mui/icons-material/ExtensionOutlined";
 import StopCircleIcon from "@mui/icons-material/StopCircle";
 import WarningAmberRoundedIcon from "@mui/icons-material/WarningAmberRounded";
 import { Box, Collapse, Divider, InputBase, Menu, MenuItem, Stack, Switch, type SxProps, TextField, type Theme, Tooltip, Typography } from "@mui/material";
@@ -28,12 +29,6 @@ import type { ComposerAttachmentDraft, ComposerDraft } from "./types";
 
 /** Pastes longer than this become a text-file attachment instead of flooding the input. */
 const PASTE_AS_FILE_CHARS = 1500;
-
-interface SlashCommand {
-  readonly id: string;
-  readonly label: string;
-  readonly prompt: string;
-}
 
 // Pasted-file fallback names only (a filename, not a React key).
 let attachmentIdSeq = 0;
@@ -85,6 +80,19 @@ function isTextLikeFile(file: File): boolean {
 function mentionQuery(value: string): string | null {
   const match = value.match(/(?:^|\s)@([^\s@/]*)$/);
   return match ? match[1].toLowerCase() : null;
+}
+
+function pluginLinkQuery(value: string): string | null {
+  const match = value.match(/(?:^|\s)\$([^\s$]*)$/);
+  return match ? match[1].toLowerCase() : null;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function displayPluginToken(token: string): string {
+  return token.replace(/^\$/, "").replace(/^ScheduleWakeup$/, "TaskWakeup");
 }
 
 function attachmentBlock(attachment: ComposerAttachmentDraft): string {
@@ -173,6 +181,14 @@ function speechRecognitionConstructor(): SpeechRecognitionConstructor | null {
   return candidate.SpeechRecognition ?? candidate.webkitSpeechRecognition ?? null;
 }
 
+function isMobileSpeechRecognitionRuntime(): boolean {
+  if (typeof navigator === "undefined") {
+    return false;
+  }
+  const userAgent = navigator.userAgent.toLowerCase();
+  return /android|iphone|ipad|ipod/.test(userAgent);
+}
+
 function preferredAudioMimeType(): string | undefined {
   if (typeof MediaRecorder === "undefined") {
     return undefined;
@@ -240,9 +256,17 @@ const VOICE_LEVEL_PITCH_PX = 6;
 const VOICE_IDLE_LEVEL = 0.025;
 const VOICE_IDLE_LEVELS = voiceIdleLevels(VOICE_DEFAULT_LEVEL_COUNT);
 const VOICE_NO_SPEECH_NOTICE_DELAY_MS = 800;
+const VOICE_AMBIENT_LEVELS = voiceAmbientLevels(VOICE_DEFAULT_LEVEL_COUNT);
 
 function voiceIdleLevels(levelCount: number): readonly number[] {
   return Array.from({ length: levelCount }, () => VOICE_IDLE_LEVEL);
+}
+
+function voiceAmbientLevels(levelCount: number): readonly number[] {
+  return Array.from({ length: levelCount }, (_, index) => {
+    const phase = index / Math.max(1, levelCount - 1);
+    return 0.08 + (Math.sin(phase * Math.PI * 5) + 1) * 0.045;
+  });
 }
 
 export function voiceLevelCountFromWidth(width: number): number {
@@ -277,7 +301,19 @@ export function voiceLevelsFromTimeDomainData(data: Uint8Array, levelCount = VOI
   });
 }
 
-function VoiceRecordingStrip({ label, duration, levels, onLevelCountChange }: { readonly label: string; readonly duration: string; readonly levels: readonly number[]; readonly onLevelCountChange: (levelCount: number) => void }) {
+function VoiceRecordingStrip({
+  label,
+  duration,
+  levels,
+  ambient,
+  onLevelCountChange,
+}: {
+  readonly label: string;
+  readonly duration: string;
+  readonly levels: readonly number[];
+  readonly ambient: boolean;
+  readonly onLevelCountChange: (levelCount: number) => void;
+}) {
   const waveformRef = useRef<HTMLDivElement | null>(null);
 
   useLayoutEffect(() => {
@@ -295,6 +331,7 @@ function VoiceRecordingStrip({ label, duration, levels, onLevelCountChange }: { 
   return (
     <Box
       data-testid="composer-voice-recording-strip"
+      data-ambient={ambient ? "true" : "false"}
       role="status"
       aria-label={label}
       sx={{
@@ -326,6 +363,8 @@ function VoiceRecordingStrip({ label, duration, levels, onLevelCountChange }: { 
       >
         {levels.map((level, index) => {
           const height = Math.max(3, Math.min(28, 3 + level * 32));
+          const ambientDuration = 1300 + (index % 7) * 95;
+          const ambientDelay = -(index % 13) * 75;
           return (
           <Box
             key={index}
@@ -339,7 +378,16 @@ function VoiceRecordingStrip({ label, duration, levels, onLevelCountChange }: { 
               backgroundColor: "text.primary",
               opacity: Math.max(0.28, Math.min(0.96, 0.34 + level * 0.8)),
               transformOrigin: "center",
-              transition: "height 80ms linear",
+              transition: ambient ? "none" : "height 80ms linear",
+              ...(ambient
+                ? {
+                    animation: `voiceAmbientPulse ${ambientDuration}ms ease-in-out ${ambientDelay}ms infinite`,
+                    "@keyframes voiceAmbientPulse": {
+                      "0%, 100%": { transform: "scaleY(0.72)", opacity: 0.34 },
+                      "50%": { transform: "scaleY(1.58)", opacity: 0.72 },
+                    },
+                  }
+                : {}),
             }}
           />
           );
@@ -565,6 +613,12 @@ export interface ComposerHandle {
   readonly focus: () => void;
 }
 
+export interface ComposerPluginLink {
+  readonly id: string;
+  readonly label: string;
+  readonly token: string;
+}
+
 interface ComposerProps {
   readonly placeholder?: string;
   readonly mentionableFiles?: readonly string[];
@@ -577,6 +631,10 @@ interface ComposerProps {
   /** The currently active work mode id ("default" when none). */
   readonly activeMode?: string;
   readonly onModeChange?: (modeId: string) => void;
+  /** Sandbox approval setting for CLIs where this is not a chat work mode. */
+  readonly autoConfirm?: boolean;
+  readonly supportsAutoConfirm?: boolean;
+  readonly onAutoConfirmChange?: (enabled: boolean) => void;
   readonly onDraftChange?: (draft: ComposerDraft) => void;
   readonly onSend?: (value: string) => void;
   readonly onStop?: () => void;
@@ -617,6 +675,8 @@ interface ComposerProps {
   readonly onCompactNow?: () => void;
   /** Browser Preview activity, shown inside the input options menu. */
   readonly browserActivityEvents?: readonly ComposerBrowserActivityEvent[];
+  /** Server-registered rlab tools that can be referenced in the prompt via `$...`. */
+  readonly registeredPlugins?: readonly ComposerPluginLink[];
   /** Server-side scheduled wakeups for this chat, rendered as first floating tags. */
   readonly scheduledWakeups?: readonly { readonly id: string; readonly label: string; readonly removeLabel: string; readonly onRemove: () => void }[];
   /** User turns queued behind the current/last run; can be dispatched manually. */
@@ -628,9 +688,8 @@ interface ComposerProps {
 }
 
 /** Agents whose CLI/SDK does not surface account rate-limit data, so the menu
- *  shows "not reported" instead of a forever-pending "no data yet". Gemini's
- *  CLI keeps quota only in its interactive UI; OpenCode doesn't report it. */
-const LIMIT_UNSUPPORTED_AGENTS = new Set<string>(["gemini", "opencode"]);
+ *  shows "not reported" instead of a forever-pending "no data yet". */
+const LIMIT_UNSUPPORTED_AGENTS = new Set<string>(["opencode"]);
 const AUTO_COMPACT_TOGGLE_AGENTS = new Set<string>(["claude-code"]);
 const COMPACTION_WINDOW_AGENTS = new Set<string>(["claude-code", "codex"]);
 
@@ -647,6 +706,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     modes = [],
     activeMode = "default",
     onModeChange,
+    autoConfirm = false,
+    supportsAutoConfirm = false,
+    onAutoConfirmChange,
     onDraftChange,
     onSend,
     onStop,
@@ -671,6 +733,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     onCompactWindowChange,
     onCompactNow,
     browserActivityEvents,
+    registeredPlugins = [],
     scheduledWakeups = [],
     queuedMessageCount = 0,
     onSendQueuedNow,
@@ -685,6 +748,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const [activeSuggestion, setActiveSuggestion] = useState(0);
   const [suggestDismissed, setSuggestDismissed] = useState(false);
   const [modeMenuAnchor, setModeMenuAnchor] = useState<null | HTMLElement>(null);
+  const [optionsMenuMaxHeight, setOptionsMenuMaxHeight] = useState<number | undefined>(undefined);
   // True when the input needs more than one row; it then lifts into an upward-
   // growing overlay (so the bar height never changes), and the floating tags
   // rise above it by `overlayLift`.
@@ -713,6 +777,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const voiceNoSpeechNotifiedRef = useRef(false);
   const voiceRecognizedRef = useRef(false);
   const voiceManualStopRef = useRef(false);
+  const voiceBrowserInterimTranscriptRef = useRef("");
   const voiceLevelValuesRef = useRef<readonly number[]>(VOICE_IDLE_LEVELS);
   const voiceLevelLastPaintRef = useRef(0);
   const voiceLevelCountRef = useRef(VOICE_DEFAULT_LEVEL_COUNT);
@@ -720,6 +785,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const [voiceRecordingStartedAt, setVoiceRecordingStartedAt] = useState<number | null>(null);
   const [voiceClock, setVoiceClock] = useState(0);
   const [voiceLevels, setVoiceLevels] = useState<readonly number[]>(VOICE_IDLE_LEVELS);
+  const [voiceAmbient, setVoiceAmbient] = useState(false);
   const [browserVoiceSupported, setBrowserVoiceSupported] = useState(false);
   const singleRowRef = useRef(0);
   // Shell-style history navigation: -1 means "not browsing"; otherwise an index
@@ -808,20 +874,61 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     };
   }, [onTagsHeightChange]);
 
-  const slashCommands = useMemo<readonly SlashCommand[]>(
-    () => [
-      { id: "plan", label: "/plan", prompt: t("slashPlanPrompt") },
-      { id: "test", label: "/test", prompt: t("slashTestPrompt") },
-      { id: "fix", label: "/fix", prompt: t("slashFixPrompt") },
-    ],
-    [t],
-  );
   const q = mentionQuery(composerValue);
+  const pluginQ = pluginLinkQuery(composerValue);
   const mentionedFiles = useMemo(
     () => (q == null ? [] : mentionableFiles.filter((file) => file.toLowerCase().includes(q)).slice(0, 8)),
     [mentionableFiles, q],
   );
-  const visibleSlashCommands = composerValue.startsWith("/") && !composerValue.includes(" ") ? slashCommands.filter((command) => command.label.startsWith(composerValue)) : [];
+  const mentionedPlugins = useMemo(
+    () =>
+      pluginQ == null
+        ? []
+        : registeredPlugins
+            .filter((plugin) => {
+              const haystack = `${plugin.id} ${plugin.label} ${plugin.token}`.toLowerCase();
+              return haystack.includes(pluginQ);
+            })
+            .slice(0, 8),
+    [pluginQ, registeredPlugins],
+  );
+  const composerPluginTokenPattern = useMemo(() => {
+    const tokens = new Set<string>();
+    registeredPlugins.forEach((plugin) => {
+      if (plugin.token.startsWith("$")) {
+        tokens.add(plugin.token);
+      }
+    });
+    if (tokens.has("$TaskWakeup")) {
+      tokens.add("$ScheduleWakeup");
+    }
+    if (tokens.size === 0) {
+      return null;
+    }
+    return new RegExp(`(${Array.from(tokens).sort((left, right) => right.length - left.length).map(escapeRegExp).join("|")})\\b`, "g");
+  }, [registeredPlugins]);
+  const composerPluginPreviewParts = useMemo(() => {
+    if (!composerPluginTokenPattern) {
+      return [];
+    }
+    const parts: ReadonlyArray<{ readonly type: "text"; readonly text: string } | { readonly type: "plugin"; readonly token: string }> = [];
+    const mutableParts: Array<{ readonly type: "text"; readonly text: string } | { readonly type: "plugin"; readonly token: string }> = [];
+    let lastIndex = 0;
+    for (const match of composerValue.matchAll(composerPluginTokenPattern)) {
+      const raw = match[0];
+      const index = match.index ?? 0;
+      if (index > lastIndex) {
+        mutableParts.push({ type: "text", text: composerValue.slice(lastIndex, index) });
+      }
+      mutableParts.push({ type: "plugin", token: raw });
+      lastIndex = index + raw.length;
+    }
+    if (lastIndex < composerValue.length) {
+      mutableParts.push({ type: "text", text: composerValue.slice(lastIndex) });
+    }
+    return mutableParts.length === 1 && mutableParts[0]?.type === "text" ? parts : mutableParts;
+  }, [composerPluginTokenPattern, composerValue]);
+  const hasComposerPluginPreview = composerPluginPreviewParts.length > 0;
 
   const updateComposerBorderHover = useCallback((event: PointerEvent<HTMLDivElement>) => {
     const composerBar = composerBarRef.current;
@@ -843,7 +950,16 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       return;
     }
     voiceLevelCountRef.current = levelCount;
-    setVoiceLevels((current) => (current.length === levelCount ? current : voiceIdleLevels(levelCount)));
+    setVoiceLevels((current) => (current.length === levelCount ? current : voiceAmbient ? voiceAmbientLevels(levelCount) : voiceIdleLevels(levelCount)));
+  }, [voiceAmbient]);
+
+  const setAmbientVoiceLevels = useCallback((enabled: boolean) => {
+    setVoiceAmbient(enabled);
+    if (enabled) {
+      const levels = voiceAmbientLevels(voiceLevelCountRef.current);
+      voiceLevelValuesRef.current = levels;
+      setVoiceLevels(levels);
+    }
   }, []);
 
   const updateOptionsMenuPosition = useCallback(() => {
@@ -975,7 +1091,14 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     return true;
   }, [clearVoiceNoSpeechNotice]);
 
+  const commitBrowserInterimDictation = useCallback((): boolean => {
+    const interim = voiceBrowserInterimTranscriptRef.current;
+    voiceBrowserInterimTranscriptRef.current = "";
+    return appendDictation(interim);
+  }, [appendDictation]);
+
   const stopVoiceAnalyser = useCallback(() => {
+    setVoiceAmbient(false);
     if (voiceAnalyserFrameRef.current !== null) {
       cancelAnimationFrame(voiceAnalyserFrameRef.current);
       voiceAnalyserFrameRef.current = null;
@@ -1073,29 +1196,58 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       return;
     }
     const Recognition = speechRecognitionConstructor();
-    if (!Recognition || !navigator.mediaDevices || typeof window.AudioContext === "undefined") {
+    if (!Recognition) {
       onVoiceError?.(t("voiceInputUnavailable", { provider: voiceProvider.name }));
       return;
     }
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      mediaStreamRef.current = stream;
-      startVoiceAnalyser(stream);
+      const isMobileRuntime = isMobileSpeechRecognitionRuntime();
+      if (!isMobileRuntime && navigator.mediaDevices && typeof window.AudioContext !== "undefined") {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaStreamRef.current = stream;
+        startVoiceAnalyser(stream);
+      } else {
+        setAmbientVoiceLevels(true);
+      }
       const recognition = new Recognition();
+      const allowAutoRestart = !isMobileRuntime;
       recognition.lang = voiceProvider.language;
-      recognition.continuous = true;
+      recognition.continuous = allowAutoRestart;
       recognition.interimResults = true;
+      const finishRecognition = () => {
+        recognitionRef.current = null;
+        clearVoiceNoSpeechNotice();
+        stopVoiceTracks();
+        setVoiceState("idle");
+      };
       recognition.onresult = (event) => {
-        let transcript = "";
+        let finalTranscript = "";
+        let interimTranscript = "";
         for (let index = event.resultIndex; index < event.results.length; index += 1) {
           const result = event.results[index];
           if (result?.isFinal) {
-            transcript += result[0]?.transcript ?? "";
+            finalTranscript += result[0]?.transcript ?? "";
+          } else {
+            interimTranscript += result?.[0]?.transcript ?? "";
           }
         }
-        appendDictation(transcript);
+        if (finalTranscript.trim()) {
+          voiceBrowserInterimTranscriptRef.current = "";
+          appendDictation(finalTranscript);
+          return;
+        }
+        if (interimTranscript.trim()) {
+          voiceBrowserInterimTranscriptRef.current = interimTranscript;
+          voiceRecognizedRef.current = true;
+          clearVoiceNoSpeechNotice();
+        }
       };
       recognition.onerror = (event) => {
+        if (voiceManualStopRef.current && (event.error === "aborted" || event.error === "no-speech")) {
+          commitBrowserInterimDictation();
+          finishRecognition();
+          return;
+        }
         if (!voiceManualStopRef.current && event.error === "no-speech") {
           scheduleVoiceNoSpeechNotice();
           return;
@@ -1107,7 +1259,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         setVoiceState("idle");
       };
       recognition.onend = () => {
-        if (!voiceManualStopRef.current && recognitionRef.current === recognition) {
+        const committed = commitBrowserInterimDictation();
+        const shouldReportNoSpeech = !committed && !voiceManualStopRef.current && !voiceRecognizedRef.current;
+        if (allowAutoRestart && !voiceManualStopRef.current && recognitionRef.current === recognition) {
           window.setTimeout(() => {
             if (voiceManualStopRef.current || recognitionRef.current !== recognition) {
               return;
@@ -1125,13 +1279,15 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           }, 120);
           return;
         }
-        recognitionRef.current = null;
-        stopVoiceTracks();
-        setVoiceState("idle");
+        finishRecognition();
+        if (shouldReportNoSpeech) {
+          scheduleVoiceNoSpeechNotice();
+        }
       };
       voiceManualStopRef.current = false;
       voiceRecognizedRef.current = false;
       voiceNoSpeechNotifiedRef.current = false;
+      voiceBrowserInterimTranscriptRef.current = "";
       clearVoiceNoSpeechNotice();
       recognitionRef.current = recognition;
       setVoiceRecordingStartedAt(Date.now());
@@ -1143,7 +1299,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       setVoiceState("idle");
       onVoiceError?.(t("voiceTranscriptionFailed", { error: error instanceof Error ? error.message : String(error) }));
     }
-  }, [appendDictation, clearVoiceNoSpeechNotice, onVoiceError, scheduleVoiceNoSpeechNotice, startVoiceAnalyser, stopVoiceTracks, t, voiceProvider]);
+  }, [appendDictation, clearVoiceNoSpeechNotice, commitBrowserInterimDictation, onVoiceError, scheduleVoiceNoSpeechNotice, setAmbientVoiceLevels, startVoiceAnalyser, stopVoiceTracks, t, voiceProvider]);
 
   const startCloudDictation = useCallback(async () => {
     if (!voiceProvider || voiceProvider.kind !== "cloud") {
@@ -1371,15 +1527,15 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     setComposerValue(composerValue.replace(/@([^\s@/]*)$/, `@${file} `));
   };
 
-  const insertSlashCommand = (command: SlashCommand) => {
-    setComposerValue(`${command.prompt} `);
+  const insertPluginLink = (plugin: ComposerPluginLink) => {
+    setComposerValue(composerValue.replace(/(^|\s)\$([^\s$]*)$/, (_match, prefix: string) => `${prefix}${plugin.token} `));
   };
 
-  // Slash commands and @-mentions never appear together (one needs a leading
-  // "/", the other a trailing "@…"), so a single suggestion list covers both.
+  // `$` plugin links and @-mentions never appear together at the same caret
+  // position, so a single suggestion list covers both.
   const suggestions: ReadonlyArray<{ readonly id: string; readonly label: string; readonly mono?: boolean; readonly apply: () => void }> =
-    visibleSlashCommands.length > 0
-      ? visibleSlashCommands.map((command) => ({ id: command.id, label: command.label, apply: () => insertSlashCommand(command) }))
+    mentionedPlugins.length > 0
+      ? mentionedPlugins.map((plugin) => ({ id: plugin.id, label: plugin.token, mono: true, apply: () => insertPluginLink(plugin) }))
       : mentionedFiles.map((file) => ({ id: file, label: file, mono: true, apply: () => insertMention(file) }));
   const suggestionsOpen = suggestions.length > 0 && !suggestDismissed;
   const activeIndex = Math.min(activeSuggestion, Math.max(suggestions.length - 1, 0));
@@ -1395,11 +1551,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const sendLabel = reviewCount > 0 ? t("reviewSendComments") : t("send");
   const browserProviderAvailable =
     voiceProvider?.kind === "browser"
-    && browserVoiceSupported
-    && typeof navigator !== "undefined"
-    && Boolean(navigator.mediaDevices)
-    && typeof window !== "undefined"
-    && typeof window.AudioContext !== "undefined";
+    && browserVoiceSupported;
   const cloudProviderAvailable =
     voiceProvider?.kind === "cloud"
     && voiceProvider.configured
@@ -1436,17 +1588,17 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const contextOverLimit = hasKnownContextWindow && effectiveContextTokens / effectiveContextWindow >= 1;
   const supportsAutoCompactToggle = agentId !== undefined && AUTO_COMPACT_TOGGLE_AGENTS.has(agentId);
   const supportsCompactionWindow = agentId !== undefined && COMPACTION_WINDOW_AGENTS.has(agentId);
-  const limitWindowLabel = (kind: RateLimitWindow["kind"]): string =>
-    kind === "weekly" ? t("limitWindowWeekly") : kind === "overage" ? t("limitOverage") : t("limitWindow5h");
+  const limitWindowLabel = (kind: RateLimitWindow["kind"], label?: string): string =>
+    label ?? (kind === "weekly" ? t("limitWindowWeekly") : kind === "daily" ? t("limitWindowDaily") : kind === "overage" ? t("limitOverage") : t("limitWindow5h"));
   const lowLimitWindow = agentLimit?.windows.find((window) => typeof window.usedPercent === "number" && window.usedPercent >= 85) ?? null;
   const lowLimitPercent = typeof lowLimitWindow?.usedPercent === "number" ? Math.round(lowLimitWindow.usedPercent) : null;
   const limitWarningLabel =
     lowLimitWindow && lowLimitPercent !== null
-      ? `${t("limitsLowTile")} · ${limitWindowLabel(lowLimitWindow.kind)} ${lowLimitPercent}%`
+      ? `${t("limitsLowTile")} · ${limitWindowLabel(lowLimitWindow.kind, lowLimitWindow.label)} ${lowLimitPercent}%`
       : null;
   const limitWarningHint =
     lowLimitWindow && lowLimitPercent !== null
-      ? t("limitsLowHint", { window: limitWindowLabel(lowLimitWindow.kind), percent: lowLimitPercent })
+      ? t("limitsLowHint", { window: limitWindowLabel(lowLimitWindow.kind, lowLimitWindow.label), percent: lowLimitPercent })
       : null;
   const limitWarningTone = agentLimit?.status === "rejected" || (lowLimitPercent !== null && lowLimitPercent >= 95) ? "danger" : "warn";
 
@@ -1482,7 +1634,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         parts.push(formatReset(window.resetsAt));
       }
       if (parts.length > 0) {
-        lines.push({ id: window.kind, label: limitWindowLabel(window.kind), value: parts.join(" · "), percent: typeof window.usedPercent === "number" ? window.usedPercent : undefined });
+        lines.push({
+          id: window.label ? `${window.kind}:${window.label}` : window.kind,
+          label: limitWindowLabel(window.kind, window.label),
+          value: parts.join(" · "),
+          percent: typeof window.usedPercent === "number" ? window.usedPercent : undefined,
+        });
       }
     }
     if (agentLimit.plan) {
@@ -1516,6 +1673,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // collapsed by default and refresh only when the user expands that section.
   const openOptionsMenu = (anchorEl: HTMLElement) => {
     setLimitOpen(false);
+    setOptionsMenuMaxHeight(Math.max(0, Math.floor(anchorEl.getBoundingClientRect().top - 12)));
     setModeMenuAnchor(anchorEl);
   };
 
@@ -1702,6 +1860,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               sx: {
                 boxShadow: "0 4px 12px rgba(0, 0, 0, 0.14)",
                 minWidth: 304,
+                maxHeight: optionsMenuMaxHeight,
+                overflowY: "auto",
               },
             },
             list: {
@@ -1733,6 +1893,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 </MenuItem>
               ))}
             </>
+          )}
+          {supportsAutoConfirm && (
+            <MenuItem onClick={() => onAutoConfirmChange?.(!autoConfirm)} sx={modeMenuItemSx}>
+              <AutoAwesomeRoundedIcon sx={{ fontSize: 15, color: "text.secondary" }} />
+              <Box component="span" sx={{ minWidth: 84 }}>{t("agentModeAutoConfirm")}</Box>
+              <Switch size="small" checked={autoConfirm} onChange={() => undefined} tabIndex={-1} sx={modeSwitchSx} />
+            </MenuItem>
           )}
           {showBrowserActivitySection && (
             <>
@@ -1960,6 +2127,53 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               </Stack>
             </Box>
           )}
+          {hasComposerPluginPreview && (
+            <Box
+              data-testid="composer-plugin-preview"
+              aria-hidden="true"
+              sx={{
+                position: "absolute",
+                left: expanded ? 8 : 0,
+                right: expanded ? 8 : 0,
+                top: expanded ? 6 : "50%",
+                transform: expanded ? "none" : "translateY(-50%)",
+                zIndex: expanded ? 6 : 1,
+                pointerEvents: "none",
+                display: "block",
+                minWidth: 0,
+                maxHeight: expanded ? "11.6em" : "1.45em",
+                overflow: "hidden",
+                color: "text.primary",
+                fontSize: "0.84rem",
+                lineHeight: 1.45,
+                whiteSpace: "pre-wrap",
+                overflowWrap: "anywhere",
+              }}
+            >
+              {composerPluginPreviewParts.map((part, index) =>
+                part.type === "plugin" ? (
+                  <Box
+                    key={`${part.token}-${index}`}
+                    component="span"
+                    sx={{
+                      display: "inline-flex",
+                      alignItems: "baseline",
+                      color: "primary.main",
+                      fontFamily: (theme) => theme.custom.fonts.mono,
+                      fontWeight: 700,
+                      textDecoration: "underline",
+                      textUnderlineOffset: 3,
+                    }}
+                  >
+                    <ExtensionOutlinedIcon sx={{ fontSize: 13, mr: 0.35, verticalAlign: "-0.15em" }} />
+                    {displayPluginToken(part.token)}
+                  </Box>
+                ) : (
+                  <Box key={`text-${index}`} component="span">{part.text}</Box>
+                ),
+              )}
+            </Box>
+          )}
           <InputBase
             inputRef={textareaRef}
             value={composerValue}
@@ -1976,6 +2190,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               fontSize: "0.84rem",
               lineHeight: 1.45,
               py: 0.25,
+              ...(hasComposerPluginPreview && {
+                "& .MuiInputBase-input": {
+                  color: "transparent",
+                  caretColor: (theme) => theme.palette.text.primary,
+                },
+              }),
               ...(expanded && {
                 position: "absolute",
                 left: 0,
@@ -1991,7 +2211,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               }),
             }}
           />
-          {voiceState === "recording" && <VoiceRecordingStrip label={voiceLabel} duration={voiceDuration} levels={voiceLevels} onLevelCountChange={setVoiceLevelCountForWidth} />}
+          {voiceState === "recording" && <VoiceRecordingStrip label={voiceLabel} duration={voiceDuration} levels={voiceLevels} ambient={voiceAmbient} onLevelCountChange={setVoiceLevelCountForWidth} />}
         </Box>
         <Stack direction="row" spacing={0.5} sx={{ alignItems: "center", flex: "0 0 auto" }}>
           {!running && !voiceInputActive ? (
@@ -2025,34 +2245,36 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               </span>
             </Tooltip>
           )}
-          {showAgentStopButton ? (
-            <IconButton
-              data-testid="composer-stop-button"
-              aria-label={t("stopRun")}
-              tone="danger"
-              onClick={onStop}
-              sx={{ width: 30, height: 30, borderRadius: (theme) => `${theme.custom.radii.md}px` }}
-            >
-              <StopCircleIcon sx={{ fontSize: 18 }} />
-            </IconButton>
-          ) : (
-            <Button
-              variant="contained"
-              onClick={() => void send()}
-              disabled={!canSend}
-              sx={{
-                height: 30,
-                width: 30,
-                minWidth: 30,
-                px: 0,
-                py: 0,
-                borderRadius: (t) => `${t.custom.radii.md}px`,
-              }}
-              aria-label={sendLabel}
-              data-testid="composer-send-button"
-            >
-              <SendIcon sx={{ fontSize: 16 }} />
-            </Button>
+          {!voiceInputActive && (
+            showAgentStopButton ? (
+              <IconButton
+                data-testid="composer-stop-button"
+                aria-label={t("stopRun")}
+                tone="danger"
+                onClick={onStop}
+                sx={{ width: 30, height: 30, borderRadius: (theme) => `${theme.custom.radii.md}px` }}
+              >
+                <StopCircleIcon sx={{ fontSize: 18 }} />
+              </IconButton>
+            ) : (
+              <Button
+                variant="contained"
+                onClick={() => void send()}
+                disabled={!canSend}
+                sx={{
+                  height: 30,
+                  width: 30,
+                  minWidth: 30,
+                  px: 0,
+                  py: 0,
+                  borderRadius: (t) => `${t.custom.radii.md}px`,
+                }}
+                aria-label={sendLabel}
+                data-testid="composer-send-button"
+              >
+                <SendIcon sx={{ fontSize: 16 }} />
+              </Button>
+            )
           )}
         </Stack>
       </Box>

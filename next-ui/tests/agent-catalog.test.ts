@@ -5,6 +5,7 @@ import {
   accessModeForAgentProfile,
   agentProfileLabels,
   getAgent,
+  normalizeAgentProfile,
   resolveAgentModeValue,
   resolveAgentModelValue,
   resolveAgentReasoningValue,
@@ -16,18 +17,34 @@ describe("agent catalog", () => {
     expect(resolveAgentModelValue("claude-code", "fable")).toBe("fable");
     expect(resolveAgentModelValue("gemini", "gemini-2.5-flash-lite")).toBe("gemini-2.5-flash-lite");
     expect(resolveAgentModelValue("opencode", DEFAULT_AGENT_OPTION_ID)).toBe("opencode/deepseek-v4-flash-free");
-    expect(resolveAgentModelValue("opencode", "anthropic-claude-opus-4-7")).toBe("anthropic/claude-opus-4-7");
+    expect(resolveAgentModelValue("opencode", "opencode-north-mini-code-free")).toBe("opencode/north-mini-code-free");
     expect(resolveAgentReasoningValue("codex", "xhigh")).toBe("xhigh");
   });
 
   it("exposes chat work modes for every runnable agent", () => {
     for (const agent of ["claude-code", "codex", "gemini", "opencode"] as const) {
-      expect(getAgent(agent).modes.map((option) => option.id)).toEqual(["default", "plan", "auto"]);
+      expect(getAgent(agent).modes.map((option) => option.id)).toEqual(["default", "plan"]);
     }
     expect(resolveAgentModeValue("codex", "plan")).toBe("plan");
-    expect(resolveAgentModeValue("gemini", "auto")).toBe("auto");
+    expect(resolveAgentModeValue("gemini", "auto")).toBeUndefined();
     expect(accessModeForAgentProfile({ agent: "codex", model: "default", reasoning: "default", mode: "plan" })).toBe("read-only");
-    expect(accessModeForAgentProfile({ agent: "codex", model: "default", reasoning: "default", mode: "auto" })).toBe("unrestricted");
+  });
+
+  it("converts legacy auto-confirm modes into the security toggle", () => {
+    expect(normalizeAgentProfile({ agent: "claude-code", model: "default", reasoning: "default", mode: "auto" })).toEqual({
+      agent: "claude-code",
+      model: "default",
+      reasoning: "default",
+      mode: "default",
+      autoConfirm: true,
+    });
+    expect(normalizeAgentProfile({ agent: "codex", model: "default", reasoning: "default", mode: "bypass-permissions" })).toEqual({
+      agent: "codex",
+      model: "default",
+      reasoning: "default",
+      mode: "default",
+      autoConfirm: true,
+    });
   });
 
   it("only exposes the four currently supported visible agents", () => {

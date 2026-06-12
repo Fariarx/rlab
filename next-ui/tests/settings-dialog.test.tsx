@@ -175,6 +175,39 @@ describe("SettingsDialog agent configuration", () => {
     expect(screen.getByTestId("voice-provider-none-icon")).toBeInTheDocument();
   });
 
+  it("marks cloud voice providers as alpha without marking disabled or browser providers", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL | Request) => {
+        const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+        if (path === "/api/agent-config" || path === "/api/voice-config") {
+          return Response.json(path === "/api/voice-config" ? { providers: {} } : { agents: {} });
+        }
+        return Response.json({});
+      }),
+    );
+
+    renderWithTheme(
+      <SettingsDialog
+        open
+        onClose={vi.fn()}
+        settings={defaultAppSettings}
+        onSettingsChange={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("tab", { name: "Голос" }));
+
+    const disabledCard = screen.getByText("No voice input").closest(".MuiStack-root");
+    const browserCard = screen.getByText("Browser Web Speech").closest(".MuiStack-root");
+    const openAiCard = screen.getByText("OpenAI Speech-to-Text").closest(".MuiStack-root");
+
+    expect(screen.getAllByText("Альфа-версия")).toHaveLength(5);
+    expect(disabledCard).not.toHaveTextContent("Альфа-версия");
+    expect(browserCard).not.toHaveTextContent("Альфа-версия");
+    expect(openAiCard).toHaveTextContent("Альфа-версия");
+  });
+
   it("reports a completed install request for unavailable agents", async () => {
     const fetch = vi.fn(async (url: string | URL | Request) => {
       const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;

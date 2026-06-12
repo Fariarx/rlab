@@ -23,6 +23,7 @@ type DatabaseHandle = InstanceType<typeof DatabaseSync>;
  */
 
 let db: DatabaseHandle | null = null;
+const WORKSPACE_REVISION_KEY = "workspaceRevision";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS projects (
@@ -92,6 +93,56 @@ function transaction(run: () => void): void {
   }
 }
 
+function readWorkspaceRevisionFromHandle(handle: DatabaseHandle): number {
+  const row = handle.prepare("SELECT value FROM kv WHERE key = ?").get(WORKSPACE_REVISION_KEY) as { value: string } | undefined;
+  if (!row) {
+    return 0;
+  }
+  try {
+    const parsed = JSON.parse(row.value) as unknown;
+    return typeof parsed === "number" && Number.isFinite(parsed) && parsed >= 0 ? Math.trunc(parsed) : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function writeWorkspaceRevision(handle: DatabaseHandle, revision: number): void {
+  handle
+    .prepare("INSERT INTO kv(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+    .run(WORKSPACE_REVISION_KEY, JSON.stringify(revision));
+}
+
+function bumpWorkspaceRevisionInTransaction(handle: DatabaseHandle): number {
+  const next = readWorkspaceRevisionFromHandle(handle) + 1;
+  writeWorkspaceRevision(handle, next);
+  return next;
+}
+
+/** Monotonic workspace version used by /api/workspace optimistic concurrency. */
+export function readWorkspaceRevision(): number {
+  return readWorkspaceRevisionFromHandle(database());
+}
+
+type ProjectMeta = Omit<Project, "conversations">;
+
+export type WorkspaceDbMutation =
+  | { readonly type: "setSelectedConversation"; readonly conversationId: string }
+  | { readonly type: "setSettings"; readonly settings: WorkspaceState["settings"] }
+  | { readonly type: "upsertProject"; readonly project: ProjectMeta; readonly insertAtFront?: boolean }
+  | { readonly type: "upsertConversation"; readonly conversation: ConversationSummary; readonly projectId: string | null; readonly insertAtFront?: boolean }
+  | { readonly type: "updateConversation"; readonly conversation: ConversationSummary }
+  | { readonly type: "deleteConversation"; readonly conversationId: string }
+  | { readonly type: "setComposerDraft"; readonly conversationId: string; readonly draft: ComposerDraft }
+  | { readonly type: "deleteComposerDraft"; readonly conversationId: string }
+  | { readonly type: "upsertMessage"; readonly conversationId: string; readonly message: ChatMessage }
+  | { readonly type: "upsertMessages"; readonly conversationId: string; readonly messages: readonly ChatMessage[] }
+  | { readonly type: "replaceConversationThread"; readonly conversationId: string; readonly messages: readonly ChatMessage[] };
+
+function projectMeta(project: Project): ProjectMeta {
+  const { conversations: _conversations, ...meta } = project;
+  return meta;
+}
+
 /** True once a workspace has been persisted — used to gate one-time import/seed. */
 export function workspaceDbHasState(): boolean {
   const row = database().prepare("SELECT EXISTS(SELECT 1 FROM kv WHERE key = 'settings') AS present").get() as { present: number };
@@ -135,13 +186,15 @@ export function readWorkspaceStateFromDb(includeThreadIds?: ReadonlySet<string>)
   return { chats: convsByProject.get(null) ?? [], projects, threads, composerDrafts, selectedId, settings };
 }
 
-/** Replace the entire persisted tree in one transaction. For full-state writes
- *  (UI PUT, seed, reconcile) — infrequent, so a full rewrite is fine; the hot
- *  streaming path uses the per-row upserts below instead. */
-export function writeWorkspaceStateToDb(state: WorkspaceState): void {
+/** Seed an empty database. This is intentionally insert-only and refuses to run
+ *  once a workspace exists; normal app writes must use WorkspaceDbMutation. */
+export function initializeWorkspaceStateInDb(state: WorkspaceState): number {
   const handle = database();
+  if (workspaceDbHasState()) {
+    throw new Error("Refusing to initialize a workspace database that already has state.");
+  }
+  const nextRevision = readWorkspaceRevisionFromHandle(handle) + 1;
   transaction(() => {
-    handle.exec("DELETE FROM projects; DELETE FROM conversations; DELETE FROM messages; DELETE FROM composer_drafts; DELETE FROM kv;");
     const insProject = handle.prepare("INSERT INTO projects(id, position, data) VALUES(?, ?, ?)");
     const insConv = handle.prepare("INSERT INTO conversations(id, project_id, position, data) VALUES(?, ?, ?, ?)");
     const insMsg = handle.prepare("INSERT INTO messages(id, conversation_id, position, data) VALUES(?, ?, ?, ?)");
@@ -161,7 +214,139 @@ export function writeWorkspaceStateToDb(state: WorkspaceState): void {
     }
     insKv.run("selectedId", JSON.stringify(state.selectedId));
     insKv.run("settings", JSON.stringify(state.settings));
+    writeWorkspaceRevision(handle, nextRevision);
   });
+  return nextRevision;
+}
+
+function projectWhere(projectId: string | null): string {
+  return projectId === null ? "project_id IS NULL" : "project_id = ?";
+}
+
+function projectParams(projectId: string | null): readonly string[] {
+  return projectId === null ? [] : [projectId];
+}
+
+function nextConversationPosition(handle: DatabaseHandle, projectId: string | null): number {
+  return (handle.prepare(`SELECT COALESCE(MAX(position), -1) + 1 AS next FROM conversations WHERE ${projectWhere(projectId)}`).get(...projectParams(projectId)) as { next: number }).next;
+}
+
+function shiftConversationPositionsForFrontInsert(handle: DatabaseHandle, projectId: string | null): void {
+  handle.prepare(`UPDATE conversations SET position = position + 1 WHERE ${projectWhere(projectId)}`).run(...projectParams(projectId));
+}
+
+function upsertProjectInTransaction(handle: DatabaseHandle, project: ProjectMeta, insertAtFront = false): void {
+  const existing = handle.prepare("SELECT position FROM projects WHERE id = ?").get(project.id) as { position: number } | undefined;
+  if (existing) {
+    handle.prepare("UPDATE projects SET data = ? WHERE id = ?").run(JSON.stringify(project), project.id);
+    return;
+  }
+  if (insertAtFront) {
+    handle.prepare("UPDATE projects SET position = position + 1").run();
+  }
+  const position = insertAtFront ? 0 : (handle.prepare("SELECT COALESCE(MAX(position), -1) + 1 AS next FROM projects").get() as { next: number }).next;
+  handle.prepare("INSERT INTO projects(id, position, data) VALUES(?, ?, ?)").run(project.id, position, JSON.stringify(project));
+}
+
+function upsertConversationInTransaction(handle: DatabaseHandle, conversation: ConversationSummary, projectId: string | null, insertAtFront = false): void {
+  const existing = handle.prepare("SELECT project_id AS projectId, position FROM conversations WHERE id = ?").get(conversation.id) as { projectId: string | null; position: number } | undefined;
+  if (existing && existing.projectId === projectId) {
+    handle.prepare("UPDATE conversations SET data = ? WHERE id = ?").run(JSON.stringify(conversation), conversation.id);
+    return;
+  }
+  if (existing) {
+    handle.prepare("DELETE FROM conversations WHERE id = ?").run(conversation.id);
+  }
+  if (insertAtFront) {
+    shiftConversationPositionsForFrontInsert(handle, projectId);
+  }
+  const position = insertAtFront ? 0 : nextConversationPosition(handle, projectId);
+  handle.prepare("INSERT INTO conversations(id, project_id, position, data) VALUES(?, ?, ?, ?)").run(conversation.id, projectId, position, JSON.stringify(conversation));
+}
+
+function updateConversationInTransaction(handle: DatabaseHandle, conversation: ConversationSummary): void {
+  const result = handle.prepare("UPDATE conversations SET data = ? WHERE id = ?").run(JSON.stringify(conversation), conversation.id);
+  if (result.changes === 0) {
+    throw new Error(`Conversation ${conversation.id} does not exist.`);
+  }
+}
+
+function upsertMessageInTransaction(handle: DatabaseHandle, conversationId: string, message: ChatMessage): void {
+  const existing = handle.prepare("SELECT position FROM messages WHERE id = ?").get(message.id) as { position: number } | undefined;
+  const position = existing
+    ? existing.position
+    : (handle.prepare("SELECT COALESCE(MAX(position), -1) + 1 AS next FROM messages WHERE conversation_id = ?").get(conversationId) as { next: number }).next;
+  handle
+    .prepare("INSERT INTO messages(id, conversation_id, position, data) VALUES(?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET conversation_id = excluded.conversation_id, data = excluded.data")
+    .run(message.id, conversationId, position, JSON.stringify(message));
+}
+
+function replaceConversationThreadInTransaction(handle: DatabaseHandle, conversationId: string, messages: readonly ChatMessage[]): void {
+  handle.prepare("DELETE FROM messages WHERE conversation_id = ?").run(conversationId);
+  const insMsg = handle.prepare("INSERT INTO messages(id, conversation_id, position, data) VALUES(?, ?, ?, ?)");
+  messages.forEach((message, index) => insMsg.run(message.id, conversationId, index, JSON.stringify(message)));
+}
+
+export function applyWorkspaceDbMutations(mutations: readonly WorkspaceDbMutation[]): number {
+  const handle = database();
+  let nextRevision = readWorkspaceRevisionFromHandle(handle);
+  if (mutations.length === 0) {
+    return nextRevision;
+  }
+  transaction(() => {
+    for (const mutation of mutations) {
+      switch (mutation.type) {
+        case "setSelectedConversation":
+          handle.prepare("INSERT INTO kv(key, value) VALUES('selectedId', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(JSON.stringify(mutation.conversationId));
+          if (mutation.conversationId) {
+            const row = handle.prepare("SELECT data FROM conversations WHERE id = ?").get(mutation.conversationId) as { data: string } | undefined;
+            if (row) {
+              const conversation = JSON.parse(row.data) as ConversationSummary;
+              updateConversationInTransaction(handle, { ...conversation, unread: false });
+            }
+          }
+          break;
+        case "setSettings":
+          handle.prepare("INSERT INTO kv(key, value) VALUES('settings', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(JSON.stringify(mutation.settings));
+          break;
+        case "upsertProject":
+          upsertProjectInTransaction(handle, mutation.project, mutation.insertAtFront);
+          break;
+        case "upsertConversation":
+          upsertConversationInTransaction(handle, mutation.conversation, mutation.projectId, mutation.insertAtFront);
+          break;
+        case "updateConversation":
+          updateConversationInTransaction(handle, mutation.conversation);
+          break;
+        case "deleteConversation":
+          handle.prepare("DELETE FROM conversations WHERE id = ?").run(mutation.conversationId);
+          handle.prepare("DELETE FROM messages WHERE conversation_id = ?").run(mutation.conversationId);
+          handle.prepare("DELETE FROM composer_drafts WHERE conversation_id = ?").run(mutation.conversationId);
+          break;
+        case "setComposerDraft":
+          handle
+            .prepare("INSERT INTO composer_drafts(conversation_id, data) VALUES(?, ?) ON CONFLICT(conversation_id) DO UPDATE SET data = excluded.data")
+            .run(mutation.conversationId, JSON.stringify(mutation.draft));
+          break;
+        case "deleteComposerDraft":
+          handle.prepare("DELETE FROM composer_drafts WHERE conversation_id = ?").run(mutation.conversationId);
+          break;
+        case "upsertMessage":
+          upsertMessageInTransaction(handle, mutation.conversationId, mutation.message);
+          break;
+        case "upsertMessages":
+          for (const message of mutation.messages) {
+            upsertMessageInTransaction(handle, mutation.conversationId, message);
+          }
+          break;
+        case "replaceConversationThread":
+          replaceConversationThreadInTransaction(handle, mutation.conversationId, mutation.messages);
+          break;
+      }
+    }
+    nextRevision = bumpWorkspaceRevisionInTransaction(handle);
+  });
+  return nextRevision;
 }
 
 /** Blocks of a single agent message, for the streaming merge (hot path). */
@@ -181,13 +366,10 @@ export function readMessage(messageId: string): ChatMessage | undefined {
  *  end of their conversation; existing ones update in place. */
 export function upsertMessage(conversationId: string, message: ChatMessage): void {
   const handle = database();
-  const existing = handle.prepare("SELECT position FROM messages WHERE id = ?").get(message.id) as { position: number } | undefined;
-  const position = existing
-    ? existing.position
-    : (handle.prepare("SELECT COALESCE(MAX(position), -1) + 1 AS next FROM messages WHERE conversation_id = ?").get(conversationId) as { next: number }).next;
-  handle
-    .prepare("INSERT INTO messages(id, conversation_id, position, data) VALUES(?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET conversation_id = excluded.conversation_id, data = excluded.data")
-    .run(message.id, conversationId, position, JSON.stringify(message));
+  transaction(() => {
+    upsertMessageInTransaction(handle, conversationId, message);
+    bumpWorkspaceRevisionInTransaction(handle);
+  });
 }
 
 /** Upsert a bound agent reply immediately after its user message. Any stale
@@ -229,6 +411,7 @@ export function upsertAgentMessageForUserTurn(conversationId: string, userMessag
       }
     }
     handle.prepare("INSERT INTO messages(id, conversation_id, position, data) VALUES(?, ?, ?, ?)").run(message.id, conversationId, userRow.position + 1, JSON.stringify(message));
+    bumpWorkspaceRevisionInTransaction(handle);
   });
 }
 
@@ -241,7 +424,11 @@ export function readConversation(conversationId: string): ConversationSummary | 
 
 /** Update a single conversation's summary in place (keeps its position/project). */
 export function updateConversationData(conversation: ConversationSummary): void {
-  database().prepare("UPDATE conversations SET data = ? WHERE id = ?").run(JSON.stringify(conversation), conversation.id);
+  const handle = database();
+  transaction(() => {
+    updateConversationInTransaction(handle, conversation);
+    bumpWorkspaceRevisionInTransaction(handle);
+  });
 }
 
 /** The persisted selected conversation id (so the client shell can ship its
@@ -256,42 +443,6 @@ export function readThreadFromDb(conversationId: string): ChatMessage[] {
   return (database().prepare("SELECT data FROM messages WHERE conversation_id = ? ORDER BY position").all(conversationId) as Array<{ data: string }>).map(
     (row) => JSON.parse(row.data) as ChatMessage,
   );
-}
-
-/** Write the shell (projects/conversations/composer_drafts/kv) in full, replace
- *  messages only for the threads PRESENT in `state.threads`, and PRESERVE threads
- *  the caller didn't include (the client only holds lazily-loaded ones). Messages
- *  of conversations that no longer exist in the shell are dropped. Used by the
- *  client `PUT /api/workspace` so a partial client never clobbers unopened chats. */
-export function writeWorkspaceShellPreservingThreads(state: WorkspaceState): void {
-  const handle = database();
-  transaction(() => {
-    handle.exec("DELETE FROM projects; DELETE FROM conversations; DELETE FROM composer_drafts; DELETE FROM kv;");
-    const insProject = handle.prepare("INSERT INTO projects(id, position, data) VALUES(?, ?, ?)");
-    const insConv = handle.prepare("INSERT INTO conversations(id, project_id, position, data) VALUES(?, ?, ?, ?)");
-    const insDraft = handle.prepare("INSERT INTO composer_drafts(conversation_id, data) VALUES(?, ?)");
-    const insKv = handle.prepare("INSERT INTO kv(key, value) VALUES(?, ?)");
-    state.chats.forEach((conversation, index) => insConv.run(conversation.id, null, index, JSON.stringify(conversation)));
-    state.projects.forEach((project, projectIndex) => {
-      const { conversations, ...meta } = project;
-      insProject.run(project.id, projectIndex, JSON.stringify(meta));
-      conversations.forEach((conversation, index) => insConv.run(conversation.id, project.id, index, JSON.stringify(conversation)));
-    });
-    for (const [conversationId, draft] of Object.entries(state.composerDrafts)) {
-      insDraft.run(conversationId, JSON.stringify(draft));
-    }
-    insKv.run("selectedId", JSON.stringify(state.selectedId));
-    insKv.run("settings", JSON.stringify(state.settings));
-    const delMsgs = handle.prepare("DELETE FROM messages WHERE conversation_id = ?");
-    const insMsg = handle.prepare("INSERT INTO messages(id, conversation_id, position, data) VALUES(?, ?, ?, ?)");
-    for (const [conversationId, messages] of Object.entries(state.threads)) {
-      delMsgs.run(conversationId);
-      messages.forEach((message, index) => insMsg.run(message.id, conversationId, index, JSON.stringify(message)));
-    }
-    // Drop messages whose conversation was deleted (not in the new shell), while
-    // leaving lazily-unloaded threads (their conversation IS still in the shell).
-    handle.exec("DELETE FROM messages WHERE conversation_id NOT IN (SELECT id FROM conversations)");
-  });
 }
 
 export function closeWorkspaceDb(): void {

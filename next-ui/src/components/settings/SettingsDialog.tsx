@@ -6,7 +6,7 @@ import OpenInBrowserIcon from "@mui/icons-material/OpenInBrowser";
 import KeyboardVoiceIcon from "@mui/icons-material/KeyboardVoice";
 import MicOffOutlinedIcon from "@mui/icons-material/MicOffOutlined";
 import VpnKeyOutlinedIcon from "@mui/icons-material/VpnKeyOutlined";
-import { Alert, Box, Dialog, Divider, Popover, Radio, Stack, Switch, Tab, Tabs, TextField, ToggleButton, ToggleButtonGroup, Tooltip, Typography, type SxProps, type Theme } from "@mui/material";
+import { Alert, Box, Chip, Dialog, Divider, Popover, Radio, Stack, Switch, Tab, Tabs, TextField, ToggleButton, ToggleButtonGroup, Tooltip, Typography, type SxProps, type Theme } from "@mui/material";
 import { type ReactNode, useCallback, useEffect, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import type { AppSettings, AppSettingsPatch, DensityMode, Locale, ThemeMode } from "../workspace/app-settings";
@@ -786,9 +786,28 @@ function VoiceSection({ settings, onSettingsChange, onVoiceConfigChange }: Pick<
               )}
             </Box>
             <Box sx={{ flex: 1, minWidth: 0 }}>
-              <Typography noWrap sx={{ fontSize: "0.85rem", fontWeight: 600, color: "text.primary" }}>
-                {provider.name}
-              </Typography>
+              <Stack direction="row" spacing={0.75} sx={{ alignItems: "center", minWidth: 0 }}>
+                <Typography noWrap sx={{ fontSize: "0.85rem", fontWeight: 600, color: "text.primary" }}>
+                  {provider.name}
+                </Typography>
+                {provider.kind === "cloud" && (
+                  <Chip
+                    label={t("alphaVersion")}
+                    size="small"
+                    sx={{
+                      flex: "0 0 auto",
+                      height: 20,
+                      borderRadius: (theme) => `${theme.custom.radii.pill}px`,
+                      border: (theme) => `1px solid ${theme.palette.status.warn.border}`,
+                      backgroundColor: (theme) => theme.palette.status.warn.soft,
+                      color: (theme) => theme.palette.status.warn.main,
+                      fontSize: "0.64rem",
+                      fontWeight: 700,
+                      "& .MuiChip-label": { px: 0.75 },
+                    }}
+                  />
+                )}
+              </Stack>
               <Stack direction="row" spacing={0.75} sx={{ alignItems: "center" }}>
                 <StatusDot status={status} label={statusLabel} size="sm" pulse={false} />
                 <Typography noWrap sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.7rem", color: "text.secondary" }}>

@@ -1,4 +1,4 @@
-import { type IReactionDisposer, makeAutoObservable, reaction, runInAction } from "mobx";
+import { makeAutoObservable, reaction, runInAction } from "mobx";
 import { useEffect, useState } from "react";
 import { accessModeForAgentProfile, compactCommandForAgent, normalizeAgentProfile, type AgentBlock, type AgentId, type AgentProfile, type ApprovalDecision, type ChatMessage, type CompactionSettings, type ComposerDraft, type ConversationStatus, type ConversationSummary, type ConversationView, type Project, type ReviewCommentEntry } from "../agent";
 import { translate } from "../../i18n/I18nProvider";
@@ -67,11 +67,29 @@ async function loadWorkspaceState(): Promise<WorkspaceState> {
   return (await response.json()) as WorkspaceState;
 }
 
-async function saveWorkspaceState(state: WorkspaceState): Promise<void> {
-  const response = await fetch("/api/workspace", {
-    method: "PUT",
+type ProjectMeta = Omit<Project, "conversations">;
+
+type WorkspaceMutation =
+  | { readonly type: "setSelectedConversation"; readonly conversationId: string }
+  | { readonly type: "setSettings"; readonly settings: AppSettings }
+  | { readonly type: "upsertProject"; readonly project: ProjectMeta; readonly insertAtFront?: boolean }
+  | { readonly type: "upsertConversation"; readonly conversation: ConversationSummary; readonly projectId: string | null; readonly insertAtFront?: boolean }
+  | { readonly type: "updateConversation"; readonly conversation: ConversationSummary }
+  | { readonly type: "deleteConversation"; readonly conversationId: string }
+  | { readonly type: "setComposerDraft"; readonly conversationId: string; readonly draft: ComposerDraft }
+  | { readonly type: "deleteComposerDraft"; readonly conversationId: string }
+  | { readonly type: "upsertMessage"; readonly conversationId: string; readonly message: ChatMessage }
+  | { readonly type: "upsertMessages"; readonly conversationId: string; readonly messages: readonly ChatMessage[] }
+  | { readonly type: "replaceConversationThread"; readonly conversationId: string; readonly messages: readonly ChatMessage[] };
+
+async function saveWorkspaceMutations(mutations: readonly WorkspaceMutation[]): Promise<void> {
+  if (mutations.length === 0) {
+    return;
+  }
+  const response = await fetch("/api/workspace/mutations", {
+    method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(state),
+    body: JSON.stringify({ mutations }),
   });
   if (!response.ok) {
     throw new Error(await responseErrorMessage(response, `Workspace save failed (${response.status})`));
@@ -84,6 +102,15 @@ function findConversation(state: WorkspaceState, id: string): ConversationSummar
 
 function workspaceConversations(state: WorkspaceState): ConversationSummary[] {
   return [...state.chats, ...state.projects.flatMap((project) => project.conversations)];
+}
+
+function projectMeta(project: Project): ProjectMeta {
+  const { conversations: _conversations, ...meta } = project;
+  return meta;
+}
+
+function projectIdForConversation(state: WorkspaceState, conversationId: string): string | null {
+  return state.projects.find((project) => project.conversations.some((conversation) => conversation.id === conversationId))?.id ?? null;
 }
 
 /** The attachment-block portion of a sent user message (inline text-file blocks
@@ -519,19 +546,15 @@ class WorkspaceStore implements Workspace {
 
   private loadSeq = 0;
 
-  private saveDisposer: IReactionDisposer | null = null;
-
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
 
   private saveRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
-  private pendingSaveState: WorkspaceState | null = null;
+  private pendingMutations: WorkspaceMutation[] = [];
 
   private pendingSaveUrgent = false;
 
   private saveInFlight = false;
-
-  private inFlightSaveState: WorkspaceState | null = null;
 
   private pollTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -562,13 +585,11 @@ class WorkspaceStore implements Workspace {
       | "hydrated"
       | "loadSeq"
       | "runs"
-      | "saveDisposer"
       | "saveTimer"
       | "saveRetryTimer"
-      | "pendingSaveState"
+      | "pendingMutations"
       | "pendingSaveUrgent"
       | "saveInFlight"
-      | "inFlightSaveState"
       | "pollTimer"
       | "loadRetryTimer"
       | "skipNextSave"
@@ -582,13 +603,11 @@ class WorkspaceStore implements Workspace {
         hydrated: false,
         loadSeq: false,
         runs: false,
-        saveDisposer: false,
         saveTimer: false,
         saveRetryTimer: false,
-        pendingSaveState: false,
+        pendingMutations: false,
         pendingSaveUrgent: false,
         saveInFlight: false,
-        inFlightSaveState: false,
         pollTimer: false,
         loadRetryTimer: false,
         skipNextSave: false,
@@ -689,21 +708,6 @@ class WorkspaceStore implements Workspace {
   }
 
   mount(): void {
-    if (!this.saveDisposer) {
-      this.saveDisposer = reaction(
-        () => this.state,
-        (state) => {
-          if (!this.hydrated) {
-            return;
-          }
-          if (this.skipNextSave) {
-            this.skipNextSave = false;
-            return;
-          }
-          this.scheduleSave(state);
-        },
-      );
-    }
     if (!this.pollTimer) {
       this.pollTimer = setInterval(() => {
         if (this.hydrated && !this.loading) {
@@ -723,8 +727,6 @@ class WorkspaceStore implements Workspace {
 
   unmount(): void {
     this.loadSeq += 1;
-    this.saveDisposer?.();
-    this.saveDisposer = null;
     void this.flushPendingSave();
     for (const run of this.runs.values()) {
       run.controller.abort();
@@ -764,44 +766,21 @@ class WorkspaceStore implements Workspace {
     }, WORKSPACE_SAVE_RETRY_MS);
   }
 
-  private scheduleSave(state: WorkspaceState): void {
-    if (this.pendingSaveState === state || (this.saveInFlight && this.inFlightSaveState === state)) {
+  private enqueueMutations(...mutations: WorkspaceMutation[]): void {
+    if (mutations.length === 0) {
       return;
     }
-    this.pendingSaveState = state;
+    this.pendingMutations.push(...mutations);
     this.startSaveTimer();
   }
 
   private persistCurrentStateNow(): void {
-    this.pendingSaveState = this.state;
     this.pendingSaveUrgent = true;
     void this.flushPendingSave();
   }
 
   private markThreadDirty(id: string): void {
     this.dirtyThreadVersions.set(id, ++this.nextDirtyThreadVersion);
-  }
-
-  /** Build the PUT body, persisting ONLY threads we hold in full. A partial
-   *  thread (lazily not yet loaded, or freshly populated by a run before its
-   *  history arrived) must never be sent — the server replaces threads it
-   *  receives, so a partial one would delete the unopened history. Omitted
-   *  threads are preserved server-side; run messages persist via the run binding.
-   *
-   *  Shell-only mutations (create/delete/rename/select) must not resend a huge
-   *  selected thread: under CPU pressure that made tiny UI actions depend on a
-   *  multi-MB PUT and they could vanish after reload if the request hit 502. */
-  private putPayload(state: WorkspaceState): { readonly state: WorkspaceState; readonly threadVersions: ReadonlyMap<string, number> } {
-    const threads: Record<string, ChatMessage[]> = {};
-    const threadVersions = new Map<string, number>();
-    for (const [id, version] of this.dirtyThreadVersions) {
-      const messages = state.threads[id];
-      if (messages && this.fullyLoadedThreadIds.has(id)) {
-        threads[id] = messages;
-        threadVersions.set(id, version);
-      }
-    }
-    return { state: { ...state, threads }, threadVersions };
   }
 
   private async flushPendingSave(): Promise<void> {
@@ -817,24 +796,17 @@ class WorkspaceStore implements Workspace {
       this.pendingSaveUrgent = true;
       return;
     }
-    const state = this.pendingSaveState;
-    if (!state) {
+    if (this.pendingMutations.length === 0) {
       return;
     }
-    this.pendingSaveState = null;
+    const mutations = this.pendingMutations;
+    this.pendingMutations = [];
     this.pendingSaveUrgent = false;
     this.saveInFlight = true;
-    this.inFlightSaveState = state;
     let saveFailed = false;
-    const payload = this.putPayload(state);
     try {
-      await saveWorkspaceState(payload.state);
+      await saveWorkspaceMutations(mutations);
       runInAction(() => {
-        for (const [id, version] of payload.threadVersions) {
-          if (this.dirtyThreadVersions.get(id) === version) {
-            this.dirtyThreadVersions.delete(id);
-          }
-        }
         if (this.loadError?.startsWith("Workspace save failed")) {
           this.loadError = null;
         }
@@ -844,15 +816,14 @@ class WorkspaceStore implements Workspace {
       runInAction(() => {
         const message = error instanceof Error ? error.message : String(error);
         this.loadError = message.startsWith("Workspace save failed") ? message : `Workspace save failed: ${message}`;
-        this.pendingSaveState = this.pendingSaveState ?? state;
+        this.pendingMutations = [...mutations, ...this.pendingMutations];
         this.pendingSaveUrgent = false;
         this.startSaveRetryTimer();
       });
     } finally {
       runInAction(() => {
         this.saveInFlight = false;
-        this.inFlightSaveState = null;
-        if (this.pendingSaveState) {
+        if (this.pendingMutations.length > 0) {
           if (this.pendingSaveUrgent) {
             void this.flushPendingSave();
           } else if (!saveFailed) {
@@ -1140,12 +1111,15 @@ class WorkspaceStore implements Workspace {
       return patchConversation({ ...current, selectedId: id }, id, { unread: false });
     });
     if (selected) {
+      this.enqueueMutations({ type: "setSelectedConversation", conversationId: id });
       void this.loadThread(id);
     }
   }
 
   newChat(profile: AgentProfile): string {
     const id = nextId("chat");
+    const thread = starterThread();
+    let conversation: ConversationSummary | null = null;
     this.fullyLoadedThreadIds.add(id);
     this.setState((current) => {
       const locale = current.settings.general.locale;
@@ -1158,14 +1132,22 @@ class WorkspaceStore implements Workspace {
         agent: profile.agent,
         profile,
       };
+      conversation = conv;
       return {
         ...current,
         chats: [conv, ...current.chats],
-        threads: { ...current.threads, [id]: starterThread() },
+        threads: { ...current.threads, [id]: thread },
         selectedId: id,
       };
     });
-    this.persistCurrentStateNow();
+    if (conversation) {
+      this.enqueueMutations(
+        { type: "upsertConversation", conversation, projectId: null, insertAtFront: true },
+        { type: "upsertMessages", conversationId: id, messages: thread },
+        { type: "setSelectedConversation", conversationId: id },
+      );
+      this.persistCurrentStateNow();
+    }
     return id;
   }
 
@@ -1180,6 +1162,7 @@ class WorkspaceStore implements Workspace {
     }
     const projectId = projectIdFromName(name);
     const conversationId = nextId("chat");
+    const thread = starterThread();
     this.fullyLoadedThreadIds.add(conversationId);
     const conversation: ConversationSummary = {
       id: conversationId,
@@ -1198,10 +1181,16 @@ class WorkspaceStore implements Workspace {
       return {
         ...current,
         projects: [project, ...current.projects],
-        threads: { ...current.threads, [conversationId]: starterThread() },
+        threads: { ...current.threads, [conversationId]: thread },
         selectedId: conversationId,
       };
     });
+    this.enqueueMutations(
+      { type: "upsertProject", project: { id: projectId, name, path }, insertAtFront: true },
+      { type: "upsertConversation", conversation, projectId, insertAtFront: true },
+      { type: "upsertMessages", conversationId, messages: thread },
+      { type: "setSelectedConversation", conversationId },
+    );
     this.persistCurrentStateNow();
     return { projectId, conversationId };
   }
@@ -1212,6 +1201,8 @@ class WorkspaceStore implements Workspace {
       throw new Error(`Project ${projectId} was not found.`);
     }
     const id = nextId("chat");
+    const thread = starterThread();
+    let conversation: ConversationSummary | null = null;
     this.fullyLoadedThreadIds.add(id);
     this.setState((current) => {
       const locale = current.settings.general.locale;
@@ -1224,14 +1215,22 @@ class WorkspaceStore implements Workspace {
         agent: profile.agent,
         profile,
       };
+      conversation = conv;
       return {
         ...current,
         projects: current.projects.map((item) => (item.id === projectId ? { ...item, conversations: [conv, ...item.conversations] } : item)),
-        threads: { ...current.threads, [id]: starterThread() },
+        threads: { ...current.threads, [id]: thread },
         selectedId: id,
       };
     });
-    this.persistCurrentStateNow();
+    if (conversation) {
+      this.enqueueMutations(
+        { type: "upsertConversation", conversation, projectId, insertAtFront: true },
+        { type: "upsertMessages", conversationId: id, messages: thread },
+        { type: "setSelectedConversation", conversationId: id },
+      );
+      this.persistCurrentStateNow();
+    }
     return id;
   }
 
@@ -1268,6 +1267,13 @@ class WorkspaceStore implements Workspace {
       selectedId: current.selectedId === id ? "" : current.selectedId,
     }));
     this.markThreadDirty(id);
+    const conversation = this.find(id);
+    if (conversation) {
+      this.enqueueMutations({ type: "updateConversation", conversation });
+    }
+    if (!this.selectedId) {
+      this.enqueueMutations({ type: "setSelectedConversation", conversationId: "" });
+    }
     this.persistCurrentStateNow();
   }
 
@@ -1299,6 +1305,7 @@ class WorkspaceStore implements Workspace {
       };
     });
     this.dirtyThreadVersions.delete(id);
+    this.enqueueMutations({ type: "deleteConversation", conversationId: id }, { type: "setSelectedConversation", conversationId: nextSelectedId });
     this.persistCurrentStateNow();
     if (nextSelectedId) {
       void this.loadThread(nextSelectedId);
@@ -1319,6 +1326,11 @@ class WorkspaceStore implements Workspace {
       ),
     );
     this.markThreadDirty(id);
+    const conversation = this.find(id);
+    if (conversation) {
+      this.enqueueMutations({ type: "updateConversation", conversation });
+    }
+    this.enqueueMutations({ type: "upsertMessage", conversationId: id, message: userMsg });
     // If the agent is still working, queue this turn instead of cancelling it —
     // it dispatches automatically when the current run settles (see drainPendingMessages).
     if (this.runs.has(id)) {
@@ -1377,6 +1389,10 @@ class WorkspaceStore implements Workspace {
       };
       return patchConversation(current, id, { compaction: Object.keys(cleaned).length > 0 ? cleaned : undefined });
     });
+    const conversation = this.find(id);
+    if (conversation) {
+      this.enqueueMutations({ type: "updateConversation", conversation });
+    }
     this.persistCurrentStateNow();
   }
 
@@ -1421,6 +1437,10 @@ class WorkspaceStore implements Workspace {
       threads: { ...current.threads, [id]: [...(current.threads[id] ?? []), userMsg] },
     }));
     this.markThreadDirty(id);
+    const conversation = this.find(id);
+    if (conversation) {
+      this.enqueueMutations({ type: "updateConversation", conversation }, { type: "upsertMessage", conversationId: id, message: userMsg });
+    }
     this.runTurn(id, userMsg, { promptOverride: compactCommandForAgent(profile.agent), initialContextTokens: 0 });
     return true;
   }
@@ -1437,6 +1457,8 @@ class WorkspaceStore implements Workspace {
       threads: { ...current.threads, [id]: [...(current.threads[id] ?? []), message] },
     }));
     this.markThreadDirty(id);
+    this.enqueueMutations({ type: "upsertMessage", conversationId: id, message });
+    this.persistCurrentStateNow();
   }
 
   /** Run (or re-run) the agent for an existing user message in the thread.
@@ -1488,6 +1510,10 @@ class WorkspaceStore implements Workspace {
     };
     const conversationPatch = isDefaultTitle ? { ...runningPatch, title: truncate(text, 40) } : runningPatch;
     this.setState((current) => patchConversation(current, id, conversationPatch));
+    const runningConversation = this.find(id);
+    if (runningConversation) {
+      this.enqueueMutations({ type: "updateConversation", conversation: runningConversation });
+    }
     this.persistCurrentStateNow();
 
     const aId = nextId("a");
@@ -1504,9 +1530,11 @@ class WorkspaceStore implements Workspace {
       return { ...current, threads: { ...current.threads, [id]: upsertAgentMessageForUserTurn(arr, userMsg.id, { id: aId, role: "agent", time: agentTime, startedAtMs: agentStartedAtMs, profile, blocks: [] }) } };
     });
     this.markThreadDirty(id);
+    this.enqueueMutations({ type: "upsertMessage", conversationId: id, message: { id: aId, role: "agent", time: agentTime, startedAtMs: agentStartedAtMs, profile, blocks: [] } });
     const applyBlocks = (blocks: AgentBlock[]) => {
       let shouldFlush = false;
       let shouldPersistBlocks = true;
+      let persistedMessage: ChatMessage | null = null;
       this.setState((current) => {
         const arr = current.threads[id] ?? [];
         const previousBlocks = arr.find((m) => m.id === aId)?.blocks;
@@ -1518,6 +1546,7 @@ class WorkspaceStore implements Workspace {
         }
         shouldFlush = needsInput || blocksHaveStatus(mergedBlocks);
         const message: ChatMessage = { id: aId, role: "agent", time: agentTime, startedAtMs: agentStartedAtMs, profile, blocks: mergedBlocks };
+        persistedMessage = message;
         const nextState = {
           ...current,
           threads: {
@@ -1537,6 +1566,13 @@ class WorkspaceStore implements Workspace {
       });
       if (shouldPersistBlocks) {
         this.markThreadDirty(id);
+        if (persistedMessage) {
+          this.enqueueMutations({ type: "upsertMessage", conversationId: id, message: persistedMessage });
+        }
+        const conversation = this.find(id);
+        if (conversation && (shouldFlush || conversation.status === "waiting")) {
+          this.enqueueMutations({ type: "updateConversation", conversation });
+        }
       }
       if (shouldFlush) {
         this.persistCurrentStateNow();
@@ -1571,6 +1607,10 @@ class WorkspaceStore implements Workspace {
         // Persist the native session id for this agent branch so switching away
         // and back can resume it without replaying the transcript.
         this.setState((current) => patchConversationAgentSession(current, id, profile.agent, sessionId));
+        const conversation = this.find(id);
+        if (conversation) {
+          this.enqueueMutations({ type: "updateConversation", conversation });
+        }
         this.persistCurrentStateNow();
       },
       onBlocks: applyBlocks,
@@ -1586,12 +1626,25 @@ class WorkspaceStore implements Workspace {
           return patchAgentMessageUsage(withConversation, id, aId, result);
         });
         this.markThreadDirty(id);
+        const conversation = this.find(id);
+        const message = this.state.threads[id]?.find((item) => item.id === aId);
+        if (conversation) {
+          this.enqueueMutations({ type: "updateConversation", conversation });
+        }
+        if (message) {
+          this.enqueueMutations({ type: "upsertMessage", conversationId: id, message });
+        }
         this.persistCurrentStateNow();
       })
       .catch(() => {
         if (!runHandle.canceled) {
           this.setState((current) => patchConversation(settleThreadLiveBlocks(current, id), id, { activeRunId: undefined, status: "error", snippet: translate(current.settings.general.locale, "runFailedSnippet") }));
           this.markThreadDirty(id);
+          const conversation = this.find(id);
+          if (conversation) {
+            this.enqueueMutations({ type: "updateConversation", conversation });
+          }
+          this.enqueueMutations({ type: "replaceConversationThread", conversationId: id, messages: this.state.threads[id] ?? [] });
           this.persistCurrentStateNow();
         }
       })
@@ -1639,6 +1692,11 @@ class WorkspaceStore implements Workspace {
       });
     });
     this.markThreadDirty(id);
+    const conversation = this.find(id);
+    if (conversation) {
+      this.enqueueMutations({ type: "updateConversation", conversation });
+    }
+    this.enqueueMutations({ type: "replaceConversationThread", conversationId: id, messages: this.state.threads[id] ?? [] });
     this.persistCurrentStateNow();
   }
 
@@ -1666,6 +1724,7 @@ class WorkspaceStore implements Workspace {
     // it in place — no duplicate user turn.
     this.setState((current) => ({ ...current, threads: { ...current.threads, [id]: thread.slice(0, userIndex + 1) } }));
     this.markThreadDirty(id);
+    this.enqueueMutations({ type: "replaceConversationThread", conversationId: id, messages: this.state.threads[id] ?? [] });
     this.runTurn(id, userMsg);
   }
 
@@ -1719,6 +1778,15 @@ class WorkspaceStore implements Workspace {
     });
     if (forkId) {
       this.markThreadDirty(forkId);
+      const conversation = this.find(forkId);
+      const projectId = projectIdForConversation(this.state, forkId);
+      if (conversation) {
+        this.enqueueMutations(
+          { type: "upsertConversation", conversation, projectId, insertAtFront: true },
+          { type: "upsertMessages", conversationId: forkId, messages: this.state.threads[forkId] ?? [] },
+          { type: "setSelectedConversation", conversationId: forkId },
+        );
+      }
       this.persistCurrentStateNow();
     }
     return forkId;
@@ -1743,18 +1811,29 @@ class WorkspaceStore implements Workspace {
     const userMsg: ChatMessage = { ...thread[index], text: nextText, time: nowLabel() };
     this.setState((current) => ({ ...current, threads: { ...current.threads, [id]: [...thread.slice(0, index), userMsg] } }));
     this.markThreadDirty(id);
+    this.enqueueMutations({ type: "replaceConversationThread", conversationId: id, messages: this.state.threads[id] ?? [] });
     this.runTurn(id, userMsg);
   }
 
   decideApproval(id: string, approvalId: string, decision: ApprovalDecision): void {
     this.setState((current) => patchConversation(patchApprovalDecision(current, id, approvalId, decision), id, { status: "running", time: nowLabel() }));
     this.markThreadDirty(id);
+    const conversation = this.find(id);
+    if (conversation) {
+      this.enqueueMutations({ type: "updateConversation", conversation });
+    }
+    this.enqueueMutations({ type: "replaceConversationThread", conversationId: id, messages: this.state.threads[id] ?? [] });
     this.persistCurrentStateNow();
   }
 
   selectOptions(id: string, optionBlockId: string, selectedLabels: readonly string[]): void {
     this.setState((current) => patchConversation(patchOptionSelection(current, id, optionBlockId, selectedLabels), id, { status: "running", time: nowLabel() }));
     this.markThreadDirty(id);
+    const conversation = this.find(id);
+    if (conversation) {
+      this.enqueueMutations({ type: "updateConversation", conversation });
+    }
+    this.enqueueMutations({ type: "replaceConversationThread", conversationId: id, messages: this.state.threads[id] ?? [] });
     this.persistCurrentStateNow();
   }
 
@@ -1776,6 +1855,12 @@ class WorkspaceStore implements Workspace {
         },
       };
     });
+    const nextDraft = this.state.composerDrafts[id] ?? { text: "", attachments: [] };
+    this.enqueueMutations(
+      nextDraft.text.trim().length === 0 && nextDraft.attachments.length === 0
+        ? { type: "deleteComposerDraft", conversationId: id }
+        : { type: "setComposerDraft", conversationId: id, draft: nextDraft },
+    );
   }
 
   updateSettings(patch: AppSettingsPatch): void {
@@ -1783,10 +1868,17 @@ class WorkspaceStore implements Workspace {
       ...current,
       settings: mergeAppSettings(current.settings, patch),
     }));
+    this.enqueueMutations({ type: "setSettings", settings: this.state.settings });
+    this.persistCurrentStateNow();
   }
 
   private patchConv(id: string, patch: Partial<ConversationSummary>): void {
     this.setState((current) => patchConversation(current, id, patch));
+    const conversation = this.find(id);
+    if (conversation) {
+      this.enqueueMutations({ type: "updateConversation", conversation });
+      this.persistCurrentStateNow();
+    }
   }
 
   private setState(updater: (current: WorkspaceState) => WorkspaceState): void {

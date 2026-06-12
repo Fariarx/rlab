@@ -65,6 +65,13 @@ describe("Message", () => {
     expect(screen.queryByText("03:19 PM")).not.toBeInTheDocument();
   });
 
+  it("renders rlab tool tokens as inline tool links", () => {
+    renderMessage({ id: "user-plugin-link", role: "user", text: "$TaskWakeup что это" });
+
+    const link = screen.getByRole("link", { name: "TaskWakeup" });
+    expect(link).toHaveAttribute("href", "rlab-tool:TaskWakeup");
+  });
+
   it("shows real elapsed time for an empty live agent message", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-06-10T12:00:07.000Z"));

@@ -6,14 +6,16 @@ import { voiceLevelCountFromWidth, voiceLevelsFromTimeDomainData } from "../src/
 import { renderWithTheme } from "./util/render-with-theme";
 
 const originalMediaDevicesDescriptor = Object.getOwnPropertyDescriptor(navigator, "mediaDevices");
+const originalUserAgentDescriptor = Object.getOwnPropertyDescriptor(navigator, "userAgent");
 
-function installVoiceCaptureMocks(): void {
+function installVoiceCaptureMocks(): { readonly getUserMedia: ReturnType<typeof vi.fn> } {
   const stream = {
     getTracks: () => [{ stop: vi.fn() }],
   } as unknown as MediaStream;
+  const getUserMedia = vi.fn().mockResolvedValue(stream);
   Object.defineProperty(navigator, "mediaDevices", {
     configurable: true,
-    value: { getUserMedia: vi.fn().mockResolvedValue(stream) },
+    value: { getUserMedia },
   });
   class FakeAudioContext {
     state: AudioContextState = "running";
@@ -36,6 +38,7 @@ function installVoiceCaptureMocks(): void {
     }
   }
   vi.stubGlobal("AudioContext", FakeAudioContext);
+  return { getUserMedia };
 }
 
 describe("Composer", () => {
@@ -46,6 +49,9 @@ describe("Composer", () => {
       Object.defineProperty(navigator, "mediaDevices", originalMediaDevicesDescriptor);
     } else {
       Reflect.deleteProperty(navigator, "mediaDevices");
+    }
+    if (originalUserAgentDescriptor) {
+      Object.defineProperty(navigator, "userAgent", originalUserAgentDescriptor);
     }
   });
 
@@ -352,7 +358,7 @@ describe("Composer", () => {
     expect(onVoiceError).toHaveBeenCalledWith("Речь не распознана.");
   });
 
-  it("shows the recording strip and hides the send key hint while voice input is active", async () => {
+  it("shows only the dictation stop action while voice input is active", async () => {
     class FakeSpeechRecognition {
       static current: FakeSpeechRecognition | null = null;
       lang = "";
@@ -386,7 +392,8 @@ describe("Composer", () => {
     expect(await screen.findByTestId("composer-voice-recording-strip")).toBeInTheDocument();
     expect(screen.queryByText("⏎")).not.toBeInTheDocument();
     expect(screen.getByTestId("composer-voice-button")).toHaveStyle({ height: "30px" });
-    expect(screen.getByTestId("composer-send-button")).toHaveStyle({ width: "30px", height: "30px", minWidth: "30px" });
+    expect(screen.queryByTestId("composer-send-button")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("composer-stop-button")).not.toBeInTheDocument();
   });
 
   it("shows a manual send-now tile for queued messages", () => {
@@ -433,28 +440,163 @@ describe("Composer", () => {
     expect(screen.getByPlaceholderText("Написать")).toHaveValue("Read @src/auth.ts ");
   });
 
-  it("expands slash commands into working prompts", () => {
-    renderWithTheme(<Composer placeholder="Написать" />);
+  it("does not show composer suggestions for slash commands", () => {
+    renderWithTheme(<Composer placeholder="Написать" registeredPlugins={[{ id: "TaskWakeup", label: "TaskWakeup", token: "$TaskWakeup" }]} />);
 
     fireEvent.change(screen.getByPlaceholderText("Написать"), { target: { value: "/" } });
-    fireEvent.click(screen.getByRole("option", { name: "/plan" }));
 
-    expect(screen.getByPlaceholderText("Написать")).toHaveValue("Составь план реализации перед изменениями. ");
+    expect(screen.queryByRole("option")).not.toBeInTheDocument();
   });
 
-  it("navigates the suggestion popover with the arrow keys and selects with Enter", () => {
-    renderWithTheme(<Composer placeholder="Написать" />);
+  it("navigates plugin suggestions with the arrow keys and inserts a tool link", () => {
+    renderWithTheme(
+      <Composer
+        placeholder="Написать"
+        registeredPlugins={[
+          { id: "AskUserQuestion", label: "AskUserQuestion", token: "$AskUserQuestion" },
+          { id: "TaskWakeup", label: "TaskWakeup", token: "$TaskWakeup" },
+        ]}
+      />,
+    );
     const input = screen.getByPlaceholderText("Написать");
 
-    fireEvent.change(input, { target: { value: "/" } });
+    fireEvent.change(input, { target: { value: "$" } });
     // The list opens with the first item active.
-    expect(screen.getByRole("option", { name: "/plan" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("option", { name: "$AskUserQuestion" })).toHaveAttribute("aria-selected", "true");
 
     fireEvent.keyDown(input, { key: "ArrowDown" });
-    expect(screen.getByRole("option", { name: "/test" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("option", { name: "$TaskWakeup" })).toHaveAttribute("aria-selected", "true");
 
     fireEvent.keyDown(input, { key: "Enter" });
-    expect(input).toHaveValue("Запусти релевантные тесты и сообщи результат. ");
+    expect(input).toHaveValue("$TaskWakeup ");
+    expect(screen.getByTestId("composer-plugin-preview")).toHaveTextContent("TaskWakeup");
+    expect(screen.getByTestId("composer-plugin-preview")).not.toHaveTextContent("$TaskWakeup");
+  });
+
+  it("commits browser speech interim text when mobile recognition ends before a final result", async () => {
+    class FakeSpeechRecognition {
+      static current: FakeSpeechRecognition | null = null;
+      startCount = 0;
+      lang = "";
+      continuous = false;
+      interimResults = false;
+      onresult: ((event: { readonly resultIndex: number; readonly results: { readonly length: number; readonly 0: { readonly length: number; readonly isFinal: boolean; readonly 0: { readonly transcript: string } } } }) => void) | null = null;
+      onerror: ((event: { readonly error?: string; readonly message?: string }) => void) | null = null;
+      onend: (() => void) | null = null;
+
+      constructor() {
+        FakeSpeechRecognition.current = this;
+      }
+
+      start(): void {
+        this.startCount += 1;
+      }
+
+      stop(): void {
+        this.onend?.();
+      }
+
+      emitInterim(text: string): void {
+        this.onresult?.({
+          resultIndex: 0,
+          results: {
+            length: 1,
+            0: { length: 1, isFinal: false, 0: { transcript: text } },
+          },
+        });
+      }
+    }
+    vi.stubGlobal("SpeechRecognition", FakeSpeechRecognition);
+    const capture = installVoiceCaptureMocks();
+    Object.defineProperty(navigator, "userAgent", {
+      configurable: true,
+      value: "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 Chrome/126 Mobile Safari/537.36",
+    });
+
+    renderWithTheme(
+      <Composer
+        placeholder="Написать"
+        voiceProvider={{ id: "web-speech", name: "Browser Web Speech", kind: "browser", language: "ru-RU", configured: true }}
+      />,
+    );
+
+    fireEvent.click(await screen.findByTestId("composer-voice-button"));
+    await waitFor(() => {
+      expect(FakeSpeechRecognition.current).not.toBeNull();
+    });
+    expect(FakeSpeechRecognition.current?.continuous).toBe(false);
+    expect(capture.getUserMedia).not.toHaveBeenCalled();
+    expect(await screen.findByTestId("composer-voice-recording-strip")).toHaveAttribute("data-ambient", "true");
+
+    act(() => {
+      FakeSpeechRecognition.current?.emitInterim("текст с телефона");
+    });
+    expect(screen.getByPlaceholderText("Написать")).toHaveValue("");
+
+    act(() => {
+      FakeSpeechRecognition.current?.onend?.();
+    });
+
+    expect(screen.getByPlaceholderText("Написать")).toHaveValue("текст с телефона");
+    expect(FakeSpeechRecognition.current?.startCount).toBe(1);
+  });
+
+  it("commits browser speech interim text when Android reports aborted during manual stop", async () => {
+    class FakeSpeechRecognition {
+      static current: FakeSpeechRecognition | null = null;
+      lang = "";
+      continuous = false;
+      interimResults = false;
+      onresult: ((event: { readonly resultIndex: number; readonly results: { readonly length: number; readonly 0: { readonly length: number; readonly isFinal: boolean; readonly 0: { readonly transcript: string } } } }) => void) | null = null;
+      onerror: ((event: { readonly error?: string; readonly message?: string }) => void) | null = null;
+      onend: (() => void) | null = null;
+
+      constructor() {
+        FakeSpeechRecognition.current = this;
+      }
+
+      start(): void {}
+
+      stop(): void {
+        this.onerror?.({ error: "aborted" });
+      }
+
+      emitInterim(text: string): void {
+        this.onresult?.({
+          resultIndex: 0,
+          results: {
+            length: 1,
+            0: { length: 1, isFinal: false, 0: { transcript: text } },
+          },
+        });
+      }
+    }
+    vi.stubGlobal("SpeechRecognition", FakeSpeechRecognition);
+    const capture = installVoiceCaptureMocks();
+    Object.defineProperty(navigator, "userAgent", {
+      configurable: true,
+      value: "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 Chrome/126 Mobile Safari/537.36",
+    });
+
+    renderWithTheme(
+      <Composer
+        placeholder="Написать"
+        voiceProvider={{ id: "web-speech", name: "Browser Web Speech", kind: "browser", language: "ru-RU", configured: true }}
+      />,
+    );
+
+    fireEvent.click(await screen.findByTestId("composer-voice-button"));
+    await waitFor(() => {
+      expect(FakeSpeechRecognition.current).not.toBeNull();
+    });
+    expect(capture.getUserMedia).not.toHaveBeenCalled();
+
+    act(() => {
+      FakeSpeechRecognition.current?.emitInterim("ручная остановка");
+    });
+    fireEvent.click(screen.getByTestId("composer-voice-button"));
+
+    expect(screen.getByPlaceholderText("Написать")).toHaveValue("ручная остановка");
   });
 
   it("attaches files handed in by the parent drop zone", async () => {
@@ -471,10 +613,10 @@ describe("Composer", () => {
 
   it("dismisses the suggestion popover with Escape without sending", () => {
     const onSend = vi.fn();
-    renderWithTheme(<Composer placeholder="Написать" onSend={onSend} />);
+    renderWithTheme(<Composer placeholder="Написать" onSend={onSend} registeredPlugins={[{ id: "TaskWakeup", label: "TaskWakeup", token: "$TaskWakeup" }]} />);
     const input = screen.getByPlaceholderText("Написать");
 
-    fireEvent.change(input, { target: { value: "/" } });
+    fireEvent.change(input, { target: { value: "$" } });
     expect(screen.getByRole("listbox", { name: "Подсказки" })).toBeInTheDocument();
 
     fireEvent.keyDown(input, { key: "Escape" });

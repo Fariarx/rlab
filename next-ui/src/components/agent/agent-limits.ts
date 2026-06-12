@@ -1,5 +1,6 @@
 export interface RateLimitWindow {
-  readonly kind: "five_hour" | "weekly" | "overage";
+  readonly kind: "five_hour" | "weekly" | "daily" | "overage";
+  readonly label?: string;
   readonly usedPercent?: number;
   readonly resetsAt?: number;
   readonly status?: string;
@@ -13,4 +14,3 @@ export interface AgentRateLimit {
 }
 
 export type AgentRateLimitMap = Readonly<Record<string, AgentRateLimit>>;
-

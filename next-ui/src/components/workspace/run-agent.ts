@@ -353,6 +353,7 @@ async function streamRun(
       model: profile.model,
       reasoning: profile.reasoning,
       mode: profile.mode,
+      autoConfirm: profile.autoConfirm ?? false,
       prompt,
       cwd,
       accessMode,

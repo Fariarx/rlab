@@ -20,7 +20,7 @@ import { DiffCard } from "./DiffCard";
 import { DEFAULT_AGENT_OPTION_ID, agentProfileLabels, getAgent, resolveAgentReasoningValue, type AgentProfile } from "./agents";
 import { rise } from "./anim";
 import type { MessageActionHandlers } from "./message-actions";
-import { AgentAvatar, TypingDots, UserAvatar } from "./parts";
+import { AgentAvatar, InlinePluginText, TypingDots, UserAvatar } from "./parts";
 import type { AgentBlock, ChatMessage, DiffBlock, PlanBlock } from "./types";
 
 interface MessageAttachment {
@@ -266,8 +266,8 @@ function UserMessage({ message, delay, actions }: { readonly message: ChatMessag
                   border: (t) => `1px solid ${t.custom.borders.subtle}`,
                 }}
               >
-                <Typography sx={{ minWidth: 0, maxWidth: "100%", fontSize: "0.9rem", lineHeight: 1.6, color: "text.primary", whiteSpace: "pre-line", overflowWrap: "anywhere", wordBreak: "break-word" }}>
-                  {displayText}
+                <Typography component="div" sx={{ minWidth: 0, maxWidth: "100%", fontSize: "0.9rem", lineHeight: 1.6, color: "text.primary", whiteSpace: "pre-line", overflowWrap: "anywhere", wordBreak: "break-word" }}>
+                  <InlinePluginText text={displayText} />
                 </Typography>
               </Box>
             )}

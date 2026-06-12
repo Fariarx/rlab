@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { appendFileSync, chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
@@ -7,6 +7,8 @@ import { homedir, tmpdir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import { CronExpressionParser } from "cron-parser";
+import * as pty from "node-pty";
 import { chromium, type Browser, type BrowserContext, type ConsoleMessage, type Frame, type FrameLocator, type Locator, type Page, type Request as PlaywrightRequest } from "playwright";
 import type { Plugin, ViteDevServer, PreviewServer } from "vite";
 import { parseGitStatusPorcelain, parseNumstatTotals } from "./src/lib/git-status";
@@ -21,7 +23,22 @@ import {
 } from "./src/lib/app-settings";
 import { getVoiceProvider, isVoiceProviderId, VOICE_PROVIDERS, type VoiceProviderId } from "./src/lib/voice-providers";
 import { buildEmptyWorkspaceState, buildInitialWorkspaceState, cloneWorkspaceState, type WorkspaceState } from "./src/lib/workspace-state";
-import { initWorkspaceDb, readConversation, readMessage, readMessageBlocks, readSelectedConversationId, readThreadFromDb, readWorkspaceStateFromDb, updateConversationData, upsertAgentMessageForUserTurn, upsertMessage, workspaceDbHasState, writeWorkspaceShellPreservingThreads, writeWorkspaceStateToDb } from "./workspace-db";
+import {
+  applyWorkspaceDbMutations,
+  initWorkspaceDb,
+  initializeWorkspaceStateInDb,
+  readConversation,
+  readMessage,
+  readMessageBlocks,
+  readSelectedConversationId,
+  readThreadFromDb,
+  readWorkspaceStateFromDb,
+  updateConversationData,
+  upsertAgentMessageForUserTurn,
+  upsertMessage,
+  workspaceDbHasState,
+  type WorkspaceDbMutation,
+} from "./workspace-db";
 import {
   agentProfileEquals,
   claudeAgentNameFromMode,
@@ -405,6 +422,7 @@ function terminateAgentProcessTree(child: ReturnType<typeof spawn>, signal: Node
 }
 
 const MODEL_DISCOVERY_TIMEOUT_MS = 5_000;
+const OPENCODE_DISCOVERY_TIMEOUT_MS = 15_000;
 const AGENT_DETECTION_CACHE_TTL_MS = 5 * 60_000;
 const CLI_UPDATE_CHECK_INTERVAL_MS = 60 * 60_000;
 const CLI_UPDATE_CHECK_TIMEOUT_MS = 20_000;
@@ -899,7 +917,8 @@ async function discoveredAgentOptionsAsync(id: string, resolvedBin: string | nul
     return {};
   }
   if (id === "opencode") {
-    const [modelOutput, agentOutput] = await Promise.all([runResolvedBinTextAsync(resolvedBin, ["models"]), runResolvedBinTextAsync(resolvedBin, ["agent", "list"])]);
+    const modelOutput = await runResolvedBinTextAsync(resolvedBin, ["models"], {}, OPENCODE_DISCOVERY_TIMEOUT_MS);
+    const agentOutput = await runResolvedBinTextAsync(resolvedBin, ["agent", "list"], {}, OPENCODE_DISCOVERY_TIMEOUT_MS);
     const models = modelOutput.output ? parseOpenCodeModelsOutput(modelOutput.output) : [];
     const modes = agentOutput.output ? parseOpenCodeAgentsOutput(agentOutput.output) : [];
     const modelDiscoveryError = [modelOutput.error, agentOutput.error].filter((error): error is string => error !== null).join("; ");
@@ -2560,7 +2579,9 @@ export function reconcileStaleBackgroundRuns(state: WorkspaceState, activeRunIds
   }
   const threads = { ...state.threads };
   for (const conversationId of staleConversationIds) {
-    threads[conversationId] = settleInterruptedThread(threads[conversationId] ?? [], locale);
+    if (Object.prototype.hasOwnProperty.call(state.threads, conversationId)) {
+      threads[conversationId] = settleInterruptedThread(threads[conversationId] ?? [], locale);
+    }
   }
   return { ...state, chats, projects, threads };
 }
@@ -2594,7 +2615,9 @@ export function cancelBackgroundRunState(state: WorkspaceState, runId: string): 
   const statusBlock: Extract<AgentBlock, { kind: "status" }> = { kind: "status", level: "warn", text: snippet };
   const threads = { ...state.threads };
   for (const conversationId of canceledConversationIds) {
-    threads[conversationId] = settleLiveThreadWithStatus(state.threads[conversationId] ?? [], statusBlock);
+    if (Object.prototype.hasOwnProperty.call(state.threads, conversationId)) {
+      threads[conversationId] = settleLiveThreadWithStatus(state.threads[conversationId] ?? [], statusBlock);
+    }
   }
   return { ...state, chats, projects, threads };
 }
@@ -2649,7 +2672,7 @@ function ensureWorkspaceDb(): void {
       const parsed = JSON.parse(readFileSync(WORKSPACE_STATE_FILE, "utf8").replace(/^\uFEFF/, "")) as unknown;
       const imported = coerceParsedWorkspaceState(parsed);
       if (imported) {
-        writeWorkspaceStateToDb(normalizeSeedProjectPaths(migrateSeedWorkspaceState(imported)));
+        initializeWorkspaceStateInDb(normalizeSeedProjectPaths(migrateSeedWorkspaceState(imported)));
         try {
           renameSync(WORKSPACE_STATE_FILE, `${WORKSPACE_STATE_FILE}.pre-sqlite`);
         } catch {
@@ -2717,7 +2740,7 @@ function clearLegacyNonNativeContextUsageOnce(): void {
       const current = readWorkspaceStateFromDb();
       const migrated = clearLegacyNonNativeContextUsage(current);
       if (migrated.changed) {
-        writeWorkspaceStateToDb(migrated.state);
+        persistWorkspaceDelta(current, migrated.state);
       }
     }
     writeFileSync(CONTEXT_USAGE_MIGRATION_FILE, `${new Date().toISOString()}\n`, "utf8");
@@ -2730,7 +2753,7 @@ function readWorkspaceState(): WorkspaceState {
   ensureWorkspaceDb();
   if (!workspaceDbHasState()) {
     const initial = normalizeSeedProjectPaths(isDemoWorkspaceEnabled() ? buildInitialWorkspaceState() : buildEmptyWorkspaceState());
-    writeWorkspaceState(initial);
+    initializeWorkspaceState(initial);
     return initial;
   }
   const raw = readWorkspaceStateFromDb();
@@ -2746,7 +2769,7 @@ function readWorkspaceShellForClient(): WorkspaceState {
   ensureWorkspaceDb();
   if (!workspaceDbHasState()) {
     const initial = normalizeSeedProjectPaths(isDemoWorkspaceEnabled() ? buildInitialWorkspaceState() : buildEmptyWorkspaceState());
-    writeWorkspaceState(initial);
+    initializeWorkspaceState(initial);
     return initial;
   }
   const selectedId = readSelectedConversationId();
@@ -2844,10 +2867,54 @@ let lastBackgroundPersistAt = 0;
  *  status snippets without loading the whole workspace. */
 let cachedWorkspaceLocale: Locale = "en";
 
-function writeWorkspaceState(state: WorkspaceState): void {
+function initializeWorkspaceState(state: WorkspaceState): void {
   ensureWorkspaceDb();
   cachedWorkspaceLocale = state.settings?.general?.locale ?? cachedWorkspaceLocale;
-  writeWorkspaceStateToDb(state);
+  initializeWorkspaceStateInDb(state);
+}
+
+function workspaceProjectMeta(project: WorkspaceState["projects"][number]): Omit<WorkspaceState["projects"][number], "conversations"> {
+  const { conversations: _conversations, ...meta } = project;
+  return meta;
+}
+
+function persistWorkspaceDelta(before: WorkspaceState, after: WorkspaceState): void {
+  const operations: WorkspaceDbMutation[] = [];
+  const beforeConversations = workspaceConversationMap(before);
+  const afterConversations = workspaceConversationMap(after);
+  for (const project of after.projects) {
+    const beforeProject = before.projects.find((item) => item.id === project.id);
+    if (!beforeProject || JSON.stringify(workspaceProjectMeta(beforeProject)) !== JSON.stringify(workspaceProjectMeta(project))) {
+      operations.push({ type: "upsertProject", project: workspaceProjectMeta(project) });
+    }
+    for (const conversation of project.conversations) {
+      const beforeConversation = beforeConversations.get(conversation.id);
+      if (!beforeConversation || JSON.stringify(beforeConversation) !== JSON.stringify(conversation)) {
+        operations.push({ type: beforeConversation ? "updateConversation" : "upsertConversation", conversation, projectId: project.id });
+      }
+    }
+  }
+  for (const conversation of after.chats) {
+    const beforeConversation = beforeConversations.get(conversation.id);
+    if (!beforeConversation || JSON.stringify(beforeConversation) !== JSON.stringify(conversation)) {
+      operations.push({ type: beforeConversation ? "updateConversation" : "upsertConversation", conversation, projectId: null });
+    }
+  }
+  for (const [conversationId, messages] of Object.entries(after.threads)) {
+    if (JSON.stringify(before.threads[conversationId] ?? []) !== JSON.stringify(messages)) {
+      operations.push({ type: "replaceConversationThread", conversationId, messages });
+    }
+  }
+  if (JSON.stringify(before.settings) !== JSON.stringify(after.settings)) {
+    operations.push({ type: "setSettings", settings: after.settings });
+  }
+  if (before.selectedId !== after.selectedId) {
+    operations.push({ type: "setSelectedConversation", conversationId: after.selectedId });
+  }
+  if (operations.length > 0) {
+    cachedWorkspaceLocale = after.settings?.general?.locale ?? cachedWorkspaceLocale;
+    applyWorkspaceDbMutations(operations);
+  }
 }
 
 export function storageHealthSnapshot(): {
@@ -3028,8 +3095,10 @@ function sendJson(res: ServerResponse, statusCode: number, payload: unknown): vo
   res.end(JSON.stringify(payload));
 }
 
+const workspaceMutationBadRequestMessages = new Set(["Invalid workspace mutation payload.", "Invalid workspace mutation."]);
+
 export function workspacePutErrorStatus(error: unknown): 400 | 500 {
-  return error instanceof SyntaxError ? 400 : 500;
+  return error instanceof SyntaxError || workspaceMutationBadRequestMessages.has(errorMessage(error)) ? 400 : 500;
 }
 
 export function attachmentUploadErrorStatus(error: unknown): 400 | 500 {
@@ -3883,35 +3952,39 @@ function handleWorkspace(req: IncomingMessage, res: ServerResponse): void {
   }
 
   if (req.method === "PUT") {
-    readJsonBody(req, res, (body) => {
-      try {
-        const parsed = JSON.parse(body) as unknown;
-        if (!isWorkspaceState(parsed)) {
-          sendJson(res, 400, { error: "Invalid workspace state payload." });
-          return;
-        }
-        // The client only holds lazily-loaded threads, so the merged write must
-        // PRESERVE threads it didn't send (writeWorkspaceShellPreservingThreads).
-        const incoming = normalizeSeedProjectPaths(cloneWorkspaceState(parsed));
-        // The merge only reads `current` threads for the conversations the client
-        // SENT plus those with a live server-owned run — so load just those, not
-        // all 147 messages. Parsing the whole workspace on every save is what
-        // blocks the event loop and flickers 502s under 2+ concurrent agents.
-        ensureWorkspaceDb();
-        const relevantThreadIds = new Set<string>([...Object.keys(incoming.threads), ...[...backgroundRunHandles.values()].map((handle) => handle.binding.conversationId)]);
-        const current = reconcileStaleBackgroundRuns(normalizeSeedProjectPaths(readWorkspaceStateFromDb(relevantThreadIds)), new Set(backgroundRunHandles.keys()));
-        const normalized = mergeWorkspacePutState(incoming, current);
-        writeWorkspaceShellPreservingThreads(normalized);
-        sendJson(res, 200, normalized);
-      } catch (error) {
-        sendJson(res, workspacePutErrorStatus(error), { error: error instanceof Error ? error.message : String(error) });
-      }
-    });
+    sendJson(res, 410, { error: "Full workspace writes are disabled. Use /api/workspace/mutations." });
     return;
   }
 
   res.statusCode = 405;
   res.end();
+}
+
+function parseWorkspaceMutationPayload(body: string): WorkspaceDbMutation[] {
+  const parsed = JSON.parse(body) as unknown;
+  const mutations = isRecord(parsed) ? parsed.mutations : parsed;
+  if (!Array.isArray(mutations)) {
+    throw new Error("Invalid workspace mutation payload.");
+  }
+  return mutations.map((mutation) => {
+    if (!isRecord(mutation) || typeof mutation.type !== "string") {
+      throw new Error("Invalid workspace mutation.");
+    }
+    return mutation as WorkspaceDbMutation;
+  });
+}
+
+function handleWorkspaceMutations(req: IncomingMessage, res: ServerResponse): void {
+  readJsonBody(req, res, (body) => {
+    try {
+      ensureWorkspaceDb();
+      const mutations = parseWorkspaceMutationPayload(body);
+      applyWorkspaceDbMutations(mutations);
+      sendJson(res, 200, { ok: true });
+    } catch (error) {
+      sendJson(res, workspacePutErrorStatus(error), { error: errorMessage(error) });
+    }
+  });
 }
 
 function handleFolderPicker(_req: IncomingMessage, res: ServerResponse): void {
@@ -4568,7 +4641,8 @@ function handleRunApproval(req: IncomingMessage, res: ServerResponse): void {
       const decision = parseRunApprovalPayload(body);
       const resolved = resolvePendingRunApproval(decision);
       appendRunAuditEvent(RUN_AUDIT_FILE, { type: "approval_decision", id: resolved.id, decision: resolved.decision });
-      writeWorkspaceState(applyRunApprovalDecisionState(readWorkspaceState(), resolved));
+      const before = readWorkspaceState();
+      persistWorkspaceDelta(before, applyRunApprovalDecisionState(before, resolved));
       sendJson(res, 200, resolved);
     } catch (error) {
       sendJson(res, runControlErrorStatus(error), { error: errorMessage(error) });
@@ -4581,7 +4655,8 @@ function handleRunInput(req: IncomingMessage, res: ServerResponse): void {
     try {
       const selection = parseRunInputPayload(body);
       const resolved = resolvePendingRunInput(selection);
-      writeWorkspaceState(applyRunInputSelectionState(readWorkspaceState(), resolved));
+      const before = readWorkspaceState();
+      persistWorkspaceDelta(before, applyRunInputSelectionState(before, resolved));
       sendJson(res, 200, resolved);
     } catch (error) {
       sendJson(res, runControlErrorStatus(error), { error: errorMessage(error) });
@@ -5256,7 +5331,7 @@ export type RunEvent =
   | { type: "status"; level: "info" | "ok" | "warn" | "error"; text: string }
   | { type: "error"; text: string }
   | { type: "session"; id: string }
-  | { type: "wakeup"; prompt: string; reason?: string; toolId?: string; delaySeconds?: number; fireAt?: string; script?: string; intervalSeconds?: number }
+  | { type: "wakeup"; prompt: string; reason?: string; toolId?: string; delaySeconds?: number; fireAt?: string; cron?: string; script?: string; intervalSeconds?: number }
   | { type: "cancel_wakeup"; wakeupId?: string; all?: boolean; reason?: string; toolId?: string }
   | { type: "done"; costUsd?: number; usage?: RunUsage; usageDebug?: UsageDebugEntry | readonly UsageDebugEntry[] };
 
@@ -5325,6 +5400,9 @@ interface RunRequest {
   readonly mode: AgentProfile["mode"];
   readonly prompt: string;
   readonly accessMode: AgentAccessMode;
+  /** CLI approval shortcut for agents where auto-confirm is a sandbox setting,
+   *  not a chat work mode (Gemini `--approval-mode yolo`). */
+  readonly autoConfirm?: boolean;
   /** Native session id to resume (same agent continuing the conversation). */
   readonly resume?: string;
   /** Server-assigned session id for a NEW session (agents that let us set it,
@@ -5340,10 +5418,12 @@ interface RunRequest {
 
 type ScheduledWakeupTrigger =
   | { readonly type: "time"; readonly fireAtMs: number }
+  | { readonly type: "cron"; readonly cron: string; readonly nextFireMs: number }
   | {
       readonly type: "script";
       readonly script: string;
-      readonly intervalSeconds: number;
+      readonly intervalSeconds?: number;
+      readonly cron?: string;
       readonly nextCheckMs: number;
       readonly lastCheckedAtMs?: number;
       readonly lastExitCode?: number;
@@ -5375,10 +5455,12 @@ export interface ScheduledWakeupSummary {
 /** A single rate-limit window. An account can be bounded by several at once —
  *  e.g. Claude/Codex enforce both a rolling 5-hour window and a weekly one — so
  *  each is tracked independently and shown side by side in the composer. */
-type RateLimitWindowKind = "five_hour" | "weekly" | "overage";
+type RateLimitWindowKind = "five_hour" | "weekly" | "overage" | "daily";
 
 interface RateLimitWindow {
   readonly kind: RateLimitWindowKind;
+  /** Optional provider-specific label (Gemini reports separate model-family rows). */
+  readonly label?: string;
   /** Percent of this window's allowance used (0–100). */
   readonly usedPercent?: number;
   /** Epoch seconds when this window resets. */
@@ -5402,19 +5484,17 @@ interface AgentRateLimit {
   readonly windows: readonly RateLimitWindow[];
 }
 
-/** Mutable per-agent accumulator. Windows are keyed by kind so repeated events
- *  (Claude emits one window per event; Codex sends sparse rolling updates)
- *  merge instead of clobbering each other — the cause of only one window ever
- *  showing in the UI. */
+/** Mutable per-agent accumulator. Windows are keyed by kind plus optional label
+ *  so repeated events merge, while Gemini can keep separate model-family rows. */
 interface AgentLimitAccumulator {
   updatedAt: number;
   plan?: string;
-  windows: Map<RateLimitWindowKind, RateLimitWindow>;
+  windows: Map<string, RateLimitWindow>;
 }
 
 const latestAgentLimits = new Map<string, AgentLimitAccumulator>();
 
-const WINDOW_ORDER: readonly RateLimitWindowKind[] = ["five_hour", "weekly", "overage"];
+const WINDOW_ORDER: readonly RateLimitWindowKind[] = ["five_hour", "weekly", "daily", "overage"];
 const RATE_LIMIT_WINDOW_KINDS: ReadonlySet<string> = new Set(WINDOW_ORDER);
 const AGENT_LIMIT_REFRESH_MIN_INTERVAL_MS = 60_000;
 const agentLimitRefreshAttempts = new Map<string, { readonly attemptedAt: number; readonly error?: string }>();
@@ -5435,12 +5515,12 @@ function loadPersistedAgentLimits(): void {
       if (!isRecord(value)) {
         continue;
       }
-      const windows = new Map<RateLimitWindowKind, RateLimitWindow>();
+      const windows = new Map<string, RateLimitWindow>();
       for (const window of Array.isArray(value.windows) ? value.windows : []) {
         if (isRecord(window) && typeof window.kind === "string" && RATE_LIMIT_WINDOW_KINDS.has(window.kind)) {
           const rateWindow = window as unknown as RateLimitWindow;
           if (!rateLimitWindowExpired(rateWindow, nowSeconds)) {
-            windows.set(rateWindow.kind, rateWindow);
+            windows.set(rateLimitWindowKey(rateWindow), rateWindow);
           }
         }
       }
@@ -5479,15 +5559,19 @@ function persistAgentLimits(): void {
 loadPersistedAgentLimits();
 const STATUS_SEVERITY: Record<string, number> = { allowed: 0, allowed_warning: 1, rejected: 2 };
 
+function rateLimitWindowKey(window: Pick<RateLimitWindow, "kind" | "label">): string {
+  return window.label ? `${window.kind}:${window.label}` : window.kind;
+}
+
 function rateLimitWindowExpired(window: Pick<RateLimitWindow, "resetsAt">, nowSeconds = Date.now() / 1000): boolean {
   return typeof window.resetsAt === "number" && window.resetsAt <= nowSeconds;
 }
 
 function pruneExpiredLimitWindows(acc: AgentLimitAccumulator, nowSeconds = Date.now() / 1000): boolean {
   let changed = false;
-  for (const [kind, window] of acc.windows.entries()) {
+  for (const [key, window] of acc.windows.entries()) {
     if (rateLimitWindowExpired(window, nowSeconds)) {
-      acc.windows.delete(kind);
+      acc.windows.delete(key);
       changed = true;
     }
   }
@@ -5509,14 +5593,16 @@ function upsertLimitWindow(agent: string, window: RateLimitWindow): void {
   const acc = limitAccumulator(agent);
   pruneExpiredLimitWindows(acc);
   if (rateLimitWindowExpired(window)) {
-    acc.windows.delete(window.kind);
+    acc.windows.delete(rateLimitWindowKey(window));
     acc.updatedAt = Date.now();
     persistAgentLimits();
     return;
   }
-  const prev = acc.windows.get(window.kind);
-  acc.windows.set(window.kind, {
+  const key = rateLimitWindowKey(window);
+  const prev = acc.windows.get(key);
+  acc.windows.set(key, {
     kind: window.kind,
+    label: window.label ?? prev?.label,
     usedPercent: window.usedPercent ?? prev?.usedPercent,
     resetsAt: window.resetsAt ?? prev?.resetsAt,
     status: window.status ?? prev?.status,
@@ -5528,7 +5614,12 @@ function upsertLimitWindow(agent: string, window: RateLimitWindow): void {
 /** Serialize an accumulator into the API shape: ordered windows + the
  *  most-severe window status as the overall status. */
 function serializeAgentLimit(acc: AgentLimitAccumulator): AgentRateLimit {
-  const windows = WINDOW_ORDER.map((kind) => acc.windows.get(kind)).filter((w): w is RateLimitWindow => w !== undefined && !rateLimitWindowExpired(w));
+  const windows = [...acc.windows.values()]
+    .filter((window) => !rateLimitWindowExpired(window))
+    .sort((a, b) => {
+      const order = WINDOW_ORDER.indexOf(a.kind) - WINDOW_ORDER.indexOf(b.kind);
+      return order === 0 ? (a.label ?? "").localeCompare(b.label ?? "") : order;
+    });
   let status: string | undefined;
   for (const window of windows) {
     if (window.status && (status === undefined || (STATUS_SEVERITY[window.status] ?? 0) > (STATUS_SEVERITY[status] ?? 0))) {
@@ -5674,6 +5765,153 @@ export function parseClaudeOAuthUsagePayload(
   return { plan: claudePlanLabel(credentials), windows };
 }
 
+function stripTerminalAnsi(value: string): string {
+  return value
+    .replace(/\x1B\][^\x07]*(?:\x07|\x1B\\)/g, "")
+    .replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, "");
+}
+
+function parseGeminiDurationSeconds(value: string): number | undefined {
+  const matches = [...value.matchAll(/(\d+)\s*([dhm])/gi)];
+  if (matches.length === 0) {
+    return undefined;
+  }
+  let seconds = 0;
+  for (const match of matches) {
+    const amount = Number.parseInt(match[1] ?? "", 10);
+    if (!Number.isFinite(amount)) {
+      continue;
+    }
+    const unit = (match[2] ?? "").toLowerCase();
+    seconds += unit === "d" ? amount * 86400 : unit === "h" ? amount * 3600 : amount * 60;
+  }
+  return seconds > 0 ? seconds : undefined;
+}
+
+export function parseGeminiModelUsageOutput(output: string, nowMs = Date.now()): Pick<AgentRateLimit, "plan" | "windows"> {
+  const clean = stripTerminalAnsi(output).replace(/\r/g, "\n");
+  const windows: RateLimitWindow[] = [];
+  for (const rawLine of clean.split("\n")) {
+    const line = rawLine.replace(/[│|]/g, " ").replace(/\s+/g, " ").trim();
+    const match = line.match(/^(.+?)\s*[━─▬=._\-\s]+(\d{1,3})%\s+Resets:\s+.*?(?:\(([^)]*)\))?\s*$/i);
+    if (!match) {
+      continue;
+    }
+    const label = match[1]?.trim();
+    const usedPercent = Number.parseInt(match[2] ?? "", 10);
+    if (!label || !Number.isFinite(usedPercent)) {
+      continue;
+    }
+    const durationSeconds = match[3] ? parseGeminiDurationSeconds(match[3]) : undefined;
+    windows.push({
+      kind: "daily",
+      label,
+      usedPercent,
+      resetsAt: durationSeconds ? Math.floor((nowMs + durationSeconds * 1000) / 1000) : undefined,
+      status: rateLimitStatusFromPercent(usedPercent),
+    });
+  }
+  return { plan: "Gemini CLI", windows };
+}
+
+function runGeminiModelUsagePtyAsync(resolvedBin: string, cwd: string, timeoutMs = 25_000): Promise<TextDiscoveryResult> {
+  const launch = resolveLaunchCommand(resolvedBin, ["--prompt-interactive", "/model", "--skip-trust"]);
+  return new Promise((resolve) => {
+    let output = "";
+    let settled = false;
+    let sentModelCommand = false;
+    let ptyProcess: pty.IPty | null = null;
+    let closeTimer: ReturnType<typeof setTimeout> | null = null;
+    const killPtyTree = () => {
+      const pid = ptyProcess?.pid;
+      try {
+        ptyProcess?.kill();
+      } catch {
+        // already exited
+      }
+      if (pid === undefined || process.platform === "win32") {
+        return;
+      }
+      try {
+        process.kill(-pid, "SIGTERM");
+      } catch {
+        try {
+          process.kill(pid, "SIGTERM");
+        } catch {
+          // already exited
+        }
+      }
+      setTimeout(() => {
+        try {
+          process.kill(-pid, "SIGKILL");
+        } catch {
+          try {
+            process.kill(pid, "SIGKILL");
+          } catch {
+            // already exited
+          }
+        }
+      }, 1_000).unref();
+    };
+    const finish = (result: TextDiscoveryResult) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeoutTimer);
+      clearTimeout(forceCommandTimer);
+      if (closeTimer) {
+        clearTimeout(closeTimer);
+      }
+      killPtyTree();
+      resolve(result);
+    };
+    const sendModelCommand = () => {
+      if (sentModelCommand || !ptyProcess) {
+        return;
+      }
+      sentModelCommand = true;
+      ptyProcess.write("/model\r");
+    };
+    const timeoutTimer = setTimeout(() => {
+      const parsed = parseGeminiModelUsageOutput(output);
+      finish(
+        parsed.windows.length > 0
+          ? { output, error: null }
+          : { output: null, error: `${basename(resolvedBin)} /model timed out before Model usage appeared.` },
+      );
+    }, timeoutMs);
+    const forceCommandTimer = setTimeout(sendModelCommand, 2500);
+    try {
+      ptyProcess = pty.spawn(launch.command, [...launch.args], {
+        name: "xterm-256color",
+        cols: 220,
+        rows: 45,
+        cwd,
+        env: process.env,
+      });
+    } catch (error) {
+      finish({ output: null, error: `${basename(resolvedBin)} /model failed: ${errorMessage(error)}` });
+      return;
+    }
+    ptyProcess.onData((chunk) => {
+      output = appendLimitedText(output, chunk, DISCOVERY_OUTPUT_LIMIT_CHARS);
+      const clean = stripTerminalAnsi(output);
+      if (!sentModelCommand && /(?:^|\n)\s*>\s*$/.test(clean)) {
+        sendModelCommand();
+      }
+      if (sentModelCommand && /Model usage/i.test(clean) && /\(Press Esc to close\)/i.test(clean)) {
+        ptyProcess?.write("\x1b");
+        closeTimer ??= setTimeout(() => finish({ output, error: null }), 500);
+      }
+    });
+    ptyProcess.onExit(() => {
+      const parsed = parseGeminiModelUsageOutput(output);
+      finish(parsed.windows.length > 0 ? { output, error: null } : { output: null, error: `${basename(resolvedBin)} /model exited before Model usage appeared.` });
+    });
+  });
+}
+
 function recordAgentRateLimitSnapshot(agent: string, snapshot: Pick<AgentRateLimit, "plan" | "windows">): void {
   const acc = limitAccumulator(agent);
   acc.plan = snapshot.plan;
@@ -5704,9 +5942,29 @@ async function refreshClaudeRateLimitsFromCli(): Promise<void> {
   recordAgentRateLimitSnapshot("claude-code", snapshot);
 }
 
+async function refreshGeminiRateLimitsFromCli(): Promise<void> {
+  const resolvedBin = resolveBinOnPath("gemini");
+  if (!resolvedBin) {
+    throw new Error("gemini is not installed on this machine.");
+  }
+  const output = await runGeminiModelUsagePtyAsync(resolvedBin, process.cwd());
+  if (output.error) {
+    throw new Error(output.error);
+  }
+  const snapshot = parseGeminiModelUsageOutput(output.output ?? "");
+  if (snapshot.windows.length === 0) {
+    throw new Error("Gemini /model output did not contain model usage rows.");
+  }
+  recordAgentRateLimitSnapshot("gemini", snapshot);
+}
+
 async function refreshAgentLimitsFromCli(agent: string): Promise<void> {
   if (agent === "claude-code") {
     await refreshClaudeRateLimitsFromCli();
+    return;
+  }
+  if (agent === "gemini") {
+    await refreshGeminiRateLimitsFromCli();
     return;
   }
   throw new Error(`${agent} does not expose an on-demand CLI rate-limit refresh.`);
@@ -5763,6 +6021,7 @@ interface RunArgsRequest {
   readonly model?: string;
   readonly reasoning?: string;
   readonly mode?: AgentProfile["mode"];
+  readonly autoConfirm?: boolean;
   readonly accessMode?: AgentAccessMode;
   readonly resume?: string;
   readonly sessionId?: string;
@@ -5878,17 +6137,18 @@ interface RunSpec {
   readonly createTranslator: () => (line: string) => RunEvent[];
 }
 
-const CLAUDE_READ_ONLY_TOOLS = ["Read", "Glob", "Grep", "LS", "AskUserQuestion", "ScheduleWakeup"] as const;
+const TASK_WAKEUP_TOOL_NAME = "TaskWakeup";
+const CLAUDE_READ_ONLY_TOOLS = ["Read", "Glob", "Grep", "LS", "AskUserQuestion", TASK_WAKEUP_TOOL_NAME] as const;
 const CLAUDE_EFFORT_LEVELS = new Set(["low", "medium", "high", "xhigh", "max"]);
 const RLAB_CHAT_TOOLS_PROMPT = [
   "When you need user input that blocks progress, use the AskUserQuestion tool instead of asking as plain text.",
   "Use AskUserQuestion for concrete choices, clarifying questions, or option selection that the chat UI should render as interactive controls.",
   "Do not create a numbered question list in prose when the question can be represented with AskUserQuestion options.",
-  "When you need to wake up later in this same rlab chat, use ScheduleWakeup with the exact follow-up prompt; rlab persists and fires that wakeup server-side.",
-  "Use ScheduleWakeup instead of sleeping, polling inside the agent, or keeping the turn open. After ScheduleWakeup succeeds, finish the current turn and wait for rlab to re-run you.",
-  "ScheduleWakeup supports delaySeconds/fireAt for time wakeups and script plus intervalSeconds for condition wakeups; the script runs server-side in the project cwd, exit code 0 fires the wakeup, and non-zero exit codes keep polling.",
-  "For condition wakeups, write a deterministic shell script in the ScheduleWakeup input: { prompt, script, intervalSeconds, reason }. Do not describe the script in prose instead of calling the tool.",
-  "To cancel scheduled wakeups in this chat, call ScheduleWakeup with action=\"cancel\" and either wakeupId/id or all=true.",
+  "When you need rlab to wake you later in this same chat for an automation task, use TaskWakeup with the exact follow-up prompt; rlab persists and fires that wakeup server-side.",
+  "Use TaskWakeup instead of sleeping, polling inside the agent, or keeping the turn open. After TaskWakeup succeeds, finish the current turn and wait for rlab to re-run you.",
+  "TaskWakeup supports delaySeconds/fireAt/cron for time wakeups and script plus intervalSeconds or cron for condition wakeups; the script runs server-side in the project cwd, exit code 0 fires the wakeup, and non-zero exit codes keep polling.",
+  "For condition wakeups, write a deterministic shell script in the TaskWakeup input: { prompt, script, intervalSeconds, reason } or { prompt, script, cron, reason }. Do not describe the script in prose instead of calling the tool.",
+  "To cancel task wakeups in this chat, call TaskWakeup with action=\"cancel\" and either wakeupId/id or all=true.",
 ].join("\n");
 const CLAUDE_CHAT_UI_SYSTEM_PROMPT = RLAB_CHAT_TOOLS_PROMPT;
 interface CodexDynamicToolSpec {
@@ -5899,11 +6159,17 @@ interface CodexDynamicToolSpec {
   readonly deferLoading?: boolean;
 }
 
+interface RlabPluginLink {
+  readonly id: string;
+  readonly label: string;
+  readonly token: string;
+}
+
 const CODEX_RLAB_DYNAMIC_TOOLS: readonly CodexDynamicToolSpec[] = [
   {
-    name: "ScheduleWakeup",
+    name: TASK_WAKEUP_TOOL_NAME,
     description:
-      "Schedule or cancel a server-side wakeup in the current rlab chat. To schedule, provide prompt plus delaySeconds, fireAt, or script with intervalSeconds. To cancel, provide action='cancel' plus wakeupId/id or all=true. The script runs server-side in the project cwd; exit code 0 fires the wakeup and non-zero keeps polling.",
+      "Set or cancel a server-side task wakeup in the current rlab chat. To set a wakeup, provide prompt plus delaySeconds, fireAt, cron, or script with intervalSeconds/cron. To cancel, provide action='cancel' plus wakeupId/id or all=true. The script is syntax-checked before acceptance, runs server-side in the project cwd, exit code 0 fires the wakeup, and non-zero keeps polling.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -5930,14 +6196,18 @@ const CODEX_RLAB_DYNAMIC_TOOLS: readonly CodexDynamicToolSpec[] = [
           type: "string",
           description: "Absolute wakeup time, preferably ISO 8601.",
         },
+        cron: {
+          type: "string",
+          description: "Cron expression for the next wakeup/check. Supports 5-field and 6-field cron expressions.",
+        },
         script: {
           type: "string",
-          description: "Deterministic shell script to poll in the project cwd. Exit 0 fires the wakeup; non-zero keeps polling.",
+          description: "Deterministic shell script to poll in the project cwd. rlab validates shell syntax before accepting it. Exit 0 fires the wakeup; non-zero keeps polling.",
         },
         intervalSeconds: {
           type: "number",
           minimum: 1,
-          description: "Polling interval for script wakeups.",
+          description: "Polling interval for script wakeups. Use either intervalSeconds or cron with script.",
         },
         wakeupId: {
           type: "string",
@@ -5960,7 +6230,22 @@ export function codexRlabDynamicTools(): readonly CodexDynamicToolSpec[] {
   return CODEX_RLAB_DYNAMIC_TOOLS;
 }
 
+function registeredRlabPluginLinks(): readonly RlabPluginLink[] {
+  return [
+    { id: "AskUserQuestion", label: "AskUserQuestion", token: "$AskUserQuestion" },
+    ...CODEX_RLAB_DYNAMIC_TOOLS.map((tool) => ({ id: tool.name, label: tool.name, token: `$${tool.name}` })),
+    { id: "BrowserPreview", label: "BrowserPreview", token: "$BrowserPreview" },
+  ];
+}
+
 const CODEX_PLAN_PROMPT_PREFIX = [
+  "Plan mode is active.",
+  "Do not modify files or run commands that write to the filesystem.",
+  "Inspect the workspace as needed, then respond with a concise implementation plan.",
+  "",
+].join("\n");
+
+const GEMINI_PLAN_PROMPT_PREFIX = [
   "Plan mode is active.",
   "Do not modify files or run commands that write to the filesystem.",
   "Inspect the workspace as needed, then respond with a concise implementation plan.",
@@ -6031,7 +6316,7 @@ function rlabChatToolsPromptAppendix(): string {
     "<rlab-chat-tools>",
     "This rlab chat has server-side tools that are handled by the application, not by the user's project.",
     RLAB_CHAT_TOOLS_PROMPT,
-    "Tool names accepted by rlab for wakeups: ScheduleWakeup, rlab_schedule_wakeup, schedule_wakeup, wakeup.",
+    "Tool names accepted by rlab for task wakeups: TaskWakeup.",
     "</rlab-chat-tools>",
   ].join("\n");
 }
@@ -6055,6 +6340,7 @@ function profileForArgs(agent: AgentProfile["agent"], request: RunArgsRequest): 
       model: request.model ?? "default",
       reasoning: request.reasoning ?? "default",
       mode: request.mode ?? "default",
+      autoConfirm: request.autoConfirm,
     },
     agent,
   );
@@ -6078,6 +6364,10 @@ function asClaudeEffort(value: string | undefined): string | undefined {
 
 function codexPromptForMode(prompt: string, mode: string | undefined): string {
   return mode === "plan" ? `${CODEX_PLAN_PROMPT_PREFIX}${prompt}` : prompt;
+}
+
+function geminiPromptForMode(prompt: string, mode: string | undefined): string {
+  return mode === "plan" ? `${GEMINI_PLAN_PROMPT_PREFIX}${prompt}` : prompt;
 }
 
 function requestedProfileError(agent: AgentProfile["agent"], model: string, reasoning: string, mode: AgentProfile["mode"]): string | null {
@@ -6116,6 +6406,7 @@ interface ParsedRunRequestSuccess {
   readonly requestedCwd: string;
   readonly accessMode: AgentAccessMode;
   readonly resume: string | undefined;
+  readonly autoConfirm: boolean | undefined;
   readonly autoCompact: boolean | undefined;
   readonly compactWindow: number | undefined;
   readonly accessModeValid: boolean;
@@ -6140,6 +6431,7 @@ export function parseRunRequestPayload(body: string): ParsedRunRequestPayload {
   let profileError = "";
   let binding: BackgroundRunBinding | null = null;
   let bindingInvalid = false;
+  let autoConfirm: boolean | undefined;
   let parsed: unknown;
   try {
     parsed = JSON.parse(body || "{}") as unknown;
@@ -6167,6 +6459,7 @@ export function parseRunRequestPayload(body: string): ParsedRunRequestPayload {
   }
   prompt = typeof parsed.prompt === "string" ? parsed.prompt.trim() : "";
   const resume = typeof parsed.resume === "string" && parsed.resume.trim().length > 0 ? parsed.resume.trim() : undefined;
+  autoConfirm = typeof parsed.autoConfirm === "boolean" ? parsed.autoConfirm : undefined;
   const autoCompact = typeof parsed.autoCompact === "boolean" ? parsed.autoCompact : undefined;
   const compactWindow =
     typeof parsed.compactWindow === "number" && Number.isFinite(parsed.compactWindow) && parsed.compactWindow > 0 ? Math.floor(parsed.compactWindow) : undefined;
@@ -6191,6 +6484,7 @@ export function parseRunRequestPayload(body: string): ParsedRunRequestPayload {
     requestedCwd,
     accessMode,
     resume,
+    autoConfirm,
     autoCompact,
     compactWindow,
     accessModeValid,
@@ -6225,9 +6519,8 @@ export function buildClaudeRunArgs(request: RunArgsRequest): string[] {
   }
   if (accessMode === "read-only" || mode === "plan") {
     args.push("--permission-mode", "plan", "--tools", CLAUDE_READ_ONLY_TOOLS.join(","));
-  } else if (accessMode === "unrestricted") {
-    // The CLI's "do anything" flag — no permission prompts at all.
-    args.push("--dangerously-skip-permissions");
+  } else if (request.autoConfirm || profile.autoConfirm) {
+    args.push("--permission-mode", "auto");
   }
   if (request.sessionId) {
     args.push("--session-id", request.sessionId);
@@ -6248,8 +6541,10 @@ export function buildCodexRunArgs(request: RunArgsRequest): string[] {
   const args = request.resume ? ["exec", "resume", request.resume, "--json"] : reviewMode ? ["exec", "review", "--json"] : ["exec", "--json"];
   if (planMode) {
     args.push("--sandbox", "read-only");
-  } else if (accessMode === "unrestricted") {
+  } else if (accessMode === "unrestricted" && (request.autoConfirm || profile.autoConfirm)) {
     args.push("--dangerously-bypass-approvals-and-sandbox");
+  } else if (accessMode === "unrestricted") {
+    args.push("--sandbox", "workspace-write");
   } else if (!reviewMode) {
     args.push("--sandbox", "read-only");
   }
@@ -6266,21 +6561,30 @@ export function buildCodexRunArgs(request: RunArgsRequest): string[] {
   return args;
 }
 
-function geminiApprovalModeForRequest(profile: AgentProfile, accessMode: AgentAccessMode): string {
+function geminiApprovalModeForRequest(profile: AgentProfile, accessMode: AgentAccessMode, autoConfirm = false): string {
+  const mode = modeForProfile(profile);
   if (accessMode !== "unrestricted") {
     return "plan";
   }
-  const mode = modeForProfile(profile);
-  if (mode === "plan" || mode === "auto_edit" || mode === "yolo") {
-    return mode;
+  if (mode === "plan") {
+    return "plan";
   }
-  return "yolo";
+  return autoConfirm || profile.autoConfirm ? "yolo" : "default";
 }
 
 export function buildGeminiRunArgs(request: RunArgsRequest): string[] {
   const profile = profileForArgs("gemini", request);
   const accessMode = request.accessMode ?? "unrestricted";
-  const args = ["--prompt", request.prompt, "--output-format", "stream-json", "--approval-mode", geminiApprovalModeForRequest(profile, accessMode), "--skip-trust"];
+  const mode = modeForProfile(profile);
+  const args = [
+    "--prompt",
+    geminiPromptForMode(request.prompt, mode),
+    "--output-format",
+    "stream-json",
+    "--approval-mode",
+    geminiApprovalModeForRequest(profile, accessMode, request.autoConfirm),
+    "--skip-trust",
+  ];
   // Continue a prior session (--resume <id>) or open a new one with the
   // server-assigned id (--session-id <uuid>) so the client can resume it later.
   if (request.resume) {
@@ -6357,9 +6661,9 @@ export function buildOpenCodeRunArgs(request: RunArgsRequest): string[] {
   if (request.resume) {
     args.push("--session", request.resume);
   }
-  if (accessMode === "unrestricted" && mode !== "plan") {
+  if (accessMode === "unrestricted" && mode !== "plan" && (request.autoConfirm || profile.autoConfirm)) {
     args.push("--dangerously-skip-permissions");
-  } else {
+  } else if (accessMode !== "unrestricted" || mode === "plan") {
     // Read-only: opencode's default `build` agent auto-allows edits/bash, so force
     // the built-in `plan` agent, which denies file writes. (bash isn't fully
     // gated by opencode here, but this is the safe known-good restriction.)
@@ -7090,6 +7394,31 @@ function scheduledRunId(prefix: "run" | "u" | "a"): string {
   return `${prefix}-${Date.now()}-${randomUUID().slice(0, 8)}`;
 }
 
+function nextCronMs(expression: string, currentDate: number = Date.now()): number {
+  return CronExpressionParser.parse(expression, { currentDate }).next().toDate().getTime();
+}
+
+function cronValidationError(expression: string): string | null {
+  try {
+    nextCronMs(expression);
+    return null;
+  } catch (error) {
+    return errorMessage(error);
+  }
+}
+
+function shellScriptSyntaxError(script: string): string | null {
+  const command = process.platform === "win32" ? "bash" : "/bin/sh";
+  const result = spawnSync(command, ["-n", "-c", script], { encoding: "utf8", maxBuffer: 64 * 1024 });
+  if (result.error) {
+    return result.error.message;
+  }
+  if (typeof result.status === "number" && result.status !== 0) {
+    return clip((result.stderr || result.stdout || `exit ${result.status}`).trim(), 300);
+  }
+  return null;
+}
+
 function persistScheduledWakeupMap(records: Iterable<ScheduledWakeupRecord>): void {
   writeScheduledWakeupRecords([...records].sort((a, b) => a.createdAtMs - b.createdAtMs));
 }
@@ -7150,15 +7479,19 @@ function updateScheduledWakeupRecord(record: ScheduledWakeupRecord): void {
 function wakeupStatusText(record: ScheduledWakeupRecord, locale: Locale): string {
   if (record.trigger.type === "time") {
     const when = formatDateTime24(new Date(record.trigger.fireAtMs));
-    return locale === "ru" ? `Wakeup установлен · ${when}` : `Wakeup scheduled · ${when}`;
+    return locale === "ru" ? `TaskWakeup установлен · ${when}` : `TaskWakeup set · ${when}`;
   }
-  return locale === "ru"
-    ? `Wakeup script установлен · каждые ${record.trigger.intervalSeconds}s`
-    : `Wakeup script installed · every ${record.trigger.intervalSeconds}s`;
+  if (record.trigger.type === "cron") {
+    const when = formatDateTime24(new Date(record.trigger.nextFireMs));
+    return locale === "ru" ? `TaskWakeup cron · ${when}` : `TaskWakeup cron · ${when}`;
+  }
+  const schedule = record.trigger.cron ? `cron ${record.trigger.cron}` : `каждые ${record.trigger.intervalSeconds}s`;
+  const scheduleEn = record.trigger.cron ? `cron ${record.trigger.cron}` : `every ${record.trigger.intervalSeconds}s`;
+  return locale === "ru" ? `TaskWakeup script установлен · ${schedule}` : `TaskWakeup script set · ${scheduleEn}`;
 }
 
 function wakeupCancelStatusText(count: number, locale: Locale): string {
-  return locale === "ru" ? `Wakeup отменён · ${count}` : `Wakeup canceled · ${count}`;
+  return locale === "ru" ? `TaskWakeup отменён · ${count}` : `TaskWakeup canceled · ${count}`;
 }
 
 function shellScriptLaunch(script: string): { readonly command: string; readonly args: readonly string[] } {
@@ -7285,7 +7618,7 @@ async function checkScriptWakeup(record: ScheduledWakeupRecord): Promise<void> {
     ...record,
     trigger: {
       ...record.trigger,
-      nextCheckMs: Date.now() + record.trigger.intervalSeconds * 1000,
+      nextCheckMs: record.trigger.cron ? nextCronMs(record.trigger.cron) : Date.now() + (record.trigger.intervalSeconds ?? 1) * 1000,
       lastCheckedAtMs: Date.now(),
       ...(result.exitCode === undefined ? {} : { lastExitCode: result.exitCode }),
       ...(result.error ? { lastError: result.error } : {}),
@@ -7297,7 +7630,7 @@ async function checkScriptWakeup(record: ScheduledWakeupRecord): Promise<void> {
 
 function armScheduledWakeup(record: ScheduledWakeupRecord): void {
   clearScheduledWakeupTimer(record.id);
-  const target = record.trigger.type === "time" ? record.trigger.fireAtMs : record.trigger.nextCheckMs;
+  const target = record.trigger.type === "time" ? record.trigger.fireAtMs : record.trigger.type === "cron" ? record.trigger.nextFireMs : record.trigger.nextCheckMs;
   scheduledWakeupTimers.set(
     record.id,
     setTimeout(() => {
@@ -7320,14 +7653,23 @@ function ensureScheduledWakeupsStarted(): void {
 function normalizeWakeupTrigger(event: Extract<RunEvent, { type: "wakeup" }>): ScheduledWakeupTrigger {
   const now = Date.now();
   if (event.script) {
-    if (event.intervalSeconds === undefined || event.intervalSeconds <= 0 || !Number.isFinite(event.intervalSeconds)) {
-      throw new Error("Script wakeup requires a positive intervalSeconds.");
+    const scriptError = shellScriptSyntaxError(event.script);
+    if (scriptError) {
+      throw new Error(`TaskWakeup script syntax error: ${scriptError}`);
     }
-    let initialCheckMs = now + event.intervalSeconds * 1000;
+    if (event.cron) {
+      const cronError = cronValidationError(event.cron);
+      if (cronError) {
+        throw new Error(`Invalid TaskWakeup cron: ${cronError}`);
+      }
+    } else if (event.intervalSeconds === undefined || event.intervalSeconds <= 0 || !Number.isFinite(event.intervalSeconds)) {
+      throw new Error("Script TaskWakeup requires positive intervalSeconds or cron.");
+    }
+    let initialCheckMs = event.cron ? nextCronMs(event.cron, now) : now + (event.intervalSeconds ?? 1) * 1000;
     if (event.fireAt) {
       const fireAtMs = Date.parse(event.fireAt);
       if (!Number.isFinite(fireAtMs)) {
-        throw new Error(`Invalid wakeup fireAt: ${event.fireAt}`);
+        throw new Error(`Invalid TaskWakeup fireAt: ${event.fireAt}`);
       }
       initialCheckMs = fireAtMs;
     } else if (event.delaySeconds !== undefined) {
@@ -7336,17 +7678,24 @@ function normalizeWakeupTrigger(event: Extract<RunEvent, { type: "wakeup" }>): S
       }
       initialCheckMs = now + event.delaySeconds * 1000;
     }
-    return { type: "script", script: event.script, intervalSeconds: event.intervalSeconds, nextCheckMs: initialCheckMs };
+    return { type: "script", script: event.script, ...(event.cron ? { cron: event.cron } : { intervalSeconds: event.intervalSeconds }), nextCheckMs: initialCheckMs };
+  }
+  if (event.cron) {
+    const cronError = cronValidationError(event.cron);
+    if (cronError) {
+      throw new Error(`Invalid TaskWakeup cron: ${cronError}`);
+    }
+    return { type: "cron", cron: event.cron, nextFireMs: nextCronMs(event.cron, now) };
   }
   if (event.fireAt) {
     const fireAtMs = Date.parse(event.fireAt);
     if (!Number.isFinite(fireAtMs)) {
-      throw new Error(`Invalid wakeup fireAt: ${event.fireAt}`);
+      throw new Error(`Invalid TaskWakeup fireAt: ${event.fireAt}`);
     }
     return { type: "time", fireAtMs };
   }
   if (event.delaySeconds === undefined || event.delaySeconds <= 0 || !Number.isFinite(event.delaySeconds)) {
-    throw new Error("Wakeup requires positive delaySeconds, fireAt, or script.");
+    throw new Error("TaskWakeup requires positive delaySeconds, fireAt, cron, or script.");
   }
   return { type: "time", fireAtMs: now + event.delaySeconds * 1000 };
 }
@@ -8357,7 +8706,7 @@ function numericWakeupField(value: unknown): number | undefined {
 
 function isWakeupToolName(name: string): boolean {
   const leaf = name.split("/").at(-1)?.toLowerCase() ?? name.toLowerCase();
-  return leaf === "schedulewakeup" || leaf === "schedule_wakeup" || leaf === "rlab_schedule_wakeup" || leaf === "wakeup";
+  return leaf === "taskwakeup" || leaf === "task_wakeup" || leaf === "rlab_task_wakeup" || leaf === "schedulewakeup" || leaf === "schedule_wakeup" || leaf === "rlab_schedule_wakeup" || leaf === "wakeup";
 }
 
 function wakeupInputValidationError(name: string, input: Record<string, unknown> | undefined): string | null {
@@ -8381,13 +8730,26 @@ function wakeupInputValidationError(name: string, input: Record<string, unknown>
   }
   const delaySeconds = numericWakeupField(input.delaySeconds ?? input.delay_seconds ?? input.delay);
   const fireAt = firstString(input, ["fireAt", "fire_at", "at", "time", "date"]);
+  const cron = firstString(input, ["cron", "cronExpression", "cron_expression"]);
   const script = firstString(input, ["script", "conditionScript", "condition_script", "command"]);
   const intervalSeconds = numericWakeupField(input.intervalSeconds ?? input.interval_seconds ?? input.pollSeconds ?? input.poll_seconds);
-  if (delaySeconds === undefined && !fireAt && !script) {
-    return `${name} requires delaySeconds, fireAt, or script.`;
+  if (cron) {
+    const cronError = cronValidationError(cron);
+    if (cronError) {
+      return `${name} cron is invalid: ${cronError}`;
+    }
   }
-  if (script && intervalSeconds === undefined) {
-    return `${name} script trigger requires intervalSeconds.`;
+  if (script) {
+    const syntaxError = shellScriptSyntaxError(script);
+    if (syntaxError) {
+      return `${name} script syntax error: ${syntaxError}`;
+    }
+  }
+  if (delaySeconds === undefined && !fireAt && !cron && !script) {
+    return `${name} requires delaySeconds, fireAt, cron, or script.`;
+  }
+  if (script && intervalSeconds === undefined && !cron) {
+    return `${name} script trigger requires intervalSeconds or cron.`;
   }
   return null;
 }
@@ -8409,8 +8771,8 @@ export function codexDynamicToolCallResponse(params: Record<string, unknown>): R
       {
         type: "inputText",
         text: cancelRequested
-          ? "rlab accepted the wakeup cancellation. Finish this turn after reporting the cancellation."
-          : "rlab accepted the wakeup schedule. Finish this turn now and wait for rlab to re-run you when it fires.",
+          ? "rlab accepted the TaskWakeup cancellation. Finish this turn after reporting the cancellation."
+          : "rlab accepted the TaskWakeup. Finish this turn now and wait for rlab to re-run you when it fires.",
       },
     ],
     success: true,
@@ -8422,7 +8784,11 @@ function wakeupFollowupEvents(id: string, name: string, input: Record<string, un
     return [];
   }
   if (!ok) {
-    return [{ type: "error", text: `${name} failed; wakeup was not scheduled.` }];
+    return [{ type: "error", text: `${name} failed; TaskWakeup was not set.` }];
+  }
+  const validationError = wakeupInputValidationError(name, input);
+  if (validationError) {
+    return [{ type: "error", text: validationError }];
   }
   const action = firstString(input, ["action", "operation", "mode"])?.toLowerCase();
   const cancelRequested = action === "cancel" || action === "delete" || action === "remove" || input?.cancel === true || input?.cancelled === true || input?.canceled === true;
@@ -8438,14 +8804,9 @@ function wakeupFollowupEvents(id: string, name: string, input: Record<string, un
   }
   const delaySeconds = numericWakeupField(input?.delaySeconds ?? input?.delay_seconds ?? input?.delay);
   const fireAt = firstString(input, ["fireAt", "fire_at", "at", "time", "date"]);
+  const cron = firstString(input, ["cron", "cronExpression", "cron_expression"]);
   const script = firstString(input, ["script", "conditionScript", "condition_script", "command"]);
   const intervalSeconds = numericWakeupField(input?.intervalSeconds ?? input?.interval_seconds ?? input?.pollSeconds ?? input?.poll_seconds);
-  if (delaySeconds === undefined && !fireAt && !script) {
-    return [{ type: "error", text: `${name} requires delaySeconds, fireAt, or script.` }];
-  }
-  if (script && intervalSeconds === undefined) {
-    return [{ type: "error", text: `${name} script trigger requires intervalSeconds.` }];
-  }
   return [
     {
       type: "wakeup",
@@ -8454,6 +8815,7 @@ function wakeupFollowupEvents(id: string, name: string, input: Record<string, un
       reason: firstString(input, ["reason", "description"]),
       ...(delaySeconds === undefined ? {} : { delaySeconds }),
       ...(fireAt ? { fireAt } : {}),
+      ...(cron ? { cron } : {}),
       ...(script ? { script } : {}),
       ...(intervalSeconds === undefined ? {} : { intervalSeconds }),
     },
@@ -9438,7 +9800,16 @@ function opencodeToolEvents(msg: Record<string, unknown>, part: Record<string, u
             type: "tool",
             id,
             name,
-            summary: clip(part.description ?? part.title ?? part.command ?? stateRecord?.description ?? stateRecord?.title ?? firstString(input ?? {}, ["command", "query", "path", "file_path", "filePath"]) ?? name, 80),
+            summary: clip(
+              part.description ??
+                part.title ??
+                part.command ??
+                stateRecord?.description ??
+                stateRecord?.title ??
+                firstString(input ?? {}, ["command", "query", "path", "file_path", "filePath"]) ??
+                name,
+              80,
+            ),
             args,
           },
         ];
@@ -9885,7 +10256,7 @@ function readOpenCodePersistedAssistantParts(sessionId: string, startedAtMs: num
          WHERE p.session_id = ? AND p.time_created >= ?
          ORDER BY p.time_created ASC`,
       )
-      .all(sessionId, Math.max(0, startedAtMs - 5_000));
+      .all(sessionId, Math.max(0, startedAtMs - 250));
     const parts: Record<string, unknown>[] = [];
     for (const row of rows) {
       if (!isRecord(row) || typeof row.partData !== "string" || typeof row.messageData !== "string") {
@@ -10014,7 +10385,8 @@ async function runOpenCodeServer(
       const detail = isRecord(parsed.data) && typeof parsed.data.message === "string" ? parsed.data.message : "";
       throw new Error(`opencode: ${parsed.name}: ${detail}`);
     }
-    emitOpenCodeParts(parsed.parts, send);
+    const persistedParts = readOpenCodePersistedAssistantParts(sessionId, runStartedAtMs);
+    emitOpenCodeParts(persistedParts.length > 0 ? persistedParts : parsed.parts, send);
     const info = isRecord(parsed.info) ? parsed.info : undefined;
     send({
       type: "done",
@@ -10036,10 +10408,20 @@ async function runOpenCodeServer(
     if (timedOut) {
       // Surface the timeout as an error in the chat — otherwise the abort
       // silently swallows it and the agent message hangs empty forever.
-      send({ type: "error", text: recoveredParts > 0 ? `opencode timed out after ${Math.round(OPENCODE_RUN_TIMEOUT_MS / 60000)} min. Partial output was recovered from the OpenCode session.${recoverySuffix}` : `opencode timed out after ${Math.round(OPENCODE_RUN_TIMEOUT_MS / 60000)} min.${recoverySuffix}` });
+      const minutes = Math.round(OPENCODE_RUN_TIMEOUT_MS / 60000);
+      send({
+        type: "error",
+        text:
+          recoveredParts > 0
+            ? `opencode timed out after ${minutes} min. Partial output was recovered from the OpenCode session.${recoverySuffix}`
+            : `opencode timed out after ${minutes} min.${recoverySuffix}`,
+      });
     } else if (!abortController.signal.aborted) {
       const text = openCodeServerErrorText(error);
-      send({ type: "error", text: recoveredParts > 0 ? `opencode transport failed after partial output: ${text}${recoverySuffix}` : `${text}${recoverySuffix}` });
+      send({
+        type: "error",
+        text: recoveredParts > 0 ? `opencode transport failed after partial output: ${text}${recoverySuffix}` : `${text}${recoverySuffix}`,
+      });
     }
   } finally {
     clearTimeout(runTimeout);
@@ -10208,7 +10590,7 @@ function codexCompactionConfigForRequest(request: RunRequest): Record<string, nu
 
 /** Sandbox/approval/model/effort + plan-aware prompt for a Codex thread. */
 export function buildCodexThreadParams(request: RunRequest): {
-  readonly sandbox: "read-only" | "danger-full-access";
+  readonly sandbox: "read-only" | "workspace-write" | "danger-full-access";
   readonly approvalPolicy: "never";
   readonly model?: string;
   readonly effort?: string;
@@ -10219,7 +10601,7 @@ export function buildCodexThreadParams(request: RunRequest): {
   const profile = normalizeAgentProfile(request, "codex");
   const mode = modeForProfile(profile);
   const planMode = mode === "plan";
-  const sandbox = request.accessMode === "unrestricted" && !planMode ? "danger-full-access" : "read-only";
+  const sandbox = planMode || request.accessMode !== "unrestricted" ? "read-only" : request.autoConfirm || profile.autoConfirm ? "danger-full-access" : "workspace-write";
   return {
     sandbox,
     approvalPolicy: "never",
@@ -10565,7 +10947,7 @@ function handleRunCancel(req: IncomingMessage, res: ServerResponse): void {
       const canceled = cancelBackgroundRunRequestState(currentState, request.runId, Boolean(handle));
       if (!handle) {
         if (canceled.canceled) {
-          writeWorkspaceState(canceled.state);
+          persistWorkspaceDelta(currentState, canceled.state);
           sendJson(res, 200, { runId: request.runId, canceled: true, detached: true });
           return;
         }
@@ -10573,7 +10955,7 @@ function handleRunCancel(req: IncomingMessage, res: ServerResponse): void {
         return;
       }
       handle.cancel();
-      writeWorkspaceState(canceled.state);
+      persistWorkspaceDelta(currentState, canceled.state);
       sendJson(res, 200, { runId: request.runId, canceled: true });
     } catch (error) {
       sendJson(res, runControlErrorStatus(error), { error: errorMessage(error) });
@@ -10692,7 +11074,7 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
       sendJson(res, 400, { error: parsedPayload.error });
       return;
     }
-    const { agent, model, reasoning, mode, prompt, requestedCwd, accessMode, resume, autoCompact, compactWindow, accessModeValid, profileValid, profileError, bindingInvalid } = parsedPayload;
+    const { agent, model, reasoning, mode, prompt, requestedCwd, accessMode, resume, autoConfirm, autoCompact, compactWindow, accessModeValid, profileValid, profileError, bindingInvalid } = parsedPayload;
     let binding: BackgroundRunBinding | null = parsedPayload.binding;
 
     if (!prompt) {
@@ -10857,7 +11239,7 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
     // can resume it later. Claude/Codex/OpenCode mint their own and report it back
     // via a "session" event from their stream translators.
     const assignedSessionId = !resume && agent === "gemini" ? randomUUID() : undefined;
-    const request: RunRequest = { agent, model, reasoning, mode, prompt, accessMode, resume, sessionId: assignedSessionId, autoCompact, compactWindow };
+    const request: RunRequest = { agent, model, reasoning, mode, prompt, accessMode, resume, sessionId: assignedSessionId, autoConfirm, autoCompact, compactWindow };
     requestForWakeups = request;
     if (assignedSessionId) {
       send({ type: "session", id: assignedSessionId });
@@ -10882,6 +11264,7 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
         model,
         reasoning,
         mode,
+        autoConfirm,
         accessMode,
         cwd,
         runId: binding?.runId,
@@ -11148,6 +11531,7 @@ function attach(server: ViteDevServer | PreviewServer): void {
   useExactApi(server, "/api/browser/bridge/snapshot", methodOnly("GET", handleBrowserBridgeSnapshot));
   useExactApi(server, "/api/browser/snapshot", methodOnly("GET", handleBrowserSnapshot));
   useExactApi(server, "/api/browser/events", methodOnly("GET", handleBrowserEvents));
+  useExactApi(server, "/api/workspace/mutations", methodOnly("POST", handleWorkspaceMutations));
   useExactApi(server, "/api/workspace", handleWorkspace);
   useExactApi(server, "/api/thread", methodOnly("GET", (req, res) => {
     try {
@@ -11169,6 +11553,9 @@ function attach(server: ViteDevServer | PreviewServer): void {
         sendJson(res, 500, { error: errorMessage(error) });
       }
     })();
+  }));
+  useExactApi(server, "/api/rlab-plugins", methodOnly("GET", (_req, res) => {
+    sendJson(res, 200, { plugins: registeredRlabPluginLinks() });
   }));
   prewarmAgentDetectionCache();
   useExactApi(server, "/api/agent-config", handleAgentConfig);

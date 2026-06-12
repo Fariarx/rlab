@@ -21,7 +21,7 @@ if (!existsSync(resolve(packageRoot, "dist/index.html"))) {
 
 const server = await preview({
   root: packageRoot,
-  preview: { host, port, strictPort: false },
+  preview: { host, port, strictPort: true },
 });
 
 console.log("\n  rlab — agent workspace");

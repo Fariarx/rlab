@@ -53,6 +53,7 @@ export function AgentPicker({
   const [model, setModel] = useState<string>(initialProfile.model);
   const [reasoning, setReasoning] = useState<string>(initialProfile.reasoning);
   const [mode, setMode] = useState<AgentWorkMode>(initialProfile.mode);
+  const [autoConfirm, setAutoConfirm] = useState<boolean>(initialProfile.autoConfirm ?? false);
   const statusOf = useAgentStatus();
   const cliInfoOf = useAgentCliInfo();
   const liveCliDetection = useAgentStatusLive();
@@ -75,6 +76,7 @@ export function AgentPicker({
       setModel(nextProfile.model);
       setReasoning(nextProfile.reasoning);
       setMode(nextProfile.mode);
+      setAutoConfirm(nextProfile.autoConfirm ?? false);
     }
   }, [open, value]);
 
@@ -87,10 +89,11 @@ export function AgentPicker({
     setModel(nextProfile.model);
     setReasoning(nextProfile.reasoning);
     setMode(nextProfile.mode);
+    setAutoConfirm(nextProfile.autoConfirm ?? false);
   };
 
   const confirm = () => {
-    onSelect(normalizeAgentProfile({ agent, model, reasoning, mode }));
+    onSelect(normalizeAgentProfile({ agent, model, reasoning, mode, autoConfirm }));
     onClose();
   };
 

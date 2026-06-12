@@ -1,3 +1,4 @@
+import SettingsRoundedIcon from "@mui/icons-material/SettingsRounded";
 import { Box, CircularProgress, type SxProps, type Theme, Tooltip } from "@mui/material";
 import type { MouseEvent } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
@@ -73,6 +74,7 @@ export function ContextGauge({ tokens, window, size = 22, hitSize = size, ariaLa
           width: hitSize,
           height: hitSize,
           cursor: onClick ? "pointer" : "default",
+          color: (theme) => theme.palette.text.secondary,
         }}
       >
         <CircularProgress
@@ -83,6 +85,15 @@ export function ContextGauge({ tokens, window, size = 22, hitSize = size, ariaLa
           sx={{ position: "absolute", inset: 0, m: "auto", color: (theme) => theme.custom.borders.strong }}
         />
         <CircularProgress variant="determinate" value={Math.min(100, pct)} size={size} thickness={thickness} sx={fillSx} />
+        <SettingsRoundedIcon
+          aria-hidden="true"
+          sx={{
+            position: "relative",
+            width: Math.max(10, Math.round(size * 0.48)),
+            height: Math.max(10, Math.round(size * 0.48)),
+            pointerEvents: "none",
+          }}
+        />
       </Box>
     </Tooltip>
   );

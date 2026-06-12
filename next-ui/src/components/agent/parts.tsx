@@ -2,6 +2,7 @@ import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import ArrowForwardIcon from "@mui/icons-material/ArrowForward";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import DescriptionOutlinedIcon from "@mui/icons-material/DescriptionOutlined";
+import ExtensionOutlinedIcon from "@mui/icons-material/ExtensionOutlined";
 import LinkOffIcon from "@mui/icons-material/LinkOff";
 import OpenInNewIcon from "@mui/icons-material/OpenInNew";
 import RefreshIcon from "@mui/icons-material/Refresh";
@@ -30,6 +31,58 @@ const linkSx = {
 } as const;
 
 const IMAGE_URL_RE = /\.(png|jpe?g|gif|webp|svg|avif|bmp)(\?|#|$)/i;
+const RLAB_TOOL_LINK_RE = /\$(TaskWakeup|ScheduleWakeup|AskUserQuestion|BrowserPreview)\b/g;
+
+function normalizedRlabToolName(value: string): string {
+  return value === "ScheduleWakeup" ? "TaskWakeup" : value;
+}
+
+function rlabToolMarkdownLinks(text: string): string {
+  return text.replace(RLAB_TOOL_LINK_RE, (_match, tool: string) => `[${normalizedRlabToolName(tool)}](rlab-tool:${normalizedRlabToolName(tool)})`);
+}
+
+function RlabToolIcon() {
+  return <ExtensionOutlinedIcon sx={{ fontSize: 13, mr: 0.35, verticalAlign: "-0.15em" }} />;
+}
+
+export function RlabToolLink({ name, children }: { readonly name: string; readonly children?: ReactNode }) {
+  const normalized = normalizedRlabToolName(name);
+  return (
+    <Box
+      component="a"
+      href={`rlab-tool:${normalized}`}
+      onClick={(event: ReactMouseEvent<HTMLAnchorElement>) => event.preventDefault()}
+      sx={{
+        ...linkSx,
+        display: "inline-flex",
+        alignItems: "baseline",
+        fontFamily: (t) => t.custom.fonts.mono,
+        fontWeight: 700,
+      }}
+    >
+      <RlabToolIcon />
+      {children ?? normalized}
+    </Box>
+  );
+}
+
+export function InlinePluginText({ text }: { readonly text: string }) {
+  const nodes: ReactNode[] = [];
+  let lastIndex = 0;
+  for (const match of text.matchAll(RLAB_TOOL_LINK_RE)) {
+    const [raw, tool] = match;
+    const index = match.index ?? 0;
+    if (index > lastIndex) {
+      nodes.push(text.slice(lastIndex, index));
+    }
+    nodes.push(<RlabToolLink key={`${tool}-${index}`} name={tool} />);
+    lastIndex = index + raw.length;
+  }
+  if (lastIndex < text.length) {
+    nodes.push(text.slice(lastIndex));
+  }
+  return <>{nodes}</>;
+}
 
 /** A local file path (not a web URL, anchor, or mailto): has a path separator or
  *  a file extension. These open in the in-app Git file viewer, not the browser. */
@@ -77,6 +130,9 @@ export function MessageLink({ href, children }: { readonly href?: string; readon
   const { t } = useI18n();
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
   const raw = (href ?? "").trim();
+  if (raw.startsWith("rlab-tool:")) {
+    return <RlabToolLink name={raw.slice("rlab-tool:".length)}>{children}</RlabToolLink>;
+  }
   const target = normalizeExternalUrl(raw);
 
   // Outside the workspace (kit/tests): degrade to a plain new-tab link.
@@ -368,7 +424,7 @@ function MarkdownMessage({ text }: { readonly text: string }) {
   return (
     <Stack spacing={1} sx={{ width: "100%", minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }}>
       <Markdown remarkPlugins={[remarkGfm]} skipHtml components={markdownComponents}>
-        {text}
+        {rlabToolMarkdownLinks(text)}
       </Markdown>
     </Stack>
   );

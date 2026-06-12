@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+﻿import { act, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useWorkspace } from "../src/components/workspace/use-workspace";
 import { buildInitialWorkspaceState, type WorkspaceState } from "../src/components/workspace/workspace-state";
@@ -125,6 +125,110 @@ interface RunRequestRecord {
   readonly mode?: string;
 }
 
+type WorkspaceMutation =
+  | { readonly type: "setSelectedConversation"; readonly conversationId: string }
+  | { readonly type: "setSettings"; readonly settings: WorkspaceState["settings"] }
+  | { readonly type: "upsertProject"; readonly project: Omit<WorkspaceState["projects"][number], "conversations">; readonly insertAtFront?: boolean }
+  | { readonly type: "upsertConversation"; readonly conversation: WorkspaceState["chats"][number]; readonly projectId: string | null; readonly insertAtFront?: boolean }
+  | { readonly type: "updateConversation"; readonly conversation: WorkspaceState["chats"][number] }
+  | { readonly type: "deleteConversation"; readonly conversationId: string }
+  | { readonly type: "setComposerDraft"; readonly conversationId: string; readonly draft: WorkspaceState["composerDrafts"][string] }
+  | { readonly type: "deleteComposerDraft"; readonly conversationId: string }
+  | { readonly type: "upsertMessage"; readonly conversationId: string; readonly message: WorkspaceState["threads"][string][number] }
+  | { readonly type: "upsertMessages"; readonly conversationId: string; readonly messages: readonly WorkspaceState["threads"][string][number][] }
+  | { readonly type: "replaceConversationThread"; readonly conversationId: string; readonly messages: readonly WorkspaceState["threads"][string][number][] };
+
+function applyWorkspaceMutation(state: WorkspaceState, mutation: WorkspaceMutation): WorkspaceState {
+  switch (mutation.type) {
+    case "setSelectedConversation":
+      return {
+        ...state,
+        selectedId: mutation.conversationId,
+        chats: state.chats.map((conversation) => (conversation.id === mutation.conversationId ? { ...conversation, unread: false } : conversation)),
+        projects: state.projects.map((project) => ({
+          ...project,
+          conversations: project.conversations.map((conversation) => (conversation.id === mutation.conversationId ? { ...conversation, unread: false } : conversation)),
+        })),
+      };
+    case "setSettings":
+      return { ...state, settings: mutation.settings };
+    case "upsertProject": {
+      const existing = state.projects.find((project) => project.id === mutation.project.id);
+      if (existing) {
+        return { ...state, projects: state.projects.map((project) => (project.id === mutation.project.id ? { ...project, ...mutation.project } : project)) };
+      }
+      const project = { ...mutation.project, conversations: [] };
+      return { ...state, projects: mutation.insertAtFront ? [project, ...state.projects] : [...state.projects, project] };
+    }
+    case "upsertConversation": {
+      const without = {
+        ...state,
+        chats: state.chats.filter((conversation) => conversation.id !== mutation.conversation.id),
+        projects: state.projects.map((project) => ({ ...project, conversations: project.conversations.filter((conversation) => conversation.id !== mutation.conversation.id) })),
+      };
+      if (mutation.projectId === null) {
+        return { ...without, chats: mutation.insertAtFront ? [mutation.conversation, ...without.chats] : [...without.chats, mutation.conversation] };
+      }
+      return {
+        ...without,
+        projects: without.projects.map((project) =>
+          project.id === mutation.projectId
+            ? { ...project, conversations: mutation.insertAtFront ? [mutation.conversation, ...project.conversations] : [...project.conversations, mutation.conversation] }
+            : project,
+        ),
+      };
+    }
+    case "updateConversation":
+      return {
+        ...state,
+        chats: state.chats.map((conversation) => (conversation.id === mutation.conversation.id ? mutation.conversation : conversation)),
+        projects: state.projects.map((project) => ({
+          ...project,
+          conversations: project.conversations.map((conversation) => (conversation.id === mutation.conversation.id ? mutation.conversation : conversation)),
+        })),
+      };
+    case "deleteConversation": {
+      const threads = { ...state.threads };
+      const composerDrafts = { ...state.composerDrafts };
+      delete threads[mutation.conversationId];
+      delete composerDrafts[mutation.conversationId];
+      return {
+        ...state,
+        chats: state.chats.filter((conversation) => conversation.id !== mutation.conversationId),
+        projects: state.projects.map((project) => ({ ...project, conversations: project.conversations.filter((conversation) => conversation.id !== mutation.conversationId) })),
+        threads,
+        composerDrafts,
+      };
+    }
+    case "setComposerDraft":
+      return { ...state, composerDrafts: { ...state.composerDrafts, [mutation.conversationId]: mutation.draft } };
+    case "deleteComposerDraft": {
+      const composerDrafts = { ...state.composerDrafts };
+      delete composerDrafts[mutation.conversationId];
+      return { ...state, composerDrafts };
+    }
+    case "upsertMessage": {
+      const messages = state.threads[mutation.conversationId] ?? [];
+      const index = messages.findIndex((message) => message.id === mutation.message.id);
+      const next = index >= 0 ? messages.map((message) => (message.id === mutation.message.id ? mutation.message : message)) : [...messages, mutation.message];
+      return { ...state, threads: { ...state.threads, [mutation.conversationId]: next } };
+    }
+    case "upsertMessages":
+      return mutation.messages.reduce((current, message) => applyWorkspaceMutation(current, { type: "upsertMessage", conversationId: mutation.conversationId, message }), state);
+    case "replaceConversationThread":
+      return { ...state, threads: { ...state.threads, [mutation.conversationId]: [...mutation.messages] } };
+  }
+}
+
+function applyWorkspaceMutations(state: WorkspaceState, mutations: readonly WorkspaceMutation[]): WorkspaceState {
+  return mutations.reduce(applyWorkspaceMutation, state);
+}
+
+function applyWorkspaceMutationRequest(state: WorkspaceState, init: RequestInit | undefined): WorkspaceState {
+  const payload = JSON.parse(String(init?.body ?? "{}")) as { mutations?: WorkspaceMutation[] };
+  return applyWorkspaceMutations(state, payload.mutations ?? []);
+}
+
 describe("useWorkspace", () => {
   let state: WorkspaceState;
   let localStorageSetItem: ReturnType<typeof vi.fn>;
@@ -159,9 +263,10 @@ describe("useWorkspace", () => {
         if (url === "/api/workspace" && (!init || init.method === "GET")) {
           return Response.json(state);
         }
-        if (url === "/api/workspace" && init?.method === "PUT") {
-          state = JSON.parse(String(init.body)) as WorkspaceState;
-          return Response.json(state);
+        if (url === "/api/workspace/mutations" && init?.method === "POST") {
+          const payload = JSON.parse(String(init.body)) as { mutations?: WorkspaceMutation[] };
+          state = applyWorkspaceMutations(state, payload.mutations ?? []);
+          return Response.json({ ok: true });
         }
         if (url === "/api/runs") {
           return Response.json(activeRunsPayloadFromState(state));
@@ -225,7 +330,7 @@ describe("useWorkspace", () => {
       await Promise.resolve();
     });
 
-    expect(vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace" && init?.method === "PUT")).toHaveLength(0);
+    expect(vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace/mutations" && init?.method === "POST")).toHaveLength(0);
   });
 
   it("retries failed initial workspace loads every 15 seconds", async () => {
@@ -240,9 +345,9 @@ describe("useWorkspace", () => {
         }
         return Response.json(state);
       }
-      if (url === "/api/workspace" && init?.method === "PUT") {
-        state = JSON.parse(String(init.body)) as WorkspaceState;
-        return Response.json(state);
+      if (url === "/api/workspace/mutations" && init?.method === "POST") {
+        state = applyWorkspaceMutationRequest(state, init);
+        return Response.json({ ok: true });
       }
       return new Response("not found", { status: 404 });
     });
@@ -276,7 +381,7 @@ describe("useWorkspace", () => {
     screen.getByRole("button", { name: "send" }).click();
 
     await waitFor(() => {
-      expect(fetch).toHaveBeenCalledWith("/api/workspace", expect.objectContaining({ method: "PUT" }));
+      expect(fetch).toHaveBeenCalledWith("/api/workspace/mutations", expect.objectContaining({ method: "POST" }));
     });
     expect(state.threads["chat-2"].some((message) => message.text === "Persist this message")).toBe(true);
     expect(localStorageSetItem).not.toHaveBeenCalledWith(expect.stringContaining("rlab-workspace"), expect.any(String));
@@ -286,17 +391,17 @@ describe("useWorkspace", () => {
     render(<Probe />);
 
     await screen.findByText("chat-2");
-    const savesBefore = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace" && init?.method === "PUT").length;
+    const savesBefore = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace/mutations" && init?.method === "POST").length;
     screen.getByRole("button", { name: "remove-chat-1" }).click();
 
     await waitFor(() => {
-      const saves = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace" && init?.method === "PUT");
+      const saves = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace/mutations" && init?.method === "POST");
       expect(saves).toHaveLength(savesBefore + 1);
     });
-    const saves = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace" && init?.method === "PUT");
-    const payload = JSON.parse(String(saves.at(-1)?.[1]?.body ?? "{}")) as WorkspaceState;
-    expect(payload.chats.some((chat) => chat.id === "chat-1")).toBe(false);
-    expect(payload.threads).toEqual({});
+    const saves = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace/mutations" && init?.method === "POST");
+    const payload = JSON.parse(String(saves.at(-1)?.[1]?.body ?? "{}")) as { mutations?: WorkspaceMutation[] };
+    expect(payload.mutations).toContainEqual({ type: "deleteConversation", conversationId: "chat-1" });
+    expect(payload.mutations?.some((mutation) => mutation.type === "replaceConversationThread")).toBe(false);
     expect(state.chats.some((chat) => chat.id === "chat-1")).toBe(false);
   });
 
@@ -322,11 +427,11 @@ describe("useWorkspace", () => {
 
     await screen.findByText("chat-2");
     const originalThread = state.threads["chat-1"];
-    const savesBefore = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace" && init?.method === "PUT").length;
+    const savesBefore = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace/mutations" && init?.method === "POST").length;
     screen.getByRole("button", { name: "archive-chat-1" }).click();
 
     await waitFor(() => {
-      const saves = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace" && init?.method === "PUT");
+      const saves = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace/mutations" && init?.method === "POST");
       expect(saves).toHaveLength(savesBefore + 1);
     });
 
@@ -394,7 +499,7 @@ describe("useWorkspace", () => {
       await vi.advanceTimersByTimeAsync(0);
     });
     expect(screen.getByText("chat-2")).toBeInTheDocument();
-    const savesBefore = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace" && init?.method === "PUT").length;
+    const savesBefore = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace/mutations" && init?.method === "POST").length;
 
     await act(async () => {
       screen.getByRole("button", { name: "draft-a" }).click();
@@ -404,13 +509,13 @@ describe("useWorkspace", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(249);
     });
-    expect(vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace" && init?.method === "PUT")).toHaveLength(savesBefore);
+    expect(vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace/mutations" && init?.method === "POST")).toHaveLength(savesBefore);
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1);
     });
 
-    const savesAfter = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace" && init?.method === "PUT");
+    const savesAfter = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace/mutations" && init?.method === "POST");
     expect(savesAfter).toHaveLength(savesBefore + 1);
     expect(state.composerDrafts["chat-2"]?.text).toBe("ab");
     expect(localStorageSetItem).not.toHaveBeenCalledWith(expect.stringContaining("rlab-workspace"), expect.any(String));
@@ -424,13 +529,13 @@ describe("useWorkspace", () => {
       if (url === "/api/workspace" && (!init || init.method === "GET")) {
         return Response.json(state);
       }
-      if (url === "/api/workspace" && init?.method === "PUT") {
+      if (url === "/api/workspace/mutations" && init?.method === "POST") {
         saveAttempts += 1;
         if (saveAttempts === 1) {
           return Response.json({ error: "database is locked" }, { status: 502 });
         }
-        state = JSON.parse(String(init.body)) as WorkspaceState;
-        return Response.json(state);
+        state = applyWorkspaceMutationRequest(state, init);
+        return Response.json({ ok: true });
       }
       if (url === "/api/runs") {
         return Response.json(activeRunsPayloadFromState(state));
@@ -570,9 +675,9 @@ describe("useWorkspace", () => {
       if (url === "/api/workspace" && (!init || init.method === "GET")) {
         return Response.json(state);
       }
-      if (url === "/api/workspace" && init?.method === "PUT") {
-        state = JSON.parse(String(init.body)) as WorkspaceState;
-        return Response.json(state);
+      if (url === "/api/workspace/mutations" && init?.method === "POST") {
+        state = applyWorkspaceMutationRequest(state, init);
+        return Response.json({ ok: true });
       }
       if (url === "/api/runs") {
         activeRunReads += 1;
@@ -720,9 +825,9 @@ describe("useWorkspace", () => {
       if (url === "/api/workspace" && (!init || init.method === "GET")) {
         return Response.json(state);
       }
-      if (url === "/api/workspace" && init?.method === "PUT") {
-        state = JSON.parse(String(init.body)) as WorkspaceState;
-        return Response.json(state);
+      if (url === "/api/workspace/mutations" && init?.method === "POST") {
+        state = applyWorkspaceMutationRequest(state, init);
+        return Response.json({ ok: true });
       }
       if (url === "/api/runs") {
         return Response.json(activeRunsPayloadFromState(state));
@@ -859,9 +964,9 @@ describe("useWorkspace", () => {
       if (url === "/api/workspace" && (!init || init.method === "GET")) {
         return Response.json(state);
       }
-      if (url === "/api/workspace" && init?.method === "PUT") {
-        state = JSON.parse(String(init.body)) as WorkspaceState;
-        return Response.json(state);
+      if (url === "/api/workspace/mutations" && init?.method === "POST") {
+        state = applyWorkspaceMutationRequest(state, init);
+        return Response.json({ ok: true });
       }
       if (url === "/api/runs") {
         return Response.json(activeRunsPayloadFromState(state));
@@ -968,9 +1073,9 @@ describe("useWorkspace", () => {
       if (url === "/api/workspace" && (!init || init.method === "GET")) {
         return Response.json(state);
       }
-      if (url === "/api/workspace" && init?.method === "PUT") {
-        state = JSON.parse(String(init.body)) as WorkspaceState;
-        return Response.json(state);
+      if (url === "/api/workspace/mutations" && init?.method === "POST") {
+        state = applyWorkspaceMutationRequest(state, init);
+        return Response.json({ ok: true });
       }
       if (url === "/api/runs") {
         return Response.json(activeRunsPayloadFromState(state));
@@ -1144,9 +1249,9 @@ describe("useWorkspace", () => {
       if (url === "/api/workspace" && (!init || init.method === "GET")) {
         return Response.json(state);
       }
-      if (url === "/api/workspace" && init?.method === "PUT") {
-        state = JSON.parse(String(init.body)) as WorkspaceState;
-        return Response.json(state);
+      if (url === "/api/workspace/mutations" && init?.method === "POST") {
+        state = applyWorkspaceMutationRequest(state, init);
+        return Response.json({ ok: true });
       }
       if (url === "/api/runs") {
         return Response.json({ runs: [liveRun] });
@@ -1213,7 +1318,7 @@ describe("useWorkspace", () => {
     await waitFor(() => {
       expect(attachRunRequests).toEqual(["/api/run-attach?runId=run-existing"]);
     });
-    const workspaceSavesBeforeAttachUpdate = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace" && init?.method === "PUT").length;
+    const workspaceSavesBeforeAttachUpdate = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace/mutations" && init?.method === "POST").length;
 
     attachRunController?.enqueue(
       new TextEncoder().encode(
@@ -1237,7 +1342,7 @@ describe("useWorkspace", () => {
     await waitFor(() => {
       expect(screen.getByTestId("status")).toHaveTextContent("running");
     });
-    const workspaceSavesAfterAttachUpdate = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace" && init?.method === "PUT").length;
+    const workspaceSavesAfterAttachUpdate = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace/mutations" && init?.method === "POST").length;
     expect(workspaceSavesAfterAttachUpdate).toBe(workspaceSavesBeforeAttachUpdate);
   });
 
@@ -1292,9 +1397,9 @@ describe("useWorkspace", () => {
       if (url === "/api/workspace" && (!init || init.method === "GET")) {
         return Response.json(state);
       }
-      if (url === "/api/workspace" && init?.method === "PUT") {
-        state = JSON.parse(String(init.body)) as WorkspaceState;
-        return Response.json(state);
+      if (url === "/api/workspace/mutations" && init?.method === "POST") {
+        state = applyWorkspaceMutationRequest(state, init);
+        return Response.json({ ok: true });
       }
       if (url === "/api/runs") {
         return Response.json(activeRunsPayloadFromState(state));
@@ -1330,14 +1435,14 @@ describe("useWorkspace", () => {
     await waitFor(() => {
       expect(runRequests).toHaveLength(1);
     });
-    const workspaceSavesBeforeStreamUpdate = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace" && init?.method === "PUT").length;
+    const workspaceSavesBeforeStreamUpdate = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace/mutations" && init?.method === "POST").length;
 
     activeRunController?.enqueue(new TextEncoder().encode(`${JSON.stringify({ type: "text", text: "server token" })}\n`));
 
     await waitFor(() => {
       expect(screen.getByTestId("status")).toHaveTextContent("running");
     });
-    const workspaceSavesAfterStreamUpdate = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace" && init?.method === "PUT").length;
+    const workspaceSavesAfterStreamUpdate = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace/mutations" && init?.method === "POST").length;
     expect(workspaceSavesAfterStreamUpdate).toBe(workspaceSavesBeforeStreamUpdate);
   });
 
@@ -1363,9 +1468,9 @@ describe("useWorkspace", () => {
         workspaceReads += 1;
         return Response.json(workspaceReads === 1 ? runningState : doneState);
       }
-      if (url === "/api/workspace" && init?.method === "PUT") {
-        state = JSON.parse(String(init.body)) as WorkspaceState;
-        return Response.json(state);
+      if (url === "/api/workspace/mutations" && init?.method === "POST") {
+        state = applyWorkspaceMutationRequest(state, init);
+        return Response.json({ ok: true });
       }
       if (url === "/api/runs") {
         activeRunReads += 1;
@@ -1521,13 +1626,13 @@ describe("useWorkspace", () => {
     });
     expect(screen.getByText("chat-2")).toBeInTheDocument();
     const rendersAfterLoad = renders;
-    const workspaceSavesAfterLoad = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace" && init?.method === "PUT").length;
+    const workspaceSavesAfterLoad = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace/mutations" && init?.method === "POST").length;
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(2100);
     });
 
-    const workspaceSavesAfterPoll = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace" && init?.method === "PUT").length;
+    const workspaceSavesAfterPoll = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace/mutations" && init?.method === "POST").length;
     expect(renders).toBe(rendersAfterLoad);
     expect(workspaceSavesAfterPoll).toBe(workspaceSavesAfterLoad);
   });
@@ -1635,3 +1740,4 @@ describe("useWorkspace", () => {
     });
   });
 });
+

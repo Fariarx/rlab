@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+﻿import { describe, expect, it, vi } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
@@ -78,6 +78,7 @@ import {
   parseClaudeOAuthUsagePayload,
   parseClaudeRateLimitStream,
   parseCodexModelsOutput,
+  parseGeminiModelUsageOutput,
   parseClaudeAgentsOutput,
   parseGeminiCliModelConfigSource,
   parseOpenCodeAgentsOutput,
@@ -141,7 +142,7 @@ describe("vite agents plugin", () => {
     const withTools = appendRlabChatToolsPrompt("wait until the deployment is ready");
 
     expect(withTools).toContain("<rlab-chat-tools>");
-    expect(withTools).toContain("ScheduleWakeup supports delaySeconds/fireAt");
+    expect(withTools).toContain("TaskWakeup supports delaySeconds/fireAt/cron");
     expect(withTools).toContain("{ prompt, script, intervalSeconds, reason }");
     expect(appendRlabChatToolsPrompt(withTools).match(/<rlab-chat-tools>/g)).toHaveLength(1);
   });
@@ -596,8 +597,9 @@ Built-in agents:
       expect.stringContaining("AskUserQuestion"),
       "--settings",
       JSON.stringify({ autoCompactEnabled: true }),
-      "--dangerously-skip-permissions",
     ]);
+    expect(buildClaudeRunArgs({ prompt: "hello", autoConfirm: true })).toContain("--permission-mode");
+    expect(buildClaudeRunArgs({ prompt: "hello", autoConfirm: true })).toContain("auto");
   });
 
   it("builds Claude args with a selected CLI model alias", () => {
@@ -619,7 +621,7 @@ Built-in agents:
       "--permission-mode",
       "plan",
       "--tools",
-      "Read,Glob,Grep,LS,AskUserQuestion,ScheduleWakeup",
+      "Read,Glob,Grep,LS,AskUserQuestion,TaskWakeup",
     ]);
   });
 
@@ -637,7 +639,6 @@ Built-in agents:
       JSON.stringify({ autoCompactEnabled: true }),
       "--agent",
       "Goal",
-      "--dangerously-skip-permissions",
     ]);
   });
 
@@ -758,7 +759,7 @@ Built-in agents:
     ).toEqual([{ type: "tool", id: "tool-1", name: "Bash", summary: "npm test", args: { command: "npm test" } }]);
   });
 
-  it("translates Claude ScheduleWakeup tool results into scheduler events", () => {
+  it("translates Claude TaskWakeup tool results into scheduler events", () => {
     const translate = createClaudeStreamTranslator();
 
     expect(
@@ -770,14 +771,14 @@ Built-in agents:
               {
                 type: "tool_use",
                 id: "wake-1",
-                name: "ScheduleWakeup",
+                name: "TaskWakeup",
                 input: { delaySeconds: "180", prompt: "send OK", reason: "user asked for a reminder" },
               },
             ],
           },
         }),
       ),
-    ).toEqual([{ type: "tool", id: "wake-1", name: "ScheduleWakeup", summary: "", args: { delaySeconds: "180", prompt: "send OK", reason: "user asked for a reminder" } }]);
+    ).toEqual([{ type: "tool", id: "wake-1", name: "TaskWakeup", summary: "", args: { delaySeconds: "180", prompt: "send OK", reason: "user asked for a reminder" } }]);
 
     expect(
       translate(
@@ -805,7 +806,7 @@ Built-in agents:
             {
               type: "tool_use",
               id: "wake-script",
-              name: "ScheduleWakeup",
+              name: "TaskWakeup",
               input: { script: "test -f /tmp/ready", intervalSeconds: 15, prompt: "continue after ready file exists" },
             },
           ],
@@ -828,7 +829,7 @@ Built-in agents:
     ]);
   });
 
-  it("translates ScheduleWakeup cancel tool input into a scheduler cancellation event", () => {
+  it("translates TaskWakeup cancel tool input into a scheduler cancellation event", () => {
     const translate = createClaudeStreamTranslator();
 
     translate(
@@ -839,7 +840,7 @@ Built-in agents:
             {
               type: "tool_use",
               id: "wake-cancel",
-              name: "ScheduleWakeup",
+              name: "TaskWakeup",
               input: { action: "cancel", wakeupId: "wakeup-123", reason: "user canceled it" },
             },
           ],
@@ -1002,7 +1003,8 @@ Built-in agents:
   });
 
   it("maps agent access mode into CLI safety flags", () => {
-    expect(buildClaudeRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" })).toContain("--dangerously-skip-permissions");
+    expect(buildClaudeRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" })).not.toContain("--dangerously-skip-permissions");
+    expect(buildClaudeRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted", autoConfirm: true })).toEqual(expect.arrayContaining(["--permission-mode", "auto"]));
     // Read-only access maps to Claude's plan permission mode.
     expect(buildClaudeRunArgs({ prompt: "hello", model: "opus", reasoning: "max", mode: "default", accessMode: "read-only" })).toEqual([
       "-p",
@@ -1022,16 +1024,24 @@ Built-in agents:
       "--permission-mode",
       "plan",
       "--tools",
-      "Read,Glob,Grep,LS,AskUserQuestion,ScheduleWakeup",
+      "Read,Glob,Grep,LS,AskUserQuestion,TaskWakeup",
     ]);
     expect(buildCodexRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" })).toEqual([
+      "exec",
+      "--json",
+      "--sandbox",
+      "workspace-write",
+      "--skip-git-repo-check",
+      "hello",
+    ]);
+    expect(buildCodexRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted", autoConfirm: true })).toEqual([
       "exec",
       "--json",
       "--dangerously-bypass-approvals-and-sandbox",
       "--skip-git-repo-check",
       "hello",
     ]);
-    expect(buildGeminiRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" })).toContain("yolo");
+    expect(buildGeminiRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" })).toContain("default");
   });
 
   it("allows unrestricted runs for every RUN adapter without a live permission bridge", () => {
@@ -1062,8 +1072,18 @@ Built-in agents:
   });
 
   it("maps access mode into real Gemini approval modes", () => {
-    // Unrestricted -> yolo (the agent's "do anything" approval mode).
+    // Unrestricted without auto-confirm uses Gemini's normal approval flow.
     expect(buildGeminiRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" })).toEqual([
+      "--prompt",
+      "hello",
+      "--output-format",
+      "stream-json",
+      "--approval-mode",
+      "default",
+      "--skip-trust",
+    ]);
+    // Auto-confirm is a sandbox approval setting, not a chat work mode.
+    expect(buildGeminiRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted", autoConfirm: true })).toEqual([
       "--prompt",
       "hello",
       "--output-format",
@@ -1074,6 +1094,15 @@ Built-in agents:
     ]);
     // Read-only -> plan (hard-enforced read-only at the tool layer).
     expect(buildGeminiRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "read-only" })).toContain("plan");
+    expect(buildGeminiRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "plan", accessMode: "unrestricted" })).toEqual([
+      "--prompt",
+      "Plan mode is active.\nDo not modify files or run commands that write to the filesystem.\nInspect the workspace as needed, then respond with a concise implementation plan.\nhello",
+      "--output-format",
+      "stream-json",
+      "--approval-mode",
+      "plan",
+      "--skip-trust",
+    ]);
   });
 
   it("builds OpenCode read-only args with the plan agent, default model, and reasoning variant", () => {
@@ -1090,11 +1119,12 @@ Built-in agents:
       "high",
       "hello",
     ]);
-    expect(buildOpenCodeRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" })).toContain("--dangerously-skip-permissions");
+    expect(buildOpenCodeRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" })).not.toContain("--dangerously-skip-permissions");
+    expect(buildOpenCodeRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted", autoConfirm: true })).toContain("--dangerously-skip-permissions");
   });
 
   it("builds OpenCode args with selected provider/model IDs", () => {
-    expect(buildOpenCodeRunArgs({ prompt: "hello", model: "anthropic-claude-opus-4-7", reasoning: "default", mode: "default", accessMode: "read-only" })).toEqual([
+    expect(buildOpenCodeRunArgs({ prompt: "hello", model: "opencode-north-mini-code-free", reasoning: "default", mode: "default", accessMode: "read-only" })).toEqual([
       "run",
       "--format",
       "json",
@@ -1102,7 +1132,7 @@ Built-in agents:
       "--agent",
       "plan",
       "--model",
-      "anthropic/claude-opus-4-7",
+      "opencode/north-mini-code-free",
       "hello",
     ]);
     expect(buildOpenCodeRunArgs({ prompt: "hello", model: "opencode-big-pickle", reasoning: "default", mode: "default", accessMode: "read-only" })).toContain("opencode/big-pickle");
@@ -1180,11 +1210,12 @@ Built-in agents:
     expect(tools).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          name: "ScheduleWakeup",
+          name: "TaskWakeup",
           inputSchema: expect.objectContaining({
             type: "object",
             properties: expect.objectContaining({
               prompt: expect.objectContaining({ type: "string" }),
+              cron: expect.objectContaining({ type: "string" }),
               script: expect.objectContaining({ type: "string" }),
               intervalSeconds: expect.objectContaining({ type: "number" }),
             }),
@@ -1205,17 +1236,17 @@ Built-in agents:
     ).toBe(tools);
   });
 
-  it("answers Codex dynamic ScheduleWakeup calls with tool-call results", () => {
+  it("answers Codex dynamic TaskWakeup calls with tool-call results", () => {
     expect(
       codexDynamicToolCallResponse({
-        tool: "ScheduleWakeup",
+        tool: "TaskWakeup",
         arguments: { prompt: "report result", delaySeconds: 60 },
       }),
     ).toEqual({
       contentItems: [
         {
           type: "inputText",
-          text: "rlab accepted the wakeup schedule. Finish this turn now and wait for rlab to re-run you when it fires.",
+          text: "rlab accepted the TaskWakeup. Finish this turn now and wait for rlab to re-run you when it fires.",
         },
       ],
       success: true,
@@ -1223,11 +1254,11 @@ Built-in agents:
 
     expect(
       codexDynamicToolCallResponse({
-        tool: "ScheduleWakeup",
+        tool: "TaskWakeup",
         arguments: { prompt: "missing trigger" },
       }),
     ).toEqual({
-      contentItems: [{ type: "inputText", text: "ScheduleWakeup requires delaySeconds, fireAt, or script." }],
+      contentItems: [{ type: "inputText", text: "TaskWakeup requires delaySeconds, fireAt, cron, or script." }],
       success: false,
     });
   });
@@ -1280,15 +1311,15 @@ Built-in agents:
       { type: "tool", id: "t1", name: "srv/fetch" },
       { type: "tool_result", id: "t1", ok: false, output: JSON.stringify({ message: "boom" }) },
     ]);
-    expect(codexAppServerItemEvents({ type: "dynamicToolCall", id: "wake-1", tool: "ScheduleWakeup", arguments: { prompt: "send OK", delaySeconds: 180 } }, false)).toEqual([
-      { type: "tool", id: "wake-1", name: "ScheduleWakeup", summary: "send OK", args: { prompt: "send OK", delaySeconds: "180" } },
+    expect(codexAppServerItemEvents({ type: "dynamicToolCall", id: "wake-1", tool: "TaskWakeup", arguments: { prompt: "send OK", delaySeconds: 180 } }, false)).toEqual([
+      { type: "tool", id: "wake-1", name: "TaskWakeup", summary: "send OK", args: { prompt: "send OK", delaySeconds: "180" } },
     ]);
     expect(
       codexAppServerItemEvents(
         {
           type: "dynamicToolCall",
           id: "wake-1",
-          tool: "ScheduleWakeup",
+          tool: "TaskWakeup",
           status: "completed",
           arguments: { prompt: "send OK", delaySeconds: 180 },
           contentItems: [{ type: "inputText", text: "accepted" }],
@@ -1297,7 +1328,7 @@ Built-in agents:
         true,
       ),
     ).toEqual([
-      { type: "tool", id: "wake-1", name: "ScheduleWakeup", summary: "send OK", args: { prompt: "send OK", delaySeconds: "180" } },
+      { type: "tool", id: "wake-1", name: "TaskWakeup", summary: "send OK", args: { prompt: "send OK", delaySeconds: "180" } },
       { type: "tool_result", id: "wake-1", ok: true, output: "accepted" },
       { type: "wakeup", toolId: "wake-1", prompt: "send OK", delaySeconds: 180 },
     ]);
@@ -1389,6 +1420,29 @@ Built-in agents:
       windows: [
         { kind: "five_hour", usedPercent: 12.4, resetsAt: 1781184600, status: "allowed" },
         { kind: "weekly", usedPercent: 91, resetsAt: 1781701200, status: "allowed_warning" },
+      ],
+    });
+  });
+
+  it("parses Gemini interactive /model usage into per-model limit windows", () => {
+    expect(
+      parseGeminiModelUsageOutput(
+        [
+          "Model usage",
+          "Flash       ▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬ 0%  Resets: 7:09 PM (24h)",
+          "Flash Lite  ▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬ 1%  Resets: 6:55 PM (23h 46m)",
+          "Pro         ▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬ 90% Resets: 7:09 PM (24h)",
+          "gemini-3.1-…▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬ 100% Resets: 6:55 PM (23h 46m)",
+        ].join("\n"),
+        1_800_000_000_000,
+      ),
+    ).toEqual({
+      plan: "Gemini CLI",
+      windows: [
+        { kind: "daily", label: "Flash", usedPercent: 0, resetsAt: 1_800_086_400, status: "allowed" },
+        { kind: "daily", label: "Flash Lite", usedPercent: 1, resetsAt: 1_800_085_560, status: "allowed" },
+        { kind: "daily", label: "Pro", usedPercent: 90, resetsAt: 1_800_086_400, status: "allowed_warning" },
+        { kind: "daily", label: "gemini-3.1-…", usedPercent: 100, resetsAt: 1_800_085_560, status: "rejected" },
       ],
     });
   });
@@ -3427,6 +3481,46 @@ Built-in agents:
       status: "running",
       snippet: "Still running",
     });
+  });
+
+  it("does not materialize an empty thread while reconciling an unloaded stale background run", () => {
+    const state = buildInitialWorkspaceState();
+    const partialState = {
+      ...state,
+      chats: state.chats.map((conversation) =>
+        conversation.id === "chat-2" ? { ...conversation, activeRunId: "run-stale", status: "running" as const, snippet: "Still running" } : conversation,
+      ),
+      threads: {},
+    };
+
+    const reconciled = reconcileStaleBackgroundRuns(partialState, new Set());
+
+    expect(reconciled.chats.find((conversation) => conversation.id === "chat-2")).toMatchObject({
+      activeRunId: undefined,
+      status: "error",
+      snippet: "Фоновый запуск прерван",
+    });
+    expect(Object.prototype.hasOwnProperty.call(reconciled.threads, "chat-2")).toBe(false);
+  });
+
+  it("does not materialize an empty thread while canceling an unloaded background run", () => {
+    const state = buildInitialWorkspaceState();
+    const partialState = {
+      ...state,
+      chats: state.chats.map((conversation) =>
+        conversation.id === "chat-2" ? { ...conversation, activeRunId: "run-detached", status: "running" as const, snippet: "Still running" } : conversation,
+      ),
+      threads: {},
+    };
+
+    const canceled = cancelBackgroundRunState(partialState, "run-detached");
+
+    expect(canceled.chats.find((conversation) => conversation.id === "chat-2")).toMatchObject({
+      activeRunId: undefined,
+      status: "idle",
+      snippet: "Запуск остановлен",
+    });
+    expect(Object.prototype.hasOwnProperty.call(canceled.threads, "chat-2")).toBe(false);
   });
 
   it("re-asserts a streaming background run as active so a stale interrupt can't strand it", () => {

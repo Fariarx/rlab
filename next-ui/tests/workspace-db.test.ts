@@ -6,6 +6,8 @@ import type { ChatMessage, ConversationSummary } from "../src/components/agent/t
 import { buildEmptyWorkspaceState, type WorkspaceState } from "../src/lib/workspace-state";
 import {
   closeWorkspaceDb,
+  applyWorkspaceDbMutations,
+  initializeWorkspaceStateInDb,
   initWorkspaceDb,
   readConversation,
   readMessageBlocks,
@@ -15,8 +17,6 @@ import {
   upsertAgentMessageForUserTurn,
   upsertMessage,
   workspaceDbHasState,
-  writeWorkspaceShellPreservingThreads,
-  writeWorkspaceStateToDb,
 } from "../workspace-db";
 
 const conv = (id: string, extra: Partial<ConversationSummary> = {}): ConversationSummary => ({
@@ -52,7 +52,7 @@ describe("workspace-db", () => {
       selectedId: "c1",
     };
     expect(workspaceDbHasState()).toBe(false);
-    writeWorkspaceStateToDb(state);
+    initializeWorkspaceStateInDb(state);
     expect(workspaceDbHasState()).toBe(true);
 
     const read = readWorkspaceStateFromDb();
@@ -65,7 +65,7 @@ describe("workspace-db", () => {
   });
 
   it("upserts a single message + conversation without rewriting the whole tree (hot path)", () => {
-    writeWorkspaceStateToDb({ ...buildEmptyWorkspaceState(), chats: [conv("c1", { status: "running" })], threads: { c1: [] }, selectedId: "c1" });
+    initializeWorkspaceStateInDb({ ...buildEmptyWorkspaceState(), chats: [conv("c1", { status: "running" })], threads: { c1: [] }, selectedId: "c1" });
 
     // New streamed message appends; re-upsert updates in place (same id, same row).
     upsertMessage("c1", msg("a1", "partial"));
@@ -85,7 +85,7 @@ describe("workspace-db", () => {
   });
 
   it("upserts a bound agent reply after its user turn and deletes stale replies", () => {
-    writeWorkspaceStateToDb({
+    initializeWorkspaceStateInDb({
       ...buildEmptyWorkspaceState(),
       chats: [conv("c1")],
       threads: {
@@ -104,7 +104,7 @@ describe("workspace-db", () => {
   });
 
   it("inserts a bound agent reply before an immediate next user turn", () => {
-    writeWorkspaceStateToDb({
+    initializeWorkspaceStateInDb({
       ...buildEmptyWorkspaceState(),
       chats: [conv("c1")],
       threads: { c1: [userMsg("u1", "first"), userMsg("u2", "second")] },
@@ -117,37 +117,52 @@ describe("workspace-db", () => {
   });
 
   it("rejects a bound agent reply when the user turn is missing", () => {
-    writeWorkspaceStateToDb({ ...buildEmptyWorkspaceState(), chats: [conv("c1")], threads: { c1: [msg("a1", "answer")] }, selectedId: "c1" });
+    initializeWorkspaceStateInDb({ ...buildEmptyWorkspaceState(), chats: [conv("c1")], threads: { c1: [msg("a1", "answer")] }, selectedId: "c1" });
 
     expect(() => upsertAgentMessageForUserTurn("c1", "u-missing", msg("a-new", "new answer"))).toThrow("User message u-missing is missing");
   });
 
   it("filtered read loads only the requested threads; readThreadFromDb loads one", () => {
-    writeWorkspaceStateToDb({ ...buildEmptyWorkspaceState(), chats: [conv("c1"), conv("c2")], threads: { c1: [msg("m1", "a")], c2: [msg("m2", "b")] }, selectedId: "c1" });
+    initializeWorkspaceStateInDb({ ...buildEmptyWorkspaceState(), chats: [conv("c1"), conv("c2")], threads: { c1: [msg("m1", "a")], c2: [msg("m2", "b")] }, selectedId: "c1" });
     const shell = readWorkspaceStateFromDb(new Set(["c1"]));
     expect(shell.threads.c1).toHaveLength(1);
     expect(shell.threads.c2).toBeUndefined();
     expect(readThreadFromDb("c2").map((m) => m.id)).toEqual(["m2"]);
   });
 
-  it("partial shell write preserves unsent threads, replaces sent ones, drops deleted convs", () => {
-    writeWorkspaceStateToDb({
+  it("applies row-level conversation mutations without touching unrelated threads", () => {
+    initializeWorkspaceStateInDb({
       ...buildEmptyWorkspaceState(),
       chats: [conv("c1"), conv("c2"), conv("c3")],
       threads: { c1: [msg("m1", "a")], c2: [msg("m2", "b")], c3: [msg("m3", "c")] },
       selectedId: "c1",
     });
-    // Client holds only c1 (loaded), leaves c2 lazy (absent), and deletes c3.
-    writeWorkspaceShellPreservingThreads({
-      ...buildEmptyWorkspaceState(),
-      chats: [conv("c1"), conv("c2")],
-      threads: { c1: [msg("m1", "a2"), msg("m1b", "x")] },
-      selectedId: "c1",
-    });
+    applyWorkspaceDbMutations([
+      { type: "updateConversation", conversation: conv("c1") },
+      { type: "updateConversation", conversation: conv("c2") },
+      { type: "deleteConversation", conversationId: "c3" },
+      { type: "replaceConversationThread", conversationId: "c1", messages: [msg("m1", "a2"), msg("m1b", "x")] },
+      { type: "setSelectedConversation", conversationId: "c1" },
+    ]);
     const read = readWorkspaceStateFromDb();
     expect(read.chats.map((c) => c.id)).toEqual(["c1", "c2"]);
     expect(read.threads.c1.map((m) => m.id)).toEqual(["m1", "m1b"]); // replaced
     expect(read.threads.c2.map((m) => m.id)).toEqual(["m2"]); // preserved (lazy, not sent)
     expect(read.threads.c3).toBeUndefined(); // deleted conversation → messages dropped
+  });
+
+  it("updates a conversation row without rewriting its thread", () => {
+    initializeWorkspaceStateInDb({
+      ...buildEmptyWorkspaceState(),
+      chats: [conv("c1")],
+      threads: { c1: [msg("m1", "a")] },
+      selectedId: "c1",
+    });
+
+    applyWorkspaceDbMutations([{ type: "updateConversation", conversation: conv("c1", { title: "renamed" }) }]);
+
+    const read = readWorkspaceStateFromDb();
+    expect(read.chats.find((conversation) => conversation.id === "c1")?.title).toBe("renamed");
+    expect(read.threads.c1.map((message) => message.id)).toEqual(["m1"]);
   });
 });

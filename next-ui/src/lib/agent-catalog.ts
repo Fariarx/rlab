@@ -64,10 +64,10 @@ export const CLAUDE_AGENT_MODE_PREFIX = "claude-agent:";
 const STANDARD_WORK_MODES = [
   DEFAULT_OPTION,
   { id: "plan", label: "Plan", value: "plan" },
-  { id: "auto", label: "Auto-confirm", value: "auto" },
 ] as const;
 const OPENCODE_INTERNAL_AGENT_IDS = new Set(["title", "compaction"]);
 const CLAUDE_INTERNAL_AGENT_IDS = new Set(["statusline-setup"]);
+const LEGACY_AUTO_CONFIRM_MODE_IDS = new Set(["auto", "bypass-permissions"]);
 const CLAUDE_REASONING_OPTIONS = [
   DEFAULT_OPTION,
   { id: "low", label: "Low", value: "low" },
@@ -108,19 +108,7 @@ const OPENCODE_MODEL_OPTIONS = [
   { id: "opencode-big-pickle", label: "OpenCode Big Pickle", value: "opencode/big-pickle" },
   { id: "opencode-mimo-v2.5-free", label: "Mimo v2.5 Free", value: "opencode/mimo-v2.5-free" },
   { id: "opencode-nemotron-3-ultra-free", label: "Nemotron 3 Ultra Free", value: "opencode/nemotron-3-ultra-free" },
-  { id: "anthropic-claude-opus-4-8", label: "Claude Opus 4.8", value: "anthropic/claude-opus-4-8" },
-  { id: "anthropic-claude-opus-4-8-fast", label: "Claude Opus 4.8 Fast", value: "anthropic/claude-opus-4-8-fast" },
-  { id: "anthropic-claude-opus-4-7", label: "Claude Opus 4.7", value: "anthropic/claude-opus-4-7" },
-  { id: "anthropic-claude-opus-4-7-fast", label: "Claude Opus 4.7 Fast", value: "anthropic/claude-opus-4-7-fast" },
-  { id: "anthropic-claude-opus-4-6", label: "Claude Opus 4.6", value: "anthropic/claude-opus-4-6" },
-  { id: "anthropic-claude-opus-4-6-fast", label: "Claude Opus 4.6 Fast", value: "anthropic/claude-opus-4-6-fast" },
-  { id: "anthropic-claude-opus-4-5", label: "Claude Opus 4.5", value: "anthropic/claude-opus-4-5" },
-  { id: "anthropic-claude-sonnet-4-6", label: "Claude Sonnet 4.6", value: "anthropic/claude-sonnet-4-6" },
-  { id: "anthropic-claude-sonnet-4-5", label: "Claude Sonnet 4.5", value: "anthropic/claude-sonnet-4-5" },
-  { id: "anthropic-claude-haiku-4-5", label: "Claude Haiku 4.5", value: "anthropic/claude-haiku-4-5" },
-  { id: "lmstudio-openai-gpt-oss-20b", label: "LM Studio GPT-OSS 20B", value: "lmstudio/openai/gpt-oss-20b" },
-  { id: "lmstudio-qwen3-30b-a3b-2507", label: "LM Studio Qwen3 30B A3B", value: "lmstudio/qwen/qwen3-30b-a3b-2507" },
-  { id: "lmstudio-qwen3-coder-30b", label: "LM Studio Qwen3 Coder 30B", value: "lmstudio/qwen/qwen3-coder-30b" },
+  { id: "opencode-north-mini-code-free", label: "North Mini Code Free", value: "opencode/north-mini-code-free" },
 ] as const;
 export const AGENTS: readonly AgentDef[] = [
   {
@@ -252,6 +240,7 @@ export interface AgentProfile {
   readonly model: string;
   readonly reasoning: string;
   readonly mode: AgentWorkMode;
+  readonly autoConfirm?: boolean;
 }
 
 export const DEFAULT_PROFILE: AgentProfile = { agent: "claude-code", model: DEFAULT_AGENT_OPTION_ID, reasoning: DEFAULT_AGENT_OPTION_ID, mode: "default" };
@@ -358,11 +347,15 @@ export function normalizeAgentProfile(value: unknown, fallbackAgent: AgentId = D
     return legacyProfileFromVariant(agent, value.variant);
   }
   const def = getAgent(agent);
+  const rawMode = isAgentWorkMode(value.mode) ? value.mode.trim() : DEFAULT_AGENT_OPTION_ID;
+  const legacyAutoConfirm = LEGACY_AUTO_CONFIRM_MODE_IDS.has(rawMode);
+  const autoConfirm = typeof value.autoConfirm === "boolean" ? value.autoConfirm : legacyAutoConfirm ? true : undefined;
   return {
     agent,
     model: typeof value.model === "string" ? normalizeOptionId(agent, "models", def.models, value.model) : DEFAULT_AGENT_OPTION_ID,
     reasoning: typeof value.reasoning === "string" ? normalizeOptionId(agent, "reasoning", def.reasoning, value.reasoning) : DEFAULT_AGENT_OPTION_ID,
-    mode: isAgentWorkMode(value.mode) ? normalizeModeId(agent, def.modes, value.mode.trim()) : DEFAULT_AGENT_OPTION_ID,
+    mode: legacyAutoConfirm ? DEFAULT_AGENT_OPTION_ID : normalizeModeId(agent, def.modes, rawMode),
+    ...(autoConfirm !== undefined ? { autoConfirm } : {}),
   };
 }
 
@@ -384,7 +377,7 @@ export function legacyProfileFromVariant(agent: AgentId, variant: string): Agent
 }
 
 export function agentProfileEquals(a: AgentProfile, b: AgentProfile): boolean {
-  return a.agent === b.agent && a.model === b.model && a.reasoning === b.reasoning && a.mode === b.mode;
+  return a.agent === b.agent && a.model === b.model && a.reasoning === b.reasoning && a.mode === b.mode && (a.autoConfirm ?? false) === (b.autoConfirm ?? false);
 }
 
 export function accessModeForAgentProfile(profile: AgentProfile): AgentAccessMode {
