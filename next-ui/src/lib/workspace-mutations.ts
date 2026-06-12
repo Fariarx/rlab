@@ -190,28 +190,60 @@ function updateConversationInCollections(state: WorkspaceState, conversation: Co
   };
 }
 
+function findConversationProjectId(state: WorkspaceState, conversationId: string): string | null | undefined {
+  if (state.chats.some((conversation) => conversation.id === conversationId)) {
+    return null;
+  }
+  return state.projects.find((project) => project.conversations.some((conversation) => conversation.id === conversationId))?.id;
+}
+
 function upsertConversationInCollection(
   conversations: readonly ConversationSummary[],
   conversation: ConversationSummary,
   insertAtFront: boolean | undefined,
 ): ConversationSummary[] {
-  const existing = conversations.filter((item) => item.id !== conversation.id);
-  return insertAtFront ? [conversation, ...existing] : [...existing, conversation];
+  const existingIndex = conversations.findIndex((item) => item.id === conversation.id);
+  if (existingIndex >= 0) {
+    return conversations.map((item, index) => (index === existingIndex ? conversation : item));
+  }
+  return insertAtFront ? [conversation, ...conversations] : [...conversations, conversation];
 }
 
 export function applyWorkspaceMutationToState(state: WorkspaceState, mutation: WorkspaceMutation): WorkspaceState {
   switch (mutation.type) {
-    case "setSelectedConversation":
-      return { ...state, selectedId: mutation.conversationId };
+    case "setSelectedConversation": {
+      const selected =
+        state.chats.find((conversation) => conversation.id === mutation.conversationId) ??
+        state.projects.flatMap((project) => project.conversations).find((conversation) => conversation.id === mutation.conversationId);
+      const selectedState = { ...state, selectedId: mutation.conversationId };
+      return selected ? updateConversationInCollections(selectedState, { ...selected, unread: false }) : selectedState;
+    }
     case "setSettings":
       return { ...state, settings: mutation.settings };
     case "upsertProject": {
       const existing = state.projects.find((project) => project.id === mutation.project.id);
-      const nextProject: Project = { ...mutation.project, conversations: existing?.conversations ?? [] };
-      const projects = state.projects.filter((project) => project.id !== mutation.project.id);
-      return { ...state, projects: mutation.insertAtFront ? [nextProject, ...projects] : [...projects, nextProject] };
+      if (existing) {
+        return {
+          ...state,
+          projects: state.projects.map((project) => (project.id === mutation.project.id ? { ...mutation.project, conversations: project.conversations } : project)),
+        };
+      }
+      const nextProject: Project = { ...mutation.project, conversations: [] };
+      return { ...state, projects: mutation.insertAtFront ? [nextProject, ...state.projects] : [...state.projects, nextProject] };
     }
     case "upsertConversation": {
+      const currentProjectId = findConversationProjectId(state, mutation.conversation.id);
+      if (currentProjectId === mutation.projectId) {
+        if (mutation.projectId === null) {
+          return { ...state, chats: upsertConversationInCollection(state.chats, mutation.conversation, mutation.insertAtFront) };
+        }
+        return {
+          ...state,
+          projects: state.projects.map((project) =>
+            project.id === mutation.projectId ? { ...project, conversations: upsertConversationInCollection(project.conversations, mutation.conversation, mutation.insertAtFront) } : project,
+          ),
+        };
+      }
       const withoutConversation = removeConversationFromCollections(state, mutation.conversation.id);
       if (mutation.projectId === null) {
         return {

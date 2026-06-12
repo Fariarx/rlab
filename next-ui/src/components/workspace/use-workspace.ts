@@ -38,6 +38,8 @@ function syncGeneratedIdSequence(state: WorkspaceState): void {
 interface RunHandle {
   readonly controller: AbortController;
   readonly runId: string;
+  readonly userMessageId: string;
+  readonly agentMessageId: string;
   serverOwned: boolean;
   canceled: boolean;
 }
@@ -288,6 +290,58 @@ function blocksHaveLiveOutput(blocks: readonly AgentBlock[]): boolean {
         return false;
     }
   });
+}
+
+function messageHasLiveOutput(message: ChatMessage | undefined): message is ChatMessage {
+  return message?.role === "agent" && blocksHaveLiveOutput(message.blocks ?? []);
+}
+
+function withoutStaleActiveRunMessageMutations(
+  state: WorkspaceState,
+  runs: ReadonlyMap<string, RunHandle>,
+  mutations: readonly WorkspaceMutation[],
+): WorkspaceMutation[] {
+  const isStaleActiveRunMessageMutation = (conversationId: string, message: ChatMessage): boolean => {
+    const run = runs.get(conversationId);
+    if (!run?.serverOwned || run.agentMessageId !== message.id) {
+      return false;
+    }
+    const localMessage = state.threads[conversationId]?.find((item) => item.id === message.id);
+    return messageHasLiveOutput(localMessage) && !serializableEqual(localMessage, message);
+  };
+
+  const next: WorkspaceMutation[] = [];
+  for (const mutation of mutations) {
+    if (mutation.type === "upsertMessage" && isStaleActiveRunMessageMutation(mutation.conversationId, mutation.message)) {
+      continue;
+    }
+    if (mutation.type === "upsertMessages") {
+      const messages = mutation.messages.filter((message) => !isStaleActiveRunMessageMutation(mutation.conversationId, message));
+      if (messages.length > 0) {
+        next.push({ ...mutation, messages });
+      }
+      continue;
+    }
+    next.push(mutation);
+  }
+  return next;
+}
+
+function preserveLiveActiveRunMessages(state: WorkspaceState, localState: WorkspaceState, runs: ReadonlyMap<string, RunHandle>): WorkspaceState {
+  let threads: Record<string, ChatMessage[]> | null = null;
+  for (const [conversationId, run] of runs) {
+    const localMessage = localState.threads[conversationId]?.find((message) => message.id === run.agentMessageId);
+    if (!messageHasLiveOutput(localMessage)) {
+      continue;
+    }
+    const currentMessages = (threads ?? state.threads)[conversationId] ?? [];
+    const nextMessages = upsertAgentMessageForUserTurn(currentMessages, run.userMessageId, localMessage);
+    if (!serializableEqual(currentMessages, nextMessages)) {
+      threads = threads ?? { ...state.threads };
+      threads[conversationId] = nextMessages;
+    }
+  }
+  return threads ? { ...state, threads } : state;
 }
 
 /** Clears a block's "live" flags so the UI stops animating it. Used when a run
@@ -840,8 +894,9 @@ class WorkspaceStore implements Workspace {
       saveFailed = true;
       runInAction(() => {
         if (error instanceof WorkspaceMutationConflictError) {
-          const unsavedMutations = [...mutations, ...this.pendingMutations];
-          const rebasedState = applyWorkspaceMutationsToState(cloneWorkspaceState(error.workspace), unsavedMutations);
+          const localState = this.state;
+          const unsavedMutations = withoutStaleActiveRunMessageMutations(localState, this.runs, [...mutations, ...this.pendingMutations]);
+          const rebasedState = preserveLiveActiveRunMessages(applyWorkspaceMutationsToState(cloneWorkspaceState(error.workspace), unsavedMutations), localState, this.runs);
           this.workspaceRevision = error.revision;
           this.applyServerState(rebasedState);
           this.pendingMutations = unsavedMutations;
@@ -1032,7 +1087,7 @@ class WorkspaceStore implements Workspace {
       return;
     }
     const controller = new AbortController();
-    const runHandle: RunHandle = { controller, runId: run.runId, serverOwned: true, canceled: false };
+    const runHandle: RunHandle = { controller, runId: run.runId, userMessageId: run.userMessageId, agentMessageId: run.agentMessageId, serverOwned: true, canceled: false };
     this.runs.set(run.conversationId, runHandle);
     let terminalUpdateReceived = false;
     let attachErrorMessage: string | null = null;
@@ -1617,7 +1672,7 @@ class WorkspaceStore implements Workspace {
     };
 
     const controller = new AbortController();
-    const runHandle: RunHandle = { controller, runId, serverOwned: false, canceled: false };
+    const runHandle: RunHandle = { controller, runId, userMessageId: userMsg.id, agentMessageId: aId, serverOwned: false, canceled: false };
     this.runs.set(id, runHandle);
 
     runConversation({

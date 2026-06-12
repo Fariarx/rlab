@@ -731,57 +731,20 @@ describe("Composer", () => {
     }
   });
 
-  it("requests shared account-limit refresh only when the collapsed section is opened", () => {
-    const onRefreshAgentLimits = vi.fn();
-
-    renderWithTheme(
-      <Composer
-        placeholder="Написать"
-        agentId="claude-code"
-        agentLimit={{
-          updatedAt: Date.now(),
-          windows: [{ kind: "five_hour", usedPercent: 42, resetsAt: Math.floor(Date.now() / 1000) + 3600 }],
-        }}
-        agentLimitLoaded
-        onRefreshAgentLimits={onRefreshAgentLimits}
-      />,
-    );
-
-    fireEvent.click(screen.getByRole("button", { name: /Опции/ }));
-    expect(onRefreshAgentLimits).not.toHaveBeenCalled();
-
-    fireEvent.click(screen.getByRole("button", { name: "Лимиты аккаунта" }));
-    expect(onRefreshAgentLimits).toHaveBeenCalledWith(true);
-    expect(screen.getByText(/42%/)).toBeInTheDocument();
-  });
-
-  it("shows a shared low-limit warning tile for the current CLI agent", () => {
-    renderWithTheme(
-      <Composer
-        placeholder="Написать"
-        agentId="claude-code"
-        agentLimit={{
-          updatedAt: Date.now(),
-          windows: [{ kind: "weekly", usedPercent: 88, resetsAt: Math.floor(Date.now() / 1000) + 86400 }],
-        }}
-        agentLimitLoaded
-      />,
-    );
-
-    expect(screen.getByTestId("agent-limit-warning")).toHaveStyle({ width: "76px", height: "76px" });
-    expect(screen.getByText("Лимиты на исходе · Неделя 88%")).toBeInTheDocument();
-  });
-
-  it("shows the context gauge when context tokens and window are available", () => {
+  it("renders composer options as a plain icon button without context progress", () => {
     renderWithTheme(<Composer placeholder="Написать" agentId="codex" contextTokens={120000} contextWindow={272000} />);
 
-    expect(screen.getByTestId("composer-options-button")).toHaveAttribute("aria-label", "Опции · Контекст · 44%");
+    expect(screen.getByTestId("composer-options-button")).toHaveAttribute("aria-label", "Опции");
+    expect(screen.queryByLabelText(/Контекст/)).not.toBeInTheDocument();
   });
 
-  it("keeps the context gauge visible when only the model window is known", () => {
-    renderWithTheme(<Composer placeholder="Написать" agentId="codex" contextWindow={272000} />);
+  it("does not render account limit warning or menu section in the composer", () => {
+    renderWithTheme(<Composer placeholder="Написать" agentId="claude-code" />);
 
-    expect(screen.getByTestId("composer-options-button")).toHaveAttribute("aria-label", "Опции · Контекст · 0%");
+    fireEvent.click(screen.getByRole("button", { name: "Опции" }));
+
+    expect(screen.queryByTestId("agent-limit-warning")).not.toBeInTheDocument();
+    expect(screen.queryByText("Лимиты аккаунта")).not.toBeInTheDocument();
   });
 
   it("renders composer floating controls as square tiles", () => {

@@ -41,7 +41,6 @@ import {
   type AgentProfile,
   type ApprovalDecision,
   AGENTS,
-  type AgentRateLimitMap,
   AgentBadge,
   AgentPicker,
   Composer,
@@ -87,8 +86,6 @@ import { conversationProfile, type Workspace, useWorkspace } from "./use-workspa
 const COMPOSER_DRAFT_SAVE_DELAY_MS = 350;
 const EMPTY_COMPOSER_DRAFT: ComposerDraft = { text: "", attachments: [] };
 const CLI_UPDATE_POLL_MS = 5 * 60_000;
-const AGENT_LIMIT_REFRESH_MIN_INTERVAL_MS = 60_000;
-const AGENT_LIMIT_ON_DEMAND_REFRESH_AGENTS = new Set(["claude-code", "codex", "gemini"]);
 const AGENT_AUTO_CONFIRM_AGENTS = new Set(["claude-code", "codex", "gemini"]);
 
 const CONVERSATION_VIEWS = new Set<ConversationView>(["chat", "git", "resources", "preview", "terminal"]);
@@ -130,11 +127,6 @@ interface CliUpdateSnapshot {
   readonly errors: Record<string, string>;
 }
 
-interface AgentLimitSnapshot {
-  readonly limits: AgentRateLimitMap;
-  readonly refreshError?: string;
-}
-
 interface VoiceProviderConfigInfo {
   readonly envVar: string;
   readonly configured: boolean;
@@ -146,20 +138,6 @@ interface VoiceConfigSnapshot {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
-}
-
-async function loadAgentLimits(agent: string | undefined, refresh: boolean): Promise<AgentLimitSnapshot> {
-  const params = new URLSearchParams();
-  if (refresh && agent) {
-    params.set("refresh", "1");
-    params.set("agent", agent);
-  }
-  const response = await fetch(`/api/agent-limits${params.size > 0 ? `?${params.toString()}` : ""}`, { method: "GET", cache: "no-store" });
-  const payload = (await response.json().catch(() => ({}))) as { limits?: AgentRateLimitMap; refreshError?: string; error?: string };
-  if (!response.ok) {
-    throw new Error(payload.error ?? `Agent limits load failed (${response.status})`);
-  }
-  return { limits: payload.limits ?? {}, refreshError: payload.refreshError };
 }
 
 async function loadCliUpdates(refresh = false): Promise<CliUpdateSnapshot> {
@@ -327,9 +305,9 @@ function buildComposerLabel(profile: AgentProfile): string {
   const agent = getAgent(profile.agent);
   const labels = agentProfileLabels(profile);
   if (labels.length === 0) {
-    return agent?.short ?? profile.agent;
+    return agent.name;
   }
-  return labels.join(" · ");
+  return [agent.name, ...labels].join(" · ");
 }
 
 function liveModesOrCatalog<T extends { readonly id: string }>(catalogOptions: readonly T[], liveOptions: readonly T[] | undefined): readonly T[] {
@@ -553,52 +531,6 @@ export function WorkspacePageView({
   const [wakeups, setWakeups] = useState<readonly WakeupSummary[]>([]);
   const selectedWakeups = useMemo(() => (selected ? wakeups.filter((wakeup) => wakeup.conversationId === selected.id) : []), [selected, wakeups]);
   const wakeupConversationIds = useMemo(() => new Set(wakeups.map((wakeup) => wakeup.conversationId)), [wakeups]);
-  const [agentLimits, setAgentLimits] = useState<AgentRateLimitMap>({});
-  const [agentLimitsLoaded, setAgentLimitsLoaded] = useState(false);
-  const [agentLimitRefreshing, setAgentLimitRefreshing] = useState<Readonly<Record<string, boolean>>>({});
-  const [agentLimitRefreshErrors, setAgentLimitRefreshErrors] = useState<Readonly<Record<string, string | undefined>>>({});
-  const agentLimitRefreshAttemptRef = useRef<Record<string, number>>({});
-  const refreshAgentLimits = useCallback((agentId: string | undefined, requestRefresh: boolean) => {
-    const canRequestRefresh = Boolean(requestRefresh && agentId && AGENT_LIMIT_ON_DEMAND_REFRESH_AGENTS.has(agentId));
-    if (requestRefresh && agentId && !canRequestRefresh) {
-      setAgentLimitRefreshErrors((current) => ({ ...current, [agentId]: undefined }));
-    }
-    if (canRequestRefresh && agentId) {
-      const lastAttempt = agentLimitRefreshAttemptRef.current[agentId] ?? 0;
-      if (Date.now() - lastAttempt < AGENT_LIMIT_REFRESH_MIN_INTERVAL_MS) {
-        return;
-      }
-      agentLimitRefreshAttemptRef.current = { ...agentLimitRefreshAttemptRef.current, [agentId]: Date.now() };
-      setAgentLimitRefreshing((current) => ({ ...current, [agentId]: true }));
-      setAgentLimitRefreshErrors((current) => ({ ...current, [agentId]: undefined }));
-    }
-
-    loadAgentLimits(agentId, canRequestRefresh)
-      .then((snapshot) => {
-        setAgentLimits(snapshot.limits);
-        setAgentLimitsLoaded(true);
-        if (agentId) {
-          setAgentLimitRefreshErrors((current) => ({ ...current, [agentId]: snapshot.refreshError }));
-        }
-      })
-      .catch((error: unknown) => {
-        setAgentLimitsLoaded(true);
-        if (agentId) {
-          setAgentLimitRefreshErrors((current) => ({
-            ...current,
-            [agentId]: error instanceof Error ? error.message : t("limitsRefreshError"),
-          }));
-        } else {
-          toast({ message: error instanceof Error ? error.message : t("limitsRefreshError"), severity: "error", duration: 3000 });
-        }
-      })
-      .finally(() => {
-        if (agentId) {
-          setAgentLimitRefreshing((current) => ({ ...current, [agentId]: false }));
-        }
-      });
-  }, [t, toast]);
-
   const refreshVoiceConfig = useCallback(() => {
     loadVoiceConfig()
       .then(setVoiceConfig)
@@ -634,10 +566,6 @@ export function WorkspacePageView({
         };
   const selectedCwd = ws.cwdOf(ws.selectedId);
   const terminalCwd = selected ? (selectedCwd ?? ".") : undefined;
-  useEffect(() => {
-    refreshAgentLimits(undefined, false);
-  }, [refreshAgentLimits]);
-
   useEffect(() => {
     refreshVoiceConfig();
   }, [refreshVoiceConfig]);
@@ -1912,11 +1840,6 @@ export function WorkspacePageView({
                   onOverlayLiftChange={setComposerOverlayLift}
                   history={messageHistory}
                   agentId={profile.agent}
-                  agentLimit={agentLimits[profile.agent] ?? null}
-                  agentLimitLoaded={agentLimitsLoaded}
-                  agentLimitRefreshing={agentLimitRefreshing[profile.agent] === true}
-                  agentLimitRefreshError={agentLimitRefreshErrors[profile.agent] ?? null}
-                  onRefreshAgentLimits={(requestRefresh) => refreshAgentLimits(profile.agent, requestRefresh)}
                   contextTokens={selected?.usage?.contextTokens}
                   contextWindow={contextWindowForAgentProfile(profile)}
                   autoCompact={selected?.compaction?.auto ?? true}

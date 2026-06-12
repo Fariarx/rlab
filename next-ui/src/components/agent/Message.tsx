@@ -314,6 +314,7 @@ function UserMessage({ message, delay, actions }: { readonly message: ChatMessag
 const ANSWER_BLOCK_KINDS: ReadonlySet<AgentBlock["kind"]> = new Set(["text", "options", "approval", "suggested"]);
 const DIFF_KIND: AgentBlock["kind"] = "diff";
 const COMPLETED_PLAN_HIDE_DELAY_MS = 3000;
+type VisibleTerminalStatusBlock = Extract<AgentBlock, { kind: "status"; level: "warn" | "error" }>;
 
 /** Whether the agent turn is still producing output (so diffs aren't surfaced
  *  until the turn settles). */
@@ -386,6 +387,23 @@ function diffTotals(blocks: readonly DiffBlock[]): { readonly additions: number;
     }),
     { additions: 0, deletions: 0 },
   );
+}
+
+function isVisibleTerminalStatus(block: AgentBlock): block is VisibleTerminalStatusBlock {
+  return block.kind === "status" && (block.level === "warn" || block.level === "error");
+}
+
+function lastVisibleTerminalStatus(blocks: readonly AgentBlock[], live: boolean, hasVisibleAnswerOutput: boolean): VisibleTerminalStatusBlock | null {
+  if (live || hasVisibleAnswerOutput) {
+    return null;
+  }
+  for (let index = blocks.length - 1; index >= 0; index -= 1) {
+    const block = blocks[index];
+    if (isVisibleTerminalStatus(block)) {
+      return block;
+    }
+  }
+  return null;
 }
 
 function ChangedFilesAccordion({ blocks, delay }: { readonly blocks: readonly DiffBlock[]; readonly delay: number }) {
@@ -699,11 +717,13 @@ function AgentMessage({
     readOnlyImageToolPath(block) != null ||
     isResultText(block) ||
     (ANSWER_BLOCK_KINDS.has(block.kind) && block.kind !== "text" && (!isResolvedInputBlock(block) || !hideResolvedInputs));
+  const baseAnswerBlocks = blocks.filter((block) => isAnswerBlock(block));
+  const visibleTerminalStatus = lastVisibleTerminalStatus(blocks, live, baseAnswerBlocks.length > 0);
   const detailBlocks = [
     ...blocks.filter((block) => !isAnswerBlock(block) && block.kind !== DIFF_KIND && block.kind !== "plan"),
     ...archivedPlanBlocks,
   ];
-  const answerBlocks = blocks.filter((block) => isAnswerBlock(block));
+  const answerBlocks = [...baseAnswerBlocks, ...(visibleTerminalStatus ? [visibleTerminalStatus] : [])];
   // The live "thinking" dots live in exactly one place. Once the answer text
   // starts streaming (white text appears) it carries its own trailing dots, so
   // the reasoning header dots would otherwise hang awkwardly in the middle.

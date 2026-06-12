@@ -25,7 +25,7 @@ describe("hash routing", () => {
     renderApp();
 
     expect(screen.getAllByText("Объясни auth flow").length).toBeGreaterThan(0);
-    expect(await screen.findByPlaceholderText("Написать: CC")).toBeInTheDocument();
+    expect(await screen.findByPlaceholderText("Написать: Claude Code")).toBeInTheDocument();
   });
 
   it("opens a project conversation deep link", async () => {
@@ -43,7 +43,7 @@ describe("hash routing", () => {
     renderApp();
 
     expect((await screen.findAllByText("Flaky-тест auth.login")).length).toBeGreaterThan(0);
-    expect(await screen.findByPlaceholderText("Написать: CC")).toBeInTheDocument();
+    expect(await screen.findByPlaceholderText("Написать: Claude Code")).toBeInTheDocument();
     expect(window.location.hash).toBe("#/project/auth-service");
   });
 
@@ -51,7 +51,7 @@ describe("hash routing", () => {
     window.location.hash = "#/project/auth-service/c-flaky";
 
     renderApp();
-    await screen.findByPlaceholderText("Написать: CC");
+    await screen.findByPlaceholderText("Написать: Claude Code");
 
     fireEvent.click(screen.getByText("Ротация JWT-секретов"));
 
@@ -62,10 +62,10 @@ describe("hash routing", () => {
     window.location.hash = "#/project/auth-service/c-flaky";
 
     renderApp();
-    await screen.findByPlaceholderText("Написать: CC");
+    await screen.findByPlaceholderText("Написать: Claude Code");
 
     fireEvent.click(screen.getByRole("button", { name: "Новый диалог" }));
-    const input = await screen.findByPlaceholderText("Написать: CC");
+    const input = await screen.findByPlaceholderText("Написать: Claude Code");
     fireEvent.change(input, { target: { value: "Project-local follow-up" } });
     fireEvent.keyDown(input, { key: "Enter" });
 

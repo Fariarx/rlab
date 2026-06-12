@@ -3,14 +3,19 @@ import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../../i18n/I18nProvider";
 import { appTheme } from "../../theme/app-theme";
-import { Message } from "./Message";
+import { Message, type MessageDisplayPrefs } from "./Message";
 import type { ChatMessage } from "./types";
 
-function renderMessage(message: ChatMessage, actions?: Parameters<typeof Message>[0]["actions"], agentProfile?: Parameters<typeof Message>[0]["agentProfile"]) {
+function renderMessage(
+  message: ChatMessage,
+  actions?: Parameters<typeof Message>[0]["actions"],
+  agentProfile?: Parameters<typeof Message>[0]["agentProfile"],
+  displayPrefs?: MessageDisplayPrefs,
+) {
   return render(
     <ThemeProvider theme={appTheme}>
       <I18nProvider locale="ru">
-        <Message message={message} actions={actions} agentProfile={agentProfile} />
+        <Message message={message} actions={actions} agentProfile={agentProfile} displayPrefs={displayPrefs} />
       </I18nProvider>
     </ThemeProvider>,
   );
@@ -130,6 +135,55 @@ describe("Message", () => {
     fireEvent.click(disclosure);
 
     expect(disclosure).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("surfaces only the last terminal warning when a completed agent turn has no answer output", () => {
+    const message: ChatMessage = {
+      id: "agent-warning-only",
+      role: "agent",
+      blocks: [
+        { kind: "reasoning", text: "Проверяю контекст", duration: "16m 42s" },
+        { kind: "status", level: "warn", text: "api retry · overloaded #1" },
+        { kind: "status", level: "warn", text: "api retry · overloaded #2" },
+      ],
+    };
+
+    renderMessage(message);
+
+    expect(screen.getByText("api retry · overloaded #2")).toBeInTheDocument();
+    expect(screen.queryByText("api retry · overloaded #1")).not.toBeInTheDocument();
+  });
+
+  it("keeps terminal warnings folded when the completed agent turn already has answer output", () => {
+    const message: ChatMessage = {
+      id: "agent-answer-with-warning",
+      role: "agent",
+      blocks: [
+        { kind: "reasoning", text: "Проверяю контекст", duration: "2s" },
+        { kind: "text", text: "Готово" },
+        { kind: "status", level: "warn", text: "api retry · overloaded" },
+      ],
+    };
+
+    renderMessage(message);
+
+    expect(screen.getByText("Готово")).toBeInTheDocument();
+    expect(screen.queryByText("api retry · overloaded")).not.toBeInTheDocument();
+  });
+
+  it("does not surface terminal warnings while reasoning is still active", () => {
+    const message: ChatMessage = {
+      id: "agent-live-warning",
+      role: "agent",
+      blocks: [
+        { kind: "reasoning", text: "Проверяю контекст", active: true },
+        { kind: "status", level: "warn", text: "api retry · overloaded" },
+      ],
+    };
+
+    renderMessage(message, undefined, undefined, { reasoningAutoExpand: false });
+
+    expect(screen.queryByText("api retry · overloaded")).not.toBeInTheDocument();
   });
 
   it("collapses changed files by default and summarizes their diff totals", () => {

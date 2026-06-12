@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useWorkspace } from "../src/components/workspace/use-workspace";
 import { buildInitialWorkspaceState, type WorkspaceState } from "../src/components/workspace/workspace-state";
+import { applyWorkspaceMutationsToState, type WorkspaceMutation } from "../src/lib/workspace-mutations";
 
 function Probe() {
   const workspace = useWorkspace();
@@ -9,6 +10,7 @@ function Probe() {
   return (
     <div>
       <div data-testid="selected">{workspace.selectedId}</div>
+      <div data-testid="selected-title">{selected?.title ?? "none"}</div>
       <div data-testid="status">{selected?.status}</div>
       <div data-testid="theme">{workspace.settings.appearance.theme}</div>
       <div data-testid="locale">{workspace.settings.general.locale}</div>
@@ -21,6 +23,7 @@ function Probe() {
       <div data-testid="queued">{workspace.pendingMessageCount(workspace.selectedId)}</div>
       <div data-testid="archived">{[...workspace.chats, ...workspace.projects.flatMap((project) => project.conversations)].filter((conversation) => conversation.archived).map((conversation) => conversation.id).join(",")}</div>
       <div data-testid="thread-ids">{(workspace.threads[workspace.selectedId] ?? []).map((message) => message.id).join(",")}</div>
+      <div data-testid="agent-blocks">{JSON.stringify((workspace.threads[workspace.selectedId] ?? []).filter((message) => message.role === "agent").map((message) => message.blocks ?? []))}</div>
       <button type="button" onClick={() => workspace.sendMessage(workspace.selectedId, "Persist this message")}>
         send
       </button>
@@ -125,108 +128,9 @@ interface RunRequestRecord {
   readonly mode?: string;
 }
 
-type WorkspaceMutation =
-  | { readonly type: "setSelectedConversation"; readonly conversationId: string }
-  | { readonly type: "setSettings"; readonly settings: WorkspaceState["settings"] }
-  | { readonly type: "upsertProject"; readonly project: Omit<WorkspaceState["projects"][number], "conversations">; readonly insertAtFront?: boolean }
-  | { readonly type: "upsertConversation"; readonly conversation: WorkspaceState["chats"][number]; readonly projectId: string | null; readonly insertAtFront?: boolean }
-  | { readonly type: "updateConversation"; readonly conversation: WorkspaceState["chats"][number] }
-  | { readonly type: "deleteConversation"; readonly conversationId: string }
-  | { readonly type: "setComposerDraft"; readonly conversationId: string; readonly draft: WorkspaceState["composerDrafts"][string] }
-  | { readonly type: "deleteComposerDraft"; readonly conversationId: string }
-  | { readonly type: "upsertMessage"; readonly conversationId: string; readonly message: WorkspaceState["threads"][string][number] }
-  | { readonly type: "upsertMessages"; readonly conversationId: string; readonly messages: readonly WorkspaceState["threads"][string][number][] }
-  | { readonly type: "replaceConversationThread"; readonly conversationId: string; readonly messages: readonly WorkspaceState["threads"][string][number][] };
-
-function applyWorkspaceMutation(state: WorkspaceState, mutation: WorkspaceMutation): WorkspaceState {
-  switch (mutation.type) {
-    case "setSelectedConversation":
-      return {
-        ...state,
-        selectedId: mutation.conversationId,
-        chats: state.chats.map((conversation) => (conversation.id === mutation.conversationId ? { ...conversation, unread: false } : conversation)),
-        projects: state.projects.map((project) => ({
-          ...project,
-          conversations: project.conversations.map((conversation) => (conversation.id === mutation.conversationId ? { ...conversation, unread: false } : conversation)),
-        })),
-      };
-    case "setSettings":
-      return { ...state, settings: mutation.settings };
-    case "upsertProject": {
-      const existing = state.projects.find((project) => project.id === mutation.project.id);
-      if (existing) {
-        return { ...state, projects: state.projects.map((project) => (project.id === mutation.project.id ? { ...project, ...mutation.project } : project)) };
-      }
-      const project = { ...mutation.project, conversations: [] };
-      return { ...state, projects: mutation.insertAtFront ? [project, ...state.projects] : [...state.projects, project] };
-    }
-    case "upsertConversation": {
-      const without = {
-        ...state,
-        chats: state.chats.filter((conversation) => conversation.id !== mutation.conversation.id),
-        projects: state.projects.map((project) => ({ ...project, conversations: project.conversations.filter((conversation) => conversation.id !== mutation.conversation.id) })),
-      };
-      if (mutation.projectId === null) {
-        return { ...without, chats: mutation.insertAtFront ? [mutation.conversation, ...without.chats] : [...without.chats, mutation.conversation] };
-      }
-      return {
-        ...without,
-        projects: without.projects.map((project) =>
-          project.id === mutation.projectId
-            ? { ...project, conversations: mutation.insertAtFront ? [mutation.conversation, ...project.conversations] : [...project.conversations, mutation.conversation] }
-            : project,
-        ),
-      };
-    }
-    case "updateConversation":
-      return {
-        ...state,
-        chats: state.chats.map((conversation) => (conversation.id === mutation.conversation.id ? mutation.conversation : conversation)),
-        projects: state.projects.map((project) => ({
-          ...project,
-          conversations: project.conversations.map((conversation) => (conversation.id === mutation.conversation.id ? mutation.conversation : conversation)),
-        })),
-      };
-    case "deleteConversation": {
-      const threads = { ...state.threads };
-      const composerDrafts = { ...state.composerDrafts };
-      delete threads[mutation.conversationId];
-      delete composerDrafts[mutation.conversationId];
-      return {
-        ...state,
-        chats: state.chats.filter((conversation) => conversation.id !== mutation.conversationId),
-        projects: state.projects.map((project) => ({ ...project, conversations: project.conversations.filter((conversation) => conversation.id !== mutation.conversationId) })),
-        threads,
-        composerDrafts,
-      };
-    }
-    case "setComposerDraft":
-      return { ...state, composerDrafts: { ...state.composerDrafts, [mutation.conversationId]: mutation.draft } };
-    case "deleteComposerDraft": {
-      const composerDrafts = { ...state.composerDrafts };
-      delete composerDrafts[mutation.conversationId];
-      return { ...state, composerDrafts };
-    }
-    case "upsertMessage": {
-      const messages = state.threads[mutation.conversationId] ?? [];
-      const index = messages.findIndex((message) => message.id === mutation.message.id);
-      const next = index >= 0 ? messages.map((message) => (message.id === mutation.message.id ? mutation.message : message)) : [...messages, mutation.message];
-      return { ...state, threads: { ...state.threads, [mutation.conversationId]: next } };
-    }
-    case "upsertMessages":
-      return mutation.messages.reduce((current, message) => applyWorkspaceMutation(current, { type: "upsertMessage", conversationId: mutation.conversationId, message }), state);
-    case "replaceConversationThread":
-      return { ...state, threads: { ...state.threads, [mutation.conversationId]: [...mutation.messages] } };
-  }
-}
-
-function applyWorkspaceMutations(state: WorkspaceState, mutations: readonly WorkspaceMutation[]): WorkspaceState {
-  return mutations.reduce(applyWorkspaceMutation, state);
-}
-
 function applyWorkspaceMutationRequest(state: WorkspaceState, init: RequestInit | undefined): WorkspaceState {
   const payload = JSON.parse(String(init?.body ?? "{}")) as { mutations?: WorkspaceMutation[] };
-  return applyWorkspaceMutations(state, payload.mutations ?? []);
+  return applyWorkspaceMutationsToState(state, payload.mutations ?? []);
 }
 
 describe("useWorkspace", () => {
@@ -264,8 +168,7 @@ describe("useWorkspace", () => {
           return Response.json(state);
         }
         if (url === "/api/workspace/mutations" && init?.method === "POST") {
-          const payload = JSON.parse(String(init.body)) as { mutations?: WorkspaceMutation[] };
-          state = applyWorkspaceMutations(state, payload.mutations ?? []);
+          state = applyWorkspaceMutationRequest(state, init);
           return Response.json({ ok: true });
         }
         if (url === "/api/runs") {
@@ -571,6 +474,191 @@ describe("useWorkspace", () => {
     expect(saveAttempts).toBe(2);
     expect(state.composerDrafts["chat-2"]?.text).toBe("a");
     expect(screen.getByTestId("error")).toHaveTextContent("none");
+  });
+
+  it("rebases pending workspace mutations after a revision conflict", async () => {
+    vi.useFakeTimers();
+    let serverRevision = 7;
+    let saveAttempts = 0;
+    const baseRevisions: number[] = [];
+
+    vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/workspace" && (!init || init.method === "GET")) {
+        return Response.json({ ...state, revision: serverRevision });
+      }
+      if (url === "/api/workspace/mutations" && init?.method === "POST") {
+        saveAttempts += 1;
+        const payload = JSON.parse(String(init.body ?? "{}")) as { readonly baseRevision?: number; readonly mutations?: readonly WorkspaceMutation[] };
+        baseRevisions.push(payload.baseRevision ?? -1);
+        if (saveAttempts === 1) {
+          const remoteConversation = state.chats.find((chat) => chat.id === "chat-2");
+          if (!remoteConversation) {
+            throw new Error("Missing chat-2 fixture.");
+          }
+          state = applyWorkspaceMutationsToState(state, [{ type: "updateConversation", conversation: { ...remoteConversation, title: "Remote title" } }]);
+          serverRevision = 8;
+          return Response.json(
+            {
+              error: "Workspace revision conflict: expected 7, current 8.",
+              code: "workspace_revision_conflict",
+              expectedRevision: 7,
+              revision: serverRevision,
+              workspace: state,
+            },
+            { status: 409 },
+          );
+        }
+        state = applyWorkspaceMutationRequest(state, init);
+        serverRevision = 9;
+        return Response.json({ ok: true, revision: serverRevision });
+      }
+      if (url === "/api/runs") {
+        return Response.json(activeRunsPayloadFromState(state));
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    render(<Probe />);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByText("chat-2")).toBeInTheDocument();
+
+    await act(async () => {
+      screen.getByRole("button", { name: "draft-a" }).click();
+      await vi.advanceTimersByTimeAsync(250);
+      await Promise.resolve();
+    });
+
+    expect(saveAttempts).toBe(1);
+    expect(screen.getByTestId("selected-title")).toHaveTextContent("Remote title");
+    expect(state.composerDrafts["chat-2"]).toBeUndefined();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_999);
+    });
+    expect(saveAttempts).toBe(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+      await Promise.resolve();
+    });
+
+    expect(saveAttempts).toBe(2);
+    expect(state.composerDrafts["chat-2"]?.text).toBe("a");
+    expect(screen.getByTestId("error")).toHaveTextContent("none");
+    expect(baseRevisions).toEqual([7, 8]);
+    expect(serverRevision).toBe(9);
+  });
+
+  it("does not clear live agent reasoning when a stale initial message save conflicts", async () => {
+    vi.useFakeTimers();
+    let serverRevision = 3;
+    let saveAttempts = 0;
+    let resolveFirstSave: (() => void) | null = null;
+    const mutationPayloads: Array<{ readonly baseRevision?: number; readonly mutations?: readonly WorkspaceMutation[] }> = [];
+
+    vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/workspace" && (!init || init.method === "GET")) {
+        return Response.json({ ...state, revision: serverRevision });
+      }
+      if (url === "/api/workspace/mutations" && init?.method === "POST") {
+        saveAttempts += 1;
+        const payload = JSON.parse(String(init.body ?? "{}")) as { readonly baseRevision?: number; readonly mutations?: readonly WorkspaceMutation[] };
+        mutationPayloads.push(payload);
+        if (saveAttempts === 1) {
+          return await new Promise<Response>((resolve) => {
+            resolveFirstSave = () => {
+              const remoteConversation = state.chats.find((chat) => chat.id === "chat-2");
+              if (!remoteConversation) {
+                throw new Error("Missing chat-2 fixture.");
+              }
+              state = applyWorkspaceMutationsToState(state, [{ type: "updateConversation", conversation: { ...remoteConversation, title: "Remote title" } }]);
+              serverRevision = 4;
+              resolve(
+                Response.json(
+                  {
+                    error: "Workspace revision conflict: expected 3, current 4.",
+                    code: "workspace_revision_conflict",
+                    expectedRevision: 3,
+                    revision: serverRevision,
+                    workspace: state,
+                  },
+                  { status: 409 },
+                ),
+              );
+            };
+          });
+        }
+        state = applyWorkspaceMutationRequest(state, init);
+        serverRevision += 1;
+        return Response.json({ ok: true, revision: serverRevision });
+      }
+      if (url === "/api/runs") {
+        return Response.json(activeRunsPayloadFromState(state));
+      }
+      if (url === "/api/run") {
+        runRequests.push(JSON.parse(String(init?.body ?? "{}")) as RunRequestRecord);
+        activeRunSignal = init?.signal as AbortSignal | undefined;
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            activeRunController = controller;
+            controller.enqueue(new TextEncoder().encode(`${JSON.stringify({ type: "start" })}\n`));
+            controller.enqueue(new TextEncoder().encode(`${JSON.stringify({ type: "reasoning", text: "live reasoning" })}\n`));
+          },
+        });
+        return new Response(stream, {
+          headers: { "Content-Type": "application/x-ndjson" },
+        });
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    render(<Probe />);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByText("chat-2")).toBeInTheDocument();
+
+    await act(async () => {
+      screen.getByRole("button", { name: "send" }).click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(runRequests).toHaveLength(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(32);
+      await Promise.resolve();
+    });
+    expect(screen.getByTestId("agent-blocks")).toHaveTextContent("live reasoning");
+
+    await act(async () => {
+      resolveFirstSave?.();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(saveAttempts).toBe(1);
+    expect(screen.getByTestId("agent-blocks")).toHaveTextContent("live reasoning");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+      await Promise.resolve();
+    });
+
+    expect(saveAttempts).toBe(2);
+    expect(mutationPayloads[1]?.baseRevision).toBe(4);
+    expect(
+      mutationPayloads[1]?.mutations?.some(
+        (mutation) => mutation.type === "upsertMessage" && mutation.message.role === "agent" && (mutation.message.blocks ?? []).length === 0,
+      ),
+    ).toBe(false);
+    expect(screen.getByTestId("agent-blocks")).toHaveTextContent("live reasoning");
   });
 
   it("persists application settings to the server instead of localStorage", async () => {

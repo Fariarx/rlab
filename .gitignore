@@ -17,3 +17,4 @@ next-ui/test-results
 next-ui/playwright-report
 next-ui/vite-dev.err.log
 next-ui/vite-dev.out.log
+next-ui/dist.old

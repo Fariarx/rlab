@@ -4,7 +4,6 @@ import AutoAwesomeRoundedIcon from "@mui/icons-material/AutoAwesomeRounded";
 import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
 import DescriptionOutlinedIcon from "@mui/icons-material/DescriptionOutlined";
 import ImageOutlinedIcon from "@mui/icons-material/ImageOutlined";
-import KeyboardArrowDownRoundedIcon from "@mui/icons-material/KeyboardArrowDownRounded";
 import MicRoundedIcon from "@mui/icons-material/MicRounded";
 import OpenInBrowserIcon from "@mui/icons-material/OpenInBrowser";
 import RateReviewOutlinedIcon from "@mui/icons-material/RateReviewOutlined";
@@ -12,9 +11,10 @@ import SendIcon from "@mui/icons-material/Send";
 import SendTimeExtensionIcon from "@mui/icons-material/SendTimeExtension";
 import CompressRoundedIcon from "@mui/icons-material/CompressRounded";
 import ExtensionOutlinedIcon from "@mui/icons-material/ExtensionOutlined";
+import SettingsRoundedIcon from "@mui/icons-material/SettingsRounded";
 import StopCircleIcon from "@mui/icons-material/StopCircle";
 import WarningAmberRoundedIcon from "@mui/icons-material/WarningAmberRounded";
-import { Box, Collapse, Divider, InputBase, Menu, MenuItem, Stack, Switch, type SxProps, TextField, type Theme, Tooltip, Typography } from "@mui/material";
+import { Box, Divider, InputBase, Menu, MenuItem, Stack, Switch, type SxProps, TextField, type Theme, Tooltip, Typography } from "@mui/material";
 import type { PopoverActions } from "@mui/material/Popover";
 import { type ChangeEvent, type ClipboardEvent, forwardRef, type KeyboardEvent, type MouseEvent, type PointerEvent, type ReactNode, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
@@ -23,8 +23,6 @@ import type { VoiceProviderId, VoiceProviderKind } from "../../lib/voice-provide
 import { ImageLightbox } from "../workspace/ImageLightbox";
 import { Button, IconButton, KeyHint } from "../ui";
 import { AttachmentTile } from "./AttachmentTile";
-import { ContextGauge } from "./ContextGauge";
-import type { AgentRateLimit, RateLimitWindow } from "./agent-limits";
 import type { ComposerAttachmentDraft, ComposerDraft } from "./types";
 
 /** Pastes longer than this become a text-file attachment instead of flooding the input. */
@@ -545,39 +543,6 @@ function FloatingTile({
   );
 }
 
-/**
- * MeterRow — a labeled stat with an optional thin progress bar. Used in the
- * options menu for the conversation's context-window fill and the agent's
- * account-limit windows (5-hour / weekly). The bar colour climbs from calm
- * (blue) through warning (amber) to critical (red) so a glance reads how close
- * a limit is; rows without a percent (cost, plan, status) render label + value
- * only, keeping the whole section visually consistent.
- */
-function MeterRow({ label, value, percent }: { readonly label: string; readonly value: string; readonly percent?: number }) {
-  const clamped = typeof percent === "number" ? Math.max(0, Math.min(100, percent)) : null;
-  return (
-    <Box sx={{ display: "flex", flexDirection: "column", gap: 0.5 }}>
-      <Stack direction="row" spacing={1} sx={{ justifyContent: "space-between", alignItems: "baseline" }}>
-        <Typography sx={{ fontSize: "0.72rem", color: "text.secondary" }}>{label}</Typography>
-        <Typography sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.72rem", color: "text.primary" }}>{value}</Typography>
-      </Stack>
-      {clamped !== null && (
-        <Box sx={{ height: 5, borderRadius: (t) => `${t.custom.radii.pill}px`, backgroundColor: (t) => t.custom.surfaces.s4, overflow: "hidden" }}>
-          <Box
-            sx={{
-              height: "100%",
-              width: `${clamped}%`,
-              borderRadius: (t) => `${t.custom.radii.pill}px`,
-              transition: "width 220ms ease",
-              backgroundColor: (t) => (clamped >= 90 ? t.palette.status.error.main : clamped >= 70 ? t.palette.status.warn.main : t.palette.status.running.main),
-            }}
-          />
-        </Box>
-      )}
-    </Box>
-  );
-}
-
 interface ComposerBrowserActivityEvent {
   readonly id: number;
   readonly type: string;
@@ -653,16 +618,10 @@ interface ComposerProps {
   /** Previously sent user messages (oldest first) recalled with ArrowUp/ArrowDown
    *  when the caret is at the edge, shell-history style. */
   readonly history?: readonly string[];
-  /** Current agent id, used to show its account rate-limits in the options menu. */
+  /** Current agent id, used for agent-specific composer controls. */
   readonly agentId?: string;
-  /** Shared account rate-limits for the selected CLI agent, owned by WorkspacePage. */
-  readonly agentLimit?: AgentRateLimit | null;
-  readonly agentLimitLoaded?: boolean;
-  readonly agentLimitRefreshing?: boolean;
-  readonly agentLimitRefreshError?: string | null;
-  readonly onRefreshAgentLimits?: (requestRefresh: boolean) => void;
-  /** The selected conversation's latest-turn context-window fill (tokens) and the
-   *  model's window size, for the context gauge in the options menu. */
+  /** The selected conversation's latest-turn context-window fill (tokens) and
+   *  model window size, used only for the over-limit compaction warning. */
   readonly contextTokens?: number;
   readonly contextWindow?: number;
   /** Compaction controls (per conversation). `autoCompact` defaults to true;
@@ -687,9 +646,6 @@ interface ComposerProps {
   readonly onVoiceError?: (message: string) => void;
 }
 
-/** Agents whose CLI/SDK does not surface account rate-limit data, so the menu
- *  shows "not reported" instead of a forever-pending "no data yet". */
-const LIMIT_UNSUPPORTED_AGENTS = new Set<string>(["opencode"]);
 const AUTO_COMPACT_TOGGLE_AGENTS = new Set<string>(["claude-code"]);
 const COMPACTION_WINDOW_AGENTS = new Set<string>(["claude-code", "codex"]);
 
@@ -720,11 +676,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     onOverlayLiftChange,
     history = [],
     agentId,
-    agentLimit = null,
-    agentLimitLoaded = false,
-    agentLimitRefreshing = false,
-    agentLimitRefreshError = null,
-    onRefreshAgentLimits,
     contextTokens,
     contextWindow,
     autoCompact = true,
@@ -758,7 +709,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   onOverlayLiftChangeRef.current = onOverlayLiftChange;
   // An image attachment opened full-screen (click a thumbnail to view).
   const [previewAttachment, setPreviewAttachment] = useState<ComposerAttachmentDraft | null>(null);
-  const [limitOpen, setLimitOpen] = useState(false);
   const optionsMenuActionRef = useRef<PopoverActions | null>(null);
   const optionsMenuListRef = useRef<HTMLUListElement | null>(null);
   const optionsMenuPositionFrameRef = useRef<number | null>(null);
@@ -1579,100 +1529,22 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const modeMenuItemSx: SxProps<Theme> = { display: "flex", gap: 1, fontSize: "0.8rem", minHeight: 0, pl: 2, pr: 1, width: "100%" };
   const modeSwitchSx: SxProps<Theme> = { ml: "auto", mr: 0, pointerEvents: "none" };
 
-  // How full the context window is (raw ratio, may exceed 1 once the thread has
-  // outgrown the window). Drives the gauge next to the options button and the
-  // over-limit warning that offers compaction.
+  // Context usage is intentionally not rendered as a composer progress control.
+  // Keep only the over-limit warning that offers compaction.
   const hasKnownContextWindow = typeof contextWindow === "number" && contextWindow > 0;
-  const effectiveContextWindow = hasKnownContextWindow ? contextWindow : 1;
   const effectiveContextTokens = typeof contextTokens === "number" && Number.isFinite(contextTokens) && contextTokens > 0 ? contextTokens : 0;
-  const contextOverLimit = hasKnownContextWindow && effectiveContextTokens / effectiveContextWindow >= 1;
+  const contextOverLimit = hasKnownContextWindow && effectiveContextTokens / contextWindow >= 1;
   const supportsAutoCompactToggle = agentId !== undefined && AUTO_COMPACT_TOGGLE_AGENTS.has(agentId);
   const supportsCompactionWindow = agentId !== undefined && COMPACTION_WINDOW_AGENTS.has(agentId);
-  const limitWindowLabel = (kind: RateLimitWindow["kind"], label?: string): string =>
-    label ?? (kind === "weekly" ? t("limitWindowWeekly") : kind === "daily" ? t("limitWindowDaily") : kind === "overage" ? t("limitOverage") : t("limitWindow5h"));
-  const lowLimitWindow = agentLimit?.windows.find((window) => typeof window.usedPercent === "number" && window.usedPercent >= 85) ?? null;
-  const lowLimitPercent = typeof lowLimitWindow?.usedPercent === "number" ? Math.round(lowLimitWindow.usedPercent) : null;
-  const limitWarningLabel =
-    lowLimitWindow && lowLimitPercent !== null
-      ? `${t("limitsLowTile")} · ${limitWindowLabel(lowLimitWindow.kind, lowLimitWindow.label)} ${lowLimitPercent}%`
-      : null;
-  const limitWarningHint =
-    lowLimitWindow && lowLimitPercent !== null
-      ? t("limitsLowHint", { window: limitWindowLabel(lowLimitWindow.kind, lowLimitWindow.label), percent: lowLimitPercent })
-      : null;
-  const limitWarningTone = agentLimit?.status === "rejected" || (lowLimitPercent !== null && lowLimitPercent >= 95) ? "danger" : "warn";
-
-  // Compact, localized lines describing the agent's account rate-limits — one
-  // row per window (5-hour, weekly, …) showing usage % and time-to-reset side
-  // by side, then plan + the most-severe status.
-  const limitLines: ReadonlyArray<{ readonly id: string; readonly label: string; readonly value: string; readonly percent?: number }> = (() => {
-    if (!agentLimit) {
-      return [];
-    }
-    const formatReset = (resetsAt: number): string => {
-      const secs = Math.max(0, resetsAt * 1000 - Date.now()) / 1000;
-      const h = Math.floor(secs / 3600);
-      const m = Math.floor((secs % 3600) / 60);
-      return h > 0 ? `${h}${t("unitHourShort")} ${m}${t("unitMinShort")}` : `${m}${t("unitMinShort")}`;
-    };
-    const statusLabel = (status: string): string =>
-      status === "allowed"
-        ? t("limitStatusOk")
-        : status === "allowed_warning"
-          ? t("limitStatusWarning")
-          : status === "rejected"
-            ? t("limitStatusRejected")
-            : status;
-
-    const lines: Array<{ id: string; label: string; value: string; percent?: number }> = [];
-    for (const window of agentLimit.windows) {
-      const parts: string[] = [];
-      if (typeof window.usedPercent === "number") {
-        parts.push(`${Math.round(window.usedPercent)}%`);
-      }
-      if (typeof window.resetsAt === "number") {
-        parts.push(formatReset(window.resetsAt));
-      }
-      if (parts.length > 0) {
-        lines.push({
-          id: window.label ? `${window.kind}:${window.label}` : window.kind,
-          label: limitWindowLabel(window.kind, window.label),
-          value: parts.join(" · "),
-          percent: typeof window.usedPercent === "number" ? window.usedPercent : undefined,
-        });
-      }
-    }
-    if (agentLimit.plan) {
-      lines.push({ id: "plan", label: t("limitPlan"), value: agentLimit.plan });
-    }
-    if (agentLimit.status) {
-      lines.push({ id: "status", label: t("limitStatus"), value: statusLabel(agentLimit.status) });
-    }
-    return lines;
-  })();
-
-  useEffect(() => {
-    setLimitOpen(false);
-  }, [agentId]);
 
   useLayoutEffect(() => {
     if (modeMenuAnchor) {
       scheduleOptionsMenuPositionUpdate();
     }
-  }, [agentLimitLoaded, agentLimitRefreshError, agentLimitRefreshing, limitOpen, limitLines.length, modeMenuAnchor, scheduleOptionsMenuPositionUpdate]);
+  }, [modeMenuAnchor, scheduleOptionsMenuPositionUpdate]);
 
-  const toggleLimitsOpen = () => {
-    const nextOpen = !limitOpen;
-    setLimitOpen(nextOpen);
-    if (nextOpen) {
-      onRefreshAgentLimits?.(true);
-    }
-  };
-
-  // Opens the options menu anchored to the clicked element. Account limits stay
-  // collapsed by default and refresh only when the user expands that section.
+  // Opens the options menu anchored to the clicked element.
   const openOptionsMenu = (anchorEl: HTMLElement) => {
-    setLimitOpen(false);
     setOptionsMenuMaxHeight(Math.max(0, Math.floor(anchorEl.getBoundingClientRect().top - 12)));
     setModeMenuAnchor(anchorEl);
   };
@@ -1722,16 +1594,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             onClick={onSendQueuedNow}
             testId="queued-message-send-now"
           />
-        )}
-        {limitWarningLabel && (
-          <Tooltip title={limitWarningHint ?? ""}>
-            <FloatingTile
-              tone={limitWarningTone}
-              icon={<WarningAmberRoundedIcon sx={{ fontSize: 20 }} />}
-              label={limitWarningLabel}
-              testId="agent-limit-warning"
-            />
-          </Tooltip>
         )}
         {contextOverLimit && (
           <Tooltip title={t("contextOverLimitHint")}>
@@ -1821,7 +1683,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             mask: "linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0)",
             maskComposite: "exclude",
           },
-          "& .MuiIconButton-root:not([data-testid='composer-voice-button'])": { width: 30, height: 30 },
+          "& .MuiIconButton-root:not([data-testid='composer-voice-button']):not([data-testid='composer-options-button'])": { width: 30, height: 30 },
           "&:focus-within": {
             borderColor: (t) => t.custom.borders.strong,
           },
@@ -1836,16 +1698,14 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           onChange={chooseFiles}
           style={{ position: "absolute", width: 1, height: 1, opacity: 0, pointerEvents: "none" }}
         />
-        {/* One options control: the context ring replaces the old settings icon
-            and opens the same menu upward. */}
-        <ContextGauge
-          tokens={effectiveContextTokens}
-          window={effectiveContextWindow}
-          hitSize={30}
-          testId="composer-options-button"
-          ariaLabel={`${t("composerOptions")} · ${t("contextUsage")} · ${Math.round((effectiveContextTokens / effectiveContextWindow) * 100)}%`}
+        <IconButton
+          data-testid="composer-options-button"
+          aria-label={t("composerOptions")}
           onClick={(event) => openOptionsMenu(event.currentTarget)}
-        />
+          sx={{ width: 34, height: 34, flex: "0 0 auto", color: "text.secondary" }}
+        >
+          <SettingsRoundedIcon sx={{ fontSize: 20 }} />
+        </IconButton>
         <Menu
           action={optionsMenuActionRef}
           anchorEl={modeMenuAnchor}
@@ -1977,75 +1837,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               </Box>
             </>
           )}
-          {/* Account rate limits (ЛИМИТЫ АККАУНТА) */}
-          <Divider sx={{ my: 0.5 }} />
-          <Box sx={{ px: 2, py: 0.75, cursor: "default" }} onClick={(event) => event.stopPropagation()}>
-            <Box
-              component="button"
-              type="button"
-              aria-expanded={limitOpen}
-              aria-controls="composer-agent-limits"
-              onClick={toggleLimitsOpen}
-              sx={{
-                width: "100%",
-                border: 0,
-                p: 0,
-                m: 0,
-                display: "flex",
-                alignItems: "center",
-                gap: 0.75,
-                cursor: "pointer",
-                color: "inherit",
-                background: "transparent",
-                textAlign: "left",
-              }}
-            >
-              <Typography variant="microLabel" sx={{ color: "text.secondary", display: "block", flex: 1, minWidth: 0 }}>
-                {t("limitsLabel")}
-              </Typography>
-              {agentLimitRefreshing ? (
-                <Typography sx={{ fontSize: "0.72rem", color: "text.tertiary", fontFamily: (theme) => theme.custom.fonts.mono }}>…</Typography>
-              ) : null}
-              <KeyboardArrowDownRoundedIcon
-                sx={{
-                  fontSize: 16,
-                  color: "text.secondary",
-                  transform: limitOpen ? "rotate(180deg)" : "rotate(0deg)",
-                  transition: "transform 140ms ease",
-                }}
-              />
-            </Box>
-            <Collapse
-              in={limitOpen}
-              timeout={120}
-              unmountOnExit={false}
-              onEnter={updateOptionsMenuPosition}
-              onEntering={updateOptionsMenuPosition}
-              onEntered={updateOptionsMenuPosition}
-              onExit={updateOptionsMenuPosition}
-              onExiting={updateOptionsMenuPosition}
-              onExited={updateOptionsMenuPosition}
-            >
-              <Box id="composer-agent-limits" sx={{ pt: 0.75 }}>
-                {limitLines.length > 0 ? (
-                  <Stack spacing={1}>
-                    {limitLines.map((line) => (
-                      <MeterRow key={line.id} label={line.label} value={line.value} percent={line.percent} />
-                    ))}
-                  </Stack>
-                ) : (
-                  <Typography sx={{ fontSize: "0.72rem", color: "text.tertiary" }}>
-                    {!agentLimitLoaded ? "…" : agentId && LIMIT_UNSUPPORTED_AGENTS.has(agentId) ? t("limitsUnavailable") : t("limitsNoData")}
-                  </Typography>
-                )}
-                {agentLimitRefreshError ? (
-                  <Typography sx={{ mt: 0.75, fontSize: "0.72rem", color: "status.error" }}>
-                    {agentLimitRefreshError}
-                  </Typography>
-                ) : null}
-              </Box>
-            </Collapse>
-          </Box>
           {/* Compaction — below both conversation info sections */}
           <Divider sx={{ my: 0.5 }} />
           {supportsAutoCompactToggle && (
