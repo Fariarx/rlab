@@ -12,11 +12,13 @@ import {
   readConversation,
   readMessageBlocks,
   readThreadFromDb,
+  readWorkspaceRevision,
   readWorkspaceStateFromDb,
   updateConversationData,
   upsertAgentMessageForUserTurn,
   upsertMessage,
   workspaceDbHasState,
+  WorkspaceRevisionConflictError,
 } from "../workspace-db";
 
 const conv = (id: string, extra: Partial<ConversationSummary> = {}): ConversationSummary => ({
@@ -164,5 +166,45 @@ describe("workspace-db", () => {
     const read = readWorkspaceStateFromDb();
     expect(read.chats.find((conversation) => conversation.id === "c1")?.title).toBe("renamed");
     expect(read.threads.c1.map((message) => message.id)).toEqual(["m1"]);
+  });
+
+  it("rejects mutation batches with a stale expected revision", () => {
+    initializeWorkspaceStateInDb({ ...buildEmptyWorkspaceState(), chats: [conv("c1")], threads: { c1: [] }, selectedId: "c1" });
+    const baseRevision = readWorkspaceRevision();
+    applyWorkspaceDbMutations([{ type: "updateConversation", conversation: conv("c1", { title: "server edit" }) }], { expectedRevision: baseRevision });
+
+    expect(() =>
+      applyWorkspaceDbMutations([{ type: "updateConversation", conversation: conv("c1", { title: "stale edit" }) }], { expectedRevision: baseRevision }),
+    ).toThrow(WorkspaceRevisionConflictError);
+    expect(readWorkspaceStateFromDb().chats[0]?.title).toBe("server edit");
+  });
+
+  it("rejects messages for missing conversations", () => {
+    initializeWorkspaceStateInDb({ ...buildEmptyWorkspaceState(), chats: [conv("c1")], threads: { c1: [] }, selectedId: "c1" });
+
+    expect(() => applyWorkspaceDbMutations([{ type: "upsertMessage", conversationId: "missing", message: msg("m1", "a") }])).toThrow("Conversation missing does not exist.");
+  });
+
+  it("rejects moving an existing message id into another conversation", () => {
+    initializeWorkspaceStateInDb({
+      ...buildEmptyWorkspaceState(),
+      chats: [conv("c1"), conv("c2")],
+      threads: { c1: [msg("m1", "a")], c2: [] },
+      selectedId: "c1",
+    });
+
+    expect(() => applyWorkspaceDbMutations([{ type: "upsertMessage", conversationId: "c2", message: msg("m1", "b") }])).toThrow(
+      "Message m1 already belongs to conversation c1.",
+    );
+    expect(readWorkspaceStateFromDb().threads.c1.map((message) => message.id)).toEqual(["m1"]);
+  });
+
+  it("rejects selected conversation and draft mutations for missing conversations", () => {
+    initializeWorkspaceStateInDb({ ...buildEmptyWorkspaceState(), chats: [conv("c1")], threads: { c1: [] }, selectedId: "c1" });
+
+    expect(() => applyWorkspaceDbMutations([{ type: "setSelectedConversation", conversationId: "missing" }])).toThrow("Conversation missing does not exist.");
+    expect(() => applyWorkspaceDbMutations([{ type: "setComposerDraft", conversationId: "missing", draft: { text: "x", attachments: [] } }])).toThrow(
+      "Conversation missing does not exist.",
+    );
   });
 });

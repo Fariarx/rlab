@@ -3,6 +3,7 @@ import { render } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/App";
 import { buildInitialWorkspaceState, type WorkspaceState } from "../src/components/workspace/workspace-state";
+import { applyWorkspaceMutationRequest, isWorkspaceMutationRequest } from "./util/workspace-api";
 import { withVirtuosoMock } from "./util/render-with-virtuoso";
 
 let workspace: WorkspaceState;
@@ -88,9 +89,9 @@ async function fetchWorkspaceResource(input: RequestInfo | URL, init?: RequestIn
     return Response.json(workspace);
   }
 
-  if (url === "/api/workspace" && method === "PUT") {
-    workspace = JSON.parse(String(init?.body)) as WorkspaceState;
-    return Response.json(workspace);
+  if (isWorkspaceMutationRequest(url, init)) {
+    workspace = applyWorkspaceMutationRequest(workspace, init);
+    return Response.json({ ok: true, revision: 1 });
   }
 
   if (url === "/api/project-files") {

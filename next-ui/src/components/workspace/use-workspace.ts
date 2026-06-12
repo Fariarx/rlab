@@ -5,6 +5,7 @@ import { translate } from "../../i18n/I18nProvider";
 import { attachRunUpdates, cancelRun, loadActiveRuns, runConversation, type ActiveRunSnapshot, type ActiveRunUpdate, type RunConversationResult } from "./run-agent";
 import { nowLabel, starterThread, truncate } from "./sample-data";
 import { type AppSettings, type AppSettingsPatch, type Locale, mergeAppSettings } from "./app-settings";
+import { applyWorkspaceMutationsToState, type WorkspaceMutation } from "../../lib/workspace-mutations";
 import { buildEmptyWorkspaceState, buildInitialWorkspaceState, cloneWorkspaceState, type WorkspaceState } from "./workspace-state";
 
 const WORKSPACE_LOAD_RETRY_MS = 15_000;
@@ -59,41 +60,60 @@ async function responseErrorMessage(response: Response, fallback: string): Promi
     : fallback;
 }
 
-async function loadWorkspaceState(): Promise<WorkspaceState> {
+type WorkspaceStatePayload = WorkspaceState & { readonly revision?: number };
+
+class WorkspaceMutationConflictError extends Error {
+  readonly revision: number;
+  readonly workspace: WorkspaceState;
+
+  constructor(message: string, revision: number, workspace: WorkspaceState) {
+    super(message);
+    this.name = "WorkspaceMutationConflictError";
+    this.revision = revision;
+    this.workspace = workspace;
+  }
+}
+
+async function loadWorkspaceState(): Promise<WorkspaceStatePayload> {
   const response = await fetch("/api/workspace", { method: "GET", cache: "no-store" });
   if (!response.ok) {
     throw new Error(await responseErrorMessage(response, `Workspace load failed (${response.status})`));
   }
-  return (await response.json()) as WorkspaceState;
+  return (await response.json()) as WorkspaceStatePayload;
 }
 
-type ProjectMeta = Omit<Project, "conversations">;
-
-type WorkspaceMutation =
-  | { readonly type: "setSelectedConversation"; readonly conversationId: string }
-  | { readonly type: "setSettings"; readonly settings: AppSettings }
-  | { readonly type: "upsertProject"; readonly project: ProjectMeta; readonly insertAtFront?: boolean }
-  | { readonly type: "upsertConversation"; readonly conversation: ConversationSummary; readonly projectId: string | null; readonly insertAtFront?: boolean }
-  | { readonly type: "updateConversation"; readonly conversation: ConversationSummary }
-  | { readonly type: "deleteConversation"; readonly conversationId: string }
-  | { readonly type: "setComposerDraft"; readonly conversationId: string; readonly draft: ComposerDraft }
-  | { readonly type: "deleteComposerDraft"; readonly conversationId: string }
-  | { readonly type: "upsertMessage"; readonly conversationId: string; readonly message: ChatMessage }
-  | { readonly type: "upsertMessages"; readonly conversationId: string; readonly messages: readonly ChatMessage[] }
-  | { readonly type: "replaceConversationThread"; readonly conversationId: string; readonly messages: readonly ChatMessage[] };
-
-async function saveWorkspaceMutations(mutations: readonly WorkspaceMutation[]): Promise<void> {
+async function saveWorkspaceMutations(mutations: readonly WorkspaceMutation[], baseRevision: number): Promise<number | undefined> {
   if (mutations.length === 0) {
-    return;
+    return undefined;
   }
   const response = await fetch("/api/workspace/mutations", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ mutations }),
+    body: JSON.stringify({ mutations, baseRevision }),
   });
   if (!response.ok) {
+    if (response.status === 409) {
+      const payload = (await response.json().catch(() => null)) as unknown;
+      if (
+        typeof payload === "object" &&
+        payload !== null &&
+        "revision" in payload &&
+        typeof payload.revision === "number" &&
+        "workspace" in payload &&
+        typeof payload.workspace === "object" &&
+        payload.workspace !== null
+      ) {
+        const message =
+          "error" in payload && typeof payload.error === "string" && payload.error.trim().length > 0
+            ? payload.error.trim()
+            : "Workspace revision conflict.";
+        throw new WorkspaceMutationConflictError(message, payload.revision, payload.workspace as WorkspaceState);
+      }
+    }
     throw new Error(await responseErrorMessage(response, `Workspace save failed (${response.status})`));
   }
+  const payload = (await response.json().catch(() => null)) as unknown;
+  return typeof payload === "object" && payload !== null && "revision" in payload && typeof payload.revision === "number" ? payload.revision : undefined;
 }
 
 function findConversation(state: WorkspaceState, id: string): ConversationSummary | null {
@@ -104,7 +124,7 @@ function workspaceConversations(state: WorkspaceState): ConversationSummary[] {
   return [...state.chats, ...state.projects.flatMap((project) => project.conversations)];
 }
 
-function projectMeta(project: Project): ProjectMeta {
+function projectMeta(project: Project): Omit<Project, "conversations"> {
   const { conversations: _conversations, ...meta } = project;
   return meta;
 }
@@ -556,6 +576,8 @@ class WorkspaceStore implements Workspace {
 
   private saveInFlight = false;
 
+  private workspaceRevision = 0;
+
   private pollTimer: ReturnType<typeof setInterval> | null = null;
 
   private loadRetryTimer: ReturnType<typeof setInterval> | null = null;
@@ -805,8 +827,11 @@ class WorkspaceStore implements Workspace {
     this.saveInFlight = true;
     let saveFailed = false;
     try {
-      await saveWorkspaceMutations(mutations);
+      const revision = await saveWorkspaceMutations(mutations, this.workspaceRevision);
       runInAction(() => {
+        if (revision !== undefined) {
+          this.workspaceRevision = revision;
+        }
         if (this.loadError?.startsWith("Workspace save failed")) {
           this.loadError = null;
         }
@@ -814,6 +839,17 @@ class WorkspaceStore implements Workspace {
     } catch (error) {
       saveFailed = true;
       runInAction(() => {
+        if (error instanceof WorkspaceMutationConflictError) {
+          const unsavedMutations = [...mutations, ...this.pendingMutations];
+          const rebasedState = applyWorkspaceMutationsToState(cloneWorkspaceState(error.workspace), unsavedMutations);
+          this.workspaceRevision = error.revision;
+          this.applyServerState(rebasedState);
+          this.pendingMutations = unsavedMutations;
+          this.loadError = null;
+          this.pendingSaveUrgent = false;
+          this.startSaveRetryTimer();
+          return;
+        }
         const message = error instanceof Error ? error.message : String(error);
         this.loadError = message.startsWith("Workspace save failed") ? message : `Workspace save failed: ${message}`;
         this.pendingMutations = [...mutations, ...this.pendingMutations];
@@ -844,6 +880,7 @@ class WorkspaceStore implements Workspace {
           return;
         }
         runInAction(() => {
+          this.workspaceRevision = typeof loadedState.revision === "number" ? loadedState.revision : 0;
           this.applyServerState(cloneWorkspaceState(loadedState));
           this.loadError = null;
           this.loaded = true;

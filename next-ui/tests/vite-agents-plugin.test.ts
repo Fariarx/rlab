@@ -8,6 +8,7 @@ import {
   agentConfigErrorStatus,
   appendJsonBodyChunk,
   attachmentUploadErrorStatus,
+  buildClaudeSdkOptions,
   buildClaudeRunArgs,
   buildCodexRunArgs,
   buildCodexThreadParams,
@@ -46,6 +47,7 @@ import {
   parseBrowserSyncPayload,
   parseAgentConfigPayload,
   parseAgentInstallPayload,
+  parseAnthropicModelInfos,
   parseGitStatusPorcelain,
   parseGitCwdPayload,
   parseGitFilePayload,
@@ -330,6 +332,31 @@ describe("vite agents plugin", () => {
     }
   });
 
+  it("marks Claude Code available through the SDK runtime without a PATH binary", () => {
+    expect(
+      agentCliInfoForDetection(
+        "claude-code",
+        {
+          bins: ["claude"],
+          sdkRuntime: true,
+          env: ["ANTHROPIC_API_KEY"],
+          hasAuth: () => false,
+        },
+        { env: {} },
+        { ANTHROPIC_API_KEY: "anthropic-test-key" },
+        "",
+        "linux",
+      ),
+    ).toMatchObject({
+      status: "available",
+      bins: ["claude"],
+      resolvedBin: null,
+      runAdapter: true,
+      selectable: true,
+      env: ["ANTHROPIC_API_KEY"],
+    });
+  });
+
   it("keeps hidden agents unsupported even if their executable is present", () => {
     const dir = mkdtempSync(join(tmpdir(), "rlab-amp-discovery-"));
     try {
@@ -400,6 +427,43 @@ describe("vite agents plugin", () => {
         { id: "xhigh", label: "Extra High", value: "xhigh" },
       ],
     });
+  });
+
+  it("parses Anthropic SDK model metadata for Claude Code", () => {
+    const models: Parameters<typeof parseAnthropicModelInfos>[0] = [
+      {
+        type: "model",
+        id: "claude-sonnet-4-6-20260101",
+        display_name: "Claude Sonnet 4.6",
+        created_at: "2026-01-01T00:00:00Z",
+        capabilities: null,
+        max_input_tokens: null,
+        max_tokens: null,
+      },
+      {
+        type: "model",
+        id: "claude-haiku-4-5-20260101",
+        display_name: "",
+        created_at: "2026-01-01T00:00:00Z",
+        capabilities: null,
+        max_input_tokens: null,
+        max_tokens: null,
+      },
+      {
+        type: "model",
+        id: "gpt-5.5",
+        display_name: "GPT-5.5",
+        created_at: "2026-01-01T00:00:00Z",
+        capabilities: null,
+        max_input_tokens: null,
+        max_tokens: null,
+      },
+    ];
+
+    expect(parseAnthropicModelInfos(models)).toEqual([
+      { id: "claude-sonnet-4-6-20260101", label: "Claude Sonnet 4.6", value: "claude-sonnet-4-6-20260101" },
+      { id: "claude-haiku-4-5-20260101", label: "Claude Haiku 4.5 20260101", value: "claude-haiku-4-5-20260101" },
+    ]);
   });
 
   it("parses Claude CLI model aliases from the installed binary metadata", () => {
@@ -597,6 +661,7 @@ Built-in agents:
       expect.stringContaining("AskUserQuestion"),
       "--settings",
       JSON.stringify({ autoCompactEnabled: true }),
+      "--dangerously-skip-permissions",
     ]);
     expect(buildClaudeRunArgs({ prompt: "hello", autoConfirm: true })).toContain("--permission-mode");
     expect(buildClaudeRunArgs({ prompt: "hello", autoConfirm: true })).toContain("auto");
@@ -639,7 +704,62 @@ Built-in agents:
       JSON.stringify({ autoCompactEnabled: true }),
       "--agent",
       "Goal",
+      "--dangerously-skip-permissions",
     ]);
+  });
+
+  it("builds Claude SDK options for the selected model, effort, agent, and permissions", () => {
+    const abortController = new AbortController();
+    const canUseTool: Parameters<typeof buildClaudeSdkOptions>[3] = async (_toolName, input) => ({ behavior: "allow", updatedInput: input });
+
+    expect(
+      buildClaudeSdkOptions(
+        {
+          agent: "claude-code",
+          prompt: "hello",
+          model: "claude-sonnet-4-6-20260101",
+          reasoning: "high",
+          mode: "claude-agent:Goal",
+          accessMode: "unrestricted",
+          sessionId: "session-1",
+          resume: "resume-1",
+        },
+        "C:/repo",
+        abortController,
+        canUseTool,
+        { ANTHROPIC_API_KEY: "anthropic-test-key" },
+      ),
+    ).toMatchObject({
+      abortController,
+      allowDangerouslySkipPermissions: true,
+      allowedTools: ["Read", "Glob", "Grep", "LS"],
+      canUseTool,
+      cwd: "C:/repo",
+      env: { ANTHROPIC_API_KEY: "anthropic-test-key" },
+      includePartialMessages: true,
+      settings: { autoCompactEnabled: true },
+      permissionMode: "bypassPermissions",
+      systemPrompt: { type: "preset", preset: "claude_code", append: expect.stringContaining("AskUserQuestion") },
+      tools: { type: "preset", preset: "claude_code" },
+      model: "claude-sonnet-4-6-20260101",
+      effort: "high",
+      agent: "Goal",
+      sessionId: "session-1",
+      resume: "resume-1",
+    });
+
+    const readOnlyOptions = buildClaudeSdkOptions(
+      { agent: "claude-code", prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "read-only", autoCompact: false, compactWindow: 120000 },
+      "C:/repo",
+      abortController,
+      canUseTool,
+    );
+    expect(readOnlyOptions.allowDangerouslySkipPermissions).toBeUndefined();
+    expect(readOnlyOptions).toMatchObject({
+      permissionMode: "plan",
+      settings: { autoCompactEnabled: false, autoCompactWindow: 120000 },
+      tools: ["Read", "Glob", "Grep", "LS", "AskUserQuestion", "TaskWakeup"],
+    });
   });
 
   it("translates Claude text deltas without duplicating the final assistant message", () => {
@@ -1003,8 +1123,9 @@ Built-in agents:
   });
 
   it("maps agent access mode into CLI safety flags", () => {
-    expect(buildClaudeRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" })).not.toContain("--dangerously-skip-permissions");
+    expect(buildClaudeRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" })).toContain("--dangerously-skip-permissions");
     expect(buildClaudeRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted", autoConfirm: true })).toEqual(expect.arrayContaining(["--permission-mode", "auto"]));
+    expect(buildClaudeRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted", autoConfirm: true })).not.toContain("--dangerously-skip-permissions");
     // Read-only access maps to Claude's plan permission mode.
     expect(buildClaudeRunArgs({ prompt: "hello", model: "opus", reasoning: "max", mode: "default", accessMode: "read-only" })).toEqual([
       "-p",
@@ -1030,18 +1151,19 @@ Built-in agents:
       "exec",
       "--json",
       "--sandbox",
-      "workspace-write",
+      "danger-full-access",
       "--skip-git-repo-check",
       "hello",
     ]);
     expect(buildCodexRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted", autoConfirm: true })).toEqual([
       "exec",
       "--json",
-      "--dangerously-bypass-approvals-and-sandbox",
+      "--sandbox",
+      "danger-full-access",
       "--skip-git-repo-check",
       "hello",
     ]);
-    expect(buildGeminiRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" })).toContain("default");
+    expect(buildGeminiRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" })).toContain("yolo");
   });
 
   it("allows unrestricted runs for every RUN adapter without a live permission bridge", () => {
@@ -1072,24 +1194,24 @@ Built-in agents:
   });
 
   it("maps access mode into real Gemini approval modes", () => {
-    // Unrestricted without auto-confirm uses Gemini's normal approval flow.
+    // Unrestricted without auto-confirm is the full-access/default automation mode.
     expect(buildGeminiRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" })).toEqual([
       "--prompt",
       "hello",
       "--output-format",
       "stream-json",
       "--approval-mode",
-      "default",
+      "yolo",
       "--skip-trust",
     ]);
-    // Auto-confirm is a sandbox approval setting, not a chat work mode.
+    // Auto-confirm is a sandbox approval setting, not a chat work mode or full-access bypass.
     expect(buildGeminiRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted", autoConfirm: true })).toEqual([
       "--prompt",
       "hello",
       "--output-format",
       "stream-json",
       "--approval-mode",
-      "yolo",
+      "auto_edit",
       "--skip-trust",
     ]);
     // Read-only -> plan (hard-enforced read-only at the tool layer).
@@ -1119,7 +1241,7 @@ Built-in agents:
       "high",
       "hello",
     ]);
-    expect(buildOpenCodeRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" })).not.toContain("--dangerously-skip-permissions");
+    expect(buildOpenCodeRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" })).toContain("--dangerously-skip-permissions");
     expect(buildOpenCodeRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted", autoConfirm: true })).toContain("--dangerously-skip-permissions");
   });
 
@@ -1203,6 +1325,38 @@ Built-in agents:
         accessMode: "read-only",
       }).config,
     ).toBeUndefined();
+  });
+
+  it("keeps Codex full access separate from app-server auto-review", () => {
+    expect(
+      buildCodexThreadParams({
+        agent: "codex",
+        model: "default",
+        reasoning: "default",
+        mode: "default",
+        prompt: "hello",
+        accessMode: "unrestricted",
+      }),
+    ).toMatchObject({
+      sandbox: "danger-full-access",
+      approvalPolicy: "never",
+    });
+
+    expect(
+      buildCodexThreadParams({
+        agent: "codex",
+        model: "default",
+        reasoning: "default",
+        mode: "default",
+        prompt: "hello",
+        accessMode: "unrestricted",
+        autoConfirm: true,
+      }),
+    ).toMatchObject({
+      sandbox: "danger-full-access",
+      approvalPolicy: "on-request",
+      approvalsReviewer: "auto_review",
+    });
   });
 
   it("registers rlab dynamic tools for Codex app-server threads", () => {

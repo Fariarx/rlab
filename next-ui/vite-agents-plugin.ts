@@ -7,6 +7,9 @@ import { homedir, tmpdir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import Anthropic from "@anthropic-ai/sdk";
+import type { ModelInfo as AnthropicModelInfo } from "@anthropic-ai/sdk/resources/models";
+import { query, type CanUseTool, type EffortLevel, type Options as ClaudeQueryOptions, type PermissionResult } from "@anthropic-ai/claude-agent-sdk";
 import { CronExpressionParser } from "cron-parser";
 import * as pty from "node-pty";
 import { chromium, type Browser, type BrowserContext, type ConsoleMessage, type Frame, type FrameLocator, type Locator, type Page, type Request as PlaywrightRequest } from "playwright";
@@ -18,11 +21,11 @@ import { attachPtyTerminalWebSockets, PtyTerminalManager } from "./src/server/pt
 import {
   cloneAppSettings,
   defaultAppSettings,
-  isAppSettings,
   type Locale,
 } from "./src/lib/app-settings";
 import { getVoiceProvider, isVoiceProviderId, VOICE_PROVIDERS, type VoiceProviderId } from "./src/lib/voice-providers";
 import { buildEmptyWorkspaceState, buildInitialWorkspaceState, cloneWorkspaceState, type WorkspaceState } from "./src/lib/workspace-state";
+import { parseWorkspaceMutationRequestBody, workspaceMutationBadRequestMessages } from "./src/lib/workspace-mutations";
 import {
   applyWorkspaceDbMutations,
   initWorkspaceDb,
@@ -32,11 +35,13 @@ import {
   readMessageBlocks,
   readSelectedConversationId,
   readThreadFromDb,
+  readWorkspaceRevision,
   readWorkspaceStateFromDb,
   updateConversationData,
   upsertAgentMessageForUserTurn,
   upsertMessage,
   workspaceDbHasState,
+  WorkspaceRevisionConflictError,
   type WorkspaceDbMutation,
 } from "./workspace-db";
 import {
@@ -62,9 +67,12 @@ import {
   type AgentBlock,
   type ChatMessage,
   type CodeBlockData,
+  type ComposerDraft,
+  type ConversationSummary,
   type ConversationStatus,
   type DiffBlock,
   type PlanBlock,
+  type Project,
   type RunState,
   type RunUsage,
   type SearchBlock,
@@ -96,7 +104,6 @@ const WORKSPACE_STATE_DIR = process.env.RLAB_DATA_DIR
   : join(PLUGIN_DIR, ".data");
 const WORKSPACE_STATE_FILE = join(WORKSPACE_STATE_DIR, "workspace-state.json");
 const WORKSPACE_DB_FILE = join(WORKSPACE_STATE_DIR, "workspace.db");
-const WORKSPACE_STATE_LOCK_FILE = join(WORKSPACE_STATE_DIR, "workspace-state.lock");
 const RUN_AUDIT_FILE = join(WORKSPACE_STATE_DIR, "run-audit.ndjson");
 const SCHEDULED_WAKEUPS_FILE = join(WORKSPACE_STATE_DIR, "scheduled-wakeups.json");
 const ATTACHMENTS_DIR = join(WORKSPACE_STATE_DIR, "attachments");
@@ -104,7 +111,6 @@ const AMP_READ_ONLY_SETTINGS_FILE = join(WORKSPACE_STATE_DIR, "amp-read-only-set
 // Account rate-limit snapshots survive restarts here so the composer keeps
 // showing the last-known 5h/weekly windows instead of going blank on reboot.
 const AGENT_LIMITS_FILE = join(WORKSPACE_STATE_DIR, "agent-limits.json");
-const CONTEXT_USAGE_MIGRATION_FILE = join(WORKSPACE_STATE_DIR, "context-usage-native-v1");
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 export const MAX_JSON_BODY_BYTES = 40 * 1024 * 1024;
 export const JSON_CONTENT_TYPE = "application/json; charset=utf-8";
@@ -119,6 +125,8 @@ const terminalWebSocketServers = new WeakSet<object>();
 
 interface Detect {
   readonly bins: readonly string[];
+  /** Runtime is provided by an installed SDK dependency, not a PATH binary. */
+  readonly sdkRuntime?: boolean;
   /** If set, at least one of these env vars must be present, else `needs-setup`. */
   readonly env?: readonly string[];
   /** Some CLIs, notably Codex, can be fully authenticated via local account state. */
@@ -141,7 +149,7 @@ interface AgentCliInfo {
 
 // Keys must match AgentId in src/components/agent/agents.ts.
 const DETECT: Record<string, Detect> = {
-  "claude-code": { bins: ["claude"], env: ["ANTHROPIC_API_KEY"], hasAuth: hasClaudeStoredAuth },
+  "claude-code": { bins: ["claude"], sdkRuntime: true, env: ["ANTHROPIC_API_KEY"], hasAuth: hasClaudeStoredAuth },
   codex: { bins: ["codex"], env: ["OPENAI_API_KEY", "CODEX_API_KEY"], hasAuth: hasCodexStoredAuth },
   gemini: { bins: ["gemini"], env: ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENAI_API_KEY"], hasAuth: hasGeminiStoredAuth },
   opencode: { bins: ["opencode"] },
@@ -150,7 +158,7 @@ const DETECT: Record<string, Detect> = {
 const RUNNABLE_AGENT_IDS = new Set(["claude-code", "codex", "gemini", "opencode"]);
 
 const INSTALL_COMMANDS: Partial<Record<string, readonly string[]>> = {
-  "claude-code": ["npm", "install", "-g", "@anthropic-ai/claude-code@latest"],
+  "claude-code": ["npm", "install", "@anthropic-ai/claude-agent-sdk@latest", "@anthropic-ai/sdk@latest"],
   codex: ["npm", "install", "-g", "@openai/codex@latest"],
   gemini: ["npm", "install", "-g", "@google/gemini-cli@latest"],
   opencode: ["npm", "install", "-g", "opencode-ai@latest"],
@@ -210,6 +218,16 @@ export function writeAgentSecretConfig(config: AgentSecretConfig, file = AGENT_C
 
 function configuredEnvValueFrom(envName: string, config: AgentSecretConfig, env: NodeJS.ProcessEnv): string | undefined {
   return env[envName] ?? config.env[envName];
+}
+
+function firstConfiguredEnvValue(envNames: readonly string[], config: AgentSecretConfig, env: NodeJS.ProcessEnv): string | undefined {
+  for (const envName of envNames) {
+    const value = configuredEnvValueFrom(envName, config, env);
+    if (value && value.trim().length > 0) {
+      return value;
+    }
+  }
+  return undefined;
 }
 
 function claudeHome(): string {
@@ -422,6 +440,7 @@ function terminateAgentProcessTree(child: ReturnType<typeof spawn>, signal: Node
 }
 
 const MODEL_DISCOVERY_TIMEOUT_MS = 5_000;
+const ANTHROPIC_MODEL_API_KEY_ENV = ["ANTHROPIC_API_KEY"] as const;
 const OPENCODE_DISCOVERY_TIMEOUT_MS = 15_000;
 const AGENT_DETECTION_CACHE_TTL_MS = 5 * 60_000;
 const CLI_UPDATE_CHECK_INTERVAL_MS = 60 * 60_000;
@@ -613,6 +632,14 @@ export function parseClaudeCliModelAliasesSource(source: string): AgentOption[] 
     value: alias.id,
   }));
   return models.length > 0 ? [{ id: DEFAULT_AGENT_OPTION_ID, label: "Default" }, ...models] : [];
+}
+
+export function parseAnthropicModelInfos(models: readonly AnthropicModelInfo[]): AgentOption[] {
+  return uniqueAgentOptions(
+    models
+      .filter((model) => isDirectAgentModelValue("claude-code", model.id))
+      .map((model) => ({ id: model.id, label: model.display_name || modelLabelFromValue(model.id), value: model.id })),
+  );
 }
 
 function skipJsWhitespaceAndComments(source: string, index: number): number {
@@ -912,7 +939,36 @@ function runResolvedBinTextAsync(
   });
 }
 
-async function discoveredAgentOptionsAsync(id: string, resolvedBin: string | null): Promise<Pick<AgentCliInfo, "models" | "reasoning" | "modes" | "modelDiscoveryError">> {
+async function discoverAnthropicModelOptionsAsync(
+  config: AgentSecretConfig,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<Pick<AgentCliInfo, "models" | "modelDiscoveryError">> {
+  const apiKey = firstConfiguredEnvValue(ANTHROPIC_MODEL_API_KEY_ENV, config, env);
+  if (!apiKey) {
+    return {};
+  }
+  try {
+    const client = new Anthropic({ apiKey, maxRetries: 0, timeout: MODEL_DISCOVERY_TIMEOUT_MS });
+    const models: AnthropicModelInfo[] = [];
+    for await (const model of client.models.list({ limit: 100 })) {
+      models.push(model);
+    }
+    const parsed = parseAnthropicModelInfos(models);
+    return parsed.length > 0 ? { models: parsed } : {};
+  } catch (error) {
+    return { modelDiscoveryError: `Claude model discovery failed: ${errorMessage(error)}` };
+  }
+}
+
+async function discoveredAgentOptionsAsync(
+  id: string,
+  resolvedBin: string | null,
+  config: AgentSecretConfig,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<Pick<AgentCliInfo, "models" | "reasoning" | "modes" | "modelDiscoveryError">> {
+  if (id === "claude-code") {
+    return discoverAnthropicModelOptionsAsync(config, env);
+  }
   if (!resolvedBin) {
     return {};
   }
@@ -926,13 +982,6 @@ async function discoveredAgentOptionsAsync(id: string, resolvedBin: string | nul
       ...(models.length > 0 ? { models } : {}),
       ...(modes.length > 0 ? { modes } : {}),
       ...(modelDiscoveryError.length > 0 ? { modelDiscoveryError } : {}),
-    };
-  }
-  if (id === "claude-code") {
-    const parsed = await parseClaudeCliInstalledModelAliasesAsync(resolvedBin);
-    return {
-      ...(parsed.models.length > 0 ? { models: parsed.models } : {}),
-      ...(parsed.error ? { modelDiscoveryError: parsed.error } : {}),
     };
   }
   if (id === "codex") {
@@ -973,7 +1022,7 @@ export function agentCliInfoForDetection(
   platform: NodeJS.Platform = process.platform,
 ): AgentCliInfo {
   const resolvedBin = resolvedDetectBin(detect, pathValue, platform);
-  const found = resolvedBin !== null;
+  const found = resolvedBin !== null || detect.sdkRuntime === true;
   const runAdapter = RUNNABLE_AGENT_IDS.has(id);
   const status = found && !runAdapter ? "unsupported" : agentStatusForDetection(detect, found, config, env);
   return {
@@ -1035,7 +1084,7 @@ async function detectAgentsWithLiveModelsUncached(): Promise<Record<string, Agen
   await Promise.all(
     Object.entries(DETECT).map(async ([id, cfg]) => {
       const cliInfo = agentCliInfoForDetection(id, cfg, config);
-      const discovered = cliInfo.status === "available" ? await discoveredAgentOptionsAsync(id, cliInfo.resolvedBin) : {};
+      const discovered = cliInfo.status === "available" ? await discoveredAgentOptionsAsync(id, cliInfo.resolvedBin, config) : {};
       result[id] = { ...cliInfo, ...discovered };
     }),
   );
@@ -2345,48 +2394,6 @@ export async function applyBrowserStorageSnapshot(page: Pick<Page, "evaluate" | 
   }, storage);
 }
 
-function isWorkspaceState(value: unknown): value is WorkspaceState {
-  if (!isRecord(value)) {
-    return false;
-  }
-  return (
-    Array.isArray(value.chats) &&
-    Array.isArray(value.projects) &&
-    isRecord(value.threads) &&
-    isRecord(value.composerDrafts) &&
-    typeof value.selectedId === "string" &&
-    isAppSettings(value.settings)
-  );
-}
-
-function isWorkspaceStateWithoutComposerDrafts(value: unknown): value is Omit<WorkspaceState, "composerDrafts"> {
-  if (!isRecord(value)) {
-    return false;
-  }
-  return (
-    Array.isArray(value.chats) &&
-    Array.isArray(value.projects) &&
-    isRecord(value.threads) &&
-    value.composerDrafts === undefined &&
-    typeof value.selectedId === "string" &&
-    isAppSettings(value.settings)
-  );
-}
-
-function isLegacyWorkspaceState(value: unknown): value is Omit<WorkspaceState, "settings" | "composerDrafts"> {
-  if (!isRecord(value)) {
-    return false;
-  }
-  return (
-    Array.isArray(value.chats) &&
-    Array.isArray(value.projects) &&
-    isRecord(value.threads) &&
-    typeof value.selectedId === "string" &&
-    value.composerDrafts === undefined &&
-    value.settings === undefined
-  );
-}
-
 type WorkspaceConversation = WorkspaceState["chats"][number];
 
 const legacySeedCopy: Record<string, { readonly title: string; readonly snippet: string }> = {
@@ -2643,110 +2650,15 @@ function isDemoWorkspaceEnabled(): boolean {
   return process.env.RLAB_DEMO === "1" || process.env.NODE_ENV === "development";
 }
 
-/** Coerce a parsed legacy JSON-blob state into the current full shape (adds
- *  composerDrafts/settings defaults). Returns null if it isn't recognizable. */
-function coerceParsedWorkspaceState(parsed: unknown): WorkspaceState | null {
-  if (isWorkspaceState(parsed)) {
-    return cloneWorkspaceState(parsed);
-  }
-  if (isWorkspaceStateWithoutComposerDrafts(parsed)) {
-    return cloneWorkspaceState({ ...parsed, composerDrafts: {} });
-  }
-  if (isLegacyWorkspaceState(parsed)) {
-    return { ...parsed, composerDrafts: {}, settings: cloneAppSettings(defaultAppSettings) };
-  }
-  return null;
-}
-
 let workspaceDbReady = false;
-/** Open the workspace DB once and, on first run, import the legacy JSON blob so
- *  existing installs migrate transparently. The blob is then renamed to a frozen
- *  `.pre-sqlite` backup so it is never re-imported (and never written again). */
+
+/** Open the workspace DB once. Runtime workspace state is SQLite-only. */
 function ensureWorkspaceDb(): void {
   if (workspaceDbReady) {
     return;
   }
   initWorkspaceDb(WORKSPACE_DB_FILE);
-  if (!workspaceDbHasState() && existsSync(WORKSPACE_STATE_FILE)) {
-    try {
-      const parsed = JSON.parse(readFileSync(WORKSPACE_STATE_FILE, "utf8").replace(/^\uFEFF/, "")) as unknown;
-      const imported = coerceParsedWorkspaceState(parsed);
-      if (imported) {
-        initializeWorkspaceStateInDb(normalizeSeedProjectPaths(migrateSeedWorkspaceState(imported)));
-        try {
-          renameSync(WORKSPACE_STATE_FILE, `${WORKSPACE_STATE_FILE}.pre-sqlite`);
-        } catch {
-          // best-effort; the workspaceDbHasState() guard still prevents a re-import next boot
-        }
-      }
-    } catch (error) {
-      console.error(`[rlab] Failed to import legacy workspace state: ${errorMessage(error)}`);
-    }
-  }
   workspaceDbReady = true;
-  clearLegacyNonNativeContextUsageOnce();
-}
-
-function usageWithoutContextTokens(usage: RunUsage | undefined): RunUsage | undefined {
-  if (usage?.contextTokens === undefined) {
-    return usage;
-  }
-  const { contextTokens: _contextTokens, ...rest } = usage;
-  return compactUsage(rest);
-}
-
-function conversationAgentId(conversation: WorkspaceState["chats"][number]): AgentId | undefined {
-  return conversation.profile?.agent ?? conversation.agent;
-}
-
-function shouldClearLegacyContextUsage(agent: AgentId | undefined): boolean {
-  return agent !== "claude-code";
-}
-
-function clearLegacyNonNativeContextUsage(state: WorkspaceState): { readonly state: WorkspaceState; readonly changed: boolean } {
-  let changed = false;
-  const conversationAgents = new Map(state.chats.map((conversation) => [conversation.id, conversationAgentId(conversation)]));
-  const chats = state.chats.map((conversation) => {
-    if (!shouldClearLegacyContextUsage(conversationAgentId(conversation)) || conversation.usage?.contextTokens === undefined) {
-      return conversation;
-    }
-    changed = true;
-    return { ...conversation, usage: usageWithoutContextTokens(conversation.usage) };
-  });
-  const threads: WorkspaceState["threads"] = {};
-  for (const [conversationId, messages] of Object.entries(state.threads)) {
-    const conversationAgent = conversationAgents.get(conversationId);
-    threads[conversationId] = messages.map((message) => {
-      if (message.role !== "agent" || message.usage?.contextTokens === undefined) {
-        return message;
-      }
-      const agent = message.profile?.agent ?? conversationAgent;
-      if (!shouldClearLegacyContextUsage(agent)) {
-        return message;
-      }
-      changed = true;
-      return { ...message, usage: usageWithoutContextTokens(message.usage) };
-    });
-  }
-  return changed ? { state: { ...state, chats, threads }, changed } : { state, changed };
-}
-
-function clearLegacyNonNativeContextUsageOnce(): void {
-  if (existsSync(CONTEXT_USAGE_MIGRATION_FILE)) {
-    return;
-  }
-  try {
-    if (workspaceDbHasState()) {
-      const current = readWorkspaceStateFromDb();
-      const migrated = clearLegacyNonNativeContextUsage(current);
-      if (migrated.changed) {
-        persistWorkspaceDelta(current, migrated.state);
-      }
-    }
-    writeFileSync(CONTEXT_USAGE_MIGRATION_FILE, `${new Date().toISOString()}\n`, "utf8");
-  } catch (error) {
-    console.error(`[rlab] Failed to migrate legacy context usage: ${errorMessage(error)}`);
-  }
 }
 
 function readWorkspaceState(): WorkspaceState {
@@ -2882,6 +2794,11 @@ function persistWorkspaceDelta(before: WorkspaceState, after: WorkspaceState): v
   const operations: WorkspaceDbMutation[] = [];
   const beforeConversations = workspaceConversationMap(before);
   const afterConversations = workspaceConversationMap(after);
+  for (const conversation of beforeConversations.values()) {
+    if (!afterConversations.has(conversation.id)) {
+      operations.push({ type: "deleteConversation", conversationId: conversation.id });
+    }
+  }
   for (const project of after.projects) {
     const beforeProject = before.projects.find((item) => item.id === project.id);
     if (!beforeProject || JSON.stringify(workspaceProjectMeta(beforeProject)) !== JSON.stringify(workspaceProjectMeta(project))) {
@@ -2901,8 +2818,12 @@ function persistWorkspaceDelta(before: WorkspaceState, after: WorkspaceState): v
     }
   }
   for (const [conversationId, messages] of Object.entries(after.threads)) {
-    if (JSON.stringify(before.threads[conversationId] ?? []) !== JSON.stringify(messages)) {
-      operations.push({ type: "replaceConversationThread", conversationId, messages });
+    const beforeMessages = new Map((before.threads[conversationId] ?? []).map((message) => [message.id, message] as const));
+    for (const message of messages) {
+      const previous = beforeMessages.get(message.id);
+      if (!previous || JSON.stringify(previous) !== JSON.stringify(message)) {
+        operations.push({ type: "upsertMessage", conversationId, message });
+      }
     }
   }
   if (JSON.stringify(before.settings) !== JSON.stringify(after.settings)) {
@@ -3095,10 +3016,20 @@ function sendJson(res: ServerResponse, statusCode: number, payload: unknown): vo
   res.end(JSON.stringify(payload));
 }
 
-const workspaceMutationBadRequestMessages = new Set(["Invalid workspace mutation payload.", "Invalid workspace mutation."]);
-
 export function workspacePutErrorStatus(error: unknown): 400 | 500 {
-  return error instanceof SyntaxError || workspaceMutationBadRequestMessages.has(errorMessage(error)) ? 400 : 500;
+  const message = errorMessage(error);
+  if (error instanceof SyntaxError || workspaceMutationBadRequestMessages.has(message)) {
+    return 400;
+  }
+  if (
+    (message.startsWith("Conversation ") && message.endsWith(" does not exist.")) ||
+    (message.startsWith("Project ") && message.endsWith(" does not exist.")) ||
+    (message.startsWith("Message ") && message.includes(" already belongs to conversation ")) ||
+    message.startsWith("Duplicate message id ")
+  ) {
+    return 400;
+  }
+  return 500;
 }
 
 export function attachmentUploadErrorStatus(error: unknown): 400 | 500 {
@@ -3944,7 +3875,7 @@ function handleBrowserEvents(req: IncomingMessage, res: ServerResponse): void {
 function handleWorkspace(req: IncomingMessage, res: ServerResponse): void {
   if (req.method === "GET") {
     try {
-      sendJson(res, 200, readWorkspaceShellForClient());
+      sendJson(res, 200, { ...readWorkspaceShellForClient(), revision: readWorkspaceRevision() });
     } catch (error) {
       sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) });
     }
@@ -3960,28 +3891,24 @@ function handleWorkspace(req: IncomingMessage, res: ServerResponse): void {
   res.end();
 }
 
-function parseWorkspaceMutationPayload(body: string): WorkspaceDbMutation[] {
-  const parsed = JSON.parse(body) as unknown;
-  const mutations = isRecord(parsed) ? parsed.mutations : parsed;
-  if (!Array.isArray(mutations)) {
-    throw new Error("Invalid workspace mutation payload.");
-  }
-  return mutations.map((mutation) => {
-    if (!isRecord(mutation) || typeof mutation.type !== "string") {
-      throw new Error("Invalid workspace mutation.");
-    }
-    return mutation as WorkspaceDbMutation;
-  });
-}
-
 function handleWorkspaceMutations(req: IncomingMessage, res: ServerResponse): void {
   readJsonBody(req, res, (body) => {
     try {
       ensureWorkspaceDb();
-      const mutations = parseWorkspaceMutationPayload(body);
-      applyWorkspaceDbMutations(mutations);
-      sendJson(res, 200, { ok: true });
+      const { mutations, baseRevision } = parseWorkspaceMutationRequestBody(body);
+      const revision = applyWorkspaceDbMutations(mutations, { expectedRevision: baseRevision });
+      sendJson(res, 200, { ok: true, revision });
     } catch (error) {
+      if (error instanceof WorkspaceRevisionConflictError) {
+        sendJson(res, 409, {
+          error: error.message,
+          code: "workspace_revision_conflict",
+          expectedRevision: error.expectedRevision,
+          revision: error.currentRevision,
+          workspace: readWorkspaceState(),
+        });
+        return;
+      }
       sendJson(res, workspacePutErrorStatus(error), { error: errorMessage(error) });
     }
   });
@@ -5342,43 +5269,6 @@ interface UsageDebugEntry {
 
 type ApprovalDecision = "approved" | "rejected";
 
-interface PermissionUpdate {
-  readonly type: string;
-  readonly rules?: readonly unknown[];
-  readonly behavior?: string;
-  readonly destination?: string;
-}
-
-type PermissionResult =
-  | {
-      readonly behavior: "allow";
-      readonly updatedInput?: Record<string, unknown>;
-      readonly updatedPermissions?: readonly PermissionUpdate[];
-      readonly toolUseID?: string;
-      readonly decisionClassification?: string;
-    }
-  | {
-      readonly behavior: "deny";
-      readonly message: string;
-      readonly interrupt?: boolean;
-      readonly toolUseID?: string;
-      readonly decisionClassification?: string;
-    };
-
-interface CanUseToolContext {
-  readonly signal: AbortSignal;
-  readonly suggestions?: readonly PermissionUpdate[];
-  readonly blockedPath?: string;
-  readonly decisionReason?: string;
-  readonly title?: string;
-  readonly displayName?: string;
-  readonly description?: string;
-  readonly toolUseID: string;
-  readonly agentID?: string;
-}
-
-type CanUseTool = (toolName: string, input: Record<string, unknown>, context: CanUseToolContext) => Promise<PermissionResult>;
-
 interface RunApprovalDecision {
   readonly id: string;
   readonly decision: ApprovalDecision;
@@ -5958,9 +5848,128 @@ async function refreshGeminiRateLimitsFromCli(): Promise<void> {
   recordAgentRateLimitSnapshot("gemini", snapshot);
 }
 
+async function refreshCodexRateLimitsFromAppServer(): Promise<void> {
+  const resolvedBin = resolveBinOnPath("codex", process.env.PATH ?? "");
+  if (!resolvedBin) {
+    throw new Error("codex is not installed on this machine.");
+  }
+
+  const child = spawnResolvedBin(
+    resolvedBin,
+    ["app-server"],
+    agentProcessSpawnOptions({
+      cwd: process.cwd(),
+      env: { ...process.env, ...readAgentSecretConfig().env, NODE_NO_WARNINGS: "1", NO_COLOR: "1", RUST_LOG: "error" },
+      stdio: ["pipe", "pipe", "pipe"],
+    }),
+  );
+
+  let settled = false;
+  let nextId = 0;
+  let stdoutBuffer = "";
+  const pending = new Map<number, { resolve: (value: Record<string, unknown>) => void; reject: (error: Error) => void }>();
+  const timeout = setTimeout(() => {
+    if (!settled) {
+      settled = true;
+      for (const { reject } of pending.values()) {
+        reject(new Error("codex app-server rate-limit refresh timed out."));
+      }
+      pending.clear();
+      terminateAgentProcessTree(child);
+    }
+  }, CODEX_APP_SERVER_TIMEOUT_MS);
+
+  const writeMessage = (message: Record<string, unknown>): void => {
+    if (child.stdin && !child.stdin.destroyed) {
+      child.stdin.write(`${JSON.stringify(message)}\n`);
+    }
+  };
+  const sendRequest = (method: string, params: Record<string, unknown> | undefined): Promise<Record<string, unknown>> => {
+    const id = ++nextId;
+    return new Promise<Record<string, unknown>>((resolve, reject) => {
+      pending.set(id, { resolve, reject });
+      writeMessage({ jsonrpc: "2.0", id, method, params });
+    });
+  };
+
+  child.stdout?.on("data", (chunk: Buffer) => {
+    stdoutBuffer += chunk.toString("utf8");
+    let newline: number;
+    while ((newline = stdoutBuffer.indexOf("\n")) >= 0) {
+      const line = stdoutBuffer.slice(0, newline).trim();
+      stdoutBuffer = stdoutBuffer.slice(newline + 1);
+      if (!line) {
+        continue;
+      }
+      let message: unknown;
+      try {
+        message = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (!isRecord(message) || message.id === undefined || (message.result === undefined && message.error === undefined)) {
+        continue;
+      }
+      const id = typeof message.id === "number" ? message.id : Number(message.id);
+      const entry = pending.get(id);
+      if (!entry) {
+        continue;
+      }
+      pending.delete(id);
+      if (message.error !== undefined) {
+        entry.reject(new Error(errorText(isRecord(message.error) ? message.error.message ?? message.error : message.error)));
+      } else {
+        entry.resolve(isRecord(message.result) ? message.result : {});
+      }
+    }
+  });
+
+  child.on("exit", () => {
+    if (settled) {
+      return;
+    }
+    settled = true;
+    for (const { reject } of pending.values()) {
+      reject(new Error("codex app-server exited during rate-limit refresh."));
+    }
+    pending.clear();
+  });
+
+  try {
+    await sendRequest("initialize", {
+      clientInfo: { name: "rlab", title: null, version: "0.1.0" },
+      capabilities: { experimentalApi: true, requestAttestation: false },
+    });
+    writeMessage({ jsonrpc: "2.0", method: "initialized" });
+    const result = await sendRequest("account/rateLimits/read", undefined);
+    if (!isRecord(result.rateLimits)) {
+      throw new Error("Codex account/rateLimits/read did not return rateLimits.");
+    }
+    recordCodexRateLimit("codex", result.rateLimits);
+    const snapshot = serializeAgentLimit(limitAccumulator("codex"));
+    if (snapshot.windows.length === 0) {
+      throw new Error("Codex account/rateLimits/read did not contain rate-limit windows.");
+    }
+  } finally {
+    clearTimeout(timeout);
+    settled = true;
+    for (const { reject } of pending.values()) {
+      reject(new Error("codex app-server rate-limit refresh stopped."));
+    }
+    pending.clear();
+    if (child.exitCode === null) {
+      terminateAgentProcessTree(child);
+    }
+  }
+}
+
 async function refreshAgentLimitsFromCli(agent: string): Promise<void> {
   if (agent === "claude-code") {
     await refreshClaudeRateLimitsFromCli();
+    return;
+  }
+  if (agent === "codex") {
+    await refreshCodexRateLimitsFromAppServer();
     return;
   }
   if (agent === "gemini") {
@@ -6138,8 +6147,9 @@ interface RunSpec {
 }
 
 const TASK_WAKEUP_TOOL_NAME = "TaskWakeup";
+const CLAUDE_SAFE_READ_TOOLS = ["Read", "Glob", "Grep", "LS"] as const;
 const CLAUDE_READ_ONLY_TOOLS = ["Read", "Glob", "Grep", "LS", "AskUserQuestion", TASK_WAKEUP_TOOL_NAME] as const;
-const CLAUDE_EFFORT_LEVELS = new Set(["low", "medium", "high", "xhigh", "max"]);
+const CLAUDE_EFFORT_LEVELS: ReadonlySet<EffortLevel> = new Set(["low", "medium", "high", "xhigh", "max"]);
 const RLAB_CHAT_TOOLS_PROMPT = [
   "When you need user input that blocks progress, use the AskUserQuestion tool instead of asking as plain text.",
   "Use AskUserQuestion for concrete choices, clarifying questions, or option selection that the chat UI should render as interactive controls.",
@@ -6358,8 +6368,8 @@ function modeForProfile(profile: AgentProfile): string | undefined {
   return resolveAgentModeValue(profile.agent, profile.mode) ?? (profile.mode !== DEFAULT_AGENT_OPTION_ID && isDirectAgentModeValue(profile.agent, profile.mode) ? profile.mode : undefined);
 }
 
-function asClaudeEffort(value: string | undefined): string | undefined {
-  return value && CLAUDE_EFFORT_LEVELS.has(value) ? value : undefined;
+function asClaudeEffort(value: string | undefined): EffortLevel | undefined {
+  return value && CLAUDE_EFFORT_LEVELS.has(value as EffortLevel) ? (value as EffortLevel) : undefined;
 }
 
 function codexPromptForMode(prompt: string, mode: string | undefined): string {
@@ -6495,6 +6505,75 @@ export function parseRunRequestPayload(body: string): ParsedRunRequestPayload {
   };
 }
 
+function claudePermissionModeForRequest(request: RunRequest): ClaudeQueryOptions["permissionMode"] {
+  const profile = normalizeAgentProfile(request, "claude-code");
+  const mode = modeForProfile(profile);
+  if (request.accessMode === "read-only" || mode === "plan") {
+    return "plan";
+  }
+  if (request.autoConfirm || profile.autoConfirm) {
+    return "auto";
+  }
+  return "bypassPermissions";
+}
+
+function claudeToolsForRequest(request: RunRequest): ClaudeQueryOptions["tools"] {
+  const profile = normalizeAgentProfile(request, "claude-code");
+  const mode = modeForProfile(profile);
+  if (request.accessMode === "read-only" || mode === "plan") {
+    return [...CLAUDE_READ_ONLY_TOOLS];
+  }
+  return { type: "preset", preset: "claude_code" };
+}
+
+export function buildClaudeSdkOptions(
+  request: RunRequest,
+  cwd: string,
+  abortController: AbortController,
+  canUseTool: CanUseTool,
+  env: NodeJS.ProcessEnv = process.env,
+): ClaudeQueryOptions {
+  const permissionMode = claudePermissionModeForRequest(request);
+  const options: ClaudeQueryOptions = {
+    abortController,
+    allowedTools: [...CLAUDE_SAFE_READ_TOOLS],
+    canUseTool,
+    cwd,
+    env,
+    includePartialMessages: true,
+    settings: {
+      autoCompactEnabled: request.autoCompact ?? true,
+      ...(typeof request.compactWindow === "number" && request.compactWindow > 0 ? { autoCompactWindow: request.compactWindow } : {}),
+    },
+    permissionMode,
+    systemPrompt: { type: "preset", preset: "claude_code", append: CLAUDE_CHAT_UI_SYSTEM_PROMPT },
+    tools: claudeToolsForRequest(request),
+  };
+  if (permissionMode === "bypassPermissions") {
+    options.allowDangerouslySkipPermissions = true;
+  }
+  const profile = normalizeAgentProfile(request, "claude-code");
+  const model = modelForProfile(profile);
+  if (model) {
+    options.model = model;
+  }
+  const effort = asClaudeEffort(reasoningForProfile(profile));
+  if (effort) {
+    options.effort = effort;
+  }
+  const agentName = claudeAgentNameFromMode(modeForProfile(profile) ?? "");
+  if (agentName) {
+    options.agent = agentName;
+  }
+  if (request.sessionId) {
+    options.sessionId = request.sessionId;
+  }
+  if (request.resume) {
+    options.resume = request.resume;
+  }
+  return options;
+}
+
 export function buildClaudeRunArgs(request: RunArgsRequest): string[] {
   const profile = profileForArgs("claude-code", request);
   const accessMode = request.accessMode ?? "unrestricted";
@@ -6521,6 +6600,8 @@ export function buildClaudeRunArgs(request: RunArgsRequest): string[] {
     args.push("--permission-mode", "plan", "--tools", CLAUDE_READ_ONLY_TOOLS.join(","));
   } else if (request.autoConfirm || profile.autoConfirm) {
     args.push("--permission-mode", "auto");
+  } else if (accessMode === "unrestricted") {
+    args.push("--dangerously-skip-permissions");
   }
   if (request.sessionId) {
     args.push("--session-id", request.sessionId);
@@ -6541,10 +6622,8 @@ export function buildCodexRunArgs(request: RunArgsRequest): string[] {
   const args = request.resume ? ["exec", "resume", request.resume, "--json"] : reviewMode ? ["exec", "review", "--json"] : ["exec", "--json"];
   if (planMode) {
     args.push("--sandbox", "read-only");
-  } else if (accessMode === "unrestricted" && (request.autoConfirm || profile.autoConfirm)) {
-    args.push("--dangerously-bypass-approvals-and-sandbox");
   } else if (accessMode === "unrestricted") {
-    args.push("--sandbox", "workspace-write");
+    args.push("--sandbox", "danger-full-access");
   } else if (!reviewMode) {
     args.push("--sandbox", "read-only");
   }
@@ -6569,7 +6648,7 @@ function geminiApprovalModeForRequest(profile: AgentProfile, accessMode: AgentAc
   if (mode === "plan") {
     return "plan";
   }
-  return autoConfirm || profile.autoConfirm ? "yolo" : "default";
+  return autoConfirm || profile.autoConfirm ? "auto_edit" : "yolo";
 }
 
 export function buildGeminiRunArgs(request: RunArgsRequest): string[] {
@@ -6661,7 +6740,7 @@ export function buildOpenCodeRunArgs(request: RunArgsRequest): string[] {
   if (request.resume) {
     args.push("--session", request.resume);
   }
-  if (accessMode === "unrestricted" && mode !== "plan" && (request.autoConfirm || profile.autoConfirm)) {
+  if (accessMode === "unrestricted" && mode !== "plan") {
     args.push("--dangerously-skip-permissions");
   } else if (accessMode !== "unrestricted" || mode === "plan") {
     // Read-only: opencode's default `build` agent auto-allows edits/bash, so force
@@ -10154,6 +10233,69 @@ function createRunEventSender(res: ServerResponse): { readonly send: (event: Run
   };
 }
 
+function translateSdkMessage(translate: (line: string) => RunEvent[], message: unknown): RunEvent[] {
+  try {
+    return translate(JSON.stringify(message));
+  } catch (error) {
+    return [{ type: "error", text: errorMessage(error) }];
+  }
+}
+
+async function runClaudeSdk(
+  request: RunRequest,
+  cwd: string,
+  runEnv: NodeJS.ProcessEnv,
+  res: ServerResponse,
+  send: (event: RunEvent) => void,
+  sendDone: () => void,
+  end: () => void,
+  binding: BackgroundRunBinding | null,
+  accumulator: BackgroundRunAccumulator | null,
+): Promise<void> {
+  const abortController = new AbortController();
+  res.on("close", () => {
+    if (!binding && !abortController.signal.aborted) {
+      abortController.abort();
+    }
+  });
+  if (binding) {
+    backgroundRunHandles.set(binding.runId, {
+      binding,
+      startedAt: new Date().toISOString(),
+      cancel: () => {
+        if (!abortController.signal.aborted) {
+          abortController.abort();
+        }
+      },
+    });
+  }
+  const translate = createClaudeStreamTranslator();
+  const canUseTool = createRunApprovalHandler(send, binding?.runId, claudePermissionModeForRequest(request) === "bypassPermissions");
+
+  try {
+    for await (const message of query({ prompt: request.prompt, options: buildClaudeSdkOptions(request, cwd, abortController, canUseTool, runEnv) })) {
+      if (message.type === "rate_limit_event" && isRecord(message.rate_limit_info)) {
+        recordClaudeRateLimit(request.agent, message.rate_limit_info);
+      }
+      for (const event of translateSdkMessage(translate, message)) {
+        send(event);
+      }
+    }
+  } catch (error) {
+    if (!abortController.signal.aborted) {
+      send({ type: "error", text: errorMessage(error) });
+    }
+  } finally {
+    if (binding && accumulator) {
+      finishPersistedBackgroundRun(binding, accumulator, abortController.signal.aborted);
+      notifyBackgroundRunUpdate(binding, true);
+      backgroundRunHandles.delete(binding.runId);
+    }
+    sendDone();
+    end();
+  }
+}
+
 // --- OpenCode via its HTTP server (like vibe-kanban) ------------------------
 // `opencode run --format json` drops the assistant text part for some models;
 // the `opencode serve` HTTP API returns the full {info, parts} (text included),
@@ -10590,8 +10732,9 @@ function codexCompactionConfigForRequest(request: RunRequest): Record<string, nu
 
 /** Sandbox/approval/model/effort + plan-aware prompt for a Codex thread. */
 export function buildCodexThreadParams(request: RunRequest): {
-  readonly sandbox: "read-only" | "workspace-write" | "danger-full-access";
-  readonly approvalPolicy: "never";
+  readonly sandbox: "read-only" | "danger-full-access";
+  readonly approvalPolicy: "never" | "on-request";
+  readonly approvalsReviewer?: "auto_review";
   readonly model?: string;
   readonly effort?: string;
   readonly prompt: string;
@@ -10601,10 +10744,12 @@ export function buildCodexThreadParams(request: RunRequest): {
   const profile = normalizeAgentProfile(request, "codex");
   const mode = modeForProfile(profile);
   const planMode = mode === "plan";
-  const sandbox = planMode || request.accessMode !== "unrestricted" ? "read-only" : request.autoConfirm || profile.autoConfirm ? "danger-full-access" : "workspace-write";
+  const autoConfirm = Boolean(request.autoConfirm || profile.autoConfirm);
+  const sandbox = planMode || request.accessMode !== "unrestricted" ? "read-only" : "danger-full-access";
   return {
     sandbox,
-    approvalPolicy: "never",
+    approvalPolicy: autoConfirm && sandbox === "danger-full-access" ? "on-request" : "never",
+    ...(autoConfirm && sandbox === "danger-full-access" ? { approvalsReviewer: "auto_review" as const } : {}),
     model: modelForProfile(profile),
     effort: reasoningForProfile(profile),
     prompt: codexPromptForMode(request.prompt, mode),
@@ -10677,11 +10822,12 @@ async function runCodexAppServer(
   };
 
   const handleServerRequest = (id: unknown, method: string, params: Record<string, unknown>): void => {
-    // We run with approvalPolicy "never", so these should not fire. Respond
-    // defensively so a stray request never deadlocks the turn.
+    // Most runs use approvalPolicy "never"; auto-review runs should route
+    // approval requests to Codex's own reviewer. Respond defensively so a stray
+    // request never deadlocks the turn.
     let result: Record<string, unknown> = {};
     if (method.endsWith("requestApproval")) {
-      result = { decision: unrestricted ? "acceptForSession" : "decline" };
+      result = { decision: unrestricted ? "approved_for_session" : "denied" };
     } else if (method === "item/tool/requestUserInput") {
       result = { answers: {} };
     } else if (method === "item/tool/call") {
@@ -10874,6 +11020,9 @@ async function runCodexAppServer(
 
     const params = buildCodexThreadParams(request);
     const threadParams: Record<string, unknown> = { cwd, sandbox: params.sandbox, approvalPolicy: params.approvalPolicy, dynamicTools: params.dynamicTools };
+    if (params.approvalsReviewer) {
+      threadParams.approvalsReviewer = params.approvalsReviewer;
+    }
     if (params.model) {
       threadParams.model = params.model;
     }
@@ -10895,6 +11044,9 @@ async function runCodexAppServer(
       input: [{ type: "text", text: params.prompt, text_elements: [] }],
       approvalPolicy: params.approvalPolicy,
     };
+    if (params.approvalsReviewer) {
+      turnParams.approvalsReviewer = params.approvalsReviewer;
+    }
     if (params.effort) {
       turnParams.effort = params.effort;
     }
@@ -11095,12 +11247,13 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
     }
 
     const spec = RUN[agent];
-    const resolvedBin = spec ? resolveBinOnPath(spec.bin) : null;
+    const usesSdkRuntime = agent === "claude-code";
+    const resolvedBin = spec && !usesSdkRuntime ? resolveBinOnPath(spec.bin) : null;
     if (!spec || !isAgentId(agent)) {
       sendJson(res, 400, { error: `Running ${agent || "this agent"} is not wired yet.` });
       return;
     }
-    if (!resolvedBin) {
+    if (!usesSdkRuntime && !resolvedBin) {
       sendJson(res, 503, { error: `${spec.bin} is not installed on this machine.` });
       return;
     }
@@ -11277,6 +11430,11 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
       return;
     }
 
+    if (agent === "claude-code") {
+      void runClaudeSdk(executionRequest, cwd, runEnv, res, send, sendDone, sender.end, binding, accumulator);
+      return;
+    }
+
     if (agent === "opencode") {
       void runOpenCodeServer(executionRequest, cwd, res, send, sendDone, sender.end, binding, accumulator);
       return;
@@ -11301,6 +11459,11 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
     // stalls ~3s: "no stdin data received").
     let child: ReturnType<typeof spawn>;
     try {
+      if (!resolvedBin) {
+        send({ type: "error", text: `${spec.bin} is not installed on this machine.` });
+        finishAndEnd();
+        return;
+      }
       child = spawnResolvedBin(resolvedBin, spec.args(executionRequest), agentProcessSpawnOptions({ cwd, env: runEnv, stdio: ["ignore", "pipe", "pipe"] }));
     } catch (error) {
       send({ type: "error", text: error instanceof Error ? `Failed to launch ${spec.bin}: ${error.message}` : `Failed to launch ${spec.bin}` });

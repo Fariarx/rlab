@@ -82,7 +82,7 @@ describe("AgentPicker a11y", () => {
     fireEvent.click(screen.getByRole("button", { name: "Выбрать Codex из CLI" }));
     fireEvent.click(screen.getByRole("button", { name: "Применить" }));
 
-    expect(onSelect).toHaveBeenCalledWith({ agent: "codex", model: "default", reasoning: "default", mode: "default" });
+    expect(onSelect).toHaveBeenCalledWith({ agent: "codex", model: "default", reasoning: "default", mode: "default", autoConfirm: false });
   });
 
   it("uses live CLI model options from the agent detection payload", async () => {
@@ -120,7 +120,7 @@ describe("AgentPicker a11y", () => {
     fireEvent.click(screen.getByRole("button", { name: "Claude Custom Lab" }));
     fireEvent.click(screen.getByRole("button", { name: "Применить" }));
 
-    expect(onSelect).toHaveBeenCalledWith({ agent: "opencode", model: "anthropic/claude-custom-lab", reasoning: "default", mode: "default" });
+    expect(onSelect).toHaveBeenCalledWith({ agent: "opencode", model: "anthropic/claude-custom-lab", reasoning: "default", mode: "default", autoConfirm: false });
   });
 
   it("exposes Claude Code CLI model aliases and reasoning options but no work-mode control", () => {
@@ -143,7 +143,7 @@ describe("AgentPicker a11y", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Выбрать OpenCode из CLI" }));
 
-    expect(screen.getByRole("button", { name: "Claude Opus 4.7" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "OpenCode Big Pickle" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Mimo v2.5 Free" })).toBeInTheDocument();
   });
 });

@@ -88,8 +88,8 @@ const COMPOSER_DRAFT_SAVE_DELAY_MS = 350;
 const EMPTY_COMPOSER_DRAFT: ComposerDraft = { text: "", attachments: [] };
 const CLI_UPDATE_POLL_MS = 5 * 60_000;
 const AGENT_LIMIT_REFRESH_MIN_INTERVAL_MS = 60_000;
-const AGENT_LIMIT_ON_DEMAND_REFRESH_AGENTS = new Set(["claude-code", "gemini"]);
-const AGENT_AUTO_CONFIRM_AGENTS = new Set(["claude-code", "codex", "gemini", "opencode"]);
+const AGENT_LIMIT_ON_DEMAND_REFRESH_AGENTS = new Set(["claude-code", "codex", "gemini"]);
+const AGENT_AUTO_CONFIRM_AGENTS = new Set(["claude-code", "codex", "gemini"]);
 
 const CONVERSATION_VIEWS = new Set<ConversationView>(["chat", "git", "resources", "preview", "terminal"]);
 
@@ -1087,6 +1087,26 @@ export function WorkspacePageView({
     requestAnimationFrame(() => composerRef.current?.focus());
   };
 
+  const submitComposerText = (text: string) => {
+    const activeConversation = ws.find(ws.selectedId);
+    let targetId = activeConversation?.id ?? "";
+    if (!targetId) {
+      const newProfile = ws.settings.agents.defaultProfile ?? DEFAULT_PROFILE;
+      const projectId = routeKind === "project" && routeProjectId && ws.projects.some((project) => project.id === routeProjectId) ? routeProjectId : undefined;
+      setProfile(newProfile);
+      targetId = projectId ? ws.newProjectChat(projectId, newProfile) : ws.newChat(newProfile);
+      setView("chat");
+      ws.setConversationView(targetId, "chat");
+      setRunKey((k) => k + 1);
+      onNavigate?.(routeForConversation(ws, targetId));
+    }
+    pendingDraftValues.current.delete(targetId);
+    cancelDraftSave(targetId);
+    ws.updateComposerDraft(targetId, EMPTY_COMPOSER_DRAFT);
+    notifiableRuns.current.add(targetId);
+    ws.sendMessage(targetId, text);
+  };
+
   const handleCliUpdate = async (update: CliUpdateInfo) => {
     setCliUpdateBusyAgent(update.agent);
     toast({ message: t("cliUpdateStarted", { agent: update.agentName }), severity: "info", duration: 2500 });
@@ -1874,14 +1894,7 @@ export function WorkspacePageView({
                     }
                   }}
                   onSend={(text) => {
-                    if (!selected) {
-                      return;
-                    }
-                    pendingDraftValues.current.delete(ws.selectedId);
-                    cancelDraftSave(ws.selectedId);
-                    ws.updateComposerDraft(ws.selectedId, EMPTY_COMPOSER_DRAFT);
-                    notifiableRuns.current.add(ws.selectedId);
-                    ws.sendMessage(ws.selectedId, text);
+                    submitComposerText(text);
                   }}
                   mentionableFiles={mentionableFiles}
                   modes={supportedModes}

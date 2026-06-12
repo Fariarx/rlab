@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/App";
 import { buildInitialWorkspaceState, type WorkspaceState } from "../src/components/workspace/workspace-state";
+import { applyWorkspaceMutationRequest, isWorkspaceMutationRequest } from "./util/workspace-api";
 import { withVirtuosoMock } from "./util/render-with-virtuoso";
 
 describe("App", () => {
@@ -28,9 +29,9 @@ describe("App", () => {
         if (path === "/api/workspace" && (!init || init.method === "GET")) {
           return Response.json(state);
         }
-        if (path === "/api/workspace" && init?.method === "PUT") {
-          state = JSON.parse(String(init.body)) as WorkspaceState;
-          return Response.json(state);
+        if (isWorkspaceMutationRequest(path, init)) {
+          state = applyWorkspaceMutationRequest(state, init);
+          return Response.json({ ok: true, revision: 1 });
         }
         if (path === "/api/agents") {
           return Response.json({
@@ -64,9 +65,9 @@ describe("App", () => {
         if (path === "/api/workspace" && (!init || init.method === "GET")) {
           return Response.json(state);
         }
-        if (path === "/api/workspace" && init?.method === "PUT") {
-          state = JSON.parse(String(init.body)) as WorkspaceState;
-          return Response.json(state);
+        if (isWorkspaceMutationRequest(path, init)) {
+          state = applyWorkspaceMutationRequest(state, init);
+          return Response.json({ ok: true, revision: 1 });
         }
         if (path === "/api/agents") {
           agentAttempts += 1;
@@ -111,9 +112,9 @@ describe("App", () => {
         if (path === "/api/workspace" && (!init || init.method === "GET")) {
           return Response.json(state);
         }
-        if (path === "/api/workspace" && init?.method === "PUT") {
-          state = JSON.parse(String(init.body)) as WorkspaceState;
-          return Response.json(state);
+        if (isWorkspaceMutationRequest(path, init)) {
+          state = applyWorkspaceMutationRequest(state, init);
+          return Response.json({ ok: true, revision: 1 });
         }
         if (path === "/api/agents") {
           return Response.json({

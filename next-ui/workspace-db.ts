@@ -2,6 +2,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import process from "node:process";
 import type { AgentBlock, ChatMessage, ComposerDraft, ConversationSummary, Project } from "./src/components/agent/types";
+import type { WorkspaceMutation } from "./src/lib/workspace-mutations";
 import type { WorkspaceState } from "./src/lib/workspace-state";
 
 // `node:sqlite` is an experimental built-in that bundlers (vite/vitest) refuse to
@@ -31,6 +32,7 @@ CREATE TABLE IF NOT EXISTS projects (
   position INTEGER NOT NULL,
   data TEXT NOT NULL
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_position ON projects(position);
 CREATE TABLE IF NOT EXISTS conversations (
   id TEXT PRIMARY KEY,
   project_id TEXT,
@@ -38,6 +40,8 @@ CREATE TABLE IF NOT EXISTS conversations (
   data TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_conversations_project ON conversations(project_id, position);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_root_position ON conversations(position) WHERE project_id IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_project_position ON conversations(project_id, position) WHERE project_id IS NOT NULL;
 CREATE TABLE IF NOT EXISTS messages (
   id TEXT PRIMARY KEY,
   conversation_id TEXT NOT NULL,
@@ -45,6 +49,7 @@ CREATE TABLE IF NOT EXISTS messages (
   data TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, position);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_conversation_position ON messages(conversation_id, position);
 CREATE TABLE IF NOT EXISTS composer_drafts (
   conversation_id TEXT PRIMARY KEY,
   data TEXT NOT NULL
@@ -64,6 +69,7 @@ export function initWorkspaceDb(file: string): void {
   const handle = new DatabaseSync(file);
   // WAL: concurrent readers + a single writer, no torn writes — this also kills
   // the "Storage state is locked" race the old lock-file approach hit.
+  handle.exec("PRAGMA foreign_keys = ON");
   handle.exec("PRAGMA journal_mode = WAL");
   handle.exec("PRAGMA synchronous = NORMAL");
   handle.exec(SCHEMA);
@@ -125,18 +131,19 @@ export function readWorkspaceRevision(): number {
 
 type ProjectMeta = Omit<Project, "conversations">;
 
-export type WorkspaceDbMutation =
-  | { readonly type: "setSelectedConversation"; readonly conversationId: string }
-  | { readonly type: "setSettings"; readonly settings: WorkspaceState["settings"] }
-  | { readonly type: "upsertProject"; readonly project: ProjectMeta; readonly insertAtFront?: boolean }
-  | { readonly type: "upsertConversation"; readonly conversation: ConversationSummary; readonly projectId: string | null; readonly insertAtFront?: boolean }
-  | { readonly type: "updateConversation"; readonly conversation: ConversationSummary }
-  | { readonly type: "deleteConversation"; readonly conversationId: string }
-  | { readonly type: "setComposerDraft"; readonly conversationId: string; readonly draft: ComposerDraft }
-  | { readonly type: "deleteComposerDraft"; readonly conversationId: string }
-  | { readonly type: "upsertMessage"; readonly conversationId: string; readonly message: ChatMessage }
-  | { readonly type: "upsertMessages"; readonly conversationId: string; readonly messages: readonly ChatMessage[] }
-  | { readonly type: "replaceConversationThread"; readonly conversationId: string; readonly messages: readonly ChatMessage[] };
+export type WorkspaceDbMutation = WorkspaceMutation;
+
+export class WorkspaceRevisionConflictError extends Error {
+  readonly expectedRevision: number;
+  readonly currentRevision: number;
+
+  constructor(expectedRevision: number, currentRevision: number) {
+    super(`Workspace revision conflict: expected ${expectedRevision}, current ${currentRevision}.`);
+    this.name = "WorkspaceRevisionConflictError";
+    this.expectedRevision = expectedRevision;
+    this.currentRevision = currentRevision;
+  }
+}
 
 function projectMeta(project: Project): ProjectMeta {
   const { conversations: _conversations, ...meta } = project;
@@ -235,6 +242,28 @@ function shiftConversationPositionsForFrontInsert(handle: DatabaseHandle, projec
   handle.prepare(`UPDATE conversations SET position = position + 1 WHERE ${projectWhere(projectId)}`).run(...projectParams(projectId));
 }
 
+function projectExists(handle: DatabaseHandle, projectId: string): boolean {
+  const row = handle.prepare("SELECT 1 AS present FROM projects WHERE id = ?").get(projectId) as { present: number } | undefined;
+  return row !== undefined;
+}
+
+function conversationExists(handle: DatabaseHandle, conversationId: string): boolean {
+  const row = handle.prepare("SELECT 1 AS present FROM conversations WHERE id = ?").get(conversationId) as { present: number } | undefined;
+  return row !== undefined;
+}
+
+function ensureProjectExists(handle: DatabaseHandle, projectId: string): void {
+  if (!projectExists(handle, projectId)) {
+    throw new Error(`Project ${projectId} does not exist.`);
+  }
+}
+
+function ensureConversationExists(handle: DatabaseHandle, conversationId: string): void {
+  if (!conversationExists(handle, conversationId)) {
+    throw new Error(`Conversation ${conversationId} does not exist.`);
+  }
+}
+
 function upsertProjectInTransaction(handle: DatabaseHandle, project: ProjectMeta, insertAtFront = false): void {
   const existing = handle.prepare("SELECT position FROM projects WHERE id = ?").get(project.id) as { position: number } | undefined;
   if (existing) {
@@ -249,6 +278,9 @@ function upsertProjectInTransaction(handle: DatabaseHandle, project: ProjectMeta
 }
 
 function upsertConversationInTransaction(handle: DatabaseHandle, conversation: ConversationSummary, projectId: string | null, insertAtFront = false): void {
+  if (projectId !== null) {
+    ensureProjectExists(handle, projectId);
+  }
   const existing = handle.prepare("SELECT project_id AS projectId, position FROM conversations WHERE id = ?").get(conversation.id) as { projectId: string | null; position: number } | undefined;
   if (existing && existing.projectId === projectId) {
     handle.prepare("UPDATE conversations SET data = ? WHERE id = ?").run(JSON.stringify(conversation), conversation.id);
@@ -272,31 +304,60 @@ function updateConversationInTransaction(handle: DatabaseHandle, conversation: C
 }
 
 function upsertMessageInTransaction(handle: DatabaseHandle, conversationId: string, message: ChatMessage): void {
-  const existing = handle.prepare("SELECT position FROM messages WHERE id = ?").get(message.id) as { position: number } | undefined;
-  const position = existing
-    ? existing.position
-    : (handle.prepare("SELECT COALESCE(MAX(position), -1) + 1 AS next FROM messages WHERE conversation_id = ?").get(conversationId) as { next: number }).next;
-  handle
-    .prepare("INSERT INTO messages(id, conversation_id, position, data) VALUES(?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET conversation_id = excluded.conversation_id, data = excluded.data")
-    .run(message.id, conversationId, position, JSON.stringify(message));
+  ensureConversationExists(handle, conversationId);
+  const existing = handle.prepare("SELECT conversation_id AS conversationId, position FROM messages WHERE id = ?").get(message.id) as { conversationId: string; position: number } | undefined;
+  if (existing) {
+    if (existing.conversationId !== conversationId) {
+      throw new Error(`Message ${message.id} already belongs to conversation ${existing.conversationId}.`);
+    }
+    handle.prepare("UPDATE messages SET data = ? WHERE id = ?").run(JSON.stringify(message), message.id);
+    return;
+  }
+  const position = (handle.prepare("SELECT COALESCE(MAX(position), -1) + 1 AS next FROM messages WHERE conversation_id = ?").get(conversationId) as { next: number }).next;
+  handle.prepare("INSERT INTO messages(id, conversation_id, position, data) VALUES(?, ?, ?, ?)").run(message.id, conversationId, position, JSON.stringify(message));
 }
 
 function replaceConversationThreadInTransaction(handle: DatabaseHandle, conversationId: string, messages: readonly ChatMessage[]): void {
+  ensureConversationExists(handle, conversationId);
+  const seen = new Set<string>();
+  for (const message of messages) {
+    if (seen.has(message.id)) {
+      throw new Error(`Duplicate message id ${message.id} in replacement thread.`);
+    }
+    seen.add(message.id);
+    const existing = handle.prepare("SELECT conversation_id AS conversationId FROM messages WHERE id = ?").get(message.id) as { conversationId: string } | undefined;
+    if (existing && existing.conversationId !== conversationId) {
+      throw new Error(`Message ${message.id} already belongs to conversation ${existing.conversationId}.`);
+    }
+  }
   handle.prepare("DELETE FROM messages WHERE conversation_id = ?").run(conversationId);
   const insMsg = handle.prepare("INSERT INTO messages(id, conversation_id, position, data) VALUES(?, ?, ?, ?)");
   messages.forEach((message, index) => insMsg.run(message.id, conversationId, index, JSON.stringify(message)));
 }
 
-export function applyWorkspaceDbMutations(mutations: readonly WorkspaceDbMutation[]): number {
+export function applyWorkspaceDbMutations(
+  mutations: readonly WorkspaceDbMutation[],
+  options: { readonly expectedRevision?: number } = {},
+): number {
   const handle = database();
   let nextRevision = readWorkspaceRevisionFromHandle(handle);
   if (mutations.length === 0) {
+    if (options.expectedRevision !== undefined && options.expectedRevision !== nextRevision) {
+      throw new WorkspaceRevisionConflictError(options.expectedRevision, nextRevision);
+    }
     return nextRevision;
   }
   transaction(() => {
+    nextRevision = readWorkspaceRevisionFromHandle(handle);
+    if (options.expectedRevision !== undefined && options.expectedRevision !== nextRevision) {
+      throw new WorkspaceRevisionConflictError(options.expectedRevision, nextRevision);
+    }
     for (const mutation of mutations) {
       switch (mutation.type) {
         case "setSelectedConversation":
+          if (mutation.conversationId) {
+            ensureConversationExists(handle, mutation.conversationId);
+          }
           handle.prepare("INSERT INTO kv(key, value) VALUES('selectedId', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(JSON.stringify(mutation.conversationId));
           if (mutation.conversationId) {
             const row = handle.prepare("SELECT data FROM conversations WHERE id = ?").get(mutation.conversationId) as { data: string } | undefined;
@@ -324,6 +385,7 @@ export function applyWorkspaceDbMutations(mutations: readonly WorkspaceDbMutatio
           handle.prepare("DELETE FROM composer_drafts WHERE conversation_id = ?").run(mutation.conversationId);
           break;
         case "setComposerDraft":
+          ensureConversationExists(handle, mutation.conversationId);
           handle
             .prepare("INSERT INTO composer_drafts(conversation_id, data) VALUES(?, ?) ON CONFLICT(conversation_id) DO UPDATE SET data = excluded.data")
             .run(mutation.conversationId, JSON.stringify(mutation.draft));
