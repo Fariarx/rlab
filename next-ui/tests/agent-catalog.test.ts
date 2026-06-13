@@ -30,15 +30,14 @@ describe("agent catalog", () => {
     expect(accessModeForAgentProfile({ agent: "codex", model: "default", reasoning: "default", mode: "plan" })).toBe("read-only");
   });
 
-  it("converts legacy auto-confirm modes into the security toggle", () => {
+  it("keeps auto-confirm as an explicit profile field only", () => {
     expect(normalizeAgentProfile({ agent: "claude-code", model: "default", reasoning: "default", mode: "auto" })).toEqual({
       agent: "claude-code",
       model: "default",
       reasoning: "default",
       mode: "default",
-      autoConfirm: true,
     });
-    expect(normalizeAgentProfile({ agent: "codex", model: "default", reasoning: "default", mode: "bypass-permissions" })).toEqual({
+    expect(normalizeAgentProfile({ agent: "codex", model: "default", reasoning: "default", mode: "default", autoConfirm: true })).toEqual({
       agent: "codex",
       model: "default",
       reasoning: "default",

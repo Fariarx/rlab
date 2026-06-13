@@ -91,49 +91,6 @@ describe("workspace state", () => {
     expect(restored.chats[0].profile).toEqual(DEFAULT_PROFILE);
   });
 
-  it("migrates a legacy single native session into the per-agent session map", () => {
-    const state = buildInitialWorkspaceState();
-    const legacyState = {
-      ...state,
-      chats: [
-        {
-          ...state.chats[0],
-          sessionId: "codex-session-1",
-          sessionAgent: "codex",
-        },
-        ...state.chats.slice(1),
-      ],
-    } as unknown as typeof state;
-
-    const restored = cloneWorkspaceState(legacyState);
-
-    expect(restored.chats[0].agentSessions).toEqual({ codex: "codex-session-1" });
-    expect(restored.chats[0].sessionId).toBe("codex-session-1");
-    expect(restored.chats[0].sessionAgent).toBe("codex");
-  });
-
-  it("hydrates optional persisted appearance settings with defaults", () => {
-    const state = buildInitialWorkspaceState();
-    const legacyState = {
-      ...state,
-      settings: {
-        ...state.settings,
-        appearance: {
-          density: "comfortable",
-          reduceMotion: false,
-          sidebarWidth: 300,
-          theme: "dark",
-        },
-      },
-    } as unknown as typeof state;
-
-    const restored = cloneWorkspaceState(legacyState);
-
-    expect("showCost" in restored.settings.appearance).toBe(false);
-    expect(restored.settings.appearance.showTerminal).toBe(false);
-    expect("showTokens" in restored.settings.appearance).toBe(false);
-  });
-
   it("deduplicates persisted message ids inside a thread", () => {
     const state = {
       ...buildInitialWorkspaceState(),

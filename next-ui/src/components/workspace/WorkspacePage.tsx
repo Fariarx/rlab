@@ -240,7 +240,7 @@ export const WorkspacePageView = observer(function WorkspacePageView({
     wakeupConversationIds,
   } = pageStore;
   const composerDockRef = useRef<HTMLDivElement | null>(null);
-  const showTerminal = ws.settings.appearance.showTerminal ?? false;
+  const showTerminal = ws.settings.appearance.showTerminal;
   const showView = useCallback((next: ConversationView) => {
     setView(next);
     if (ws.find(ws.selectedId)) {

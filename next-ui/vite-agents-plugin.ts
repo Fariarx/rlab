@@ -6019,11 +6019,6 @@ export function parseRunRequestPayload(body: string): ParsedRunRequestPayload {
       profileValid = false;
       profileError = "Invalid mode. Expected a work mode id string.";
     }
-  } else if (typeof parsed.variant === "string" && isAgentId(agent)) {
-    const legacyProfile = normalizeAgentProfile({ agent, variant: parsed.variant }, agent);
-    model = legacyProfile.model;
-    reasoning = legacyProfile.reasoning;
-    mode = legacyProfile.mode;
   }
   prompt = typeof parsed.prompt === "string" ? parsed.prompt.trim() : "";
   const resume = typeof parsed.resume === "string" && parsed.resume.trim().length > 0 ? parsed.resume.trim() : undefined;

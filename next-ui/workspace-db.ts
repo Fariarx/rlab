@@ -108,11 +108,16 @@ export function initWorkspaceDb(file: string): void {
   handle.exec("PRAGMA foreign_keys = ON");
   handle.exec("PRAGMA journal_mode = WAL");
   handle.exec("PRAGMA synchronous = NORMAL");
-  handle.exec(TABLE_SCHEMA);
-  handle.exec(INDEX_SCHEMA);
-  assertCurrentSchema(handle);
-  assertForeignKeyIntegrity(handle);
-  db = handle;
+  try {
+    handle.exec(TABLE_SCHEMA);
+    handle.exec(INDEX_SCHEMA);
+    assertCurrentSchema(handle);
+    assertForeignKeyIntegrity(handle);
+    db = handle;
+  } catch (error) {
+    handle.close();
+    throw error;
+  }
 }
 
 function database(): DatabaseHandle {

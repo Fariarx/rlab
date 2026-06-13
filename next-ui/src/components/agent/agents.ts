@@ -16,7 +16,6 @@ export {
   getAgent,
   getAgentStatus,
   isAgentId,
-  legacyProfileFromVariant,
   normalizeAgentProfile,
   resolveAgentModeValue,
   resolveAgentModelValue,

@@ -1,5 +1,5 @@
 import { DEFAULT_PROFILE, isAgentId, normalizeAgentProfile, type AgentProfile } from "./agent-catalog";
-import { DEFAULT_VOICE_SETTINGS, normalizeVoiceSettings, voiceLanguageForLocale, type VoiceSettings } from "./voice-providers";
+import { DEFAULT_VOICE_SETTINGS, isVoiceProviderId, normalizeVoiceSettings, voiceLanguageForLocale, type VoiceSettings } from "./voice-providers";
 
 export type ThemeMode = "dark" | "light" | "high-contrast";
 export type Locale = "en" | "ru";
@@ -71,19 +71,23 @@ export const defaultAppSettings: AppSettings = {
 };
 
 export function cloneAppSettings(settings: AppSettings): AppSettings {
-  const appearance = { ...defaultAppSettings.appearance, ...settings.appearance };
-  const general = { ...defaultAppSettings.general, ...settings.general, voice: normalizeVoiceSettings(settings.general.voice) };
-
   return {
     appearance: {
-      density: appearance.density,
-      reduceMotion: appearance.reduceMotion,
-      reasoningAutoExpand: appearance.reasoningAutoExpand,
-      showTerminal: appearance.showTerminal,
-      sidebarWidth: normalizeSidebarWidth(appearance.sidebarWidth),
-      theme: appearance.theme,
+      density: settings.appearance.density,
+      reduceMotion: settings.appearance.reduceMotion,
+      reasoningAutoExpand: settings.appearance.reasoningAutoExpand,
+      showTerminal: settings.appearance.showTerminal,
+      sidebarWidth: normalizeSidebarWidth(settings.appearance.sidebarWidth),
+      theme: settings.appearance.theme,
     },
-    general,
+    general: {
+      confirmDestructiveActions: settings.general.confirmDestructiveActions,
+      desktopNotifications: settings.general.desktopNotifications,
+      locale: settings.general.locale,
+      telemetry: settings.general.telemetry,
+      previewServerHost: settings.general.previewServerHost,
+      voice: normalizeVoiceSettings(settings.general.voice),
+    },
     agents: {
       defaultProfile: normalizeAgentProfile(settings.agents.defaultProfile, defaultAppSettings.agents.defaultProfile.agent),
     },
@@ -145,12 +149,15 @@ function isAgentProfile(value: unknown): value is AgentProfile {
   }
   return (
     isAgentId(value.agent) &&
-    ((typeof value.model === "string" &&
-      typeof value.reasoning === "string" &&
-      typeof value.mode === "string" &&
-      value.mode.trim().length > 0) ||
-      typeof value.variant === "string")
+    typeof value.model === "string" &&
+    typeof value.reasoning === "string" &&
+    typeof value.mode === "string" &&
+    value.mode.trim().length > 0
   );
+}
+
+function isVoiceSettings(value: unknown): value is VoiceSettings {
+  return isRecord(value) && isVoiceProviderId(value.provider) && typeof value.language === "string" && value.language.trim().length > 0;
 }
 
 export function isAppSettings(value: unknown): value is AppSettings {
@@ -162,15 +169,15 @@ export function isAppSettings(value: unknown): value is AppSettings {
     isThemeMode(appearance.theme) &&
     isDensityMode(appearance.density) &&
     typeof appearance.reduceMotion === "boolean" &&
-    (appearance.showTerminal === undefined || typeof appearance.showTerminal === "boolean") &&
-    (appearance.reasoningAutoExpand === undefined || typeof appearance.reasoningAutoExpand === "boolean") &&
-    (appearance.sidebarWidth === undefined || normalizeSidebarWidth(appearance.sidebarWidth) === appearance.sidebarWidth) &&
+    typeof appearance.showTerminal === "boolean" &&
+    typeof appearance.reasoningAutoExpand === "boolean" &&
+    normalizeSidebarWidth(appearance.sidebarWidth) === appearance.sidebarWidth &&
     isLocale(general.locale) &&
     typeof general.desktopNotifications === "boolean" &&
     typeof general.confirmDestructiveActions === "boolean" &&
     typeof general.telemetry === "boolean" &&
-    (general.previewServerHost === undefined || typeof general.previewServerHost === "string") &&
-    (general.voice === undefined || isRecord(general.voice)) &&
+    typeof general.previewServerHost === "string" &&
+    isVoiceSettings(general.voice) &&
     isAgentProfile(agents.defaultProfile)
   );
 }

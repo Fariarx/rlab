@@ -60,7 +60,6 @@ const STANDARD_WORK_MODES = [
 ] as const;
 const OPENCODE_INTERNAL_AGENT_IDS = new Set(["title", "compaction"]);
 const CLAUDE_INTERNAL_AGENT_IDS = new Set(["statusline-setup"]);
-const LEGACY_AUTO_CONFIRM_MODE_IDS = new Set(["auto", "bypass-permissions"]);
 const CLAUDE_REASONING_OPTIONS = [
   DEFAULT_OPTION,
   { id: "low", label: "Low", value: "low" },
@@ -352,37 +351,16 @@ export function normalizeAgentProfile(value: unknown, fallbackAgent: AgentId = D
     return defaultProfileForAgent(activeFallbackAgent);
   }
   const agent = isAgentId(value.agent) ? value.agent : activeFallbackAgent;
-  if (typeof value.variant === "string") {
-    return legacyProfileFromVariant(agent, value.variant);
-  }
   const def = getAgent(agent);
   const rawMode = isAgentWorkMode(value.mode) ? value.mode.trim() : DEFAULT_AGENT_OPTION_ID;
-  const legacyAutoConfirm = LEGACY_AUTO_CONFIRM_MODE_IDS.has(rawMode);
-  const autoConfirm = typeof value.autoConfirm === "boolean" ? value.autoConfirm : legacyAutoConfirm ? true : undefined;
+  const autoConfirm = typeof value.autoConfirm === "boolean" ? value.autoConfirm : undefined;
   return {
     agent,
     model: typeof value.model === "string" ? normalizeOptionId(agent, "models", def.models, value.model) : DEFAULT_AGENT_OPTION_ID,
     reasoning: typeof value.reasoning === "string" ? normalizeOptionId(agent, "reasoning", def.reasoning, value.reasoning) : DEFAULT_AGENT_OPTION_ID,
-    mode: legacyAutoConfirm ? DEFAULT_AGENT_OPTION_ID : normalizeModeId(agent, def.modes, rawMode),
+    mode: normalizeModeId(agent, def.modes, rawMode),
     ...(autoConfirm !== undefined ? { autoConfirm } : {}),
   };
-}
-
-export function legacyProfileFromVariant(agent: AgentId, variant: string): AgentProfile {
-  const base = defaultProfileForAgent(agent);
-  if (agent === "claude-code" && variant === "Plan") {
-    return { ...base, mode: "plan" };
-  }
-  if (agent === "codex" && (variant === "GPT-5" || variant === "GPT-5.5")) {
-    return { ...base, model: "gpt-5.5" };
-  }
-  if (agent === "gemini" && variant === "Flash") {
-    return { ...base, model: "gemini-2.5-flash" };
-  }
-  if (agent === "gemini" && variant === "Pro") {
-    return { ...base, model: "gemini-2.5-pro" };
-  }
-  return base;
 }
 
 export function agentProfileEquals(a: AgentProfile, b: AgentProfile): boolean {

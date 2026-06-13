@@ -124,7 +124,7 @@ describe("Message", () => {
 
   it("does not invent elapsed time when a live start timestamp is missing", () => {
     const message: ChatMessage = {
-      id: "agent-live-legacy",
+      id: "agent-live-persisted",
       role: "agent",
       blocks: [],
     };
@@ -151,9 +151,9 @@ describe("Message", () => {
     expect(disclosure).toHaveAttribute("aria-expanded", "true");
   });
 
-  it("surfaces a legacy trailing result:false text block as the completed answer", () => {
+  it("surfaces a persisted trailing result:false text block as the completed answer", () => {
     const message: ChatMessage = {
-      id: "agent-legacy-result",
+      id: "agent-persisted-result",
       role: "agent",
       blocks: [
         { kind: "text", text: "Сначала проверю файлы", result: false },

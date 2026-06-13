@@ -14,7 +14,6 @@ describe("app settings", () => {
       model: "default",
       reasoning: "default",
       mode: "default",
-      autoConfirm: true,
     });
   });
 
@@ -28,5 +27,32 @@ describe("app settings", () => {
         },
       }),
     ).toBe(true);
+  });
+
+  it("rejects incomplete persisted settings", () => {
+    expect(
+      isAppSettings({
+        ...defaultAppSettings,
+        appearance: {
+          density: "comfortable",
+          reduceMotion: false,
+          sidebarWidth: 300,
+          theme: "dark",
+        },
+      }),
+    ).toBe(false);
+    expect(
+      isAppSettings({
+        ...defaultAppSettings,
+        general: {
+          confirmDestructiveActions: true,
+          desktopNotifications: true,
+          locale: "ru",
+          telemetry: false,
+          previewServerHost: "",
+          voice: {},
+        },
+      }),
+    ).toBe(false);
   });
 });

@@ -79,9 +79,6 @@ function cloneAgentSessions(conversation: ConversationSummary): Partial<Record<A
       sessions[agent] = sessionId;
     }
   }
-  if (conversation.sessionAgent && conversation.sessionId && isAgentId(conversation.sessionAgent)) {
-    sessions[conversation.sessionAgent] = conversation.sessionId;
-  }
   return Object.keys(sessions).length > 0 ? sessions : undefined;
 }
 
