@@ -9,6 +9,7 @@ import { Box, InputBase, Menu, MenuItem, Stack, Tooltip, Typography } from "@mui
 import { type KeyboardEvent, type MouseEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import { useI18n } from "../../i18n/I18nProvider";
+import { conversationPreviewSnippet } from "../../lib/conversation-preview";
 import { normalizeClockLabel } from "../../lib/time-format";
 import { IconButton, StatusDot } from "../ui";
 import { type AgentId, getAgent, withAlpha } from "./agents";
@@ -25,8 +26,9 @@ export interface ConversationActions {
 
 export function conversationMatches(conversation: ConversationSummary, query: string, threads: Readonly<Record<string, readonly ChatMessage[]>>): boolean {
   const threadText = (threads[conversation.id] ?? []).map(messageToPlainText).join("\n");
+  const summaryText = conversationPreviewSnippet(threads[conversation.id] ?? [], 60) || conversation.snippet;
   const archiveText = conversation.archived ? "\narchive archived архив" : "";
-  const searchable = `${conversation.title}\n${conversation.snippet}${archiveText}\n${threadText}`.toLowerCase();
+  const searchable = `${conversation.title}\n${summaryText}${archiveText}\n${threadText}`.toLowerCase();
   return searchable.includes(query);
 }
 
@@ -156,6 +158,7 @@ function ConversationAvatar({ conversation, hasWakeup }: { readonly conversation
 
 function ConversationRow({
   conversation,
+  subtitle,
   active,
   delay,
   onSelect,
@@ -165,6 +168,7 @@ function ConversationRow({
   hasWakeup,
 }: {
   readonly conversation: ConversationSummary;
+  readonly subtitle: string;
   readonly active: boolean;
   readonly delay: number;
   readonly onSelect: (id: string) => void;
@@ -308,7 +312,7 @@ function ConversationRow({
         )}
         {!editing && (
           <Typography noWrap sx={{ fontSize: "0.74rem", color: "text.secondary", mt: 0.25 }}>
-            {conversation.snippet}
+            {subtitle}
           </Typography>
         )}
       </Box>
@@ -450,6 +454,7 @@ function ConversationGroupHeader({
 export function ConversationList({
   projects,
   chats,
+  threads = {},
   selectedId,
   onSelect,
   actions,
@@ -457,6 +462,7 @@ export function ConversationList({
 }: {
   readonly projects: readonly Project[];
   readonly chats: readonly ConversationSummary[];
+  readonly threads?: Readonly<Record<string, readonly ChatMessage[]>>;
   readonly selectedId: string | null;
   readonly onSelect: (id: string) => void;
   readonly actions: ConversationActions;
@@ -658,6 +664,7 @@ export function ConversationList({
             <Box sx={{ px: 0.75, pb: 0.25 }}>
               <ConversationRow
                 conversation={item.conversation}
+                subtitle={conversationPreviewSnippet(threads[item.conversation.id] ?? [], 60) || item.conversation.snippet}
                 active={item.conversation.id === selectedId}
                 delay={item.delay}
                 onSelect={onSelect}

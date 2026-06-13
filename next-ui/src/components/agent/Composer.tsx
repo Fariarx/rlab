@@ -1,574 +1,168 @@
 import AttachFileIcon from "@mui/icons-material/AttachFile";
 import AccessTimeIcon from "@mui/icons-material/AccessTime";
 import AutoAwesomeRoundedIcon from "@mui/icons-material/AutoAwesomeRounded";
-import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
 import DescriptionOutlinedIcon from "@mui/icons-material/DescriptionOutlined";
 import ImageOutlinedIcon from "@mui/icons-material/ImageOutlined";
+import KeyboardArrowDownRoundedIcon from "@mui/icons-material/KeyboardArrowDownRounded";
 import MicRoundedIcon from "@mui/icons-material/MicRounded";
 import OpenInBrowserIcon from "@mui/icons-material/OpenInBrowser";
 import RateReviewOutlinedIcon from "@mui/icons-material/RateReviewOutlined";
 import SendIcon from "@mui/icons-material/Send";
 import SendTimeExtensionIcon from "@mui/icons-material/SendTimeExtension";
 import CompressRoundedIcon from "@mui/icons-material/CompressRounded";
-import ExtensionOutlinedIcon from "@mui/icons-material/ExtensionOutlined";
 import SettingsRoundedIcon from "@mui/icons-material/SettingsRounded";
 import StopCircleIcon from "@mui/icons-material/StopCircle";
 import WarningAmberRoundedIcon from "@mui/icons-material/WarningAmberRounded";
-import { Box, Divider, InputBase, Menu, MenuItem, Stack, Switch, type SxProps, TextField, type Theme, Tooltip, Typography } from "@mui/material";
+import { Box, Collapse, Divider, InputBase, Menu, MenuItem, Stack, Switch, type SxProps, TextField, type Theme, Tooltip, Typography } from "@mui/material";
 import type { PopoverActions } from "@mui/material/Popover";
-import { type ChangeEvent, type ClipboardEvent, forwardRef, type KeyboardEvent, type MouseEvent, type PointerEvent, type ReactNode, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { type ChangeEvent, type ClipboardEvent, type FormEvent, forwardRef, type KeyboardEvent, type MouseEvent, type PointerEvent, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import { localFileUrl } from "../../lib/external-url";
-import type { VoiceProviderId, VoiceProviderKind } from "../../lib/voice-providers";
 import { ImageLightbox } from "../workspace/ImageLightbox";
 import { Button, IconButton, KeyHint } from "../ui";
 import { AttachmentTile } from "./AttachmentTile";
+import { FloatingTile } from "./ComposerFloatingTile";
+import {
+  browserActivityTone,
+  supportsAutoCompactToggle,
+  supportsCompactionWindow,
+  type ComposerBrowserActivityEvent,
+  type ComposerVoiceProvider,
+} from "./composer-model";
 import type { ComposerAttachmentDraft, ComposerDraft } from "./types";
+import {
+  VOICE_DEFAULT_LEVEL_COUNT,
+  VOICE_IDLE_LEVELS,
+  VOICE_NO_SPEECH_NOTICE_DELAY_MS,
+  VoiceRecordingStrip,
+  formatVoiceDuration,
+  speechRecognitionConstructor,
+  isMobileSpeechRecognitionRuntime,
+  preferredAudioMimeType,
+  voiceAmbientLevels,
+  voiceIdleLevels,
+  voiceLevelCountFromWidth,
+  voiceLevelsFromTimeDomainData,
+  type SpeechRecognitionLike,
+} from "./ComposerVoice";
+import type { AgentRateLimit, RateLimitWindow } from "./agent-limits";
+import {
+  PASTE_AS_FILE_CHARS,
+  attachmentBlock,
+  blobToBase64,
+  composerDraftsEqual,
+  displayPluginToken,
+  escapeRegExp,
+  fileToAttachmentDraft,
+  isImageMime,
+  mentionQuery,
+  pluginLinkQuery,
+  readComposerResponseError,
+} from "./composer-utils";
+export { voiceLevelCountFromWidth, voiceLevelsFromTimeDomainData } from "./ComposerVoice";
 
-/** Pastes longer than this become a text-file attachment instead of flooding the input. */
-const PASTE_AS_FILE_CHARS = 1500;
-
-// Pasted-file fallback names only (a filename, not a React key).
-let attachmentIdSeq = 0;
-
-/** A process-unique attachment id. Must NOT derive from file metadata + a
- *  module counter: the counter resets on every page load, so the same file
- *  re-attached after a reload (or in a second tab) would mint a colliding id,
- *  and a persisted-draft round-trip could surface two list entries with the same
- *  React key — which React reconciles by duplicating or dropping tiles, so
- *  attachments appeared to vanish or multiply. A UUID is collision-free. */
-function newAttachmentId(): string {
-  const uuid = globalThis.crypto?.randomUUID?.();
-  return uuid ?? `att-${Date.now().toString(36)}-${(attachmentIdSeq++).toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-}
-
-const TEXT_EXTENSIONS = new Set([
-  "txt", "md", "markdown", "json", "yaml", "yml", "toml", "csv", "tsv", "js", "jsx", "ts", "tsx", "mjs", "cjs",
-  "css", "scss", "less", "html", "xml", "sh", "bash", "zsh", "py", "rb", "go", "rs", "java", "kt", "c", "h",
-  "cpp", "hpp", "cc", "cs", "php", "sql", "log", "env", "gitignore", "dockerfile", "ini", "conf", "cfg", "diff", "patch",
-]);
-
-function escapeXml(value: string): string {
-  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll("\"", "&quot;");
-}
-
-function escapeMarkdownLabel(value: string): string {
-  return value.replace(/[[\]\\]/g, "\\$&");
-}
-
-function isImageMime(type: string): boolean {
-  return type.startsWith("image/");
-}
-
-function isTextLikeFile(file: File): boolean {
-  const type = file.type;
-  if (type.startsWith("text/")) {
-    return true;
-  }
-  if (/^application\/(json|xml|javascript|x-yaml|yaml|x-sh|toml|x-www-form-urlencoded)$/.test(type)) {
-    return true;
-  }
-  if (type === "") {
-    const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
-    return TEXT_EXTENSIONS.has(ext);
-  }
-  return false;
-}
-
-function mentionQuery(value: string): string | null {
-  const match = value.match(/(?:^|\s)@([^\s@/]*)$/);
-  return match ? match[1].toLowerCase() : null;
-}
-
-function pluginLinkQuery(value: string): string | null {
-  const match = value.match(/(?:^|\s)\$([^\s$]*)$/);
-  return match ? match[1].toLowerCase() : null;
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function displayPluginToken(token: string): string {
-  return token.replace(/^\$/, "").replace(/^ScheduleWakeup$/, "TaskWakeup");
-}
-
-function attachmentBlock(attachment: ComposerAttachmentDraft): string {
-  // Non-text files are referenced by their on-disk path (vibe-kanban style) so
-  // the agent reads them with its own tools instead of receiving garbled bytes.
-  if (attachment.path) {
-    const label = escapeMarkdownLabel(attachment.name);
-    return isImageMime(attachment.type) ? `![${label}](${attachment.path})` : `[${label}](${attachment.path})`;
-  }
-  const type = attachment.type || "text/plain";
-  return [`<attachment name="${escapeXml(attachment.name)}" type="${escapeXml(type)}">`, attachment.content, "</attachment>"].join("\n");
-}
-
-function fileToBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = typeof reader.result === "string" ? reader.result : "";
-      const comma = result.indexOf(",");
-      resolve(comma >= 0 ? result.slice(comma + 1) : result);
-    };
-    reader.onerror = () => reject(reader.error ?? new Error("Failed to read file"));
-    reader.readAsDataURL(file);
-  });
-}
-
-function blobToBase64(blob: Blob): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = typeof reader.result === "string" ? reader.result : "";
-      const comma = result.indexOf(",");
-      resolve(comma >= 0 ? result.slice(comma + 1) : result);
-    };
-    reader.onerror = () => reject(reader.error ?? new Error("Failed to read audio"));
-    reader.readAsDataURL(blob);
-  });
-}
-
-interface SpeechRecognitionAlternativeLike {
-  readonly transcript: string;
-}
-
-interface SpeechRecognitionResultLike {
-  readonly length: number;
-  readonly isFinal: boolean;
-  readonly [index: number]: SpeechRecognitionAlternativeLike;
-}
-
-interface SpeechRecognitionResultListLike {
-  readonly length: number;
-  readonly [index: number]: SpeechRecognitionResultLike;
-}
-
-interface SpeechRecognitionResultEventLike {
-  readonly resultIndex: number;
-  readonly results: SpeechRecognitionResultListLike;
-}
-
-interface SpeechRecognitionErrorEventLike {
-  readonly error?: string;
-  readonly message?: string;
-}
-
-interface SpeechRecognitionLike {
-  lang: string;
-  continuous: boolean;
-  interimResults: boolean;
-  onresult: ((event: SpeechRecognitionResultEventLike) => void) | null;
-  onerror: ((event: SpeechRecognitionErrorEventLike) => void) | null;
-  onend: (() => void) | null;
-  start: () => void;
-  stop: () => void;
-}
-
-type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
-
-function speechRecognitionConstructor(): SpeechRecognitionConstructor | null {
-  if (typeof window === "undefined") {
-    return null;
-  }
-  const candidate = window as Window & {
-    readonly SpeechRecognition?: SpeechRecognitionConstructor;
-    readonly webkitSpeechRecognition?: SpeechRecognitionConstructor;
-  };
-  return candidate.SpeechRecognition ?? candidate.webkitSpeechRecognition ?? null;
-}
-
-function isMobileSpeechRecognitionRuntime(): boolean {
-  if (typeof navigator === "undefined") {
-    return false;
-  }
-  const userAgent = navigator.userAgent.toLowerCase();
-  return /android|iphone|ipad|ipod/.test(userAgent);
-}
-
-function preferredAudioMimeType(): string | undefined {
-  if (typeof MediaRecorder === "undefined") {
-    return undefined;
-  }
-  const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus", "audio/ogg"];
-  return candidates.find((candidate) => MediaRecorder.isTypeSupported(candidate));
-}
-
-async function readComposerResponseError(response: Response, fallback: string): Promise<string> {
-  const payload = (await response.json().catch(() => ({}))) as { error?: string };
-  return payload.error ?? fallback;
-}
-
-async function fileToAttachmentDraft(file: File): Promise<ComposerAttachmentDraft> {
-  const base = {
-    id: newAttachmentId(),
-    name: file.name,
-    type: file.type || "application/octet-stream",
-    size: file.size,
-    lastModified: file.lastModified,
-  };
-  if (isTextLikeFile(file)) {
-    return { ...base, content: await file.text() };
-  }
-  const dataBase64 = await fileToBase64(file);
-  const response = await fetch("/api/attachments", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name: file.name, mimeType: base.type, dataBase64 }),
-  });
-  if (!response.ok) {
-    const payload = (await response.json().catch(() => ({}))) as { error?: string };
-    throw new Error(payload.error ?? `Upload failed (${response.status})`);
-  }
-  const { path } = (await response.json()) as { path: string };
-  return { ...base, content: "", path };
-}
-
-function composerAttachmentsEqual(left: readonly ComposerAttachmentDraft[], right: readonly ComposerAttachmentDraft[]): boolean {
-  return left.length === right.length && left.every((attachment, index) => {
-    const other = right[index];
-    return (
-      other !== undefined
-      && attachment.id === other.id
-      && attachment.name === other.name
-      && attachment.type === other.type
-      && attachment.content === other.content
-      && attachment.size === other.size
-      && attachment.lastModified === other.lastModified
-      && attachment.path === other.path
-    );
-  });
-}
-
-function composerDraftsEqual(left: ComposerDraft, right: ComposerDraft): boolean {
-  return left.text === right.text && composerAttachmentsEqual(left.attachments, right.attachments);
-}
-
-const COMPOSER_TILE_SIZE = 76;
 const COMPOSER_BORDER_HOVER_RADIUS_PX = 42;
-const VOICE_DEFAULT_LEVEL_COUNT = 96;
-const VOICE_MIN_LEVEL_COUNT = 48;
-const VOICE_MAX_LEVEL_COUNT = 220;
-const VOICE_LEVEL_PITCH_PX = 6;
-const VOICE_IDLE_LEVEL = 0.025;
-const VOICE_IDLE_LEVELS = voiceIdleLevels(VOICE_DEFAULT_LEVEL_COUNT);
-const VOICE_NO_SPEECH_NOTICE_DELAY_MS = 800;
-const VOICE_AMBIENT_LEVELS = voiceAmbientLevels(VOICE_DEFAULT_LEVEL_COUNT);
+const COMPOSER_OPTIONS_MENU_Y_OFFSET_PX = -12;
+const LIMIT_UNSUPPORTED_AGENTS = new Set<string>(["opencode"]);
+let pastedFileNameSeq = 0;
 
-function voiceIdleLevels(levelCount: number): readonly number[] {
-  return Array.from({ length: levelCount }, () => VOICE_IDLE_LEVEL);
+interface ComposerPluginTokenRange {
+  readonly token: string;
+  readonly start: number;
+  readonly end: number;
 }
 
-function voiceAmbientLevels(levelCount: number): readonly number[] {
-  return Array.from({ length: levelCount }, (_, index) => {
-    const phase = index / Math.max(1, levelCount - 1);
-    return 0.08 + (Math.sin(phase * Math.PI * 5) + 1) * 0.045;
-  });
-}
-
-export function voiceLevelCountFromWidth(width: number): number {
-  if (!Number.isFinite(width) || width <= 0) {
-    return VOICE_DEFAULT_LEVEL_COUNT;
-  }
-  return Math.max(VOICE_MIN_LEVEL_COUNT, Math.min(VOICE_MAX_LEVEL_COUNT, Math.round(width / VOICE_LEVEL_PITCH_PX)));
-}
-
-function formatVoiceDuration(startedAt: number | null): string {
-  if (startedAt === null) {
-    return "0:00";
-  }
-  const seconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
-  const minutes = Math.floor(seconds / 60);
-  return `${minutes}:${String(seconds % 60).padStart(2, "0")}`;
-}
-
-export function voiceLevelsFromTimeDomainData(data: Uint8Array, levelCount = VOICE_DEFAULT_LEVEL_COUNT): readonly number[] {
-  if (data.length === 0 || levelCount <= 0) {
+function pluginTokenRanges(value: string, pattern: RegExp | null): readonly ComposerPluginTokenRange[] {
+  if (!pattern) {
     return [];
   }
-  return Array.from({ length: levelCount }, (_, index) => {
-    const start = Math.floor((index * data.length) / levelCount);
-    const end = Math.max(start + 1, Math.floor(((index + 1) * data.length) / levelCount));
-    let sum = 0;
-    for (let offset = start; offset < end; offset += 1) {
-      const centered = (data[offset] - 128) / 128;
-      sum += centered * centered;
-    }
-    return Math.min(1, Math.sqrt(sum / (end - start)) * 5);
+  return Array.from(value.matchAll(pattern)).flatMap((match) => {
+    const token = match[0];
+    const start = match.index;
+    return typeof start === "number" && token.length > 0 ? [{ token, start, end: start + token.length }] : [];
   });
 }
 
-function VoiceRecordingStrip({
-  label,
-  duration,
-  levels,
-  ambient,
-  onLevelCountChange,
-}: {
-  readonly label: string;
-  readonly duration: string;
-  readonly levels: readonly number[];
-  readonly ambient: boolean;
-  readonly onLevelCountChange: (levelCount: number) => void;
-}) {
-  const waveformRef = useRef<HTMLDivElement | null>(null);
-
-  useLayoutEffect(() => {
-    const waveform = waveformRef.current;
-    if (!waveform || typeof ResizeObserver === "undefined") {
-      return;
-    }
-    const update = () => onLevelCountChange(voiceLevelCountFromWidth(waveform.getBoundingClientRect().width));
-    update();
-    const observer = new ResizeObserver(update);
-    observer.observe(waveform);
-    return () => observer.disconnect();
-  }, [onLevelCountChange]);
-
-  return (
-    <Box
-      data-testid="composer-voice-recording-strip"
-      data-ambient={ambient ? "true" : "false"}
-      role="status"
-      aria-label={label}
-      sx={{
-        position: "absolute",
-        inset: 0,
-        zIndex: 6,
-        display: "grid",
-        gridTemplateColumns: "minmax(0, 1fr) auto",
-        alignItems: "center",
-        gap: 1.25,
-        px: 1,
-        color: "text.primary",
-        pointerEvents: "none",
-        backgroundColor: (theme) => theme.custom.surfaces.s2,
-      }}
-    >
-      <Box
-        ref={waveformRef}
-        sx={{
-          minWidth: 0,
-          height: 28,
-          position: "relative",
-          display: "grid",
-          gridTemplateColumns: `repeat(${Math.max(1, levels.length)}, minmax(0, 1fr))`,
-          alignItems: "center",
-          gap: "2px",
-          overflow: "hidden",
-        }}
-      >
-        {levels.map((level, index) => {
-          const height = Math.max(3, Math.min(28, 3 + level * 32));
-          const ambientDuration = 1300 + (index % 7) * 95;
-          const ambientDelay = -(index % 13) * 75;
-          return (
-          <Box
-            key={index}
-            component="span"
-            data-level={level.toFixed(3)}
-            sx={{
-              justifySelf: "stretch",
-              minWidth: 1,
-              height,
-              borderRadius: "999px",
-              backgroundColor: "text.primary",
-              opacity: Math.max(0.28, Math.min(0.96, 0.34 + level * 0.8)),
-              transformOrigin: "center",
-              transition: ambient ? "none" : "height 80ms linear",
-              ...(ambient
-                ? {
-                    animation: `voiceAmbientPulse ${ambientDuration}ms ease-in-out ${ambientDelay}ms infinite`,
-                    "@keyframes voiceAmbientPulse": {
-                      "0%, 100%": { transform: "scaleY(0.72)", opacity: 0.34 },
-                      "50%": { transform: "scaleY(1.58)", opacity: 0.72 },
-                    },
-                  }
-                : {}),
-            }}
-          />
-          );
-        })}
-      </Box>
-      <Typography
-        component="span"
-        sx={{
-          minWidth: 38,
-          fontFamily: (theme) => theme.custom.fonts.mono,
-          fontSize: "0.78rem",
-          color: "text.secondary",
-          textAlign: "right",
-        }}
-      >
-        {duration}
-      </Typography>
-    </Box>
-  );
+function selectionIntersectsRange(selectionStart: number, selectionEnd: number, range: ComposerPluginTokenRange): boolean {
+  return selectionStart < range.end && selectionEnd > range.start;
 }
 
-/**
- * FloatingTile — a square control that "floats" above the composer with the
- * same footprint as attachment tiles. Wakeups, modes, review state, and context
- * warnings all use this shape so the row reads as one tile strip.
- */
-function FloatingTile({
-  icon,
-  label,
-  onRemove,
-  removeLabel,
-  onClick,
-  disabled = false,
-  tone = "neutral",
-  testId,
-}: {
-  readonly icon: ReactNode;
-  readonly label: string;
-  /** When omitted the tag has no close button (e.g. the read-only review tag). */
-  readonly onRemove?: () => void;
-  readonly removeLabel?: string;
-  readonly onClick?: () => void;
-  readonly disabled?: boolean;
-  readonly tone?: "neutral" | "accent" | "warn" | "danger";
-  readonly testId?: string;
-}) {
-  const Component = onClick ? "button" : "span";
+function tokenRangeForDeleteKey(ranges: readonly ComposerPluginTokenRange[], selectionStart: number, selectionEnd: number, key: "Backspace" | "Delete"): { readonly start: number; readonly end: number } | null {
+  const selectedRanges = ranges.filter((range) => selectionIntersectsRange(selectionStart, selectionEnd, range));
+  if (selectedRanges.length > 0) {
+    return {
+      start: Math.min(selectionStart, selectedRanges[0]?.start ?? selectionStart),
+      end: Math.max(selectionEnd, selectedRanges[selectedRanges.length - 1]?.end ?? selectionEnd),
+    };
+  }
+  if (key === "Backspace") {
+    const range = ranges.find((item) => selectionStart > item.start && selectionStart <= item.end);
+    return range ? { start: range.start, end: range.end } : null;
+  }
+  const range = ranges.find((item) => selectionStart >= item.start && selectionStart < item.end);
+  return range ? { start: range.start, end: range.end } : null;
+}
+
+function commonPrefixLength(left: string, right: string): number {
+  let index = 0;
+  while (index < left.length && index < right.length && left[index] === right[index]) {
+    index += 1;
+  }
+  return index;
+}
+
+function commonSuffixLength(left: string, right: string, prefixLength: number): number {
+  let length = 0;
+  while (
+    length < left.length - prefixLength
+    && length < right.length - prefixLength
+    && left[left.length - 1 - length] === right[right.length - 1 - length]
+  ) {
+    length += 1;
+  }
+  return length;
+}
+
+function normalizePluginTokenDeletion(previous: string, next: string, ranges: readonly ComposerPluginTokenRange[]): { readonly value: string; readonly caret: number } | null {
+  if (next.length >= previous.length || ranges.length === 0) {
+    return null;
+  }
+  const prefixLength = commonPrefixLength(previous, next);
+  const suffixLength = commonSuffixLength(previous, next, prefixLength);
+  const changedStart = prefixLength;
+  const changedEnd = previous.length - suffixLength;
+  const touchedRanges = ranges.filter((range) => selectionIntersectsRange(changedStart, changedEnd, range));
+  if (touchedRanges.length === 0) {
+    return null;
+  }
+  const start = Math.min(changedStart, touchedRanges[0]?.start ?? changedStart);
+  const end = Math.max(changedEnd, touchedRanges[touchedRanges.length - 1]?.end ?? changedEnd);
+  return { value: previous.slice(0, start) + previous.slice(end), caret: start };
+}
+
+function MeterRow({ label, value, percent }: { readonly label: string; readonly value: string; readonly percent?: number }) {
+  const clamped = typeof percent === "number" ? Math.max(0, Math.min(100, percent)) : null;
   return (
-    <Box
-      component={Component}
-      type={onClick ? "button" : undefined}
-      disabled={onClick ? disabled : undefined}
-      data-testid={testId}
-      onClick={onClick}
-      sx={{
-        pointerEvents: "auto",
-        position: "relative",
-        width: COMPOSER_TILE_SIZE,
-        height: COMPOSER_TILE_SIZE,
-        flex: `0 0 ${COMPOSER_TILE_SIZE}px`,
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "stretch",
-        justifyContent: "space-between",
-        gap: 0.5,
-        p: 0.75,
-        borderRadius: (t) => `${t.custom.radii.md}px`,
-        fontSize: "0.68rem",
-        fontWeight: 600,
-        lineHeight: 1.18,
-        textAlign: "left",
-        fontFamily: "inherit",
-        color: "text.primary",
-        backgroundColor: (t) => t.custom.surfaces.s3,
-        border: (t) => {
-          if (tone === "danger") {
-            return `1px solid ${t.palette.status.error.main}`;
-          }
-          if (tone === "warn") {
-            return `1px solid ${t.palette.status.warn.main}`;
-          }
-          if (tone === "accent") {
-            return `1px solid ${t.palette.status.info.main}`;
-          }
-          return `1px solid ${t.custom.borders.strong}`;
-        },
-        boxShadow: "0 1px 4px rgba(0, 0, 0, 0.18)",
-        transition: "transform 120ms ease, box-shadow 120ms ease",
-        cursor: onClick && !disabled ? "pointer" : "default",
-        opacity: disabled ? 0.5 : 1,
-        "&:hover": {
-          boxShadow: disabled ? "0 1px 4px rgba(0, 0, 0, 0.18)" : "0 2px 6px rgba(0, 0, 0, 0.24)",
-          transform: disabled ? "none" : "translateY(-1px)",
-        },
-      }}
-    >
-      <Box
-        component="span"
-        sx={{
-          display: "inline-flex",
-          flex: "0 0 auto",
-          color: (t) => {
-            if (tone === "danger") {
-              return t.palette.status.error.main;
-            }
-            if (tone === "warn") {
-              return t.palette.status.warn.main;
-            }
-            if (tone === "accent") {
-              return t.palette.status.info.main;
-            }
-            return t.palette.text.secondary;
-          },
-        }}
-      >
-        {icon}
-      </Box>
-      <Box
-        component="span"
-        sx={{
-          minHeight: 0,
-          overflow: "hidden",
-          display: "-webkit-box",
-          WebkitBoxOrient: "vertical",
-          WebkitLineClamp: 3,
-          overflowWrap: "anywhere",
-        }}
-      >
-        {label}
-      </Box>
-      {onRemove && (
-        <IconButton
-          aria-label={removeLabel ?? ""}
-          onClick={(event) => {
-            event.stopPropagation();
-            onRemove();
-          }}
-          sx={{
-            position: "absolute",
-            top: 3,
-            right: 3,
-            width: 20,
-            height: 20,
-            p: 0,
-            color: "text.secondary",
-            backgroundColor: (t) => t.custom.surfaces.s2,
-            border: (t) => `1px solid ${t.custom.borders.subtle}`,
-            "&:hover": { backgroundColor: (t) => t.custom.surfaces.s4, color: "text.primary" },
-          }}
-        >
-          <CloseRoundedIcon sx={{ fontSize: 14 }} />
-        </IconButton>
+    <Box sx={{ display: "flex", flexDirection: "column", gap: 0.5 }}>
+      <Stack direction="row" spacing={1} sx={{ justifyContent: "space-between", alignItems: "baseline" }}>
+        <Typography sx={{ fontSize: "0.72rem", color: "text.secondary" }}>{label}</Typography>
+        <Typography sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.72rem", color: "text.primary" }}>{value}</Typography>
+      </Stack>
+      {clamped !== null && (
+        <Box sx={{ height: 5, borderRadius: (t) => `${t.custom.radii.pill}px`, backgroundColor: (t) => t.custom.surfaces.s4, overflow: "hidden" }}>
+          <Box
+            sx={{
+              height: "100%",
+              width: `${clamped}%`,
+              borderRadius: (t) => `${t.custom.radii.pill}px`,
+              transition: "width 220ms ease",
+              backgroundColor: (t) => (clamped >= 90 ? t.palette.status.error.main : clamped >= 70 ? t.palette.status.warn.main : t.palette.status.running.main),
+            }}
+          />
+        </Box>
       )}
     </Box>
   );
-}
-
-interface ComposerBrowserActivityEvent {
-  readonly id: number;
-  readonly type: string;
-  readonly label: string;
-  readonly detail?: string;
-}
-
-interface ComposerVoiceProvider {
-  readonly id: VoiceProviderId;
-  readonly name: string;
-  readonly kind: Exclude<VoiceProviderKind, "none">;
-  readonly language: string;
-  readonly configured: boolean;
-}
-
-function browserActivityTone(type: string): "info" | "success" | "warning" | "error" {
-  if (type === "console.error" || type === "page.error" || type === "network.failed") {
-    return "error";
-  }
-  if (type === "navigation.done" || type === "tab.selected") {
-    return "success";
-  }
-  if (type === "navigation.started") {
-    return "warning";
-  }
-  return "info";
 }
 
 /** Imperative handle so a parent drop-zone (the whole chat pane) can hand files
@@ -620,6 +214,12 @@ interface ComposerProps {
   readonly history?: readonly string[];
   /** Current agent id, used for agent-specific composer controls. */
   readonly agentId?: string;
+  /** Shared account rate-limits for the selected CLI agent, shown inside the options menu. */
+  readonly agentLimit?: AgentRateLimit | null;
+  readonly agentLimitLoaded?: boolean;
+  readonly agentLimitRefreshing?: boolean;
+  readonly agentLimitRefreshError?: string | null;
+  readonly onRefreshAgentLimits?: (requestRefresh: boolean) => void;
   /** The selected conversation's latest-turn context-window fill (tokens) and
    *  model window size, used only for the over-limit compaction warning. */
   readonly contextTokens?: number;
@@ -645,9 +245,6 @@ interface ComposerProps {
   readonly voiceProvider?: ComposerVoiceProvider;
   readonly onVoiceError?: (message: string) => void;
 }
-
-const AUTO_COMPACT_TOGGLE_AGENTS = new Set<string>(["claude-code"]);
-const COMPACTION_WINDOW_AGENTS = new Set<string>(["claude-code", "codex"]);
 
 /** Composer — the chat input. Sends on Enter (Shift+Enter for newline). Sticky
  * at the bottom on mobile; the send button stays a comfortable tap target. */
@@ -676,6 +273,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     onOverlayLiftChange,
     history = [],
     agentId,
+    agentLimit = null,
+    agentLimitLoaded = false,
+    agentLimitRefreshing = false,
+    agentLimitRefreshError = null,
+    onRefreshAgentLimits,
     contextTokens,
     contextWindow,
     autoCompact = true,
@@ -709,6 +311,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   onOverlayLiftChangeRef.current = onOverlayLiftChange;
   // An image attachment opened full-screen (click a thumbnail to view).
   const [previewAttachment, setPreviewAttachment] = useState<ComposerAttachmentDraft | null>(null);
+  const [limitOpen, setLimitOpen] = useState(false);
   const optionsMenuActionRef = useRef<PopoverActions | null>(null);
   const optionsMenuListRef = useRef<HTMLUListElement | null>(null);
   const optionsMenuPositionFrameRef = useRef<number | null>(null);
@@ -744,6 +347,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const historyIndexRef = useRef(-1);
   const historyDraftRef = useRef("");
   const pendingCaretToEndRef = useRef(false);
+  const pendingSelectionRef = useRef<{ readonly start: number; readonly end: number } | null>(null);
   const initialDraftRef = useRef<ComposerDraft>({ text: initialValue, attachments: initialAttachments });
   const localDraftDirtyRef = useRef(false);
   const { t } = useI18n();
@@ -770,6 +374,16 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // After recalling a history entry, drop the caret at the end of the recalled
   // text so the next keystroke edits rather than replaces it.
   useLayoutEffect(() => {
+    const pendingSelection = pendingSelectionRef.current;
+    if (pendingSelection) {
+      pendingSelectionRef.current = null;
+      const el = textareaRef.current;
+      if (el) {
+        el.focus();
+        el.setSelectionRange(pendingSelection.start, pendingSelection.end);
+      }
+      return;
+    }
     if (!pendingCaretToEndRef.current) {
       return;
     }
@@ -857,27 +471,26 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     }
     return new RegExp(`(${Array.from(tokens).sort((left, right) => right.length - left.length).map(escapeRegExp).join("|")})\\b`, "g");
   }, [registeredPlugins]);
+  const composerPluginTokenRanges = useMemo(() => pluginTokenRanges(composerValue, composerPluginTokenPattern), [composerPluginTokenPattern, composerValue]);
   const composerPluginPreviewParts = useMemo(() => {
-    if (!composerPluginTokenPattern) {
+    if (composerPluginTokenRanges.length === 0) {
       return [];
     }
     const parts: ReadonlyArray<{ readonly type: "text"; readonly text: string } | { readonly type: "plugin"; readonly token: string }> = [];
     const mutableParts: Array<{ readonly type: "text"; readonly text: string } | { readonly type: "plugin"; readonly token: string }> = [];
     let lastIndex = 0;
-    for (const match of composerValue.matchAll(composerPluginTokenPattern)) {
-      const raw = match[0];
-      const index = match.index ?? 0;
-      if (index > lastIndex) {
-        mutableParts.push({ type: "text", text: composerValue.slice(lastIndex, index) });
+    for (const range of composerPluginTokenRanges) {
+      if (range.start > lastIndex) {
+        mutableParts.push({ type: "text", text: composerValue.slice(lastIndex, range.start) });
       }
-      mutableParts.push({ type: "plugin", token: raw });
-      lastIndex = index + raw.length;
+      mutableParts.push({ type: "plugin", token: range.token });
+      lastIndex = range.end;
     }
     if (lastIndex < composerValue.length) {
       mutableParts.push({ type: "text", text: composerValue.slice(lastIndex) });
     }
     return mutableParts.length === 1 && mutableParts[0]?.type === "text" ? parts : mutableParts;
-  }, [composerPluginTokenPattern, composerValue]);
+  }, [composerPluginTokenRanges, composerValue]);
   const hasComposerPluginPreview = composerPluginPreviewParts.length > 0;
 
   const updateComposerBorderHover = useCallback((event: PointerEvent<HTMLDivElement>) => {
@@ -962,6 +575,25 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     setSuggestDismissed(false);
     historyIndexRef.current = -1;
     updateDraft({ text: nextValue, attachments: latestDraftRef.current.attachments });
+  };
+
+  const replaceComposerRange = (start: number, end: number, replacement = "") => {
+    const caret = start + replacement.length;
+    pendingSelectionRef.current = { start: caret, end: caret };
+    setComposerValue(composerValue.slice(0, start) + replacement + composerValue.slice(end));
+  };
+
+  const deleteComposerPluginToken = (key: "Backspace" | "Delete"): boolean => {
+    const el = textareaRef.current;
+    if (!el || composerPluginTokenRanges.length === 0) {
+      return false;
+    }
+    const range = tokenRangeForDeleteKey(composerPluginTokenRanges, el.selectionStart, el.selectionEnd, key);
+    if (!range) {
+      return false;
+    }
+    replaceComposerRange(range.start, range.end);
+    return true;
   };
 
   // Recall a history entry without exiting history-browsing mode; the caret is
@@ -1344,6 +976,28 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     setSending(false);
   };
 
+  const handleComposerChange = (event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+    const nextValue = event.target.value;
+    const normalized = normalizePluginTokenDeletion(composerValue, nextValue, composerPluginTokenRanges);
+    if (normalized) {
+      pendingSelectionRef.current = { start: normalized.caret, end: normalized.caret };
+      setComposerValue(normalized.value);
+      return;
+    }
+    setComposerValue(nextValue);
+  };
+
+  const handleBeforeInput = (event: FormEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+    const nativeEvent = event.nativeEvent as InputEvent;
+    if (nativeEvent.inputType === "deleteContentBackward" && deleteComposerPluginToken("Backspace")) {
+      event.preventDefault();
+      return;
+    }
+    if (nativeEvent.inputType === "deleteContentForward" && deleteComposerPluginToken("Delete")) {
+      event.preventDefault();
+    }
+  };
+
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     // While the suggestion popover is open, the arrow keys / Enter / Tab drive
     // the list instead of the textarea, so picking an option never needs the mouse.
@@ -1368,6 +1022,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         setSuggestDismissed(true);
         return;
       }
+    }
+    if ((event.key === "Backspace" || event.key === "Delete") && deleteComposerPluginToken(event.key)) {
+      event.preventDefault();
+      return;
     }
     // ArrowUp/ArrowDown recall sent messages (shell history). ArrowUp engages
     // only when the caret sits at the very start (so multi-line editing's own
@@ -1455,7 +1113,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       // Clipboard images often arrive unnamed; synthesize a name from the mime.
       const ext = file.type.split("/")[1] || "bin";
       const kind = isImageMime(file.type) ? "image" : "file";
-      return new File([file], `pasted-${kind}-${attachmentIdSeq++}.${ext}`, { type: file.type });
+      return new File([file], `pasted-${kind}-${pastedFileNameSeq++}.${ext}`, { type: file.type });
     });
     if (pastedFiles.length > 0) {
       event.preventDefault();
@@ -1534,17 +1192,83 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const hasKnownContextWindow = typeof contextWindow === "number" && contextWindow > 0;
   const effectiveContextTokens = typeof contextTokens === "number" && Number.isFinite(contextTokens) && contextTokens > 0 ? contextTokens : 0;
   const contextOverLimit = hasKnownContextWindow && effectiveContextTokens / contextWindow >= 1;
-  const supportsAutoCompactToggle = agentId !== undefined && AUTO_COMPACT_TOGGLE_AGENTS.has(agentId);
-  const supportsCompactionWindow = agentId !== undefined && COMPACTION_WINDOW_AGENTS.has(agentId);
+  const supportsAutoCompact = supportsAutoCompactToggle(agentId);
+  const supportsCompaction = supportsCompactionWindow(agentId);
+  const limitWindowLabel = (kind: RateLimitWindow["kind"]): string =>
+    kind === "weekly"
+      ? t("limitWindowWeekly")
+      : kind === "daily"
+        ? t("limitWindowDaily")
+        : kind === "overage"
+          ? t("limitOverage")
+          : t("limitWindow5h");
+  const limitLines: ReadonlyArray<{ readonly id: string; readonly label: string; readonly value: string; readonly percent?: number }> = (() => {
+    if (!agentLimit) {
+      return [];
+    }
+    const formatReset = (resetsAt: number): string => {
+      const secs = Math.max(0, resetsAt * 1000 - Date.now()) / 1000;
+      const h = Math.floor(secs / 3600);
+      const m = Math.floor((secs % 3600) / 60);
+      return h > 0 ? `${h}${t("unitHourShort")} ${m}${t("unitMinShort")}` : `${m}${t("unitMinShort")}`;
+    };
+    const statusLabel = (status: string): string =>
+      status === "allowed"
+        ? t("limitStatusOk")
+        : status === "allowed_warning"
+          ? t("limitStatusWarning")
+          : status === "rejected"
+            ? t("limitStatusRejected")
+            : status;
+
+    const lines: Array<{ id: string; label: string; value: string; percent?: number }> = [];
+    for (const window of agentLimit.windows) {
+      const parts: string[] = [];
+      if (typeof window.usedPercent === "number") {
+        parts.push(`${Math.round(window.usedPercent)}%`);
+      }
+      if (typeof window.resetsAt === "number") {
+        parts.push(formatReset(window.resetsAt));
+      }
+      if (parts.length > 0) {
+        lines.push({
+          id: `${window.kind}-${window.label ?? ""}`,
+          label: window.label ?? limitWindowLabel(window.kind),
+          value: parts.join(" · "),
+          percent: typeof window.usedPercent === "number" ? window.usedPercent : undefined,
+        });
+      }
+    }
+    if (agentLimit.plan) {
+      lines.push({ id: "plan", label: t("limitPlan"), value: agentLimit.plan });
+    }
+    if (agentLimit.status) {
+      lines.push({ id: "status", label: t("limitStatus"), value: statusLabel(agentLimit.status) });
+    }
+    return lines;
+  })();
+
+  useEffect(() => {
+    setLimitOpen(false);
+  }, [agentId]);
 
   useLayoutEffect(() => {
     if (modeMenuAnchor) {
       scheduleOptionsMenuPositionUpdate();
     }
-  }, [modeMenuAnchor, scheduleOptionsMenuPositionUpdate]);
+  }, [agentLimitLoaded, agentLimitRefreshError, agentLimitRefreshing, limitOpen, limitLines.length, modeMenuAnchor, scheduleOptionsMenuPositionUpdate]);
+
+  const toggleLimitsOpen = () => {
+    const nextOpen = !limitOpen;
+    setLimitOpen(nextOpen);
+    if (nextOpen) {
+      onRefreshAgentLimits?.(true);
+    }
+  };
 
   // Opens the options menu anchored to the clicked element.
   const openOptionsMenu = (anchorEl: HTMLElement) => {
+    setLimitOpen(false);
     setOptionsMenuMaxHeight(Math.max(0, Math.floor(anchorEl.getBoundingClientRect().top - 12)));
     setModeMenuAnchor(anchorEl);
   };
@@ -1719,6 +1443,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             paper: {
               sx: {
                 boxShadow: "0 4px 12px rgba(0, 0, 0, 0.14)",
+                mt: `${COMPOSER_OPTIONS_MENU_Y_OFFSET_PX}px`,
                 minWidth: 304,
                 maxHeight: optionsMenuMaxHeight,
                 overflowY: "auto",
@@ -1839,14 +1564,14 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           )}
           {/* Compaction — below both conversation info sections */}
           <Divider sx={{ my: 0.5 }} />
-          {supportsAutoCompactToggle && (
+          {supportsAutoCompact && (
             <MenuItem onClick={() => onAutoCompactChange?.(!autoCompact)} sx={modeMenuItemSx}>
               <CompressRoundedIcon sx={{ fontSize: 15, color: "text.secondary" }} />
               <Box component="span" sx={{ flex: 1, minWidth: 0 }}>{t("compactionAuto")}</Box>
               <Switch size="small" checked={autoCompact} onChange={() => undefined} tabIndex={-1} sx={modeSwitchSx} />
             </MenuItem>
           )}
-          {supportsCompactionWindow && (supportsAutoCompactToggle ? autoCompact : true) && (
+          {supportsCompaction && (supportsAutoCompact ? autoCompact : true) && (
             <Box
               sx={{ ...modeMenuItemSx, alignItems: "center", cursor: "default", py: 0.5 }}
               onClick={(event) => event.stopPropagation()}
@@ -1881,6 +1606,75 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             <CompressRoundedIcon sx={{ fontSize: 16, color: "text.secondary" }} />
             <Box component="span">{t("compactNow")}</Box>
           </MenuItem>
+          <Divider sx={{ my: 0.5 }} />
+          <Box sx={{ px: 2, py: 0.75, cursor: "default" }} onClick={(event) => event.stopPropagation()}>
+            <Collapse
+              in={limitOpen}
+              timeout={120}
+              unmountOnExit={false}
+              onEnter={updateOptionsMenuPosition}
+              onEntering={updateOptionsMenuPosition}
+              onEntered={updateOptionsMenuPosition}
+              onExit={updateOptionsMenuPosition}
+              onExiting={updateOptionsMenuPosition}
+              onExited={updateOptionsMenuPosition}
+            >
+              <Box id="composer-agent-limits" sx={{ pb: 0.75 }}>
+                {limitLines.length > 0 ? (
+                  <Stack spacing={1}>
+                    {limitLines.map((line) => (
+                      <MeterRow key={line.id} label={line.label} value={line.value} percent={line.percent} />
+                    ))}
+                  </Stack>
+                ) : (
+                  <Typography sx={{ fontSize: "0.72rem", color: "text.tertiary" }}>
+                    {!agentLimitLoaded ? "..." : agentId && LIMIT_UNSUPPORTED_AGENTS.has(agentId) ? t("limitsUnavailable") : t("limitsNoData")}
+                  </Typography>
+                )}
+                {agentLimitRefreshError ? (
+                  <Typography sx={{ mt: 0.75, fontSize: "0.72rem", color: (theme) => theme.palette.status.error.main }}>
+                    {agentLimitRefreshError}
+                  </Typography>
+                ) : null}
+              </Box>
+            </Collapse>
+            <Box
+              component="button"
+              type="button"
+              aria-expanded={limitOpen}
+              aria-controls="composer-agent-limits"
+              onClick={toggleLimitsOpen}
+              sx={{
+                width: "100%",
+                border: 0,
+                p: 0,
+                m: 0,
+                display: "flex",
+                alignItems: "center",
+                gap: 0.75,
+                cursor: "pointer",
+                color: "inherit",
+                backgroundColor: "transparent",
+                textAlign: "left",
+                font: "inherit",
+              }}
+            >
+              <Typography variant="microLabel" sx={{ color: "text.secondary", display: "block", flex: 1, minWidth: 0 }}>
+                {t("limitsLabel")}
+              </Typography>
+              {agentLimitRefreshing ? (
+                <Typography sx={{ fontSize: "0.72rem", color: "text.tertiary", fontFamily: (theme) => theme.custom.fonts.mono }}>...</Typography>
+              ) : null}
+              <KeyboardArrowDownRoundedIcon
+                sx={{
+                  fontSize: 16,
+                  color: "text.secondary",
+                  transform: limitOpen ? "rotate(180deg)" : "rotate(0deg)",
+                  transition: "transform 140ms ease",
+                }}
+              />
+            </Box>
+          </Box>
         </Menu>
         <Box
           data-testid="composer-input-area"
@@ -1945,18 +1739,16 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 part.type === "plugin" ? (
                   <Box
                     key={`${part.token}-${index}`}
+                    data-testid="composer-plugin-token"
                     component="span"
                     sx={{
-                      display: "inline-flex",
-                      alignItems: "baseline",
+                      display: "inline-block",
+                      minWidth: `${part.token.length}ch`,
                       color: "primary.main",
-                      fontFamily: (theme) => theme.custom.fonts.mono,
                       fontWeight: 700,
-                      textDecoration: "underline",
-                      textUnderlineOffset: 3,
+                      textDecoration: "none",
                     }}
                   >
-                    <ExtensionOutlinedIcon sx={{ fontSize: 13, mr: 0.35, verticalAlign: "-0.15em" }} />
                     {displayPluginToken(part.token)}
                   </Box>
                 ) : (
@@ -1968,11 +1760,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           <InputBase
             inputRef={textareaRef}
             value={composerValue}
-            onChange={(event) => setComposerValue(event.target.value)}
+            onChange={handleComposerChange}
             onKeyDown={handleKeyDown}
             onPaste={handlePaste}
             placeholder={placeholder}
-            inputProps={{ "aria-label": placeholder, "data-testid": "composer-input" }}
+            inputProps={{ "aria-label": placeholder, "data-testid": "composer-input", spellCheck: false, autoCorrect: "off", autoCapitalize: "none", autoComplete: "off", onBeforeInput: handleBeforeInput }}
             multiline
             minRows={1}
             maxRows={expanded ? 8 : 1}

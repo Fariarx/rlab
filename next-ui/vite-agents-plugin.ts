@@ -16,6 +16,7 @@ import { chromium, type Browser, type BrowserContext, type ConsoleMessage, type 
 import type { Plugin, ViteDevServer, PreviewServer } from "vite";
 import { parseGitStatusPorcelain, parseNumstatTotals } from "./src/lib/git-status";
 import { normalizeAgentToolOutput, truncateAgentToolOutput } from "./src/lib/agent-output";
+import { conversationPreviewSnippet, previewSnippet } from "./src/lib/conversation-preview";
 import { formatClock24, formatDateTime24 } from "./src/lib/time-format";
 import { attachPtyTerminalWebSockets, PtyTerminalManager } from "./src/server/pty-terminal";
 import {
@@ -47,7 +48,6 @@ import {
 import {
   agentProfileEquals,
   claudeAgentNameFromMode,
-  claudeAgentModeId,
   DEFAULT_AGENT_OPTION_ID,
   getAgent,
   isDirectAgentModeValue,
@@ -79,6 +79,26 @@ import {
   type SuggestedActionsBlock,
 } from "./src/components/agent/types";
 import { pickDirectoryPathFromSystemDialog } from "./src/server/directory-picker";
+export {
+  parseAnthropicModelInfos,
+  parseClaudeAgentsOutput,
+  parseClaudeCliModelAliasesSource,
+  parseCodexModelsOutput,
+  parseGeminiCliModelConfigSource,
+  parseOpenCodeAgentsOutput,
+  parseOpenCodeModelsOutput,
+  uniqueAgentOptions,
+} from "./src/server/agent-model-discovery";
+import {
+  parseAnthropicModelInfos,
+  parseClaudeAgentsOutput,
+  parseClaudeCliModelAliasesSource,
+  parseCodexModelsOutput,
+  parseGeminiCliModelConfigSource,
+  parseOpenCodeAgentsOutput,
+  parseOpenCodeModelsOutput,
+  uniqueAgentOptions,
+} from "./src/server/agent-model-discovery";
 
 export { parseGitStatusPorcelain } from "./src/lib/git-status";
 
@@ -447,359 +467,6 @@ const CLI_UPDATE_CHECK_INTERVAL_MS = 60 * 60_000;
 const CLI_UPDATE_CHECK_TIMEOUT_MS = 20_000;
 const DISCOVERY_OUTPUT_LIMIT_CHARS = 1_000_000;
 const STDERR_TAIL_LIMIT_CHARS = 4_000;
-const REASONING_LABELS: Record<string, string> = {
-  low: "Low",
-  medium: "Medium",
-  high: "High",
-  xhigh: "Extra High",
-  max: "Max",
-};
-
-function modelLabelFromValue(value: string): string {
-  const leaf = value.split("/").filter(Boolean).at(-1) ?? value;
-  const readableLeaf = leaf.replace(/-(\d+)-(\d+)(?=-|$)/g, "-$1.$2");
-  return readableLeaf
-    .split(/[-_]+/)
-    .filter(Boolean)
-    .map((token) => {
-      const lower = token.toLowerCase();
-      const known: Record<string, string> = {
-        claude: "Claude",
-        codex: "Codex",
-        deepseek: "Deepseek",
-        flash: "Flash",
-        free: "Free",
-        fast: "Fast",
-        gpt: "GPT",
-        haiku: "Haiku",
-        mini: "Mini",
-        minimax: "MiniMax",
-        opus: "Opus",
-        sonnet: "Sonnet",
-      };
-      if (known[lower]) {
-        return known[lower];
-      }
-      if (/^\d+b$/i.test(token)) {
-        return token.toUpperCase();
-      }
-      if (/^\d+(?:\.\d+)+$/.test(token)) {
-        return token;
-      }
-      if (/^v\d/i.test(token)) {
-        return `V${token.slice(1)}`;
-      }
-      if (/^qwen\d*/i.test(token)) {
-        return `Qwen${token.slice(4)}`;
-      }
-      return `${token.slice(0, 1).toUpperCase()}${token.slice(1)}`;
-    })
-    .join(" ");
-}
-
-function reasoningOptionFromEffort(effort: string): AgentOption | null {
-  const label = REASONING_LABELS[effort];
-  return label ? { id: effort, label, value: effort } : null;
-}
-
-function uniqueAgentOptions(options: readonly AgentOption[]): AgentOption[] {
-  const seen = new Set<string>();
-  const result: AgentOption[] = [];
-  for (const option of options) {
-    if (seen.has(option.id)) {
-      continue;
-    }
-    seen.add(option.id);
-    result.push(option);
-  }
-  return result;
-}
-
-const OPENCODE_INTERNAL_AGENT_IDS = new Set(["title", "compaction"]);
-const CLAUDE_INTERNAL_AGENT_IDS = new Set(["statusline-setup"]);
-const CLAUDE_STATIC_AGENT_IDS = new Set(["plan"]);
-
-export function parseOpenCodeModelsOutput(output: string): AgentOption[] {
-  return uniqueAgentOptions(
-    output
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter((line) => line.includes("/") && isDirectAgentModelValue("opencode", line))
-      .map((value) => ({ id: value, label: modelLabelFromValue(value), value })),
-  );
-}
-
-export function parseOpenCodeAgentsOutput(output: string): AgentOption[] {
-  return uniqueAgentOptions(
-    output
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .map((line) => line.match(/^([A-Za-z0-9][A-Za-z0-9._-]*)\s+\((?:primary|subagent)\)/)?.[1] ?? null)
-      .filter((id): id is string => id !== null && !OPENCODE_INTERNAL_AGENT_IDS.has(id))
-      .map((id) => ({ id, label: modelLabelFromValue(id), value: id })),
-  );
-}
-
-export function parseClaudeAgentsOutput(output: string): AgentOption[] {
-  try {
-    const parsed = JSON.parse(output) as unknown;
-    if (Array.isArray(parsed)) {
-      return uniqueAgentOptions(
-        parsed
-          .map((item): string | null => {
-            if (typeof item === "string") {
-              return item;
-            }
-            if (!isRecord(item)) {
-              return null;
-            }
-            if (typeof item.name === "string") {
-              return item.name;
-            }
-            if (typeof item.id === "string") {
-              return item.id;
-            }
-            return null;
-          })
-          .filter(
-            (id): id is string =>
-              id !== null && !CLAUDE_INTERNAL_AGENT_IDS.has(id) && !CLAUDE_STATIC_AGENT_IDS.has(id.toLowerCase()) && claudeAgentNameFromMode(claudeAgentModeId(id)) !== null,
-          )
-          .map((id) => ({ id: claudeAgentModeId(id), label: modelLabelFromValue(id), value: id })),
-      );
-    }
-  } catch {
-    // Older Claude CLIs only print a text table.
-  }
-  return uniqueAgentOptions(
-    output
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .map((line) => line.match(/^([A-Za-z0-9][A-Za-z0-9._-]*)\s+·\s+\S+/)?.[1] ?? null)
-      .filter(
-        (id): id is string =>
-          id !== null && !CLAUDE_INTERNAL_AGENT_IDS.has(id) && !CLAUDE_STATIC_AGENT_IDS.has(id.toLowerCase()) && claudeAgentNameFromMode(claudeAgentModeId(id)) !== null,
-      )
-      .map((id) => ({ id: claudeAgentModeId(id), label: modelLabelFromValue(id), value: id })),
-  );
-}
-
-export function parseCodexModelsOutput(output: string): { readonly models: readonly AgentOption[]; readonly reasoning: readonly AgentOption[] } {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(output) as unknown;
-  } catch {
-    return { models: [], reasoning: [] };
-  }
-  if (!isRecord(parsed) || !Array.isArray(parsed.models)) {
-    return { models: [], reasoning: [] };
-  }
-
-  const models: AgentOption[] = [];
-  const reasoning: AgentOption[] = [];
-  const reasoningSeen = new Set<string>();
-  for (const item of parsed.models) {
-    if (!isRecord(item) || typeof item.slug !== "string" || !isDirectAgentModelValue("codex", item.slug)) {
-      continue;
-    }
-    models.push({ id: item.slug, label: typeof item.display_name === "string" ? item.display_name : modelLabelFromValue(item.slug), value: item.slug });
-    if (Array.isArray(item.supported_reasoning_levels)) {
-      for (const level of item.supported_reasoning_levels) {
-        if (!isRecord(level) || typeof level.effort !== "string" || reasoningSeen.has(level.effort)) {
-          continue;
-        }
-        const option = reasoningOptionFromEffort(level.effort);
-        if (option) {
-          reasoningSeen.add(level.effort);
-          reasoning.push(option);
-        }
-      }
-    }
-  }
-  return { models: uniqueAgentOptions(models), reasoning };
-}
-
-const CLAUDE_CLI_MODEL_ALIASES = [
-  { id: "fable", label: "Fable", markers: ["claude-fable-", "Fable 5"] },
-  { id: "sonnet", label: "Sonnet", markers: ["claude-sonnet-", "Sonnet 4"] },
-  { id: "haiku", label: "Haiku", markers: ["claude-haiku-", "Haiku 4"] },
-] as const;
-
-export function parseClaudeCliModelAliasesSource(source: string): AgentOption[] {
-  const models = CLAUDE_CLI_MODEL_ALIASES.filter((alias) => source.includes(alias.id) && alias.markers.some((marker) => source.includes(marker))).map((alias) => ({
-    id: alias.id,
-    label: alias.label,
-    value: alias.id,
-  }));
-  return models.length > 0 ? [{ id: DEFAULT_AGENT_OPTION_ID, label: "Default" }, ...models] : [];
-}
-
-export function parseAnthropicModelInfos(models: readonly AnthropicModelInfo[]): AgentOption[] {
-  return uniqueAgentOptions(
-    models
-      .filter((model) => isDirectAgentModelValue("claude-code", model.id))
-      .map((model) => ({ id: model.id, label: model.display_name || modelLabelFromValue(model.id), value: model.id })),
-  );
-}
-
-function skipJsWhitespaceAndComments(source: string, index: number): number {
-  let i = index;
-  while (i < source.length) {
-    const char = source[i];
-    if (/\s/.test(char)) {
-      i += 1;
-      continue;
-    }
-    if (source.startsWith("//", i)) {
-      const next = source.indexOf("\n", i + 2);
-      i = next === -1 ? source.length : next + 1;
-      continue;
-    }
-    if (source.startsWith("/*", i)) {
-      const next = source.indexOf("*/", i + 2);
-      i = next === -1 ? source.length : next + 2;
-      continue;
-    }
-    break;
-  }
-  return i;
-}
-
-function extractJsObjectBody(source: string, openBraceIndex: number): { readonly body: string; readonly end: number } | null {
-  if (source[openBraceIndex] !== "{") {
-    return null;
-  }
-  let depth = 0;
-  let quote: "\"" | "'" | "`" | null = null;
-  let escaped = false;
-  let lineComment = false;
-  let blockComment = false;
-  for (let i = openBraceIndex; i < source.length; i += 1) {
-    const char = source[i];
-    const next = source[i + 1];
-    if (lineComment) {
-      if (char === "\n") {
-        lineComment = false;
-      }
-      continue;
-    }
-    if (blockComment) {
-      if (char === "*" && next === "/") {
-        blockComment = false;
-        i += 1;
-      }
-      continue;
-    }
-    if (quote) {
-      if (escaped) {
-        escaped = false;
-      } else if (char === "\\") {
-        escaped = true;
-      } else if (char === quote) {
-        quote = null;
-      }
-      continue;
-    }
-    if (char === "/" && next === "/") {
-      lineComment = true;
-      i += 1;
-      continue;
-    }
-    if (char === "/" && next === "*") {
-      blockComment = true;
-      i += 1;
-      continue;
-    }
-    if (char === "\"" || char === "'" || char === "`") {
-      quote = char;
-      continue;
-    }
-    if (char === "{") {
-      depth += 1;
-      continue;
-    }
-    if (char === "}") {
-      depth -= 1;
-      if (depth === 0) {
-        return { body: source.slice(openBraceIndex + 1, i), end: i + 1 };
-      }
-    }
-  }
-  return null;
-}
-
-function readJsObjectKey(source: string, index: number): { readonly key: string; readonly next: number } | null {
-  const i = skipJsWhitespaceAndComments(source, index);
-  const char = source[i];
-  if (char === "\"" || char === "'") {
-    let escaped = false;
-    for (let j = i + 1; j < source.length; j += 1) {
-      const current = source[j];
-      if (escaped) {
-        escaped = false;
-      } else if (current === "\\") {
-        escaped = true;
-      } else if (current === char) {
-        return { key: source.slice(i + 1, j), next: j + 1 };
-      }
-    }
-    return null;
-  }
-  const match = source.slice(i).match(/^([A-Za-z_$][A-Za-z0-9_$.-]*)/);
-  return match ? { key: match[1], next: i + match[1].length } : null;
-}
-
-export function parseGeminiCliModelConfigSource(source: string): AgentOption[] {
-  const options: AgentOption[] = [];
-  let searchFrom = 0;
-  while (searchFrom < source.length) {
-    const keyIndex = source.indexOf("modelDefinitions", searchFrom);
-    if (keyIndex === -1) {
-      break;
-    }
-    searchFrom = keyIndex + "modelDefinitions".length;
-    const colonIndex = source.indexOf(":", keyIndex);
-    if (colonIndex === -1) {
-      continue;
-    }
-    const openIndex = source.indexOf("{", colonIndex);
-    if (openIndex === -1) {
-      continue;
-    }
-    const definitions = extractJsObjectBody(source, openIndex);
-    if (!definitions) {
-      continue;
-    }
-    let entryIndex = 0;
-    while (entryIndex < definitions.body.length) {
-      const key = readJsObjectKey(definitions.body, entryIndex);
-      if (!key) {
-        break;
-      }
-      let valueIndex = skipJsWhitespaceAndComments(definitions.body, key.next);
-      if (definitions.body[valueIndex] !== ":") {
-        entryIndex = key.next + 1;
-        continue;
-      }
-      valueIndex = skipJsWhitespaceAndComments(definitions.body, valueIndex + 1);
-      if (definitions.body[valueIndex] !== "{") {
-        entryIndex = valueIndex + 1;
-        continue;
-      }
-      const value = extractJsObjectBody(definitions.body, valueIndex);
-      if (!value) {
-        break;
-      }
-      entryIndex = value.end + 1;
-      if (!/\bisVisible\s*:\s*true\b/.test(value.body) || !isDirectAgentModelValue("gemini", key.key)) {
-        continue;
-      }
-      const displayName = value.body.match(/\bdisplayName\s*:\s*["']([^"']+)["']/)?.[1];
-      options.push({ id: key.key, label: displayName ?? modelLabelFromValue(key.key), value: key.key });
-    }
-  }
-  return uniqueAgentOptions(options);
-}
 
 function geminiCliPackageRootFromBin(resolvedBin: string): string | null {
   const directRoot = join(dirname(resolvedBin), "node_modules", "@google", "gemini-cli");
@@ -2522,7 +2189,7 @@ function serverRunSnippet(locale: Locale, key: keyof (typeof serverRunSnippets)[
   return serverRunSnippets[locale][key];
 }
 
-function reconcileConversationRun(conversation: WorkspaceConversation, activeRunIds: ReadonlySet<string>, locale: Locale): WorkspaceConversation {
+function reconcileConversationRun(conversation: WorkspaceConversation, activeRunIds: ReadonlySet<string>, snippet: string): WorkspaceConversation {
   if (!conversation.activeRunId || activeRunIds.has(conversation.activeRunId)) {
     return conversation;
   }
@@ -2533,7 +2200,7 @@ function reconcileConversationRun(conversation: WorkspaceConversation, activeRun
     ...conversation,
     activeRunId: undefined,
     status: "error",
-    snippet: interruptedRunSnippet[locale],
+    ...(snippet ? { snippet } : {}),
   };
 }
 
@@ -2547,6 +2214,24 @@ function settleLiveBlock(block: AgentBlock): AgentBlock {
   return block;
 }
 
+function lastTimelineNonTextBlockIndex(blocks: readonly AgentBlock[]): number {
+  for (let index = blocks.length - 1; index >= 0; index -= 1) {
+    const block = blocks[index];
+    if (block.kind === "reasoning" || block.kind === "tool" || block.kind === "command" || block.kind === "search" || block.kind === "code") {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function settleStoppedRunBlocks(blocks: readonly AgentBlock[]): AgentBlock[] {
+  const lastNonTextIndex = lastTimelineNonTextBlockIndex(blocks);
+  return blocks.map((block, index) => {
+    const settled = settleLiveBlock(block);
+    return settled.kind === "text" && index > lastNonTextIndex ? { ...settled, result: true } : settled;
+  });
+}
+
 function settleLiveThreadWithStatus(messages: readonly ChatMessage[], statusBlock: Extract<AgentBlock, { kind: "status" }>): ChatMessage[] {
   const lastAgentIndex = messages.findLastIndex((message) => message.role === "agent");
   if (lastAgentIndex < 0) {
@@ -2555,7 +2240,7 @@ function settleLiveThreadWithStatus(messages: readonly ChatMessage[], statusBloc
   const message = messages[lastAgentIndex];
   const blocks = message.blocks ?? [];
   const hasStatus = blocks.some((block) => block.kind === "status" && block.level === statusBlock.level && block.text === statusBlock.text);
-  const settledBlocks = blocks.map(settleLiveBlock);
+  const settledBlocks = settleStoppedRunBlocks(blocks);
   const nextBlocks = hasStatus ? settledBlocks : [...settledBlocks, statusBlock];
   return messages.map<ChatMessage>((item, index) => (index === lastAgentIndex ? { ...message, blocks: nextBlocks } : item));
 }
@@ -2569,7 +2254,8 @@ export function reconcileStaleBackgroundRuns(state: WorkspaceState, activeRunIds
   const locale = state.settings.general.locale;
   const staleConversationIds = new Set<string>();
   const reconcile = (conversation: WorkspaceConversation): WorkspaceConversation => {
-    const reconciled = reconcileConversationRun(conversation, activeRunIds, locale);
+    const snippet = conversationPreviewSnippet(state.threads[conversation.id] ?? [], 60);
+    const reconciled = reconcileConversationRun(conversation, activeRunIds, snippet);
     if (reconciled !== conversation) {
       changed = true;
       staleConversationIds.add(conversation.id);
@@ -2595,18 +2281,19 @@ export function reconcileStaleBackgroundRuns(state: WorkspaceState, activeRunIds
 
 export function cancelBackgroundRunState(state: WorkspaceState, runId: string): WorkspaceState {
   const locale = state.settings.general.locale;
-  const snippet = serverRunSnippet(locale, "runCanceledSnippet");
+  const canceledText = serverRunSnippet(locale, "runCanceledSnippet");
   const canceledConversationIds = new Set<string>();
   const cancelConversation = (conversation: WorkspaceConversation): WorkspaceConversation => {
     if (conversation.activeRunId !== runId || (conversation.status !== "running" && conversation.status !== "waiting")) {
       return conversation;
     }
     canceledConversationIds.add(conversation.id);
+    const snippet = conversationPreviewSnippet(state.threads[conversation.id] ?? [], 60);
     return {
       ...conversation,
       activeRunId: undefined,
       status: "idle",
-      snippet,
+      ...(snippet ? { snippet } : {}),
     };
   };
 
@@ -2619,7 +2306,7 @@ export function cancelBackgroundRunState(state: WorkspaceState, runId: string): 
     return state;
   }
 
-  const statusBlock: Extract<AgentBlock, { kind: "status" }> = { kind: "status", level: "warn", text: snippet };
+  const statusBlock: Extract<AgentBlock, { kind: "status" }> = { kind: "status", level: "warn", text: canceledText };
   const threads = { ...state.threads };
   for (const conversationId of canceledConversationIds) {
     if (Object.prototype.hasOwnProperty.call(state.threads, conversationId)) {
@@ -2670,7 +2357,12 @@ function readWorkspaceState(): WorkspaceState {
   }
   const raw = readWorkspaceStateFromDb();
   cachedWorkspaceLocale = raw.settings?.general?.locale ?? cachedWorkspaceLocale;
-  return reconcileStaleBackgroundRuns(normalizeSeedProjectPaths(migrateSeedWorkspaceState(cloneWorkspaceState(raw))), new Set(backgroundRunHandles.keys()));
+  const normalized = normalizeSeedProjectPaths(migrateSeedWorkspaceState(cloneWorkspaceState(raw)));
+  const reconciled = reconcileStaleBackgroundRuns(normalized, new Set(backgroundRunHandles.keys()));
+  if (reconciled !== normalized) {
+    persistWorkspaceDelta(normalized, reconciled);
+  }
+  return reconciled;
 }
 
 /** The lightweight state the client `GET /api/workspace` returns: the full shell
@@ -2685,9 +2377,16 @@ function readWorkspaceShellForClient(): WorkspaceState {
     return initial;
   }
   const selectedId = readSelectedConversationId();
-  const shell = readWorkspaceStateFromDb(selectedId ? new Set([selectedId]) : new Set<string>());
+  const includeThreadIds = selectedId ? new Set([selectedId]) : new Set<string>();
+  const activeRunIds = new Set(backgroundRunHandles.keys());
+  const shell = readWorkspaceStateFromDb(includeThreadIds);
   cachedWorkspaceLocale = shell.settings?.general?.locale ?? cachedWorkspaceLocale;
-  return reconcileStaleBackgroundRuns(normalizeSeedProjectPaths(shell), new Set(backgroundRunHandles.keys()));
+  const normalizedShell = normalizeSeedProjectPaths(shell);
+  if (stateHasStaleBackgroundRun(normalizedShell, activeRunIds)) {
+    readWorkspaceState();
+    return normalizeSeedProjectPaths(readWorkspaceStateFromDb(includeThreadIds));
+  }
+  return reconcileStaleBackgroundRuns(normalizedShell, activeRunIds);
 }
 
 /** A single conversation's full message thread, for lazy loading on open. */
@@ -2788,6 +2487,13 @@ function initializeWorkspaceState(state: WorkspaceState): void {
 function workspaceProjectMeta(project: WorkspaceState["projects"][number]): Omit<WorkspaceState["projects"][number], "conversations"> {
   const { conversations: _conversations, ...meta } = project;
   return meta;
+}
+
+function stateHasStaleBackgroundRun(state: WorkspaceState, activeRunIds: ReadonlySet<string>): boolean {
+  return [...state.chats, ...state.projects.flatMap((project) => project.conversations)].some((conversation) => {
+    const activeRunId = conversation.activeRunId;
+    return activeRunId !== undefined && !activeRunIds.has(activeRunId) && (conversation.status === "running" || conversation.status === "waiting");
+  });
 }
 
 function persistWorkspaceDelta(before: WorkspaceState, after: WorkspaceState): void {
@@ -6065,7 +5771,6 @@ export interface ActiveBackgroundRunUpdate {
   readonly agentMessageId: string;
   readonly startedAtMs?: number;
   readonly status: ConversationStatus;
-  readonly snippet: string;
   readonly time: string;
   readonly done: boolean;
   readonly blocks: readonly AgentBlock[];
@@ -7983,48 +7688,8 @@ function mergeInputBlockState(blocks: readonly AgentBlock[], previousBlocks: rea
   });
 }
 
-function snippetFromBlocks(blocks: readonly AgentBlock[], locale: Locale): string {
-  const textBlock = [...blocks].reverse().find((block) => block.kind === "text" && block.text.trim().length > 0);
-  const snippetSource = textBlock?.kind === "text" ? textBlock.text : serverRunSnippet(locale, "runDoneSnippet");
-  return clip(snippetSource.replace(/\s+/g, " "), 60);
-}
-
-function liveSnippetSource(block: AgentBlock): string {
-  switch (block.kind) {
-    case "text":
-    case "reasoning":
-    case "status":
-      return block.text;
-    case "tool":
-      return block.summary || block.name;
-    case "command":
-      return block.command;
-    case "search":
-      return block.query;
-    case "plan":
-      return block.steps.find((step) => step.state === "running")?.label ?? block.steps.at(-1)?.label ?? "";
-    case "diff":
-      return block.file;
-    case "code":
-      return block.language ? `${block.language} code` : "code";
-    case "approval":
-      return block.title;
-    case "options":
-      return block.prompt;
-    case "suggested":
-      return block.actions[0]?.label ?? "";
-    case "citation":
-      return block.sources[0]?.label ?? "";
-    case "review":
-      return block.comments[0]?.file ?? "";
-    default:
-      return "";
-  }
-}
-
-function liveSnippetFromBlocks(blocks: readonly AgentBlock[], locale: Locale): string {
-  const snippetSource = [...blocks].reverse().map(liveSnippetSource).find((text) => text.trim().length > 0) ?? serverRunSnippet(locale, "runDoneSnippet");
-  return clip(snippetSource.replace(/\s+/g, " "), 60);
+function agentBlocksPreviewSnippet(blocks: readonly AgentBlock[]): string {
+  return conversationPreviewSnippet([{ id: "agent-preview", role: "agent", blocks }], 60);
 }
 
 function patchWorkspaceConversation(state: WorkspaceState, id: string, patch: Partial<WorkspaceState["chats"][number]>): WorkspaceState {
@@ -8126,7 +7791,6 @@ function buildActiveRunUpdate(conversation: WorkspaceConversation, agentMessage:
     agentMessageId: binding.agentMessageId,
     ...(startedAtMs === undefined ? {} : { startedAtMs }),
     status: conversation.status,
-    snippet: conversation.snippet,
     time: conversation.time,
     done,
     blocks,
@@ -8352,7 +8016,7 @@ function persistBackgroundRunSnapshot(binding: BackgroundRunBinding, accumulator
   upsertAgentMessageForUserTurn(binding.conversationId, binding.userMessageId, message);
   const conversation = readConversation(binding.conversationId);
   if (conversation) {
-    const patched = { ...conversation, ...backgroundRunStatusPatch(binding, blocks, cachedWorkspaceLocale) };
+    const patched = { ...conversation, ...backgroundRunStatusPatch(binding, blocks) };
     updateConversationData(
       accumulator.agent && accumulator.sessionId
         ? { ...patched, agentSessions: { ...(patched.agentSessions ?? {}), [accumulator.agent]: accumulator.sessionId }, sessionId: accumulator.sessionId, sessionAgent: accumulator.agent }
@@ -8419,7 +8083,7 @@ function startBackgroundRunState(state: WorkspaceState, binding: BackgroundRunBi
   const started = patchWorkspaceConversation(withUserMessage, binding.conversationId, {
     activeRunId: binding.runId,
     status: "running",
-    snippet: clip(request.prompt, 60),
+    snippet: previewSnippet(request.prompt, 60),
     time: binding.userMessageTime,
     unread: false,
     costUsd: undefined,
@@ -8620,11 +8284,12 @@ function accumulateBackgroundRunEvent(accumulator: BackgroundRunAccumulator, eve
 export function backgroundRunStatusPatch(
   binding: BackgroundRunBinding,
   blocks: readonly AgentBlock[],
-  locale: Locale,
 ): Partial<WorkspaceState["chats"][number]> {
-  return blocksNeedInput(blocks)
-    ? { status: "waiting", activeRunId: binding.runId, snippet: serverRunSnippet(locale, "runNeedsInputSnippet"), time: binding.agentMessageTime }
-    : { status: "running", activeRunId: binding.runId, snippet: liveSnippetFromBlocks(blocks, locale), time: binding.agentMessageTime };
+  const base = blocksNeedInput(blocks)
+    ? { status: "waiting" as const, activeRunId: binding.runId, time: binding.agentMessageTime }
+    : { status: "running" as const, activeRunId: binding.runId, time: binding.agentMessageTime };
+  const snippet = agentBlocksPreviewSnippet(blocks);
+  return snippet ? { ...base, snippet } : base;
 }
 
 function applyBackgroundRunEvent(binding: BackgroundRunBinding, accumulator: BackgroundRunAccumulator, event: RunEvent): void {
@@ -8663,22 +8328,24 @@ export function finishBackgroundRunState(state: WorkspaceState, binding: Backgro
   const warningOnlyFailure = accumulator.statuses.some((status) => status.level === "warn") && !hadOutput;
   const failed = hadError || warningOnlyFailure;
   const waiting = !canceled && !failed && blocksNeedInput(blocks);
+  const withMessage = putBackgroundAgentMessage(state, binding, blocks, { costUsd: accumulator.costUsd, usage: accumulator.usage });
+  const snippet = conversationPreviewSnippet(withMessage.threads[binding.conversationId] ?? [], 60);
   const patch = canceled
-    ? { activeRunId: undefined, status: "idle" as const, snippet: serverRunSnippet(locale, "runCanceledSnippet"), time: binding.agentMessageTime }
+    ? { activeRunId: undefined, status: "idle" as const, snippet, time: binding.agentMessageTime }
     : failed
-      ? { activeRunId: undefined, status: "error" as const, snippet: serverRunSnippet(locale, "runFailedSnippet"), time: binding.agentMessageTime }
+      ? { activeRunId: undefined, status: "error" as const, snippet, time: binding.agentMessageTime }
       : waiting
-        ? { status: "waiting" as const, snippet: serverRunSnippet(locale, "runNeedsInputSnippet"), time: binding.agentMessageTime }
+        ? { status: "waiting" as const, snippet, time: binding.agentMessageTime }
         : {
             activeRunId: undefined,
             status: "done" as const,
-            snippet: snippetFromBlocks(blocks, locale),
+            snippet,
             time: binding.agentMessageTime,
             ...(accumulator.costUsd === undefined ? {} : { costUsd: accumulator.costUsd }),
             ...(accumulator.usage === undefined ? {} : { usage: accumulator.usage }),
           };
   const withConversation = patchWorkspaceConversation(
-    putBackgroundAgentMessage(state, binding, blocks, { costUsd: accumulator.costUsd, usage: accumulator.usage }),
+    withMessage,
     binding.conversationId,
     patch,
   );

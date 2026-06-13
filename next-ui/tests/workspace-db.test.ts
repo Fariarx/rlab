@@ -82,7 +82,7 @@ describe("workspace-db", () => {
     updateConversationData({ ...current!, status: "done", snippet: "answer" });
     const after = readWorkspaceStateFromDb();
     expect(after.chats[0].status).toBe("done");
-    expect(after.chats[0].snippet).toBe("answer");
+    expect(after.chats[0].snippet).toBe("next");
     expect(after.threads.c1).toHaveLength(2);
   });
 
@@ -130,6 +130,27 @@ describe("workspace-db", () => {
     expect(shell.threads.c1).toHaveLength(1);
     expect(shell.threads.c2).toBeUndefined();
     expect(readThreadFromDb("c2").map((m) => m.id)).toEqual(["m2"]);
+  });
+
+  it("derives shell conversation snippets from user/model text without loading every thread", () => {
+    initializeWorkspaceStateInDb({
+      ...buildEmptyWorkspaceState(),
+      chats: [conv("c1", { snippet: "Run failed" }), conv("c2", { snippet: "Needs input" })],
+      threads: {
+        c1: [msg("m1", "selected answer")],
+        c2: [
+          userMsg("u2", "Unloaded user prompt"),
+          { id: "a2", role: "agent", blocks: [{ kind: "status", level: "error", text: "Run failed" }] },
+        ],
+      },
+      selectedId: "c1",
+    });
+
+    const shell = readWorkspaceStateFromDb(new Set(["c1"]));
+
+    expect(shell.threads.c2).toBeUndefined();
+    expect(shell.chats.find((conversation) => conversation.id === "c1")?.snippet).toBe("selected answer");
+    expect(shell.chats.find((conversation) => conversation.id === "c2")?.snippet).toBe("Unloaded user prompt");
   });
 
   it("applies row-level conversation mutations without touching unrelated threads", () => {

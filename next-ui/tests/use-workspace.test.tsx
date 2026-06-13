@@ -693,7 +693,7 @@ describe("useWorkspace", () => {
       expect(activeRunSignal?.aborted).toBe(true);
       expect(runCancelRequests).toEqual([{ runId: runRequests[0]?.runId }]);
       expect(screen.getByTestId("status")).toHaveTextContent("idle");
-      expect(state.chats.find((chat) => chat.id === "chat-2")?.snippet).toBe("Запуск остановлен");
+      expect(state.chats.find((chat) => chat.id === "chat-2")?.snippet).toBe("ok");
     });
     expect(JSON.stringify(state.threads["chat-2"])).not.toContain("Aborted");
     activeRunController = undefined;
@@ -852,7 +852,7 @@ describe("useWorkspace", () => {
 
     await waitFor(() => {
       expect(screen.getByTestId("status")).toHaveTextContent("waiting");
-      expect(state.chats.find((chat) => chat.id === "chat-2")?.snippet).toBe("Ждёт ввод");
+      expect(state.chats.find((chat) => chat.id === "chat-2")?.snippet).toBe("ok");
     });
 
     screen.getByRole("button", { name: "approve" }).click();

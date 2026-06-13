@@ -471,6 +471,33 @@ describe("Composer", () => {
     expect(input).toHaveValue("$TaskWakeup ");
     expect(screen.getByTestId("composer-plugin-preview")).toHaveTextContent("TaskWakeup");
     expect(screen.getByTestId("composer-plugin-preview")).not.toHaveTextContent("$TaskWakeup");
+    expect(screen.getByTestId("composer-plugin-token")).toHaveStyle({ textDecoration: "none" });
+  });
+
+  it("deletes parsed plugin tool links as atomic composer tokens", () => {
+    renderWithTheme(<Composer placeholder="Написать" registeredPlugins={[{ id: "TaskWakeup", label: "TaskWakeup", token: "$TaskWakeup" }]} />);
+    const input = screen.getByPlaceholderText("Написать") as HTMLTextAreaElement;
+
+    fireEvent.change(input, { target: { value: "Run $TaskWakeup now" } });
+    input.setSelectionRange("Run $TaskWakeup".length, "Run $TaskWakeup".length);
+    fireEvent.keyDown(input, { key: "Backspace" });
+    expect(input).toHaveValue("Run  now");
+
+    fireEvent.change(input, { target: { value: "Run $TaskWakeup now" } });
+    input.setSelectionRange("Run $Ta".length, "Run $Ta".length);
+    fireEvent.keyDown(input, { key: "Delete" });
+    expect(input).toHaveValue("Run  now");
+  });
+
+  it("normalizes mobile partial deletion inside a plugin tool link", () => {
+    renderWithTheme(<Composer placeholder="Написать" registeredPlugins={[{ id: "TaskWakeup", label: "TaskWakeup", token: "$TaskWakeup" }]} />);
+    const input = screen.getByPlaceholderText("Написать");
+
+    fireEvent.change(input, { target: { value: "Run $TaskWakeup now" } });
+    fireEvent.change(input, { target: { value: "Run $TaskWakeu now" } });
+
+    expect(input).toHaveValue("Run  now");
+    expect(screen.queryByTestId("composer-plugin-preview")).not.toBeInTheDocument();
   });
 
   it("commits browser speech interim text when mobile recognition ends before a final result", async () => {
@@ -677,6 +704,14 @@ describe("Composer", () => {
     expect(menuPaper).toHaveStyle({ boxShadow: "0 4px 12px rgba(0, 0, 0, 0.14)" });
   });
 
+  it("lifts the options menu 12px above its default popover position", () => {
+    renderWithTheme(<Composer placeholder="Написать" />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Опции/ }));
+
+    expect(screen.getByRole("menu").closest(".MuiPaper-root")).toHaveStyle({ marginTop: "-12px" });
+  });
+
   it("shows browser agent activity in the options menu only when provided", () => {
     const { unmount } = renderWithTheme(<Composer placeholder="Написать" />);
 
@@ -738,13 +773,37 @@ describe("Composer", () => {
     expect(screen.queryByLabelText(/Контекст/)).not.toBeInTheDocument();
   });
 
-  it("does not render account limit warning or menu section in the composer", () => {
-    renderWithTheme(<Composer placeholder="Написать" agentId="claude-code" />);
+  it("requests shared account-limit refresh only when the collapsed menu section is opened", () => {
+    const onRefreshAgentLimits = vi.fn();
+
+    renderWithTheme(
+      <Composer
+        placeholder="Написать"
+        agentId="claude-code"
+        agentLimit={{
+          updatedAt: Date.now(),
+          windows: [{ kind: "five_hour", usedPercent: 42, resetsAt: Math.floor(Date.now() / 1000) + 3600 }],
+        }}
+        agentLimitLoaded
+        onRefreshAgentLimits={onRefreshAgentLimits}
+      />,
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "Опции" }));
+    expect(onRefreshAgentLimits).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Лимиты аккаунта" })).toHaveAttribute("aria-expanded", "false");
 
+    fireEvent.click(screen.getByRole("button", { name: "Лимиты аккаунта" }));
+    expect(onRefreshAgentLimits).toHaveBeenCalledWith(true);
+    expect(screen.getByRole("button", { name: "Лимиты аккаунта" })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText(/42%/)).toBeInTheDocument();
+    const menuText = screen.getByRole("menu").textContent ?? "";
+    const usageIndex = menuText.indexOf("42%");
+    const labelIndex = menuText.indexOf("Лимиты аккаунта");
+    expect(usageIndex).toBeGreaterThanOrEqual(0);
+    expect(labelIndex).toBeGreaterThanOrEqual(0);
+    expect(usageIndex).toBeLessThan(labelIndex);
     expect(screen.queryByTestId("agent-limit-warning")).not.toBeInTheDocument();
-    expect(screen.queryByText("Лимиты аккаунта")).not.toBeInTheDocument();
   });
 
   it("renders composer floating controls as square tiles", () => {

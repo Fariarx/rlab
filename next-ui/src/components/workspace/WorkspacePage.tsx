@@ -33,12 +33,12 @@ import {
 import { type DragEvent, type MouseEvent as ReactMouseEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { I18nProvider, useI18n } from "../../i18n/I18nProvider";
 import { normalizeExternalUrl } from "../../lib/external-url";
-import { formatDateTime24 } from "../../lib/time-format";
 import { contextWindowForAgentProfile } from "../../lib/model-context";
 import type { HashRoute } from "../../lib/use-hash-route";
-import { getVoiceProvider, type VoiceProviderId } from "../../lib/voice-providers";
+import { getVoiceProvider } from "../../lib/voice-providers";
 import {
   type AgentProfile,
+  type AgentRateLimitMap,
   type ApprovalDecision,
   AGENTS,
   AgentBadge,
@@ -50,7 +50,6 @@ import {
   ConversationSearch,
   DEFAULT_AGENT_OPTION_ID,
   DEFAULT_PROFILE,
-  type DiffBlock,
   getAgent,
   normalizeAgentProfile,
   messageToPlainText,
@@ -58,7 +57,6 @@ import {
   type ComposerDraft,
   type ComposerPluginLink,
   type ConversationStatus,
-  type ConversationSummary,
   type ConversationView,
   type ReviewCommentEntry,
   useAgentCliInfo,
@@ -68,7 +66,6 @@ import {
   useReloadAgentStatus,
   accessModeForAgentProfile,
   agentProfileEquals,
-  agentProfileLabels,
 } from "../agent";
 import { dropIn } from "../agent/anim";
 import { SettingsDialog } from "../settings/SettingsDialog";
@@ -82,192 +79,44 @@ import { TerminalView } from "./TerminalView";
 import { WorkspaceUiProvider, type WorkspaceUiApi } from "./workspace-ui";
 import { DEFAULT_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, normalizeSidebarWidth } from "./app-settings";
 import { conversationProfile, type Workspace, useWorkspace } from "./use-workspace";
+import {
+  CLI_UPDATE_POLL_MS,
+  clearCliUpdateForAgent,
+  createWorktree,
+  deleteWakeup,
+  loadAgentLimits,
+  loadCliUpdates,
+  loadRlabPlugins,
+  loadVoiceConfig,
+  loadWakeups,
+  mergeWorktree,
+  updateAgentCli,
+  wakeupLabel,
+  type CliUpdateInfo,
+  type CliUpdateSnapshot,
+  type VoiceConfigSnapshot,
+  type WakeupSummary,
+} from "./workspace-page-api";
+import {
+  buildComposerLabel,
+  composerHistoryText,
+  conversationHasActiveWork,
+  firstVisibleConversationId,
+  latestAgentDiffBlocks,
+  liveModesOrCatalog,
+  normalizeConversationView,
+  routeForConversation,
+  runNotificationForStatus,
+  runToastForStatus,
+  showDesktopNotification,
+  workspaceConversations,
+} from "./workspace-page-helpers";
 
 const COMPOSER_DRAFT_SAVE_DELAY_MS = 350;
 const EMPTY_COMPOSER_DRAFT: ComposerDraft = { text: "", attachments: [] };
-const CLI_UPDATE_POLL_MS = 5 * 60_000;
 const AGENT_AUTO_CONFIRM_AGENTS = new Set(["claude-code", "codex", "gemini"]);
-
-const CONVERSATION_VIEWS = new Set<ConversationView>(["chat", "git", "resources", "preview", "terminal"]);
-
-function normalizeConversationView(view: ConversationView | undefined, terminalEnabled: boolean): ConversationView {
-  if (!view || !CONVERSATION_VIEWS.has(view)) {
-    return "chat";
-  }
-  return view === "terminal" && !terminalEnabled ? "chat" : view;
-}
-
-type WakeupTrigger =
-  | { readonly type: "time"; readonly fireAtMs: number }
-  | { readonly type: "cron"; readonly cron: string; readonly nextFireMs: number }
-  | { readonly type: "script"; readonly script: string; readonly intervalSeconds?: number; readonly cron?: string; readonly nextCheckMs: number; readonly lastCheckedAtMs?: number; readonly lastExitCode?: number; readonly lastError?: string };
-
-interface WakeupSummary {
-  readonly id: string;
-  readonly conversationId: string;
-  readonly agent: string;
-  readonly prompt: string;
-  readonly reason?: string;
-  readonly trigger: WakeupTrigger;
-}
-
-interface CliUpdateInfo {
-  readonly agent: string;
-  readonly agentName: string;
-  readonly packageName: string;
-  readonly currentVersion: string;
-  readonly latestVersion: string;
-  readonly command: string;
-}
-
-interface CliUpdateSnapshot {
-  readonly checkedAt: number;
-  readonly checking: boolean;
-  readonly updates: readonly CliUpdateInfo[];
-  readonly errors: Record<string, string>;
-}
-
-interface VoiceProviderConfigInfo {
-  readonly envVar: string;
-  readonly configured: boolean;
-}
-
-interface VoiceConfigSnapshot {
-  readonly providers: Partial<Record<VoiceProviderId, VoiceProviderConfigInfo>>;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-async function loadCliUpdates(refresh = false): Promise<CliUpdateSnapshot> {
-  const response = await fetch(`/api/cli-updates${refresh ? "?refresh=1" : ""}`, { method: "GET", cache: "no-store" });
-  if (!response.ok) {
-    const payload = (await response.json().catch(() => ({}))) as { error?: string };
-    throw new Error(payload.error ?? `CLI update check failed (${response.status})`);
-  }
-  const payload = (await response.json()) as Partial<CliUpdateSnapshot>;
-  return {
-    checkedAt: typeof payload.checkedAt === "number" ? payload.checkedAt : 0,
-    checking: payload.checking === true,
-    updates: Array.isArray(payload.updates) ? payload.updates : [],
-    errors: payload.errors && typeof payload.errors === "object" ? payload.errors : {},
-  };
-}
-
-async function loadVoiceConfig(): Promise<VoiceConfigSnapshot> {
-  const response = await fetch("/api/voice-config", { method: "GET", cache: "no-store" });
-  const payload = (await response.json().catch(() => ({}))) as { providers?: VoiceConfigSnapshot["providers"]; error?: string };
-  if (!response.ok) {
-    throw new Error(payload.error ?? `Voice config load failed (${response.status})`);
-  }
-  return { providers: payload.providers && typeof payload.providers === "object" ? payload.providers : {} };
-}
-
-async function loadRlabPlugins(): Promise<readonly ComposerPluginLink[]> {
-  const response = await fetch("/api/rlab-plugins", { method: "GET", cache: "no-store" });
-  const payload = (await response.json().catch(() => ({}))) as { plugins?: unknown; error?: string };
-  if (!response.ok) {
-    throw new Error(payload.error ?? `rlab plugins load failed (${response.status})`);
-  }
-  if (!Array.isArray(payload.plugins)) {
-    return [];
-  }
-  return payload.plugins.filter(isRecord).flatMap((plugin) => {
-    const { id, label, token } = plugin;
-    return typeof id === "string" && typeof label === "string" && typeof token === "string" ? [{ id, label, token }] : [];
-  });
-}
-
-async function updateAgentCli(agent: string): Promise<void> {
-  const response = await fetch("/api/agent-install", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ agent }),
-  });
-  if (!response.ok) {
-    const payload = (await response.json().catch(() => ({}))) as { error?: string };
-    throw new Error(payload.error ?? `CLI update failed (${response.status})`);
-  }
-}
-
-function clearCliUpdateForAgent(snapshot: CliUpdateSnapshot, agent: string): CliUpdateSnapshot {
-  return {
-    ...snapshot,
-    checkedAt: Date.now(),
-    updates: snapshot.updates.filter((update) => update.agent !== agent),
-    errors: Object.fromEntries(Object.entries(snapshot.errors).filter(([key]) => key !== agent && key !== "update")),
-  };
-}
-
-async function loadWakeups(conversationId?: string): Promise<WakeupSummary[]> {
-  const query = new URLSearchParams();
-  if (conversationId) {
-    query.set("conversationId", conversationId);
-  }
-  const suffix = query.size > 0 ? `?${query.toString()}` : "";
-  const response = await fetch(`/api/wakeups${suffix}`, { method: "GET", cache: "no-store" });
-  if (!response.ok) {
-    const payload = (await response.json().catch(() => ({}))) as { error?: string };
-    throw new Error(payload.error ?? `Wakeups load failed (${response.status})`);
-  }
-  const payload = (await response.json()) as { wakeups?: WakeupSummary[] };
-  return Array.isArray(payload.wakeups) ? payload.wakeups : [];
-}
-
-async function deleteWakeup(conversationId: string, wakeupId: string): Promise<void> {
-  const query = new URLSearchParams({ conversationId, id: wakeupId });
-  const response = await fetch(`/api/wakeups?${query.toString()}`, { method: "DELETE", cache: "no-store" });
-  if (!response.ok) {
-    const payload = (await response.json().catch(() => ({}))) as { error?: string };
-    throw new Error(payload.error ?? `Wakeup delete failed (${response.status})`);
-  }
-}
-
-function wakeupLabel(wakeup: WakeupSummary, locale: "ru" | "en"): string {
-  if (wakeup.trigger.type === "time") {
-    const when = formatDateTime24(new Date(wakeup.trigger.fireAtMs));
-    return locale === "ru" ? `TaskWakeup: ${when}` : `TaskWakeup: ${when}`;
-  }
-  if (wakeup.trigger.type === "cron") {
-    const when = formatDateTime24(new Date(wakeup.trigger.nextFireMs));
-    return locale === "ru" ? `TaskWakeup cron: ${when}` : `TaskWakeup cron: ${when}`;
-  }
-  const scriptSchedule = wakeup.trigger.cron ? `cron ${wakeup.trigger.cron}` : locale === "ru" ? `каждые ${wakeup.trigger.intervalSeconds}s` : `every ${wakeup.trigger.intervalSeconds}s`;
-  const base = `TaskWakeup script: ${scriptSchedule}`;
-  if (wakeup.trigger.lastError) {
-    return `${base} · ${wakeup.trigger.lastError}`;
-  }
-  if (wakeup.trigger.lastExitCode !== undefined) {
-    return `${base} · exit ${wakeup.trigger.lastExitCode}`;
-  }
-  return base;
-}
-
-async function createWorktree(cwd: string): Promise<{ readonly path: string; readonly branch: string }> {
-  const response = await fetch("/api/git-worktree-create", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ cwd }),
-  });
-  const payload = (await response.json().catch(() => ({}))) as { path?: string; branch?: string; error?: string };
-  if (!response.ok || !payload.path) {
-    throw new Error(payload.error ?? `Worktree create failed (${response.status})`);
-  }
-  return { path: payload.path, branch: payload.branch ?? "" };
-}
-
-async function mergeWorktree(base: string, worktreePath: string): Promise<void> {
-  const response = await fetch("/api/git-worktree-merge", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ base, worktreePath }),
-  });
-  if (!response.ok) {
-    const payload = (await response.json().catch(() => ({}))) as { error?: string };
-    throw new Error(payload.error ?? `Worktree merge failed (${response.status})`);
-  }
-}
+const AGENT_LIMIT_REFRESH_MIN_INTERVAL_MS = 60_000;
+const AGENT_LIMIT_ON_DEMAND_REFRESH_AGENTS = new Set(["claude-code", "codex", "gemini"]);
 
 // The sidebar title bar and the chat pane header share one fixed height so the
 // two columns line up across the top.
@@ -291,128 +140,6 @@ const WORKSPACE_ERROR_ALERT_SX = {
     pt: 0,
   },
 } as const;
-
-/** The visible text of a sent user message (attachment blocks and file-link
- *  markdown removed) for ArrowUp history recall. */
-function composerHistoryText(raw: string): string {
-  return raw
-    .replace(/<attachment\s+name="[^"]*"[^>]*>[\s\S]*?<\/attachment>/g, "")
-    .replace(/!?\[([^\]\n]+)\]\(([^)\s]+)\)/g, (whole, _label, target: string) => (/[\\/]/.test(target) || /\.[a-z0-9]{1,8}$/i.test(target) ? "" : whole))
-    .trim();
-}
-
-function buildComposerLabel(profile: AgentProfile): string {
-  const agent = getAgent(profile.agent);
-  const labels = agentProfileLabels(profile);
-  if (labels.length === 0) {
-    return agent.name;
-  }
-  return [agent.name, ...labels].join(" · ");
-}
-
-function liveModesOrCatalog<T extends { readonly id: string }>(catalogOptions: readonly T[], liveOptions: readonly T[] | undefined): readonly T[] {
-  if (!liveOptions?.length) {
-    return catalogOptions;
-  }
-  const seen = new Set(catalogOptions.map((option) => option.id));
-  const merged = [...catalogOptions];
-  for (const option of liveOptions) {
-    if (!seen.has(option.id)) {
-      seen.add(option.id);
-      merged.push(option);
-    }
-  }
-  return merged;
-}
-
-function projectForConversation(workspace: Workspace, conversationId: string): { readonly id: string; readonly name: string } | null {
-  const project = workspace.projects.find((item) => item.conversations.some((conversation) => conversation.id === conversationId));
-  return project ? { id: project.id, name: project.name } : null;
-}
-
-function routeForConversation(workspace: Workspace, conversationId: string): HashRoute {
-  const project = projectForConversation(workspace, conversationId);
-  return project ? { kind: "project", projectId: project.id, conversationId } : { kind: "chat", conversationId };
-}
-
-function workspaceConversations(workspace: Workspace): readonly ConversationSummary[] {
-  return [...workspace.chats, ...workspace.projects.flatMap((project) => project.conversations)];
-}
-
-function firstVisibleConversationId(workspace: Workspace): string {
-  const conversations = workspaceConversations(workspace);
-  return conversations.find((conversation) => !conversation.archived)?.id ?? conversations[0]?.id ?? "";
-}
-
-function latestAgentDiffBlocks(messages: readonly ChatMessage[]): readonly DiffBlock[] {
-  const lastAgentMessage = [...messages].reverse().find((message) => message.role === "agent" && message.blocks?.some((block) => block.kind === "diff"));
-  return lastAgentMessage?.blocks?.filter((block): block is DiffBlock => block.kind === "diff") ?? [];
-}
-
-function messageHasLiveAgentWork(message: ChatMessage): boolean {
-  if (message.role !== "agent") {
-    return false;
-  }
-  return Boolean(
-    message.blocks?.some((block) => {
-      switch (block.kind) {
-        case "reasoning":
-          return block.active === true;
-        case "text":
-          return block.streaming === true;
-        case "tool":
-        case "command":
-        case "search":
-          return block.state === "running";
-        case "plan":
-          return block.steps.some((step) => step.state === "running");
-        default:
-          return false;
-      }
-    }),
-  );
-}
-
-function conversationHasActiveWork(conversation: ConversationSummary | null, messages: readonly ChatMessage[]): boolean {
-  return Boolean(
-    conversation &&
-      (conversation.activeRunId ||
-        messages.some(messageHasLiveAgentWork)),
-  );
-}
-
-function runToastForStatus(status: ConversationStatus, title: string, t: ReturnType<typeof useI18n>["t"]) {
-  if (status === "done") {
-    return { message: t("runCompletedToast", { title }), severity: "success" as const };
-  }
-  if (status === "waiting") {
-    return { message: t("runNeedsInputToast", { title }), severity: "warning" as const };
-  }
-  if (status === "error") {
-    return { message: t("runFailedToast", { title }), severity: "error" as const };
-  }
-  return null;
-}
-
-function runNotificationForStatus(status: ConversationStatus, title: string, t: ReturnType<typeof useI18n>["t"]) {
-  if (status === "done") {
-    return { title: t("runCompletedNotificationTitle"), body: title };
-  }
-  if (status === "waiting") {
-    return { title: t("runNeedsInputNotificationTitle"), body: title };
-  }
-  if (status === "error") {
-    return { title: t("runFailedNotificationTitle"), body: title };
-  }
-  return null;
-}
-
-function showDesktopNotification(enabled: boolean, notification: { readonly title: string; readonly body: string } | null): void {
-  if (!enabled || notification == null || typeof Notification === "undefined" || Notification.permission !== "granted") {
-    return;
-  }
-  new Notification(notification.title, { body: notification.body });
-}
 
 export function WorkspacePage() {
   const workspace = useWorkspace();
@@ -531,6 +258,51 @@ export function WorkspacePageView({
   const [wakeups, setWakeups] = useState<readonly WakeupSummary[]>([]);
   const selectedWakeups = useMemo(() => (selected ? wakeups.filter((wakeup) => wakeup.conversationId === selected.id) : []), [selected, wakeups]);
   const wakeupConversationIds = useMemo(() => new Set(wakeups.map((wakeup) => wakeup.conversationId)), [wakeups]);
+  const [agentLimits, setAgentLimits] = useState<AgentRateLimitMap>({});
+  const [agentLimitsLoaded, setAgentLimitsLoaded] = useState(false);
+  const [agentLimitRefreshing, setAgentLimitRefreshing] = useState<Readonly<Record<string, boolean>>>({});
+  const [agentLimitRefreshErrors, setAgentLimitRefreshErrors] = useState<Readonly<Record<string, string | undefined>>>({});
+  const agentLimitRefreshAttemptRef = useRef<Record<string, number>>({});
+  const refreshAgentLimits = useCallback((agentId: string | undefined, requestRefresh: boolean) => {
+    const canRequestRefresh = Boolean(requestRefresh && agentId && AGENT_LIMIT_ON_DEMAND_REFRESH_AGENTS.has(agentId));
+    if (requestRefresh && agentId && !canRequestRefresh) {
+      setAgentLimitRefreshErrors((current) => ({ ...current, [agentId]: undefined }));
+    }
+    if (canRequestRefresh && agentId) {
+      const lastAttempt = agentLimitRefreshAttemptRef.current[agentId] ?? 0;
+      if (Date.now() - lastAttempt < AGENT_LIMIT_REFRESH_MIN_INTERVAL_MS) {
+        return;
+      }
+      agentLimitRefreshAttemptRef.current = { ...agentLimitRefreshAttemptRef.current, [agentId]: Date.now() };
+      setAgentLimitRefreshing((current) => ({ ...current, [agentId]: true }));
+      setAgentLimitRefreshErrors((current) => ({ ...current, [agentId]: undefined }));
+    }
+
+    loadAgentLimits(agentId, canRequestRefresh)
+      .then((snapshot) => {
+        setAgentLimits(snapshot.limits);
+        setAgentLimitsLoaded(true);
+        if (agentId) {
+          setAgentLimitRefreshErrors((current) => ({ ...current, [agentId]: snapshot.refreshError }));
+        }
+      })
+      .catch((error: unknown) => {
+        setAgentLimitsLoaded(true);
+        if (agentId) {
+          setAgentLimitRefreshErrors((current) => ({
+            ...current,
+            [agentId]: error instanceof Error ? error.message : t("limitsRefreshError"),
+          }));
+        } else {
+          toast({ message: error instanceof Error ? error.message : t("limitsRefreshError"), severity: "error", duration: 3000 });
+        }
+      })
+      .finally(() => {
+        if (agentId) {
+          setAgentLimitRefreshing((current) => ({ ...current, [agentId]: false }));
+        }
+      });
+  }, [t, toast]);
   const refreshVoiceConfig = useCallback(() => {
     loadVoiceConfig()
       .then(setVoiceConfig)
@@ -566,6 +338,10 @@ export function WorkspacePageView({
         };
   const selectedCwd = ws.cwdOf(ws.selectedId);
   const terminalCwd = selected ? (selectedCwd ?? ".") : undefined;
+  useEffect(() => {
+    refreshAgentLimits(undefined, false);
+  }, [refreshAgentLimits]);
+
   useEffect(() => {
     refreshVoiceConfig();
   }, [refreshVoiceConfig]);
@@ -1485,7 +1261,7 @@ export function WorkspacePageView({
         </Stack>
       </Stack>
 
-      <ConversationList projects={ws.projects} chats={ws.chats} selectedId={ws.selectedId} onSelect={openConversation} actions={conversationActions} wakeupConversationIds={wakeupConversationIds} />
+      <ConversationList projects={ws.projects} chats={ws.chats} threads={ws.threads} selectedId={ws.selectedId} onSelect={openConversation} actions={conversationActions} wakeupConversationIds={wakeupConversationIds} />
       {cliUpdateNotice}
     </Stack>
   );
@@ -1840,6 +1616,11 @@ export function WorkspacePageView({
                   onOverlayLiftChange={setComposerOverlayLift}
                   history={messageHistory}
                   agentId={profile.agent}
+                  agentLimit={agentLimits[profile.agent] ?? null}
+                  agentLimitLoaded={agentLimitsLoaded}
+                  agentLimitRefreshing={agentLimitRefreshing[profile.agent] === true}
+                  agentLimitRefreshError={agentLimitRefreshErrors[profile.agent] ?? null}
+                  onRefreshAgentLimits={(requestRefresh) => refreshAgentLimits(profile.agent, requestRefresh)}
                   contextTokens={selected?.usage?.contextTokens}
                   contextWindow={contextWindowForAgentProfile(profile)}
                   autoCompact={selected?.compaction?.auto ?? true}

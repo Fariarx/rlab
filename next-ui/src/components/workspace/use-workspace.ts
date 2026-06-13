@@ -1,12 +1,51 @@
 import { makeAutoObservable, reaction, runInAction } from "mobx";
 import { useEffect, useState } from "react";
-import { accessModeForAgentProfile, compactCommandForAgent, normalizeAgentProfile, type AgentBlock, type AgentId, type AgentProfile, type ApprovalDecision, type ChatMessage, type CompactionSettings, type ComposerDraft, type ConversationStatus, type ConversationSummary, type ConversationView, type Project, type ReviewCommentEntry } from "../agent";
+import { accessModeForAgentProfile, compactCommandForAgent, normalizeAgentProfile, type AgentBlock, type AgentProfile, type ApprovalDecision, type ChatMessage, type CompactionSettings, type ComposerDraft, type ConversationStatus, type ConversationSummary, type ConversationView, type Project, type ReviewCommentEntry } from "../agent";
 import { translate } from "../../i18n/I18nProvider";
-import { attachRunUpdates, cancelRun, loadActiveRuns, runConversation, type ActiveRunSnapshot, type ActiveRunUpdate, type RunConversationResult } from "./run-agent";
+import { attachRunUpdates, cancelRun, loadActiveRuns, runConversation, type ActiveRunSnapshot } from "./run-agent";
 import { nowLabel, starterThread, truncate } from "./sample-data";
 import { type AppSettings, type AppSettingsPatch, type Locale, mergeAppSettings } from "./app-settings";
 import { applyWorkspaceMutationsToState, type WorkspaceMutation } from "../../lib/workspace-mutations";
 import { buildEmptyWorkspaceState, buildInitialWorkspaceState, cloneWorkspaceState, type WorkspaceState } from "./workspace-state";
+import { conversationPreviewSnippet, previewSnippet } from "../../lib/conversation-preview";
+import {
+  blocksHaveLiveOutput,
+  blocksHaveStatus,
+  blocksNeedInput,
+  cloneMessageForFork,
+  finalRunPatch,
+  finishThreadLiveBlocks,
+  isLiveRunStatus,
+  isSettledRunConversationResult,
+  mergeInputBlockState,
+  patchActiveRunUpdate,
+  patchAgentMessageUsage,
+  preserveLiveActiveRunMessages,
+  settleThreadLiveBlocks,
+  snippetFromStateThread,
+  upsertAgentMessageForUserTurn,
+  withoutStaleActiveRunMessageMutations,
+} from "./workspace-run-state";
+import {
+  buildAgentPrompt,
+  conversationBasePath,
+  conversationCwd,
+  conversationProfile,
+  conversationSessionId,
+  extractAttachmentBlocks,
+  findConversation,
+  isDefaultConversationTitle,
+  patchApprovalDecision,
+  patchConversation,
+  patchConversationAgentSession,
+  patchOptionSelection,
+  projectIdForConversation,
+  projectIdFromName,
+  projectMeta,
+  serializableEqual,
+  workspaceConversations,
+} from "./workspace-state-utils";
+export { buildAgentPrompt, conversationProfile } from "./workspace-state-utils";
 
 const WORKSPACE_LOAD_RETRY_MS = 15_000;
 const WORKSPACE_SAVE_DEBOUNCE_MS = 250;
@@ -116,450 +155,6 @@ async function saveWorkspaceMutations(mutations: readonly WorkspaceMutation[], b
   }
   const payload = (await response.json().catch(() => null)) as unknown;
   return typeof payload === "object" && payload !== null && "revision" in payload && typeof payload.revision === "number" ? payload.revision : undefined;
-}
-
-function findConversation(state: WorkspaceState, id: string): ConversationSummary | null {
-  return [...state.chats, ...state.projects.flatMap((p) => p.conversations)].find((c) => c.id === id) ?? null;
-}
-
-function workspaceConversations(state: WorkspaceState): ConversationSummary[] {
-  return [...state.chats, ...state.projects.flatMap((project) => project.conversations)];
-}
-
-function projectMeta(project: Project): Omit<Project, "conversations"> {
-  const { conversations: _conversations, ...meta } = project;
-  return meta;
-}
-
-function projectIdForConversation(state: WorkspaceState, conversationId: string): string | null {
-  return state.projects.find((project) => project.conversations.some((conversation) => conversation.id === conversationId))?.id ?? null;
-}
-
-/** The attachment-block portion of a sent user message (inline text-file blocks
- *  and path-based file links), so editing+resending keeps the attachments. */
-function extractAttachmentBlocks(text: string): string {
-  const blocks: string[] = [];
-  for (const match of text.matchAll(/<attachment\s+name="[^"]*"[^>]*>[\s\S]*?<\/attachment>/g)) {
-    blocks.push(match[0]);
-  }
-  for (const match of text.matchAll(/!?\[[^\]\n]+\]\(([^)\s]+)\)/g)) {
-    const target = match[1] ?? "";
-    if (/[\\/]/.test(target) || /\.[a-z0-9]{1,8}$/i.test(target)) {
-      blocks.push(match[0]);
-    }
-  }
-  return blocks.join("\n\n");
-}
-
-function serializableEqual(left: unknown, right: unknown): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
-}
-
-export function conversationProfile(conversation: ConversationSummary | null | undefined): AgentProfile {
-  return normalizeAgentProfile(conversation?.profile, conversation?.agent ?? "claude-code");
-}
-
-/** A lean transcript line for one message: the user's text, or the agent's
- *  answer (text/code blocks only — reasoning and tool noise are omitted). */
-function messageTranscriptText(message: ChatMessage): string {
-  if (message.role === "user") {
-    return (message.text ?? "").trim();
-  }
-  return (message.blocks ?? [])
-    .map((block) => (block.kind === "text" ? block.text : block.kind === "code" ? block.code : ""))
-    .filter(Boolean)
-    .join("\n")
-    .trim();
-}
-
-/** Builds the agent prompt from the conversation so far. Each agent run is a
- *  fresh, stateless invocation (no session/resume), so prior turns must be
- *  replayed in the prompt or the agent loses the thread. First message in a
- *  conversation → just the text. */
-export function buildAgentPrompt(priorMessages: readonly ChatMessage[], currentText: string): string {
-  const turns = priorMessages
-    .map((message) => {
-      const content = messageTranscriptText(message);
-      return content ? `${message.role === "user" ? "User" : "Assistant"}: ${content}` : null;
-    })
-    .filter((line): line is string => line !== null);
-  if (turns.length === 0) {
-    return currentText;
-  }
-  return `This is a continuing conversation; here are the earlier turns for context:\n\n${turns.join("\n\n")}\n\n---\n\nUser: ${currentText}`;
-}
-
-/** The project's base working directory (ignores any worktree override). */
-function conversationBasePath(state: WorkspaceState, id: string): string | undefined {
-  return state.projects.find((p) => p.conversations.some((c) => c.id === id))?.path;
-}
-
-/** The directory the agent/Git view actually operate in: an isolated worktree
- *  when one is attached to the conversation, otherwise the project base path. */
-function conversationCwd(state: WorkspaceState, id: string): string | undefined {
-  return findConversation(state, id)?.worktreePath ?? conversationBasePath(state, id);
-}
-
-function patchConversation(state: WorkspaceState, id: string, patch: Partial<ConversationSummary>): WorkspaceState {
-  return {
-    ...state,
-    chats: state.chats.map((c) => (c.id === id ? { ...c, ...patch } : c)),
-    projects: state.projects.map((p) => ({
-      ...p,
-      conversations: p.conversations.map((c) => (c.id === id ? { ...c, ...patch } : c)),
-    })),
-  };
-}
-
-function conversationSessionId(conversation: ConversationSummary | null | undefined, agent: AgentId): string | undefined {
-  return conversation?.agentSessions?.[agent] ?? (conversation?.sessionAgent === agent ? conversation.sessionId : undefined);
-}
-
-function patchConversationAgentSession(state: WorkspaceState, id: string, agent: AgentId, sessionId: string): WorkspaceState {
-  const conversation = findConversation(state, id);
-  const agentSessions: Partial<Record<AgentId, string>> = { ...(conversation?.agentSessions ?? {}), [agent]: sessionId };
-  return patchConversation(state, id, { agentSessions, sessionId, sessionAgent: agent });
-}
-
-function patchApprovalDecision(state: WorkspaceState, conversationId: string, approvalId: string, decision: ApprovalDecision): WorkspaceState {
-  return {
-    ...state,
-    threads: {
-      ...state.threads,
-      [conversationId]: (state.threads[conversationId] ?? []).map((message) => ({
-        ...message,
-        blocks: message.blocks?.map((block) => (block.kind === "approval" && block.id === approvalId ? { ...block, decision } : block)),
-      })),
-    },
-  };
-}
-
-function patchOptionSelection(state: WorkspaceState, conversationId: string, optionBlockId: string, selectedLabels: readonly string[]): WorkspaceState {
-  return {
-    ...state,
-    threads: {
-      ...state.threads,
-      [conversationId]: (state.threads[conversationId] ?? []).map((message) => ({
-        ...message,
-        blocks: message.blocks?.map((block) => (block.kind === "options" && block.id === optionBlockId ? { ...block, selected: [...selectedLabels] } : block)),
-      })),
-    },
-  };
-}
-
-function mergeInputBlockState(blocks: readonly AgentBlock[], previousBlocks: readonly AgentBlock[] | undefined): AgentBlock[] {
-  return blocks.map((block) => {
-    if (block.kind === "approval" && block.id) {
-      const previous = previousBlocks?.find((item) => item.kind === "approval" && item.id === block.id);
-      return previous?.kind === "approval" && previous.decision ? { ...block, decision: previous.decision } : block;
-    }
-    if (block.kind === "options" && block.id) {
-      const previous = previousBlocks?.find((item) => item.kind === "options" && item.id === block.id);
-      return previous?.kind === "options" && previous.selected ? { ...block, selected: [...previous.selected] } : block;
-    }
-    return block;
-  });
-}
-
-function blocksNeedInput(blocks: readonly AgentBlock[]): boolean {
-  return blocks.some((block) => {
-    if (block.kind === "approval") {
-      return !block.decision;
-    }
-    if (block.kind === "options") {
-      return !block.selected || block.selected.length === 0;
-    }
-    return false;
-  });
-}
-
-function blocksHaveLiveOutput(blocks: readonly AgentBlock[]): boolean {
-  return blocks.some((block) => {
-    switch (block.kind) {
-      case "reasoning":
-        return block.active === true;
-      case "text":
-        return block.streaming === true;
-      case "tool":
-      case "command":
-      case "search":
-        return block.state === "running";
-      case "plan":
-        return block.steps.some((step) => step.state === "running");
-      default:
-        return false;
-    }
-  });
-}
-
-function messageHasLiveOutput(message: ChatMessage | undefined): message is ChatMessage {
-  return message?.role === "agent" && blocksHaveLiveOutput(message.blocks ?? []);
-}
-
-function withoutStaleActiveRunMessageMutations(
-  state: WorkspaceState,
-  runs: ReadonlyMap<string, RunHandle>,
-  mutations: readonly WorkspaceMutation[],
-): WorkspaceMutation[] {
-  const isStaleActiveRunMessageMutation = (conversationId: string, message: ChatMessage): boolean => {
-    const run = runs.get(conversationId);
-    if (!run?.serverOwned || run.agentMessageId !== message.id) {
-      return false;
-    }
-    const localMessage = state.threads[conversationId]?.find((item) => item.id === message.id);
-    return messageHasLiveOutput(localMessage) && !serializableEqual(localMessage, message);
-  };
-
-  const next: WorkspaceMutation[] = [];
-  for (const mutation of mutations) {
-    if (mutation.type === "upsertMessage" && isStaleActiveRunMessageMutation(mutation.conversationId, mutation.message)) {
-      continue;
-    }
-    if (mutation.type === "upsertMessages") {
-      const messages = mutation.messages.filter((message) => !isStaleActiveRunMessageMutation(mutation.conversationId, message));
-      if (messages.length > 0) {
-        next.push({ ...mutation, messages });
-      }
-      continue;
-    }
-    next.push(mutation);
-  }
-  return next;
-}
-
-function preserveLiveActiveRunMessages(state: WorkspaceState, localState: WorkspaceState, runs: ReadonlyMap<string, RunHandle>): WorkspaceState {
-  let threads: Record<string, ChatMessage[]> | null = null;
-  for (const [conversationId, run] of runs) {
-    const localMessage = localState.threads[conversationId]?.find((message) => message.id === run.agentMessageId);
-    if (!messageHasLiveOutput(localMessage)) {
-      continue;
-    }
-    const currentMessages = (threads ?? state.threads)[conversationId] ?? [];
-    const nextMessages = upsertAgentMessageForUserTurn(currentMessages, run.userMessageId, localMessage);
-    if (!serializableEqual(currentMessages, nextMessages)) {
-      threads = threads ?? { ...state.threads };
-      threads[conversationId] = nextMessages;
-    }
-  }
-  return threads ? { ...state, threads } : state;
-}
-
-/** Clears a block's "live" flags so the UI stops animating it. Used when a run
- *  is stopped or errors mid-stream — otherwise reasoning/tool blocks keep their
- *  "working" animation even though the agent is no longer running. */
-function settleLiveBlock(block: AgentBlock): AgentBlock {
-  switch (block.kind) {
-    case "reasoning":
-      return block.active ? { ...block, active: false } : block;
-    case "text":
-      return block.streaming ? { ...block, streaming: false } : block;
-    case "tool":
-    case "command":
-    case "search":
-      return block.state === "running" ? { ...block, state: "error" } : block;
-    case "plan":
-      return block.steps.some((step) => step.state === "running") ? { ...block, steps: block.steps.map((step) => (step.state === "running" ? { ...step, state: "error" } : step)) } : block;
-    default:
-      return block;
-  }
-}
-
-function finishLiveBlock(block: AgentBlock, state: "ok" | "error"): AgentBlock {
-  switch (block.kind) {
-    case "reasoning":
-      return block.active ? { ...block, active: false } : block;
-    case "text":
-      return block.streaming ? { ...block, streaming: false } : block;
-    case "tool":
-    case "command":
-    case "search":
-      return block.state === "running" ? { ...block, state } : block;
-    case "plan":
-      return block.steps.some((step) => step.state === "running") ? { ...block, steps: block.steps.map((step) => (step.state === "running" ? { ...step, state } : step)) } : block;
-    default:
-      return block;
-  }
-}
-
-function settleThreadLiveBlocks(state: WorkspaceState, id: string): WorkspaceState {
-  const messages = state.threads[id];
-  if (!messages) {
-    return state;
-  }
-  let changed = false;
-  const next = messages.map((message) => {
-    if (message.role !== "agent" || !message.blocks) {
-      return message;
-    }
-    const blocks = message.blocks.map(settleLiveBlock);
-    if (blocks.some((block, index) => block !== message.blocks![index])) {
-      changed = true;
-      return { ...message, blocks };
-    }
-    return message;
-  });
-  return changed ? { ...state, threads: { ...state.threads, [id]: next } } : state;
-}
-
-function finishThreadLiveBlocks(state: WorkspaceState, id: string, runState: "ok" | "error"): WorkspaceState {
-  const messages = state.threads[id];
-  if (!messages) {
-    return state;
-  }
-  let changed = false;
-  const next = messages.map((message) => {
-    if (message.role !== "agent" || !message.blocks) {
-      return message;
-    }
-    const blocks = message.blocks.map((block) => finishLiveBlock(block, runState));
-    if (blocks.some((block, index) => block !== message.blocks![index])) {
-      changed = true;
-      return { ...message, blocks };
-    }
-    return message;
-  });
-  return changed ? { ...state, threads: { ...state.threads, [id]: next } } : state;
-}
-
-function finishBlocks(blocks: readonly AgentBlock[], runState: "ok" | "error"): AgentBlock[] {
-  return blocks.map((block) => finishLiveBlock(block, runState));
-}
-
-function cloneMessageForFork(message: ChatMessage): ChatMessage {
-  const idPrefix = message.role === "user" ? "u" : "a";
-  return {
-    ...message,
-    id: nextId(idPrefix),
-    profile: message.profile ? normalizeAgentProfile(message.profile, message.profile.agent) : undefined,
-    blocks: message.blocks?.map((block) => finishLiveBlock(JSON.parse(JSON.stringify(block)) as AgentBlock, "ok")),
-  };
-}
-
-function blocksHaveStatus(blocks: readonly AgentBlock[]): boolean {
-  return blocks.some((block) => block.kind === "status");
-}
-
-function snippetFromBlocks(blocks: readonly AgentBlock[] | undefined, locale: Locale): string {
-  const textBlock = [...(blocks ?? [])].reverse().find((block) => block.kind === "text" && block.text.trim().length > 0);
-  const snippetSource = textBlock?.kind === "text" ? textBlock.text : translate(locale, "runDoneSnippet");
-  return truncate(snippetSource.replace(/\s+/g, " "), 60);
-}
-
-type SettledRunConversationResult = RunConversationResult & { readonly status: "done" | "error" | "waiting" };
-
-function isSettledRunConversationResult(result: RunConversationResult): result is SettledRunConversationResult {
-  return result.status !== "detached";
-}
-
-function finalRunPatch(
-  current: WorkspaceState,
-  conversationId: string,
-  agentMessageId: string,
-  result: SettledRunConversationResult,
-): Partial<ConversationSummary> {
-  const locale = current.settings.general.locale;
-  const agentBlocks = current.threads[conversationId]?.find((message) => message.id === agentMessageId)?.blocks;
-  const inputResolved = agentBlocks !== undefined && !blocksNeedInput(agentBlocks);
-  const resolvedStatus = result.status === "waiting" && inputResolved ? "done" : result.status;
-  const resolvedSnippet = result.status === "waiting" && resolvedStatus === "done" ? snippetFromBlocks(agentBlocks, locale) : result.snippet;
-  return {
-    activeRunId: undefined,
-    status: resolvedStatus,
-    snippet: resolvedSnippet,
-    ...(result.costUsd === undefined ? {} : { costUsd: result.costUsd }),
-    ...(result.usage === undefined ? {} : { usage: result.usage }),
-  };
-}
-
-function patchAgentMessageUsage(
-  state: WorkspaceState,
-  conversationId: string,
-  agentMessageId: string,
-  result: Pick<RunConversationResult, "costUsd" | "usage">,
-): WorkspaceState {
-  if (result.costUsd === undefined && result.usage === undefined) {
-    return state;
-  }
-  const messages = state.threads[conversationId];
-  if (!messages?.some((message) => message.id === agentMessageId)) {
-    return state;
-  }
-  return {
-    ...state,
-    threads: {
-      ...state.threads,
-      [conversationId]: messages.map((message) =>
-        message.id === agentMessageId
-          ? {
-              ...message,
-              ...(result.costUsd === undefined ? {} : { costUsd: result.costUsd }),
-              ...(result.usage === undefined ? {} : { usage: result.usage }),
-            }
-          : message,
-      ),
-    },
-  };
-}
-
-function upsertAgentMessageForUserTurn(messages: readonly ChatMessage[], userMessageId: string, message: ChatMessage): ChatMessage[] {
-  const existingIndex = messages.findIndex((item) => item.id === message.id);
-  const withoutCurrent = messages.filter((item) => item.id !== message.id);
-  const userIndex = withoutCurrent.findIndex((item) => item.id === userMessageId && item.role === "user");
-  if (userIndex < 0) {
-    return existingIndex >= 0 ? messages.map((item) => (item.id === message.id ? message : item)) : [...messages, message];
-  }
-  const nextUserIndex = withoutCurrent.findIndex((item, index) => index > userIndex && item.role === "user");
-  const staleReplyEnd = nextUserIndex < 0 ? withoutCurrent.length : nextUserIndex;
-  const before = withoutCurrent.slice(0, userIndex + 1);
-  const after = withoutCurrent.slice(staleReplyEnd);
-  return [...before, message, ...after];
-}
-
-function isLiveRunStatus(status: ConversationStatus): boolean {
-  return status === "running" || status === "waiting";
-}
-
-function patchActiveRunUpdate(state: WorkspaceState, update: ActiveRunUpdate): WorkspaceState {
-  const messages = state.threads[update.conversationId] ?? [];
-  const previousMessage = messages.find((message) => message.id === update.agentMessageId);
-  const previousBlocks = previousMessage?.blocks;
-  const profile = previousMessage?.profile ?? conversationProfile(findConversation(state, update.conversationId));
-  const mergedBlocks = mergeInputBlockState(update.blocks, previousBlocks);
-  const blocks = update.done || !isLiveRunStatus(update.status) ? finishBlocks(mergedBlocks, update.status === "error" || update.status === "idle" ? "error" : "ok") : mergedBlocks;
-  const message: ChatMessage = {
-    id: update.agentMessageId,
-    role: "agent",
-    time: update.time,
-    ...(update.startedAtMs === undefined ? {} : { startedAtMs: update.startedAtMs }),
-    profile,
-    blocks,
-    ...(update.costUsd === undefined ? {} : { costUsd: update.costUsd }),
-    ...(update.usage === undefined ? {} : { usage: update.usage }),
-  };
-  const threads = {
-    ...state.threads,
-    [update.conversationId]: upsertAgentMessageForUserTurn(messages, update.userMessageId, message),
-  };
-  return patchConversation({ ...state, threads }, update.conversationId, {
-    activeRunId: update.done || !isLiveRunStatus(update.status) ? undefined : update.runId,
-    status: update.status,
-    snippet: update.snippet,
-    time: update.time,
-    ...(update.costUsd === undefined ? {} : { costUsd: update.costUsd }),
-    ...(update.usage === undefined ? {} : { usage: update.usage }),
-  });
-}
-
-function projectIdFromName(name: string): string {
-  const id = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-  if (!id) {
-    throw new Error("Project name must contain letters or numbers.");
-  }
-  return id;
-}
-
-function isDefaultConversationTitle(title: string | undefined): boolean {
-  return title === undefined || title === translate("en", "newChat") || title === translate("ru", "newChat");
 }
 
 export interface Workspace {
@@ -1050,6 +645,7 @@ class WorkspaceStore implements Workspace {
         continue;
       }
       const currentConversation = findConversation(next, id);
+      const loadedThread = loaded.threads[id] ?? current.threads[id] ?? [];
       if (
         currentConversation?.activeRunId &&
         !activeRunIds.has(currentConversation.activeRunId) &&
@@ -1062,17 +658,17 @@ class WorkspaceStore implements Workspace {
         // and spinners disappear instead of hanging forever. Safe because a
         // genuinely-live run re-asserts `running` on its next streamed event
         // (backgroundRunStatusPatch), which would re-list it in activeRunIds.
+        const snippet = conversationPreviewSnippet(loadedThread, 60);
         next = patchConversation(settleThreadLiveBlocks(next, id), id, {
           activeRunId: undefined,
           status: "error",
-          snippet: translate(loaded.settings.general.locale, "runInterruptedSnippet"),
+          ...(snippet ? { snippet } : {}),
         });
         continue;
       }
       if (!serializableEqual(currentConversation, loadedConversation)) {
         next = patchConversation(next, id, loadedConversation);
       }
-      const loadedThread = loaded.threads[id] ?? current.threads[id] ?? [];
       const currentThread = current.threads[id] ?? [];
       if (!serializableEqual(currentThread, loadedThread)) {
         threads = threads ?? { ...current.threads };
@@ -1594,7 +1190,7 @@ class WorkspaceStore implements Workspace {
     const runningPatch: Partial<ConversationSummary> = {
       activeRunId: runId,
       status: "running" as ConversationStatus,
-      snippet: truncate(text, 60),
+      snippet: previewSnippet(text, 60),
       time: nowLabel(),
       unread: false,
       costUsd: undefined,
@@ -1652,9 +1248,11 @@ class WorkspaceStore implements Workspace {
         if (runHandle.canceled) {
           return nextState;
         }
-        return needsInput
-          ? patchConversation(nextState, id, { status: "waiting", snippet: translate(current.settings.general.locale, "runNeedsInputSnippet"), time: nowLabel() })
-          : nextState;
+        if (!needsInput) {
+          return nextState;
+        }
+        const snippet = snippetFromStateThread(nextState, id);
+        return patchConversation(nextState, id, { status: "waiting", ...(snippet ? { snippet } : {}), time: nowLabel() });
       });
       if (shouldPersistBlocks) {
         this.markThreadDirty(id);
@@ -1730,7 +1328,11 @@ class WorkspaceStore implements Workspace {
       })
       .catch(() => {
         if (!runHandle.canceled) {
-          this.setState((current) => patchConversation(settleThreadLiveBlocks(current, id), id, { activeRunId: undefined, status: "error", snippet: translate(current.settings.general.locale, "runFailedSnippet") }));
+          this.setState((current) => {
+            const settled = settleThreadLiveBlocks(current, id);
+            const snippet = snippetFromStateThread(settled, id);
+            return patchConversation(settled, id, { activeRunId: undefined, status: "error", ...(snippet ? { snippet } : {}) });
+          });
           this.markThreadDirty(id);
           const conversation = this.find(id);
           if (conversation) {
@@ -1776,10 +1378,11 @@ class WorkspaceStore implements Workspace {
       if (!conversation || (conversation.status !== "running" && conversation.status !== "waiting")) {
         return settled;
       }
+      const snippet = snippetFromStateThread(settled, id);
       return patchConversation(settled, id, {
         activeRunId: undefined,
         status: "idle",
-        snippet: translate(current.settings.general.locale, "runCanceledSnippet"),
+        ...(snippet ? { snippet } : {}),
         time: nowLabel(),
       });
     });
@@ -1838,7 +1441,7 @@ class WorkspaceStore implements Workspace {
         ...source,
         id: forkId,
         title: truncate(translate(locale, "forkedConversationTitle", { title: source.title }), 80),
-        snippet: snippetFromBlocks(message.blocks, locale),
+        snippet: conversationPreviewSnippet([message], 60),
         time: nowLabel(),
         status: "idle",
         agent: profile.agent,
@@ -1853,7 +1456,7 @@ class WorkspaceStore implements Workspace {
         sessionAgent: undefined,
       };
       this.fullyLoadedThreadIds.add(forkId);
-      const forkThread = thread.slice(0, messageIndex + 1).map(cloneMessageForFork);
+      const forkThread = thread.slice(0, messageIndex + 1).map((threadMessage) => cloneMessageForFork(threadMessage, nextId));
       const projects = current.projects.map((project) =>
         project.conversations.some((item) => item.id === id)
           ? { ...project, conversations: [conversation, ...project.conversations] }

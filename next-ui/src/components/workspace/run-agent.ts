@@ -15,7 +15,6 @@ import type {
 import { translate } from "../../i18n/I18nProvider";
 import { truncateAgentToolOutput } from "../../lib/agent-output";
 import type { Locale } from "./app-settings";
-import { truncate } from "./sample-data";
 
 type RunEvent =
   | { type: "start" }
@@ -39,7 +38,6 @@ const LIVE_BLOCK_FLUSH_MS = 32;
 
 export interface RunConversationResult {
   readonly status: "done" | "error" | "waiting" | "detached";
-  readonly snippet: string;
   readonly costUsd?: number;
   readonly usage?: RunUsage;
   readonly sessionId?: string;
@@ -194,7 +192,6 @@ export interface ActiveRunUpdate {
   readonly agentMessageId: string;
   readonly startedAtMs?: number;
   readonly status: ConversationStatus;
-  readonly snippet: string;
   readonly time: string;
   readonly done: boolean;
   readonly blocks: readonly AgentBlock[];
@@ -258,7 +255,6 @@ function isActiveRunUpdate(value: unknown): value is ActiveRunUpdate {
     typeof value.agentMessageId === "string" &&
     (value.startedAtMs === undefined || typeof value.startedAtMs === "number") &&
     isConversationStatus(value.status) &&
-    typeof value.snippet === "string" &&
     typeof value.time === "string" &&
     typeof value.done === "boolean" &&
     Array.isArray(value.blocks) &&
@@ -392,7 +388,7 @@ async function streamRun(
 
 /**
  * Run a real agent for one turn, rebuilding the agent message's blocks as events
- * stream in (`onBlocks`). Returns the resulting conversation status + snippet.
+ * stream in (`onBlocks`). Returns the resulting conversation status and usage.
  */
 export async function runConversation(opts: {
   readonly profile: AgentProfile;
@@ -727,7 +723,7 @@ export async function runConversation(opts: {
   if (detached) {
     flushLiveBlocks();
     opts.onBlocks([...rebuild(), { kind: "status", level: "info", text: translate(opts.locale, "runDetachedSnippet") }]);
-    return { status: "detached", snippet: "", sessionId };
+    return { status: "detached", sessionId };
   }
 
   flushLiveBlocks();
@@ -761,12 +757,5 @@ export async function runConversation(opts: {
   }
   opts.onBlocks(finalBlocks);
 
-  const snippet = canceled
-    ? translate(opts.locale, "runCanceledSnippet")
-    : hadError || warningOnlyFailure
-      ? translate(opts.locale, "runFailedSnippet")
-      : needsInput
-        ? translate(opts.locale, "runNeedsInputSnippet")
-      : truncate((hasText ? text : translate(opts.locale, "runDoneSnippet")).replace(/\s+/g, " "), 60);
-  return { status, snippet, costUsd, usage, sessionId };
+  return { status, costUsd, usage, sessionId };
 }

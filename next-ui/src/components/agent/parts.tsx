@@ -10,7 +10,7 @@ import VisibilityOutlinedIcon from "@mui/icons-material/VisibilityOutlined";
 import { Box, Stack, Typography } from "@mui/material";
 import { styled } from "@mui/material/styles";
 import { type MouseEvent as ReactMouseEvent, type ReactNode, useState } from "react";
-import Markdown, { type Components } from "react-markdown";
+import Markdown, { defaultUrlTransform, type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useI18n } from "../../i18n/I18nProvider";
 import { localFileUrl, normalizeExternalUrl } from "../../lib/external-url";
@@ -39,6 +39,10 @@ function normalizedRlabToolName(value: string): string {
 
 function rlabToolMarkdownLinks(text: string): string {
   return text.replace(RLAB_TOOL_LINK_RE, (_match, tool: string) => `[${normalizedRlabToolName(tool)}](rlab-tool:${normalizedRlabToolName(tool)})`);
+}
+
+function messageMarkdownUrlTransform(url: string): string {
+  return url.startsWith("rlab-tool:") ? url : defaultUrlTransform(url);
 }
 
 function RlabToolIcon() {
@@ -423,7 +427,7 @@ const markdownComponents = {
 function MarkdownMessage({ text }: { readonly text: string }) {
   return (
     <Stack spacing={1} sx={{ width: "100%", minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }}>
-      <Markdown remarkPlugins={[remarkGfm]} skipHtml components={markdownComponents}>
+      <Markdown remarkPlugins={[remarkGfm]} skipHtml components={markdownComponents} urlTransform={messageMarkdownUrlTransform}>
         {rlabToolMarkdownLinks(text)}
       </Markdown>
     </Stack>
@@ -448,11 +452,14 @@ export function MessageText({ text, streaming }: { readonly text: string; readon
 export function StatusNote({ level, children }: { readonly level: StatusKey; readonly children: ReactNode }) {
   return (
     <Stack
+      data-testid="status-note"
       direction="row"
       spacing={1}
       sx={{
+        display: "inline-flex",
         alignItems: "center",
         alignSelf: "flex-start",
+        width: "fit-content",
         px: 1.25,
         py: 0.75,
         borderRadius: (t) => `${t.custom.radii.md}px`,

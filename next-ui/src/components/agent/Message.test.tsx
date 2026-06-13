@@ -77,6 +77,20 @@ describe("Message", () => {
     expect(link).toHaveAttribute("href", "rlab-tool:TaskWakeup");
   });
 
+  it("renders bare urls in user messages as links", () => {
+    renderMessage({
+      id: "user-links",
+      role: "user",
+      text: "Ссылки:\nhttps://github.com/MiniMax-AI/MSA\nhttps://huggingface.co/blog/AtlasCloud-AI/minimax-goes-sparse",
+    });
+
+    expect(screen.getByRole("link", { name: "https://github.com/MiniMax-AI/MSA" })).toHaveAttribute("href", "https://github.com/MiniMax-AI/MSA");
+    expect(screen.getByRole("link", { name: "https://huggingface.co/blog/AtlasCloud-AI/minimax-goes-sparse" })).toHaveAttribute(
+      "href",
+      "https://huggingface.co/blog/AtlasCloud-AI/minimax-goes-sparse",
+    );
+  });
+
   it("shows real elapsed time for an empty live agent message", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-06-10T12:00:07.000Z"));
@@ -137,6 +151,24 @@ describe("Message", () => {
     expect(disclosure).toHaveAttribute("aria-expanded", "true");
   });
 
+  it("surfaces a legacy trailing result:false text block as the completed answer", () => {
+    const message: ChatMessage = {
+      id: "agent-legacy-result",
+      role: "agent",
+      blocks: [
+        { kind: "text", text: "Сначала проверю файлы", result: false },
+        { kind: "tool", name: "Shell", summary: "git status", state: "ok", output: "" },
+        { kind: "text", text: "Финальный ответ", result: false },
+      ],
+    };
+
+    renderMessage(message);
+
+    expect(screen.getByText("Финальный ответ")).toBeInTheDocument();
+    expect(screen.queryByText("Сначала проверю файлы")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /размышление/i })).toHaveAttribute("aria-expanded", "false");
+  });
+
   it("surfaces only the last terminal warning when a completed agent turn has no answer output", () => {
     const message: ChatMessage = {
       id: "agent-warning-only",
@@ -150,8 +182,29 @@ describe("Message", () => {
 
     renderMessage(message);
 
-    expect(screen.getByText("api retry · overloaded #2")).toBeInTheDocument();
+    const disclosure = screen.getByRole("button", { name: /размышление/i });
+    expect(disclosure).toHaveAttribute("aria-expanded", "false");
+    const terminalWarning = screen.getByText("api retry · overloaded #2").closest("[data-testid='status-note']");
+    expect(terminalWarning).toBeInTheDocument();
+    expect(terminalWarning).toHaveStyle({ display: "inline-flex", width: "fit-content", alignSelf: "flex-start" });
     expect(screen.queryByText("api retry · overloaded #1")).not.toBeInTheDocument();
+  });
+
+  it("does not surface a terminal warning when it is followed by another reasoning event", () => {
+    const message: ChatMessage = {
+      id: "agent-warning-not-last",
+      role: "agent",
+      blocks: [
+        { kind: "reasoning", text: "Проверяю контекст", duration: "2s" },
+        { kind: "status", level: "warn", text: "api retry · overloaded" },
+        { kind: "reasoning", text: "Продолжаю после ретрая", duration: "1s" },
+      ],
+    };
+
+    renderMessage(message);
+
+    expect(screen.getByRole("button", { name: /размышление/i })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("api retry · overloaded")).not.toBeInTheDocument();
   });
 
   it("keeps terminal warnings folded when the completed agent turn already has answer output", () => {

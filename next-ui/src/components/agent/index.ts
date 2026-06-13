@@ -1,6 +1,7 @@
 /** Agent conversation kit — messages, reasoning, actions, and the composer. */
 export * from "./types";
 export * from "./agents";
+export * from "./agent-limits";
 export { AgentBrandIcon } from "./AgentBrandIcon";
 export { AgentMonogram } from "./AgentMonogram";
 export { AgentGlyph } from "./AgentGlyph";

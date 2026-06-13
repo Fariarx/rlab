@@ -20,7 +20,7 @@ import { DiffCard } from "./DiffCard";
 import { DEFAULT_AGENT_OPTION_ID, agentProfileLabels, getAgent, resolveAgentReasoningValue, type AgentProfile } from "./agents";
 import { rise } from "./anim";
 import type { MessageActionHandlers } from "./message-actions";
-import { AgentAvatar, InlinePluginText, TypingDots, UserAvatar } from "./parts";
+import { AgentAvatar, MessageText, TypingDots, UserAvatar } from "./parts";
 import type { AgentBlock, ChatMessage, DiffBlock, PlanBlock } from "./types";
 
 interface MessageAttachment {
@@ -266,9 +266,7 @@ function UserMessage({ message, delay, actions }: { readonly message: ChatMessag
                   border: (t) => `1px solid ${t.custom.borders.subtle}`,
                 }}
               >
-                <Typography component="div" sx={{ minWidth: 0, maxWidth: "100%", fontSize: "0.9rem", lineHeight: 1.6, color: "text.primary", whiteSpace: "pre-line", overflowWrap: "anywhere", wordBreak: "break-word" }}>
-                  <InlinePluginText text={displayText} />
-                </Typography>
+                <MessageText text={displayText} />
               </Box>
             )}
             {attachments.length > 0 && <MessageAttachments attachments={attachments} onOpenImage={setPreviewImage} />}
@@ -393,17 +391,28 @@ function isVisibleTerminalStatus(block: AgentBlock): block is VisibleTerminalSta
   return block.kind === "status" && (block.level === "warn" || block.level === "error");
 }
 
-function lastVisibleTerminalStatus(blocks: readonly AgentBlock[], live: boolean, hasVisibleAnswerOutput: boolean): VisibleTerminalStatusBlock | null {
+function terminalStatusAnswerBlock(blocks: readonly AgentBlock[], live: boolean, hasVisibleAnswerOutput: boolean): VisibleTerminalStatusBlock | null {
   if (live || hasVisibleAnswerOutput) {
     return null;
   }
   for (let index = blocks.length - 1; index >= 0; index -= 1) {
     const block = blocks[index];
-    if (isVisibleTerminalStatus(block)) {
-      return block;
+    if (block.kind === DIFF_KIND || block.kind === "plan") {
+      continue;
     }
+    return isVisibleTerminalStatus(block) ? block : null;
   }
   return null;
+}
+
+function lastTimelineNonTextBlockIndex(blocks: readonly AgentBlock[]): number {
+  for (let index = blocks.length - 1; index >= 0; index -= 1) {
+    const block = blocks[index];
+    if (block.kind === "reasoning" || block.kind === "tool" || block.kind === "command" || block.kind === "search" || block.kind === "code") {
+      return index;
+    }
+  }
+  return -1;
 }
 
 function ChangedFilesAccordion({ blocks, delay }: { readonly blocks: readonly DiffBlock[]; readonly delay: number }) {
@@ -710,17 +719,20 @@ function AgentMessage({
   }, [hasResolvedInput, resolvedInputsSignature]);
   // Only the final result text escapes the Reasoning container; narration text
   // that arrived before/between tool calls stays interleaved with them inside.
-  // Legacy/persisted text blocks have no `result` flag — treat them as result
-  // (visible) unless explicitly marked as narration (result === false).
-  const isResultText = (block: AgentBlock): boolean => block.kind === "text" && block.result !== false && !live;
-  const isAnswerBlock = (block: AgentBlock): boolean =>
+  // Legacy/persisted text blocks have no `result` flag, and older interrupted
+  // turns sometimes stored the final answer as result:false. Keep interstitial
+  // narration folded, but still surface the trailing text after the last
+  // reasoning/tool/search/code block as the answer.
+  const lastNonTextBlockIndex = lastTimelineNonTextBlockIndex(blocks);
+  const isResultText = (block: AgentBlock, index: number): boolean => block.kind === "text" && !live && (block.result !== false || index > lastNonTextBlockIndex);
+  const isAnswerBlock = (block: AgentBlock, index: number): boolean =>
     readOnlyImageToolPath(block) != null ||
-    isResultText(block) ||
+    isResultText(block, index) ||
     (ANSWER_BLOCK_KINDS.has(block.kind) && block.kind !== "text" && (!isResolvedInputBlock(block) || !hideResolvedInputs));
-  const baseAnswerBlocks = blocks.filter((block) => isAnswerBlock(block));
-  const visibleTerminalStatus = lastVisibleTerminalStatus(blocks, live, baseAnswerBlocks.length > 0);
+  const baseAnswerBlocks = blocks.filter((block, index) => isAnswerBlock(block, index));
+  const visibleTerminalStatus = terminalStatusAnswerBlock(blocks, live, baseAnswerBlocks.length > 0);
   const detailBlocks = [
-    ...blocks.filter((block) => !isAnswerBlock(block) && block.kind !== DIFF_KIND && block.kind !== "plan"),
+    ...blocks.filter((block, index) => !isAnswerBlock(block, index) && block.kind !== DIFF_KIND && block.kind !== "plan" && !isVisibleTerminalStatus(block)),
     ...archivedPlanBlocks,
   ];
   const answerBlocks = [...baseAnswerBlocks, ...(visibleTerminalStatus ? [visibleTerminalStatus] : [])];

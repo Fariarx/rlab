@@ -1,6 +1,6 @@
 import { fireEvent, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import { ConversationList, type ConversationSummary } from "../src/components/agent";
+import { ConversationList, type ChatMessage, type ConversationSummary } from "../src/components/agent";
 import { renderWithThemeAndVirtuoso } from "./util/render-with-virtuoso";
 
 const base: ConversationSummary = {
@@ -16,8 +16,10 @@ function noopActions() {
   return { onRename: vi.fn(), onTogglePin: vi.fn(), onArchive: vi.fn(), onDelete: vi.fn() };
 }
 
-function render(chats: readonly ConversationSummary[], actions = noopActions(), wakeupConversationIds: ReadonlySet<string> = new Set()) {
-  renderWithThemeAndVirtuoso(<ConversationList projects={[]} chats={chats} selectedId={chats[0]?.id ?? null} onSelect={vi.fn()} actions={actions} wakeupConversationIds={wakeupConversationIds} />);
+function render(chats: readonly ConversationSummary[], actions = noopActions(), wakeupConversationIds: ReadonlySet<string> = new Set(), threads: Readonly<Record<string, readonly ChatMessage[]>> = {}) {
+  renderWithThemeAndVirtuoso(
+    <ConversationList projects={[]} chats={chats} threads={threads} selectedId={chats[0]?.id ?? null} onSelect={vi.fn()} actions={actions} wakeupConversationIds={wakeupConversationIds} />,
+  );
   return actions;
 }
 
@@ -183,6 +185,25 @@ describe("ConversationList time labels", () => {
 
     expect(screen.getByText("15:19")).toBeInTheDocument();
     expect(screen.queryByText("03:19 PM")).not.toBeInTheDocument();
+  });
+});
+
+describe("ConversationList subtitles", () => {
+  it("renders the latest user/model text instead of a persisted dialog status snippet", () => {
+    render(
+      [{ ...base, id: "status-snippet", title: "Status snippet", snippet: "Запуск завершился с ошибкой", status: "error" }],
+      noopActions(),
+      new Set(),
+      {
+        "status-snippet": [
+          { id: "u1", role: "user", text: "Проверь SDK интеграцию" },
+          { id: "a1", role: "agent", blocks: [{ kind: "status", level: "error", text: "Запуск завершился с ошибкой" }] },
+        ],
+      },
+    );
+
+    expect(screen.getByText("Проверь SDK интеграцию")).toBeInTheDocument();
+    expect(screen.queryByText("Запуск завершился с ошибкой")).not.toBeInTheDocument();
   });
 });
 

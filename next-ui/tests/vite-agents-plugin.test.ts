@@ -3287,11 +3287,11 @@ Built-in agents:
     expect(canceledConversation).toMatchObject({
       activeRunId: undefined,
       status: "idle",
-      snippet: "Запуск остановлен",
+      snippet: "partial",
     });
     expect(canceledBlocks).toEqual([
       { kind: "reasoning", text: "Still running", active: false },
-      { kind: "text", text: "partial", streaming: false },
+      { kind: "text", text: "partial", streaming: false, result: true },
       { kind: "status", level: "warn", text: "Запуск остановлен" },
     ]);
   });
@@ -3331,7 +3331,7 @@ Built-in agents:
     expect(result.state.chats.find((conversation) => conversation.id === "chat-2")).toMatchObject({
       activeRunId: undefined,
       status: "idle",
-      snippet: "Запуск остановлен",
+      snippet: "Черновик готов. Открыть PR с обновлением CHANGELOG.md?",
     });
     expect(result.state.threads["chat-2"].find((message) => message.id === "a-detached")?.blocks).toEqual([
       { kind: "reasoning", text: "Still running", active: false },
@@ -3412,7 +3412,7 @@ Built-in agents:
     expect(finished.chats.find((conversation) => conversation.id === "chat-2")).toMatchObject({
       activeRunId: undefined,
       status: "idle",
-      snippet: "Запуск остановлен",
+      snippet: "partial",
     });
     expect(blocks).toEqual([
       { kind: "reasoning", text: "Still running", active: false, duration: expect.stringMatching(/s$/) },
@@ -3622,12 +3622,12 @@ Built-in agents:
     expect(reconciled.chats.find((conversation) => conversation.id === "chat-2")).toMatchObject({
       activeRunId: undefined,
       status: "error",
-      snippet: "Фоновый запуск прерван",
+      snippet: "partial answer",
     });
     const staleBlocks = reconciled.threads["chat-2"].find((message) => message.id === "a-stale")?.blocks;
     expect(staleBlocks).toEqual([
       { kind: "reasoning", text: "Still thinking", active: false },
-      { kind: "text", text: "partial answer", streaming: false },
+      { kind: "text", text: "partial answer", streaming: false, result: true },
       { kind: "status", level: "error", text: "Фоновый запуск прерван" },
     ]);
     expect(reconciled.projects[0]?.conversations.find((conversation) => conversation.id === "c-flaky")).toMatchObject({
@@ -3652,7 +3652,7 @@ Built-in agents:
     expect(reconciled.chats.find((conversation) => conversation.id === "chat-2")).toMatchObject({
       activeRunId: undefined,
       status: "error",
-      snippet: "Фоновый запуск прерван",
+      snippet: "Still running",
     });
     expect(Object.prototype.hasOwnProperty.call(reconciled.threads, "chat-2")).toBe(false);
   });
@@ -3672,7 +3672,7 @@ Built-in agents:
     expect(canceled.chats.find((conversation) => conversation.id === "chat-2")).toMatchObject({
       activeRunId: undefined,
       status: "idle",
-      snippet: "Запуск остановлен",
+      snippet: "Still running",
     });
     expect(Object.prototype.hasOwnProperty.call(canceled.threads, "chat-2")).toBe(false);
   });
@@ -3690,17 +3690,15 @@ Built-in agents:
     // A normal streaming event pins the conversation to "running" + this runId,
     // not an empty patch — otherwise a prior "interrupted" reconcile leaves it
     // stuck at "error" while the agent keeps working.
-    const streaming = backgroundRunStatusPatch(binding, [{ kind: "text", text: "working" }], "en");
+    const streaming = backgroundRunStatusPatch(binding, [{ kind: "text", text: "working" }]);
     expect(streaming).toEqual({ status: "running", activeRunId: "run-live", snippet: "working", time: "2026-06-06T14:00:01.000Z" });
 
-    // Tool-only runs still overwrite stale interrupted snippets while the turn
-    // is alive, even before any assistant text arrives.
-    const toolOnly = backgroundRunStatusPatch(binding, [{ kind: "tool", name: "Shell", summary: "npm run dev", state: "running" }], "en");
-    expect(toolOnly).toEqual({ status: "running", activeRunId: "run-live", snippet: "npm run dev", time: "2026-06-06T14:00:01.000Z" });
+    const toolOnly = backgroundRunStatusPatch(binding, [{ kind: "tool", name: "Shell", summary: "npm run dev", state: "running" }]);
+    expect(toolOnly).toEqual({ status: "running", activeRunId: "run-live", time: "2026-06-06T14:00:01.000Z" });
 
     // A block awaiting input pins it to "waiting" but still keeps the runId.
-    const waiting = backgroundRunStatusPatch(binding, [{ kind: "approval", title: "Run cmd" }], "en");
-    expect(waiting).toEqual({ status: "waiting", activeRunId: "run-live", snippet: "Needs input", time: "2026-06-06T14:00:01.000Z" });
+    const waiting = backgroundRunStatusPatch(binding, [{ kind: "approval", title: "Run cmd" }]);
+    expect(waiting).toEqual({ status: "waiting", activeRunId: "run-live", time: "2026-06-06T14:00:01.000Z" });
   });
 
   it("serializes active background run handles for browser reconnects", () => {
@@ -3772,7 +3770,6 @@ Built-in agents:
       userMessageId: binding.userMessageId,
       agentMessageId: binding.agentMessageId,
       status: "running",
-      snippet: "Working",
       time: binding.agentMessageTime,
       done: false,
       blocks: [{ kind: "text", text: "live" }],
@@ -3894,7 +3891,7 @@ Built-in agents:
     expect(settled.chats.find((conversation) => conversation.id === "chat-2")).toMatchObject({
       activeRunId: undefined,
       status: "error",
-      snippet: "Запуск завершился с ошибкой",
+      snippet: "Use an unsupported profile",
     });
     expect(settled.threads["chat-2"]).toEqual(
       expect.arrayContaining([
@@ -3981,7 +3978,7 @@ Built-in agents:
     expect(settled.chats.find((conversation) => conversation.id === "chat-2")).toMatchObject({
       activeRunId: undefined,
       status: "error",
-      snippet: "Запуск завершился с ошибкой",
+      snippet: "Run with missing CLI",
     });
     expect(settled.threads["chat-2"]).toEqual(
       expect.arrayContaining([

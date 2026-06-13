@@ -301,7 +301,7 @@ describe("runConversation", () => {
       onBlocks: (nextBlocks) => blocks.push(nextBlocks),
     });
 
-    expect(result).toMatchObject({ status: "waiting", snippet: "Ждёт ввод" });
+    expect(result).toMatchObject({ status: "waiting" });
     expect(blocks.at(-1)).toContainEqual({
       kind: "approval",
       id: "approval-1",
@@ -338,7 +338,7 @@ describe("runConversation", () => {
       onBlocks: (nextBlocks) => blocks.push(nextBlocks),
     });
 
-    expect(result).toMatchObject({ status: "waiting", snippet: "Ждёт ввод" });
+    expect(result).toMatchObject({ status: "waiting" });
     expect(blocks.at(-1)).toContainEqual({
       kind: "options",
       id: "toolu_question:q0",
@@ -629,7 +629,6 @@ describe("runConversation", () => {
     });
 
     expect(result.status).toBe("error");
-    expect(result.snippet).toBe("Запуск завершился с ошибкой");
   });
 
   it("returns usage from completed run events", async () => {
@@ -691,7 +690,6 @@ describe("runConversation", () => {
       userMessageId: "user-1",
       agentMessageId: "agent-1",
       status: "done",
-      snippet: "done",
       time: "10:00",
       done: true,
       blocks: [{ kind: "text", text: "done", streaming: false }],
@@ -714,7 +712,6 @@ describe("runConversation", () => {
       conversationId: "chat-1",
       agentMessageId: "agent-1",
       status: "done",
-      snippet: "done",
       time: "10:00",
       done: true,
       blocks: [{ kind: "text", text: "done", streaming: false }],

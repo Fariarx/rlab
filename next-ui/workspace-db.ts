@@ -2,6 +2,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import process from "node:process";
 import type { AgentBlock, ChatMessage, ComposerDraft, ConversationSummary, Project } from "./src/components/agent/types";
+import { conversationPreviewSnippet, messagePreviewText, previewSnippet } from "./src/lib/conversation-preview";
 import type { WorkspaceMutation } from "./src/lib/workspace-mutations";
 import type { WorkspaceState } from "./src/lib/workspace-state";
 
@@ -130,6 +131,7 @@ export function readWorkspaceRevision(): number {
 }
 
 type ProjectMeta = Omit<Project, "conversations">;
+type MessageRow = { readonly conversationId: string; readonly data: string };
 
 export type WorkspaceDbMutation = WorkspaceMutation;
 
@@ -150,6 +152,38 @@ function projectMeta(project: Project): ProjectMeta {
   return meta;
 }
 
+function messageFromRow(row: MessageRow): ChatMessage {
+  return JSON.parse(row.data) as ChatMessage;
+}
+
+function previewSnippetsFromLoadedThreads(threads: Readonly<Record<string, readonly ChatMessage[]>>): ReadonlyMap<string, string> {
+  return new Map(
+    Object.entries(threads)
+      .map(([conversationId, messages]) => [conversationId, conversationPreviewSnippet(messages, 60)] as const)
+      .filter(([, snippet]) => snippet.length > 0),
+  );
+}
+
+function readConversationPreviewSnippets(handle: DatabaseHandle): ReadonlyMap<string, string> {
+  const rows = handle.prepare("SELECT conversation_id AS conversationId, data FROM messages ORDER BY conversation_id, position DESC").all() as MessageRow[];
+  const snippets = new Map<string, string>();
+  for (const row of rows) {
+    if (snippets.has(row.conversationId)) {
+      continue;
+    }
+    const text = messagePreviewText(messageFromRow(row));
+    if (text.length > 0) {
+      snippets.set(row.conversationId, previewSnippet(text, 60));
+    }
+  }
+  return snippets;
+}
+
+function withConversationPreview(conversation: ConversationSummary, snippets: ReadonlyMap<string, string>): ConversationSummary {
+  const snippet = snippets.get(conversation.id);
+  return snippet === undefined || snippet === conversation.snippet ? conversation : { ...conversation, snippet };
+}
+
 /** True once a workspace has been persisted — used to gate one-time import/seed. */
 export function workspaceDbHasState(): boolean {
   const row = database().prepare("SELECT EXISTS(SELECT 1 FROM kv WHERE key = 'settings') AS present").get() as { present: number };
@@ -165,7 +199,7 @@ export function readWorkspaceStateFromDb(includeThreadIds?: ReadonlySet<string>)
   const convRows = handle.prepare("SELECT project_id AS projectId, data FROM conversations ORDER BY position").all() as Array<{ projectId: string | null; data: string }>;
   const msgRows = (includeThreadIds
     ? [...includeThreadIds].flatMap((id) => handle.prepare("SELECT conversation_id AS conversationId, data FROM messages WHERE conversation_id = ? ORDER BY position").all(id))
-    : handle.prepare("SELECT conversation_id AS conversationId, data FROM messages ORDER BY conversation_id, position").all()) as Array<{ conversationId: string; data: string }>;
+    : handle.prepare("SELECT conversation_id AS conversationId, data FROM messages ORDER BY conversation_id, position").all()) as MessageRow[];
   const draftRows = handle.prepare("SELECT conversation_id AS conversationId, data FROM composer_drafts").all() as Array<{ conversationId: string; data: string }>;
   const kvRows = handle.prepare("SELECT key, value FROM kv").all() as Array<{ key: string; value: string }>;
 
@@ -175,14 +209,16 @@ export function readWorkspaceStateFromDb(includeThreadIds?: ReadonlySet<string>)
     list.push(JSON.parse(row.data) as ConversationSummary);
     convsByProject.set(row.projectId, list);
   }
-  const projects: Project[] = projectRows.map((row) => ({
-    ...(JSON.parse(row.data) as Omit<Project, "conversations">),
-    conversations: convsByProject.get(row.id) ?? [],
-  }));
   const threads: Record<string, ChatMessage[]> = {};
   for (const row of msgRows) {
-    (threads[row.conversationId] ??= []).push(JSON.parse(row.data) as ChatMessage);
+    (threads[row.conversationId] ??= []).push(messageFromRow(row));
   }
+  const snippets = includeThreadIds ? readConversationPreviewSnippets(handle) : previewSnippetsFromLoadedThreads(threads);
+  const conversationsForProject = (projectId: string | null): ConversationSummary[] => (convsByProject.get(projectId) ?? []).map((conversation) => withConversationPreview(conversation, snippets));
+  const projects: Project[] = projectRows.map((row) => ({
+    ...(JSON.parse(row.data) as Omit<Project, "conversations">),
+    conversations: conversationsForProject(row.id),
+  }));
   const composerDrafts: Record<string, ComposerDraft> = {};
   for (const row of draftRows) {
     composerDrafts[row.conversationId] = JSON.parse(row.data) as ComposerDraft;
@@ -190,7 +226,7 @@ export function readWorkspaceStateFromDb(includeThreadIds?: ReadonlySet<string>)
   const kv = new Map(kvRows.map((row) => [row.key, row.value] as const));
   const selectedId = kv.has("selectedId") ? (JSON.parse(kv.get("selectedId") as string) as string) : "";
   const settings = JSON.parse(kv.get("settings") ?? "null") as WorkspaceState["settings"];
-  return { chats: convsByProject.get(null) ?? [], projects, threads, composerDrafts, selectedId, settings };
+  return { chats: conversationsForProject(null), projects, threads, composerDrafts, selectedId, settings };
 }
 
 /** Seed an empty database. This is intentionally insert-only and refuses to run
