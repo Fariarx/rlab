@@ -26,33 +26,28 @@ type DatabaseHandle = InstanceType<typeof DatabaseSync>;
 
 let db: DatabaseHandle | null = null;
 const WORKSPACE_REVISION_KEY = "workspaceRevision";
+const PREVIEW_SNIPPET_LOOKBACK_MESSAGES = 20;
 
-const SCHEMA = `
+const TABLE_SCHEMA = `
 CREATE TABLE IF NOT EXISTS projects (
   id TEXT PRIMARY KEY,
   position INTEGER NOT NULL,
   data TEXT NOT NULL
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_position ON projects(position);
 CREATE TABLE IF NOT EXISTS conversations (
   id TEXT PRIMARY KEY,
-  project_id TEXT,
+  project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
   position INTEGER NOT NULL,
   data TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_conversations_project ON conversations(project_id, position);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_root_position ON conversations(position) WHERE project_id IS NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_project_position ON conversations(project_id, position) WHERE project_id IS NOT NULL;
 CREATE TABLE IF NOT EXISTS messages (
   id TEXT PRIMARY KEY,
-  conversation_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
   position INTEGER NOT NULL,
   data TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, position);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_conversation_position ON messages(conversation_id, position);
 CREATE TABLE IF NOT EXISTS composer_drafts (
-  conversation_id TEXT PRIMARY KEY,
+  conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
   data TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS kv (
@@ -60,6 +55,70 @@ CREATE TABLE IF NOT EXISTS kv (
   value TEXT NOT NULL
 );
 `;
+
+const INDEX_SCHEMA = `
+CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_position ON projects(position);
+CREATE INDEX IF NOT EXISTS idx_conversations_project ON conversations(project_id, position);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_root_position ON conversations(position) WHERE project_id IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_project_position ON conversations(project_id, position) WHERE project_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, position);
+CREATE INDEX IF NOT EXISTS idx_messages_conversation_desc ON messages(conversation_id, position DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_conversation_position ON messages(conversation_id, position);
+`;
+
+function tableExists(handle: DatabaseHandle, name: string): boolean {
+  const row = handle.prepare("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) as { present: number } | undefined;
+  return row !== undefined;
+}
+
+function tableHasForeignKeys(handle: DatabaseHandle, name: string): boolean {
+  return (handle.prepare(`PRAGMA foreign_key_list(${name})`).all() as unknown[]).length > 0;
+}
+
+function workspaceTablesNeedForeignKeyMigration(handle: DatabaseHandle): boolean {
+  return tableExists(handle, "messages") && (!tableHasForeignKeys(handle, "conversations") || !tableHasForeignKeys(handle, "messages") || !tableHasForeignKeys(handle, "composer_drafts"));
+}
+
+function assertForeignKeyIntegrity(handle: DatabaseHandle): void {
+  const violations = handle.prepare("PRAGMA foreign_key_check").all() as Array<{ table: string; rowid: number; parent: string; fkid: number }>;
+  if (violations.length > 0) {
+    const first = violations[0];
+    throw new Error(`Workspace database foreign key violation in ${first.table} row ${first.rowid} referencing ${first.parent}.`);
+  }
+}
+
+function migrateWorkspaceTablesToForeignKeys(handle: DatabaseHandle): void {
+  if (!workspaceTablesNeedForeignKeyMigration(handle)) {
+    return;
+  }
+  handle.exec("BEGIN");
+  try {
+    handle.exec(`
+ALTER TABLE projects RENAME TO projects_old;
+ALTER TABLE conversations RENAME TO conversations_old;
+ALTER TABLE messages RENAME TO messages_old;
+ALTER TABLE composer_drafts RENAME TO composer_drafts_old;
+${TABLE_SCHEMA}
+INSERT INTO projects(id, position, data) SELECT id, position, data FROM projects_old;
+INSERT INTO conversations(id, project_id, position, data) SELECT id, project_id, position, data FROM conversations_old;
+INSERT INTO messages(id, conversation_id, position, data) SELECT id, conversation_id, position, data FROM messages_old;
+INSERT INTO composer_drafts(conversation_id, data) SELECT conversation_id, data FROM composer_drafts_old;
+DROP TABLE composer_drafts_old;
+DROP TABLE messages_old;
+DROP TABLE conversations_old;
+DROP TABLE projects_old;
+${INDEX_SCHEMA}
+`);
+    handle.exec("COMMIT");
+  } catch (error) {
+    try {
+      handle.exec("ROLLBACK");
+    } catch {
+      // ignore rollback failure; surface the original migration error
+    }
+    throw error;
+  }
+}
 
 /** Open (or create) the workspace database in WAL mode. Idempotent. */
 export function initWorkspaceDb(file: string): void {
@@ -73,7 +132,13 @@ export function initWorkspaceDb(file: string): void {
   handle.exec("PRAGMA foreign_keys = ON");
   handle.exec("PRAGMA journal_mode = WAL");
   handle.exec("PRAGMA synchronous = NORMAL");
-  handle.exec(SCHEMA);
+  if (tableExists(handle, "messages")) {
+    migrateWorkspaceTablesToForeignKeys(handle);
+  } else {
+    handle.exec(TABLE_SCHEMA);
+    handle.exec(INDEX_SCHEMA);
+  }
+  assertForeignKeyIntegrity(handle);
   db = handle;
 }
 
@@ -165,15 +230,17 @@ function previewSnippetsFromLoadedThreads(threads: Readonly<Record<string, reado
 }
 
 function readConversationPreviewSnippets(handle: DatabaseHandle): ReadonlyMap<string, string> {
-  const rows = handle.prepare("SELECT conversation_id AS conversationId, data FROM messages ORDER BY conversation_id, position DESC").all() as MessageRow[];
+  const conversations = handle.prepare("SELECT id FROM conversations ORDER BY id").all() as Array<{ id: string }>;
+  const recentMessages = handle.prepare("SELECT conversation_id AS conversationId, data FROM messages WHERE conversation_id = ? ORDER BY position DESC LIMIT ?");
   const snippets = new Map<string, string>();
-  for (const row of rows) {
-    if (snippets.has(row.conversationId)) {
-      continue;
-    }
-    const text = messagePreviewText(messageFromRow(row));
-    if (text.length > 0) {
-      snippets.set(row.conversationId, previewSnippet(text, 60));
+  for (const conversation of conversations) {
+    const rows = recentMessages.all(conversation.id, PREVIEW_SNIPPET_LOOKBACK_MESSAGES) as MessageRow[];
+    for (const row of rows) {
+      const text = messagePreviewText(messageFromRow(row));
+      if (text.length > 0) {
+        snippets.set(row.conversationId, previewSnippet(text, 60));
+        break;
+      }
     }
   }
   return snippets;

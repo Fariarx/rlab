@@ -27,6 +27,7 @@ import {
   type RunEventAccumulator,
 } from "./src/lib/run-event-accumulator";
 import { attachPtyTerminalWebSockets, PtyTerminalManager } from "./src/server/pty-terminal";
+import { attachExactApiRoutes, methodOnly, type ApiHandler, type ExactApiRoute } from "./src/server/api-router";
 import {
   cloneAppSettings,
   defaultAppSettings,
@@ -54,6 +55,7 @@ import {
   type WorkspaceDbMutation,
 } from "./workspace-db";
 import {
+  AGENTS,
   agentProfileEquals,
   claudeAgentNameFromMode,
   DEFAULT_AGENT_OPTION_ID,
@@ -70,6 +72,7 @@ import {
   type AgentAccessMode,
   type AgentOption,
   type AgentProfile,
+  type VisibleAgentId,
 } from "./src/lib/agent-catalog";
 import {
   type AgentBlock,
@@ -173,17 +176,21 @@ interface AgentCliInfo {
   readonly modelDiscoveryError?: string;
 }
 
-// Keys must match AgentId in src/components/agent/agents.ts.
-const DETECT: Record<string, Detect> = {
-  "claude-code": { bins: ["claude"], sdkRuntime: true, env: ["ANTHROPIC_API_KEY"], hasAuth: hasClaudeStoredAuth },
-  codex: { bins: ["codex"], env: ["OPENAI_API_KEY", "CODEX_API_KEY"], hasAuth: hasCodexStoredAuth },
-  gemini: { bins: ["gemini"], env: ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENAI_API_KEY"], hasAuth: hasGeminiStoredAuth },
-  opencode: { bins: ["opencode"] },
+const AGENT_RUNTIME_DETECTION: Record<VisibleAgentId, Omit<Detect, "bins">> = {
+  "claude-code": { sdkRuntime: true, env: ["ANTHROPIC_API_KEY"], hasAuth: hasClaudeStoredAuth },
+  codex: { env: ["OPENAI_API_KEY", "CODEX_API_KEY"], hasAuth: hasCodexStoredAuth },
+  gemini: { env: ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENAI_API_KEY"], hasAuth: hasGeminiStoredAuth },
+  opencode: {},
 };
 
-const RUNNABLE_AGENT_IDS = new Set(["claude-code", "codex", "gemini", "opencode"]);
+const DETECT = {} as Record<VisibleAgentId, Detect>;
+for (const agent of AGENTS) {
+  DETECT[agent.id] = { bins: agent.cliBins, ...AGENT_RUNTIME_DETECTION[agent.id] };
+}
 
-const INSTALL_COMMANDS: Partial<Record<string, readonly string[]>> = {
+const RUNNABLE_AGENT_IDS: ReadonlySet<string> = new Set(AGENTS.filter((agent) => agent.runAdapter).map((agent) => agent.id));
+
+const INSTALL_COMMANDS: Partial<Record<VisibleAgentId, readonly string[]>> = {
   "claude-code": ["npm", "install", "@anthropic-ai/claude-agent-sdk@latest", "@anthropic-ai/sdk@latest"],
   codex: ["npm", "install", "-g", "@openai/codex@latest"],
   gemini: ["npm", "install", "-g", "@google/gemini-cli@latest"],
@@ -214,7 +221,7 @@ export function visibleAgentDetectionIds(): readonly string[] {
 }
 
 export function installCommandForAgent(agent: string): readonly string[] | null {
-  return INSTALL_COMMANDS[agent] ?? null;
+  return isAgentId(agent) ? (INSTALL_COMMANDS[agent] ?? null) : null;
 }
 
 export interface AgentSecretConfig {
@@ -798,7 +805,7 @@ export function npmPackageNameFromInstallSpec(spec: string): string | null {
 }
 
 function npmPackageNameForAgent(agent: string): string | null {
-  const command = INSTALL_COMMANDS[agent];
+  const command = installCommandForAgent(agent);
   if (!command || command[0] !== "npm") {
     return null;
   }
@@ -863,7 +870,7 @@ async function checkCliUpdateForAgent(agent: string): Promise<{ readonly update?
   if (!packageName) {
     return {};
   }
-  const command = INSTALL_COMMANDS[agent];
+  const command = installCommandForAgent(agent);
   const agentName = isAgentId(agent) ? getAgent(agent).name : agent;
   if (!command) {
     return {};
@@ -4190,7 +4197,7 @@ function handleAgentConfig(req: IncomingMessage, res: ServerResponse): void {
     readJsonBody(req, res, (body) => {
       try {
         const { agent, apiKey } = parseAgentConfigPayload(body);
-        const envVar = DETECT[agent]?.env?.[0];
+        const envVar = isAgentId(agent) ? DETECT[agent].env?.[0] : undefined;
         if (!envVar) {
           sendJson(res, 400, { error: `Agent ${agent} does not accept API key configuration.` });
           return;
@@ -4255,7 +4262,7 @@ function handleAgentInstall(req: IncomingMessage, res: ServerResponse): void {
   readJsonBody(req, res, (body) => {
     try {
       const { agent } = parseAgentInstallPayload(body);
-      const command = INSTALL_COMMANDS[agent];
+      const command = installCommandForAgent(agent);
       if (!command) {
         sendJson(res, 400, { error: `No install command is configured for ${agent}.` });
         return;
@@ -11015,34 +11022,6 @@ function handlePreviewProxy(req: IncomingMessage, res: ServerResponse): void {
   req.pipe(proxyReq);
 }
 
-type ApiHandler = (req: IncomingMessage, res: ServerResponse) => void;
-
-function isExactMountedRequest(req: IncomingMessage): boolean {
-  const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
-  return pathname === "" || pathname === "/";
-}
-
-function methodOnly(method: "GET" | "POST" | "PUT", handler: ApiHandler): ApiHandler {
-  return (req, res) => {
-    if (req.method !== method) {
-      res.statusCode = 405;
-      res.end();
-      return;
-    }
-    handler(req, res);
-  };
-}
-
-function useExactApi(server: ViteDevServer | PreviewServer, path: string, handler: ApiHandler): void {
-  server.middlewares.use(path, (req, res) => {
-    if (!isExactMountedRequest(req)) {
-      sendJson(res, 404, { error: `Unknown API endpoint: ${path}${req.url ?? ""}` });
-      return;
-    }
-    handler(req, res);
-  });
-}
-
 function attach(server: ViteDevServer | PreviewServer): void {
   ensureScheduledWakeupsStarted();
   if (server.httpServer && !terminalWebSocketServers.has(server.httpServer)) {
@@ -11050,80 +11029,95 @@ function attach(server: ViteDevServer | PreviewServer): void {
     attachPtyTerminalWebSockets(server.httpServer as unknown as HttpServer, terminalManager);
   }
   server.middlewares.use(PREVIEW_PROXY_PREFIX, handlePreviewProxy);
-  useExactApi(server, "/api/health", methodOnly("GET", (_req, res) => {
-    const health = storageHealthSnapshot();
-    sendJson(res, health.storage.ok ? 200 : 500, health);
-  }));
-  useExactApi(server, "/api/browser/session", methodOnly("POST", handleBrowserSession));
-  useExactApi(server, "/api/browser/sync", methodOnly("POST", handleBrowserSync));
-  useExactApi(server, "/api/browser/dirty", methodOnly("POST", handleBrowserDirty));
-  useExactApi(server, "/api/browser/action", methodOnly("POST", handleBrowserAction));
-  useExactApi(server, "/api/browser/bridge/sync", methodOnly("POST", handleBrowserBridgeSync));
-  useExactApi(server, "/api/browser/bridge/action", methodOnly("POST", handleBrowserBridgeAction));
-  useExactApi(server, "/api/browser/bridge/snapshot", methodOnly("GET", handleBrowserBridgeSnapshot));
-  useExactApi(server, "/api/browser/snapshot", methodOnly("GET", handleBrowserSnapshot));
-  useExactApi(server, "/api/browser/events", methodOnly("GET", handleBrowserEvents));
-  useExactApi(server, "/api/workspace/revision", methodOnly("GET", handleWorkspaceRevision));
-  useExactApi(server, "/api/workspace/mutations", methodOnly("POST", handleWorkspaceMutations));
-  useExactApi(server, "/api/workspace", handleWorkspace);
-  useExactApi(server, "/api/thread", methodOnly("GET", (req, res) => {
-    try {
-      const conversationId = new URL(req.url ?? "/", "http://localhost").searchParams.get("conversationId") ?? "";
-      if (!conversationId) {
-        sendJson(res, 400, { error: "Missing conversationId." });
-        return;
-      }
-      sendJson(res, 200, readClientThread(conversationId));
-    } catch (error) {
-      sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) });
-    }
-  }));
-  useExactApi(server, "/api/agents", methodOnly("GET", (_req, res) => {
-    void (async () => {
-      try {
-        sendJson(res, 200, await detectAgentsWithLiveModels());
-      } catch (error) {
-        sendJson(res, 500, { error: errorMessage(error) });
-      }
-    })();
-  }));
-  useExactApi(server, "/api/rlab-plugins", methodOnly("GET", (_req, res) => {
-    sendJson(res, 200, { plugins: registeredRlabPluginLinks() });
-  }));
+  const routes: ExactApiRoute[] = [
+    {
+      path: "/api/health",
+      handler: methodOnly("GET", (_req, res) => {
+        const health = storageHealthSnapshot();
+        sendJson(res, health.storage.ok ? 200 : 500, health);
+      }),
+    },
+    { path: "/api/browser/session", handler: methodOnly("POST", handleBrowserSession) },
+    { path: "/api/browser/sync", handler: methodOnly("POST", handleBrowserSync) },
+    { path: "/api/browser/dirty", handler: methodOnly("POST", handleBrowserDirty) },
+    { path: "/api/browser/action", handler: methodOnly("POST", handleBrowserAction) },
+    { path: "/api/browser/bridge/sync", handler: methodOnly("POST", handleBrowserBridgeSync) },
+    { path: "/api/browser/bridge/action", handler: methodOnly("POST", handleBrowserBridgeAction) },
+    { path: "/api/browser/bridge/snapshot", handler: methodOnly("GET", handleBrowserBridgeSnapshot) },
+    { path: "/api/browser/snapshot", handler: methodOnly("GET", handleBrowserSnapshot) },
+    { path: "/api/browser/events", handler: methodOnly("GET", handleBrowserEvents) },
+    { path: "/api/workspace/revision", handler: methodOnly("GET", handleWorkspaceRevision) },
+    { path: "/api/workspace/mutations", handler: methodOnly("POST", handleWorkspaceMutations) },
+    { path: "/api/workspace", handler: handleWorkspace },
+    {
+      path: "/api/thread",
+      handler: methodOnly("GET", (req, res) => {
+        try {
+          const conversationId = new URL(req.url ?? "/", "http://localhost").searchParams.get("conversationId") ?? "";
+          if (!conversationId) {
+            sendJson(res, 400, { error: "Missing conversationId." });
+            return;
+          }
+          sendJson(res, 200, readClientThread(conversationId));
+        } catch (error) {
+          sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) });
+        }
+      }),
+    },
+    {
+      path: "/api/agents",
+      handler: methodOnly("GET", (_req, res) => {
+        void (async () => {
+          try {
+            sendJson(res, 200, await detectAgentsWithLiveModels());
+          } catch (error) {
+            sendJson(res, 500, { error: errorMessage(error) });
+          }
+        })();
+      }),
+    },
+    {
+      path: "/api/rlab-plugins",
+      handler: methodOnly("GET", (_req, res) => {
+        sendJson(res, 200, { plugins: registeredRlabPluginLinks() });
+      }),
+    },
+    { path: "/api/agent-config", handler: handleAgentConfig },
+    { path: "/api/voice-config", handler: handleVoiceConfig },
+    { path: "/api/voice/transcribe", handler: methodOnly("POST", handleVoiceTranscribe) },
+    { path: "/api/agent-install", handler: methodOnly("POST", handleAgentInstall) },
+    { path: "/api/playwright-install", handler: methodOnly("POST", handlePlaywrightInstall) },
+    { path: "/api/folder-picker", handler: methodOnly("POST", handleFolderPicker) },
+    { path: "/api/list-directories", handler: methodOnly("POST", handleListDirectories) },
+    { path: "/api/folder-info", handler: methodOnly("POST", handleFolderInfo) },
+    { path: "/api/project-files", handler: methodOnly("POST", handleProjectFiles) },
+    { path: "/api/attachments", handler: methodOnly("POST", handleAttachmentUpload) },
+    { path: "/api/local-file", handler: methodOnly("GET", handleLocalFile) },
+    { path: "/api/version", handler: methodOnly("GET", handleVersion) },
+    { path: "/api/agent-limits", handler: methodOnly("GET", handleAgentLimits) },
+    { path: "/api/cli-updates", handler: methodOnly("GET", handleCliUpdates) },
+    { path: "/api/git-status", handler: methodOnly("POST", handleGitStatus) },
+    { path: "/api/git-tree", handler: methodOnly("POST", handleGitTree) },
+    { path: "/api/git-diff", handler: methodOnly("POST", handleGitDiff) },
+    { path: "/api/git-stage", handler: methodOnly("POST", handleGitStage) },
+    { path: "/api/git-unstage", handler: methodOnly("POST", handleGitUnstage) },
+    { path: "/api/git-commit", handler: methodOnly("POST", handleGitCommit) },
+    { path: "/api/git-checkout", handler: methodOnly("POST", handleGitCheckout) },
+    { path: "/api/git-push", handler: methodOnly("POST", handleGitPush) },
+    { path: "/api/git-worktree-create", handler: methodOnly("POST", handleGitWorktreeCreate) },
+    { path: "/api/git-worktree-merge", handler: methodOnly("POST", handleGitWorktreeMerge) },
+    { path: "/api/git-init", handler: methodOnly("POST", handleGitInit) },
+    { path: "/api/terminal", handler: handleTerminalSession },
+    { path: "/api/runs", handler: methodOnly("GET", handleActiveRuns) },
+    { path: "/api/wakeups", handler: handleWakeups },
+    { path: "/api/run-attach", handler: methodOnly("GET", handleRunAttach) },
+    { path: "/api/run", handler: methodOnly("POST", handleRun) },
+    { path: "/api/run-approval", handler: methodOnly("POST", handleRunApproval) },
+    { path: "/api/run-cancel", handler: methodOnly("POST", handleRunCancel) },
+    { path: "/api/run-input", handler: methodOnly("POST", handleRunInput) },
+  ];
+  attachExactApiRoutes(server, routes);
   prewarmAgentDetectionCache();
-  useExactApi(server, "/api/agent-config", handleAgentConfig);
-  useExactApi(server, "/api/voice-config", handleVoiceConfig);
-  useExactApi(server, "/api/voice/transcribe", methodOnly("POST", handleVoiceTranscribe));
-  useExactApi(server, "/api/agent-install", methodOnly("POST", handleAgentInstall));
-  useExactApi(server, "/api/playwright-install", methodOnly("POST", handlePlaywrightInstall));
-  useExactApi(server, "/api/folder-picker", methodOnly("POST", handleFolderPicker));
-  useExactApi(server, "/api/list-directories", methodOnly("POST", handleListDirectories));
-  useExactApi(server, "/api/folder-info", methodOnly("POST", handleFolderInfo));
-  useExactApi(server, "/api/project-files", methodOnly("POST", handleProjectFiles));
-  useExactApi(server, "/api/attachments", methodOnly("POST", handleAttachmentUpload));
-  useExactApi(server, "/api/local-file", methodOnly("GET", handleLocalFile));
-  useExactApi(server, "/api/version", methodOnly("GET", handleVersion));
-  useExactApi(server, "/api/agent-limits", methodOnly("GET", handleAgentLimits));
-  useExactApi(server, "/api/cli-updates", methodOnly("GET", handleCliUpdates));
-  useExactApi(server, "/api/git-status", methodOnly("POST", handleGitStatus));
-  useExactApi(server, "/api/git-tree", methodOnly("POST", handleGitTree));
-  useExactApi(server, "/api/git-diff", methodOnly("POST", handleGitDiff));
-  useExactApi(server, "/api/git-stage", methodOnly("POST", handleGitStage));
-  useExactApi(server, "/api/git-unstage", methodOnly("POST", handleGitUnstage));
-  useExactApi(server, "/api/git-commit", methodOnly("POST", handleGitCommit));
-  useExactApi(server, "/api/git-checkout", methodOnly("POST", handleGitCheckout));
-  useExactApi(server, "/api/git-push", methodOnly("POST", handleGitPush));
-  useExactApi(server, "/api/git-worktree-create", methodOnly("POST", handleGitWorktreeCreate));
-  useExactApi(server, "/api/git-worktree-merge", methodOnly("POST", handleGitWorktreeMerge));
-  useExactApi(server, "/api/git-init", methodOnly("POST", handleGitInit));
-  useExactApi(server, "/api/terminal", handleTerminalSession);
-  useExactApi(server, "/api/runs", methodOnly("GET", handleActiveRuns));
-  useExactApi(server, "/api/wakeups", handleWakeups);
-  useExactApi(server, "/api/run-attach", methodOnly("GET", handleRunAttach));
-  useExactApi(server, "/api/run", methodOnly("POST", handleRun));
-  useExactApi(server, "/api/run-approval", methodOnly("POST", handleRunApproval));
-  useExactApi(server, "/api/run-cancel", methodOnly("POST", handleRunCancel));
-  useExactApi(server, "/api/run-input", methodOnly("POST", handleRunInput));
   startCliUpdateMonitor();
 }
 

@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import process from "node:process";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ChatMessage, ConversationSummary } from "../src/domain/agent-types";
 import { buildEmptyWorkspaceState, type WorkspaceState } from "../src/lib/workspace-state";
@@ -20,6 +21,8 @@ import {
   workspaceDbHasState,
   WorkspaceRevisionConflictError,
 } from "../workspace-db";
+
+const { DatabaseSync } = process.getBuiltinModule("node:sqlite");
 
 const conv = (id: string, extra: Partial<ConversationSummary> = {}): ConversationSummary => ({
   id,
@@ -227,5 +230,34 @@ describe("workspace-db", () => {
     expect(() => applyWorkspaceDbMutations([{ type: "setComposerDraft", conversationId: "missing", draft: { text: "x", attachments: [] } }])).toThrow(
       "Conversation missing does not exist.",
     );
+  });
+
+  it("migrates legacy tables to declared foreign keys", () => {
+    const legacyFile = join(dir, "legacy.db");
+    closeWorkspaceDb();
+    const legacy = new DatabaseSync(legacyFile);
+    legacy.exec(`
+CREATE TABLE projects (id TEXT PRIMARY KEY, position INTEGER NOT NULL, data TEXT NOT NULL);
+CREATE TABLE conversations (id TEXT PRIMARY KEY, project_id TEXT, position INTEGER NOT NULL, data TEXT NOT NULL);
+CREATE TABLE messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, position INTEGER NOT NULL, data TEXT NOT NULL);
+CREATE TABLE composer_drafts (conversation_id TEXT PRIMARY KEY, data TEXT NOT NULL);
+CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+INSERT INTO conversations(id, project_id, position, data) VALUES('c1', NULL, 0, '${JSON.stringify(conv("c1")).replace(/'/g, "''")}');
+INSERT INTO messages(id, conversation_id, position, data) VALUES('m1', 'c1', 0, '${JSON.stringify(msg("m1", "answer")).replace(/'/g, "''")}');
+INSERT INTO composer_drafts(conversation_id, data) VALUES('c1', '${JSON.stringify({ text: "draft", attachments: [] }).replace(/'/g, "''")}');
+`);
+    legacy.close();
+
+    initWorkspaceDb(legacyFile);
+    expect(readThreadFromDb("c1").map((message) => message.id)).toEqual(["m1"]);
+    closeWorkspaceDb();
+
+    const migrated = new DatabaseSync(legacyFile);
+    migrated.exec("PRAGMA foreign_keys = ON");
+    expect(migrated.prepare("PRAGMA foreign_key_list(messages)").all()).toHaveLength(1);
+    expect(() =>
+      migrated.prepare("INSERT INTO messages(id, conversation_id, position, data) VALUES('orphan', 'missing', 0, '{}')").run(),
+    ).toThrow();
+    migrated.close();
   });
 });
