@@ -1,9 +1,11 @@
 import SearchIcon from "@mui/icons-material/Search";
 import { Box, Dialog, DialogContent, DialogTitle, InputAdornment, InputBase, Stack, Typography } from "@mui/material";
+import { observer } from "mobx-react-lite";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import { StatusDot } from "../ui";
 import { AgentMonogram } from "./AgentMonogram";
+import { ConversationSearchStore } from "./agent-local-stores";
 import { conversationMatches } from "./ConversationList";
 import { type ChatMessage, conversationStatusKey, type ConversationSummary, type Project } from "./types";
 
@@ -17,7 +19,7 @@ interface SearchEntry {
  * projects and chats (replaces the inline sidebar search). Typing filters the
  * list; an empty result states whether there are no matches or no conversations.
  */
-export function ConversationSearch({
+export const ConversationSearch = observer(function ConversationSearch({
   open,
   projects,
   chats,
@@ -33,7 +35,8 @@ export function ConversationSearch({
   readonly onSelect: (id: string) => void;
 }) {
   const { t, conversationStatus } = useI18n();
-  const [query, setQuery] = useState("");
+  const [store] = useState(() => new ConversationSearchStore());
+  const { query, setQuery } = store;
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
@@ -144,4 +147,4 @@ export function ConversationSearch({
       </DialogContent>
     </Dialog>
   );
-}
+});

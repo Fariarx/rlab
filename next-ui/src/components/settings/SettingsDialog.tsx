@@ -7,6 +7,7 @@ import KeyboardVoiceIcon from "@mui/icons-material/KeyboardVoice";
 import MicOffOutlinedIcon from "@mui/icons-material/MicOffOutlined";
 import VpnKeyOutlinedIcon from "@mui/icons-material/VpnKeyOutlined";
 import { Alert, Box, Chip, Dialog, Divider, Popover, Radio, Stack, Switch, Tab, Tabs, TextField, ToggleButton, ToggleButtonGroup, Tooltip, Typography, type SxProps, type Theme } from "@mui/material";
+import { observer } from "mobx-react-lite";
 import { type ReactNode, useCallback, useEffect, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import type { AppSettings, AppSettingsPatch, DensityMode, Locale, ThemeMode } from "../workspace/app-settings";
@@ -25,6 +26,7 @@ import {
   useReloadAgentStatus,
 } from "../agent";
 import { Button, IconButton, StatusDot, TagSelect } from "../ui";
+import { AgentsSectionStore, BrowserPreviewSetupStore, SettingsDialogStore, VoiceSectionStore } from "./settings-dialog-store";
 
 interface SettingsDialogProps {
   readonly open: boolean;
@@ -170,11 +172,10 @@ function errorMessage(error: unknown): string {
 }
 
 /** Install/repair the Playwright Chromium that powers the in-app Preview tab. */
-function BrowserPreviewSetupRow() {
+const BrowserPreviewSetupRow = observer(function BrowserPreviewSetupRow() {
   const { t } = useI18n();
-  const [installed, setInstalled] = useState<boolean | null>(null);
-  const [installing, setInstalling] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [store] = useState(() => new BrowserPreviewSetupStore());
+  const { installed, setInstalled, installing, setInstalling, error, setError } = store;
 
   const refreshStatus = useCallback(async () => {
     try {
@@ -248,9 +249,9 @@ function BrowserPreviewSetupRow() {
       {error && <Alert severity="error">{t("browserPreviewInstallFailed", { error })}</Alert>}
     </Stack>
   );
-}
+});
 
-function AgentsSection({
+const AgentsSection = observer(function AgentsSection({
   defaultProfile,
   onDefaultProfileChange,
 }: {
@@ -260,14 +261,25 @@ function AgentsSection({
   const statusOf = useAgentStatus();
   const reloadAgentStatus = useReloadAgentStatus();
   const { t, agentStatus } = useI18n();
-  const [config, setConfig] = useState<AgentConfigResponse>({ agents: {} });
-  const [configReloadToken, setConfigReloadToken] = useState(0);
-  const [configError, setConfigError] = useState<string | null>(null);
-  const [draftKeys, setDraftKeys] = useState<Partial<Record<AgentId, string>>>({});
-  const [savingKey, setSavingKey] = useState<AgentId | null>(null);
-  const [installing, setInstalling] = useState<AgentId | null>(null);
-  const [operationNotice, setOperationNotice] = useState<AgentOperationNotice | null>(null);
-  const [keyPopover, setKeyPopover] = useState<{ readonly id: AgentId; readonly anchor: HTMLElement } | null>(null);
+  const [store] = useState(() => new AgentsSectionStore());
+  const {
+    config,
+    setConfig,
+    configReloadToken,
+    setConfigReloadToken,
+    configError,
+    setConfigError,
+    draftKeys,
+    setDraftKeys,
+    savingKey,
+    setSavingKey,
+    installing,
+    setInstalling,
+    operationNotice,
+    setOperationNotice,
+    keyPopover,
+    setKeyPopover,
+  } = store;
 
   useEffect(() => {
     let active = true;
@@ -542,7 +554,7 @@ function AgentsSection({
       </Popover>
     </Stack>
   );
-}
+});
 
 function AppearanceSection({ settings, onSettingsChange }: Pick<SettingsDialogProps, "settings" | "onSettingsChange">) {
   const { t } = useI18n();
@@ -662,15 +674,25 @@ function GeneralSection({ settings, onSettingsChange }: Pick<SettingsDialogProps
   );
 }
 
-function VoiceSection({ settings, onSettingsChange, onVoiceConfigChange }: Pick<SettingsDialogProps, "settings" | "onSettingsChange" | "onVoiceConfigChange">) {
+const VoiceSection = observer(function VoiceSection({ settings, onSettingsChange, onVoiceConfigChange }: Pick<SettingsDialogProps, "settings" | "onSettingsChange" | "onVoiceConfigChange">) {
   const { t } = useI18n();
-  const [config, setConfig] = useState<VoiceConfigResponse>({ providers: {} });
-  const [configError, setConfigError] = useState<string | null>(null);
-  const [reloadToken, setReloadToken] = useState(0);
-  const [draftKeys, setDraftKeys] = useState<Partial<Record<VoiceProviderId, string>>>({});
-  const [savingKey, setSavingKey] = useState<VoiceProviderId | null>(null);
-  const [notice, setNotice] = useState<{ readonly severity: "success" | "error"; readonly message: string } | null>(null);
-  const [keyPopover, setKeyPopover] = useState<{ readonly id: VoiceProviderId; readonly anchor: HTMLElement } | null>(null);
+  const [store] = useState(() => new VoiceSectionStore());
+  const {
+    config,
+    setConfig,
+    configError,
+    setConfigError,
+    reloadToken,
+    setReloadToken,
+    draftKeys,
+    setDraftKeys,
+    savingKey,
+    setSavingKey,
+    notice,
+    setNotice,
+    keyPopover,
+    setKeyPopover,
+  } = store;
 
   useEffect(() => {
     let active = true;
@@ -879,10 +901,11 @@ function VoiceSection({ settings, onSettingsChange, onVoiceConfigChange }: Pick<
       </Popover>
     </Stack>
   );
-}
+});
 
-export function SettingsDialog({ open, onClose, settings, onSettingsChange, onVoiceConfigChange }: SettingsDialogProps) {
-  const [tab, setTab] = useState(0);
+export const SettingsDialog = observer(function SettingsDialog({ open, onClose, settings, onSettingsChange, onVoiceConfigChange }: SettingsDialogProps) {
+  const [store] = useState(() => new SettingsDialogStore());
+  const { tab, setTab } = store;
   const { t } = useI18n();
   const titleId = "settings-dialog-title";
 
@@ -917,4 +940,4 @@ export function SettingsDialog({ open, onClose, settings, onSettingsChange, onVo
       </Box>
     </Dialog>
   );
-}
+});

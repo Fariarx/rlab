@@ -5,10 +5,12 @@ import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
 import SearchIcon from "@mui/icons-material/Search";
 import TerminalIcon from "@mui/icons-material/Terminal";
 import { Box, CircularProgress, Collapse, Stack, Typography } from "@mui/material";
+import { observer } from "mobx-react-lite";
 import { type ReactNode, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import { normalizeAgentToolOutput } from "../../lib/agent-output";
 import { StatusDot } from "../ui";
+import { ToggleStore } from "./agent-local-stores";
 import { MessageLink } from "./parts";
 import type { CommandBlock, RunState, SearchBlock, ToolBlock } from "./types";
 
@@ -63,8 +65,9 @@ interface ActionFrameProps {
   readonly children?: ReactNode;
 }
 
-export function ActionFrame({ icon, title, meta, state, defaultOpen, collapsible = true, children }: ActionFrameProps) {
-  const [open, setOpen] = useState(defaultOpen ?? false);
+export const ActionFrame = observer(function ActionFrame({ icon, title, meta, state, defaultOpen, collapsible = true, children }: ActionFrameProps) {
+  const [store] = useState(() => new ToggleStore(defaultOpen ?? false));
+  const { open, setOpen } = store;
   const hasBody = children != null;
 
   return (
@@ -118,7 +121,7 @@ export function ActionFrame({ icon, title, meta, state, defaultOpen, collapsible
       )}
     </Box>
   );
-}
+});
 
 const titleSx = { fontFamily: (t: { custom: { fonts: { mono: string } } }) => t.custom.fonts.mono, fontSize: "0.8rem", fontWeight: 600 } as const;
 const metaSx = { fontFamily: (t: { custom: { fonts: { mono: string } } }) => t.custom.fonts.mono, fontSize: "0.7rem", color: "text.secondary" } as const;

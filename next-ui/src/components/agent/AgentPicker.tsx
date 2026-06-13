@@ -1,6 +1,7 @@
 import CheckIcon from "@mui/icons-material/Check";
 import CloseIcon from "@mui/icons-material/Close";
 import { Alert, Box, Dialog, DialogActions, Divider, Stack, Typography } from "@mui/material";
+import { observer } from "mobx-react-lite";
 import { useEffect, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import { Button, IconButton, StatusDot, TagSelect } from "../ui";
@@ -18,6 +19,7 @@ import {
   normalizeAgentProfile,
   withAlpha,
 } from "./agents";
+import { AgentPickerStore } from "./agent-local-stores";
 import { useAgentCliInfo, useAgentStatus, useAgentStatusError, useAgentStatusLive, useReloadAgentStatus } from "./use-agent-status";
 
 function cliBinsLabel(bins: readonly string[]): string {
@@ -37,7 +39,7 @@ function liveOptionsOrCatalog(catalogOptions: readonly AgentOption[], liveOption
 
 /** AgentPicker — a polished dialog for choosing the agent profile, showing
  * each agent's status in the system. */
-export function AgentPicker({
+export const AgentPicker = observer(function AgentPicker({
   open,
   value,
   onClose,
@@ -49,11 +51,8 @@ export function AgentPicker({
   readonly onSelect: (profile: AgentProfile) => void;
 }) {
   const initialProfile = normalizeAgentProfile(value);
-  const [agent, setAgent] = useState<AgentId>(initialProfile.agent);
-  const [model, setModel] = useState<string>(initialProfile.model);
-  const [reasoning, setReasoning] = useState<string>(initialProfile.reasoning);
-  const [mode, setMode] = useState<AgentWorkMode>(initialProfile.mode);
-  const [autoConfirm, setAutoConfirm] = useState<boolean>(initialProfile.autoConfirm ?? false);
+  const [store] = useState(() => new AgentPickerStore(initialProfile));
+  const { agent, setAgent, model, setModel, reasoning, setReasoning, mode, setMode, autoConfirm, setAutoConfirm, setProfile } = store;
   const statusOf = useAgentStatus();
   const cliInfoOf = useAgentCliInfo();
   const liveCliDetection = useAgentStatusLive();
@@ -72,11 +71,7 @@ export function AgentPicker({
   useEffect(() => {
     if (open) {
       const nextProfile = normalizeAgentProfile(value);
-      setAgent(nextProfile.agent);
-      setModel(nextProfile.model);
-      setReasoning(nextProfile.reasoning);
-      setMode(nextProfile.mode);
-      setAutoConfirm(nextProfile.autoConfirm ?? false);
+      setProfile(nextProfile);
     }
   }, [open, value]);
 
@@ -251,7 +246,7 @@ export function AgentPicker({
       </DialogActions>
     </Dialog>
   );
-}
+});
 
 function AgentOptionGroup({
   label,

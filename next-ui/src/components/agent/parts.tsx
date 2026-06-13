@@ -9,6 +9,7 @@ import RefreshIcon from "@mui/icons-material/Refresh";
 import VisibilityOutlinedIcon from "@mui/icons-material/VisibilityOutlined";
 import { Box, Stack, Typography } from "@mui/material";
 import { styled } from "@mui/material/styles";
+import { observer } from "mobx-react-lite";
 import { type MouseEvent as ReactMouseEvent, type ReactNode, useState } from "react";
 import Markdown, { defaultUrlTransform, type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -17,6 +18,7 @@ import { localFileUrl, normalizeExternalUrl } from "../../lib/external-url";
 import type { StatusKey } from "../../theme/tokens";
 import { useWorkspaceUi } from "../workspace/workspace-ui";
 import { Button, IconButton, Menu, MenuItem, StatusDot } from "../ui";
+import { AnchorStore } from "./agent-local-stores";
 import { bounce } from "./anim";
 import type { SuggestedActionIconKey } from "./types";
 
@@ -129,10 +131,11 @@ function BrokenLink({ children }: { readonly children: ReactNode }) {
  * workspace (kit showcase, isolated tests) or for non-http targets it degrades to
  * a plain link that opens in a new tab.
  */
-export function MessageLink({ href, children }: { readonly href?: string; readonly children: ReactNode }) {
+export const MessageLink = observer(function MessageLink({ href, children }: { readonly href?: string; readonly children: ReactNode }) {
   const ui = useWorkspaceUi();
   const { t } = useI18n();
-  const [anchor, setAnchor] = useState<HTMLElement | null>(null);
+  const [store] = useState(() => new AnchorStore());
+  const { anchor, setAnchor } = store;
   const raw = (href ?? "").trim();
   if (raw.startsWith("rlab-tool:")) {
     return <RlabToolLink name={raw.slice("rlab-tool:".length)}>{children}</RlabToolLink>;
@@ -206,7 +209,7 @@ export function MessageLink({ href, children }: { readonly href?: string; readon
       </Menu>
     </>
   );
-}
+});
 
 /* ---------------------------------- Avatars --------------------------------- */
 

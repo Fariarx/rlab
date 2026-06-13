@@ -8,6 +8,7 @@ import RefreshIcon from "@mui/icons-material/Refresh";
 import RemoveIcon from "@mui/icons-material/Remove";
 import { Alert, Box, Chip, CircularProgress, Collapse, Divider, Popover, Stack, Tab, Tabs, TextField, type Theme, Tooltip, Typography } from "@mui/material";
 import { CommitGraph, type Branch, type Commit, type CommitNode, type GraphStyle } from "commit-graph";
+import { observer } from "mobx-react-lite";
 import { type ReactNode, type RefObject, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type I18nApi, useI18n } from "../../i18n/I18nProvider";
 import type { GitFileStatus, GitStatusPayload } from "../../lib/git-status";
@@ -28,6 +29,7 @@ import {
   type GitTreePayload,
 } from "./git-panel-api";
 import { countDiffChanges, type DiffViewerLine, GitDiffLines, gitDiffViewerLinesFromBlock, gitDiffViewerLinesFromUnified } from "./GitDiffViewer";
+import { DiffFileCardStore, GitFileDiffCardStore, GitRefPickerStore, GitTreeTabStore, GitViewStore, type GitPanelTab } from "./git-panel-store";
 
 /** Code-review comment plumbing shared by the diff cards. The file path is bound
  *  at each card so individual diff lines only deal with (line, text, body). */
@@ -70,8 +72,6 @@ export interface GitWorktreeControl {
   readonly onMerge: () => void;
 }
 
-type GitPanelTab = "tree" | "unstaged" | "staged" | "commit" | "last-turn";
-
 // A diff longer than this stays collapsed until the user opens it; one longer
 // than the hard cap is never rendered (an error is shown instead).
 const LARGE_DIFF_LINES = 240;
@@ -80,7 +80,7 @@ const GIGANTIC_DIFF_LINES = 2000;
 // automatically); with many, diffs load lazily on expand to avoid a request flood.
 const EAGER_DIFF_LIMIT = 25;
 
-function GitRefPicker({
+const GitRefPicker = observer(function GitRefPicker({
   branches,
   commits,
   disabled,
@@ -107,8 +107,8 @@ function GitRefPicker({
   readonly currentHash?: string;
   readonly currentTitle?: string;
 }) {
-  const [anchor, setAnchor] = useState<HTMLElement | null>(null);
-  const [query, setQuery] = useState("");
+  const [store] = useState(() => new GitRefPickerStore());
+  const { anchor, setAnchor, query, setQuery } = store;
   const open = Boolean(anchor);
   const normalizedQuery = query.trim().toLowerCase();
   const filteredBranches = useMemo(
@@ -283,7 +283,7 @@ function GitRefPicker({
       </Popover>
     </>
   );
-}
+});
 
 function GitRefPickerRow({
   active,
@@ -354,7 +354,7 @@ function tabLabel(label: string, count?: number): string {
 /** A single file's diff rendered as a collapsible card (kit DiffCard style):
  *  small diffs open by default, large ones stay collapsed, gigantic ones show
  *  an error instead of being rendered. */
-function DiffFileCard({
+const DiffFileCard = observer(function DiffFileCard({
   path,
   action,
   lines,
@@ -388,9 +388,8 @@ function DiffFileCard({
   const lineCount = lines?.length ?? 0;
   const gigantic = lineCount > GIGANTIC_DIFF_LINES;
   const counts = lines ? countDiffChanges(lines) : null;
-  const [open, setOpen] = useState(false);
-  const [touched, setTouched] = useState(false);
-  const [stuck, setStuck] = useState(false);
+  const [store] = useState(() => new DiffFileCardStore());
+  const { open, setOpen, touched, setTouched, stuck, setStuck } = store;
   const sentinelRef = useRef<HTMLDivElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
 
@@ -518,10 +517,10 @@ function DiffFileCard({
       </Collapse>
     </Box>
   );
-}
+});
 
 /** A working-tree / staged file diff card that fetches its own diff. */
-function GitFileDiffCard({
+const GitFileDiffCard = observer(function GitFileDiffCard({
   cwd,
   file,
   mode,
@@ -542,9 +541,8 @@ function GitFileDiffCard({
   readonly focusSignal?: number;
   readonly t: I18nApi["t"];
 }) {
-  const [lines, setLines] = useState<readonly DiffViewerLine[] | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [store] = useState(() => new GitFileDiffCardStore());
+  const { lines, setLines, loading, setLoading, error, setError } = store;
   const requestedRef = useRef(false);
 
   // Fetches once (eagerly for small changesets, otherwise on first expand). The
@@ -585,42 +583,47 @@ function GitFileDiffCard({
       t={t}
     />
   );
-}
+});
 
-export function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnstagedStatsChange, bottomInset = 0, focusPath, focusNonce = 0, reloadSignal = 0, worktree }: GitViewProps) {
+export const GitView = observer(function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnstagedStatsChange, bottomInset = 0, focusPath, focusNonce = 0, reloadSignal = 0, worktree }: GitViewProps) {
   const { t } = useI18n();
-  const [status, setStatus] = useState<GitStatusPayload | null>(null);
-  const [statusVersion, setStatusVersion] = useState(0);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [graphCommits, setGraphCommits] = useState<readonly GitGraphCommit[]>([]);
-  const [graphBranchHeads, setGraphBranchHeads] = useState<readonly GitGraphBranchHead[]>([]);
-  const [treeLoading, setTreeLoading] = useState(false);
-  const [treeError, setTreeError] = useState<string | null>(null);
-  const [reloadKey, setReloadKey] = useState(0);
-  const [activeTab, setActiveTab] = useState<GitPanelTab>("unstaged");
-  const [refPickerOpen, setRefPickerOpen] = useState(false);
-  const [actionLoading, setActionLoading] = useState(false);
-  const [commitMessage, setCommitMessage] = useState("");
-  // The focused file plus a tick so re-selecting the same path re-scrolls.
-  const [focused, setFocused] = useState<{ readonly path: string; readonly tick: number }>({ path: "", tick: 0 });
+  const [store] = useState(() => new GitViewStore());
+  const {
+    status,
+    setStatus,
+    error,
+    setError,
+    loading,
+    setLoading,
+    graphCommits,
+    setGraphCommits,
+    graphBranchHeads,
+    setGraphBranchHeads,
+    treeLoading,
+    setTreeLoading,
+    treeError,
+    setTreeError,
+    reloadKey,
+    setReloadKey,
+    activeTab,
+    setActiveTab,
+    refPickerOpen,
+    setRefPickerOpen,
+    actionLoading,
+    setActionLoading,
+    commitMessage,
+    setCommitMessage,
+    focused,
+    setFocused,
+    statusVersion,
+    applyStatus,
+    resetForCwd,
+  } = store;
   const scrollRef = useRef<HTMLDivElement>(null);
-  const applyStatus = useCallback((nextStatus: GitStatusPayload) => {
-    setStatus(nextStatus);
-    setStatusVersion((version) => version + 1);
-  }, []);
 
   useEffect(() => {
-    setStatus(null);
-    setStatusVersion((version) => version + 1);
-    setError(null);
-    setGraphCommits([]);
-    setTreeError(null);
-    setTreeLoading(false);
-    setRefPickerOpen(false);
-    setActiveTab("unstaged");
-    setFocused({ path: "", tick: 0 });
-  }, [cwd]);
+    resetForCwd();
+  }, [cwd, resetForCwd]);
 
   useEffect(() => {
     if (!cwd) {
@@ -652,7 +655,7 @@ export function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnst
     return () => {
       alive = false;
     };
-  }, [applyStatus, cwd, reloadKey, reloadSignal, t]);
+  }, [applyStatus, cwd, reloadKey, reloadSignal, setError, setLoading, setStatus, t]);
 
   useEffect(() => {
     if (!cwd || !status || (activeTab !== "tree" && !refPickerOpen)) {
@@ -681,7 +684,7 @@ export function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnst
         if (alive) {
           setTreeLoading(false);
         }
-      });
+});
 
     return () => {
       alive = false;
@@ -971,7 +974,7 @@ export function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnst
         </Stack>
     </Stack>
   );
-}
+});
 
 const GIT_GRAPH_COLORS = ["#F59E0B", "#60A5FA", "#F87171", "#A78BFA", "#34D399", "#FBBF24", "#22D3EE", "#FB7185", "#C084FC", "#2DD4BF"];
 
@@ -1067,7 +1070,7 @@ function gitGraphDateLabel(value: string | number | Date): string {
   return date.toLocaleDateString(undefined, { year: "numeric", month: "2-digit", day: "2-digit" });
 }
 
-function GitTreeTab({
+const GitTreeTab = observer(function GitTreeTab({
   commits,
   branchHeads,
   currentBranch,
@@ -1086,7 +1089,8 @@ function GitTreeTab({
 }) {
   const graphCommits = useMemo<Commit[]>(() => commits.map(gitGraphCommitToLibraryCommit), [commits]);
   const graphBranches = useMemo<Branch[]>(() => branchHeads.map(gitGraphBranchHeadToLibraryBranch), [branchHeads]);
-  const [selectedHash, setSelectedHash] = useState<string | null>(null);
+  const [store] = useState(() => new GitTreeTabStore());
+  const { selectedHash, setSelectedHash } = store;
   const selectedCommit = selectedHash ? commits.find((commit) => commit.hash === selectedHash) ?? null : null;
   const activeHash = currentHash ? commits.find((commit) => commit.shortHash === currentHash || commit.hash.startsWith(currentHash))?.hash ?? currentHash : null;
   const activeCommit = activeHash ? commits.find((commit) => commit.hash === activeHash) ?? null : null;
@@ -1223,7 +1227,7 @@ function GitTreeTab({
       )}
     </Stack>
   );
-}
+});
 
 function GitCommitSummaryRow({ commit, currentBranch }: { readonly commit: GitGraphCommit; readonly currentBranch: string }) {
   return (

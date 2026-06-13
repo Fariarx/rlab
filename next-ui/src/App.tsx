@@ -1,4 +1,5 @@
 import { CssBaseline, GlobalStyles, ThemeProvider } from "@mui/material";
+import { observer } from "mobx-react-lite";
 import { useMemo } from "react";
 import { AgentStatusProvider } from "./components/agent";
 import { KitPage } from "./components/kit/KitPage";
@@ -9,7 +10,7 @@ import { I18nProvider } from "./i18n/I18nProvider";
 import { buildHashRoute, parseHashRoute, type HashRoute, useHashRoute } from "./lib/use-hash-route";
 import { buildAppTheme } from "./theme/app-theme";
 
-export function App() {
+export const App = observer(function App() {
   const hash = useHashRoute();
   const route = parseHashRoute(hash);
   const workspace = useWorkspace();
@@ -55,4 +56,4 @@ export function App() {
       </AgentStatusProvider>
     </ThemeProvider>
   );
-}
+});

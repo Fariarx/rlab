@@ -8,6 +8,7 @@ import RefreshIcon from "@mui/icons-material/Refresh";
 import SendIcon from "@mui/icons-material/Send";
 import CloseIcon from "@mui/icons-material/Close";
 import { Box, ButtonBase, Collapse, Stack, Typography } from "@mui/material";
+import { observer } from "mobx-react-lite";
 import { type ChangeEvent, type KeyboardEvent, useEffect, useId, useRef, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import { localFileUrl } from "../../lib/external-url";
@@ -17,6 +18,7 @@ import { Button, IconButton, Tooltip } from "../ui";
 import { AgentBlockRenderer } from "./AgentBlockRenderer";
 import { AttachmentTile } from "./AttachmentTile";
 import { DiffCard } from "./DiffCard";
+import { AgentDetailsStore, AgentMessageStore, MessageShellStore, ToggleStore } from "./agent-local-stores";
 import { DEFAULT_AGENT_OPTION_ID, agentProfileLabels, getAgent, resolveAgentReasoningValue, type AgentProfile } from "./agents";
 import { rise } from "./anim";
 import type { MessageActionHandlers } from "./message-actions";
@@ -175,12 +177,19 @@ function MessageActionBar({
   );
 }
 
-function UserMessage({ message, delay, actions }: { readonly message: ChatMessage; readonly delay: number; readonly actions?: MessageActionHandlers }) {
+const UserMessage = observer(function UserMessage({
+  message,
+  delay,
+  actions,
+}: {
+  readonly message: ChatMessage;
+  readonly delay: number;
+  readonly actions?: MessageActionHandlers;
+}) {
   const { text: displayText, attachments } = splitUserContent(message.text ?? "");
   const reviewBlocks = (message.blocks ?? []).filter((block) => block.kind === "review");
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(displayText);
-  const [previewImage, setPreviewImage] = useState<MessageAttachment | null>(null);
+  const [store] = useState(() => new MessageShellStore(displayText));
+  const { editing, draft, previewImage, setDraft, setEditing, setPreviewImage } = store;
   const { t } = useI18n();
 
   const submitEdit = () => {
@@ -303,7 +312,7 @@ function UserMessage({ message, delay, actions }: { readonly message: ChatMessag
       <ImageLightbox src={previewImage?.target ?? null} label={previewImage?.name} onClose={() => setPreviewImage(null)} />
     </Stack>
   );
-}
+});
 
 // The agent's actual reply / things the user must act on stay visible; the
 // intermediate work (reasoning, tool calls, commands, searches, plans, code,
@@ -415,8 +424,9 @@ function lastTimelineNonTextBlockIndex(blocks: readonly AgentBlock[]): number {
   return -1;
 }
 
-function ChangedFilesAccordion({ blocks, delay }: { readonly blocks: readonly DiffBlock[]; readonly delay: number }) {
-  const [open, setOpen] = useState(false);
+const ChangedFilesAccordion = observer(function ChangedFilesAccordion({ blocks, delay }: { readonly blocks: readonly DiffBlock[]; readonly delay: number }) {
+  const [store] = useState(() => new ToggleStore());
+  const { open, setOpen } = store;
   const panelId = useId();
   const { t } = useI18n();
   const totals = diffTotals(blocks);
@@ -488,7 +498,7 @@ function ChangedFilesAccordion({ blocks, delay }: { readonly blocks: readonly Di
       </Collapse>
     </Box>
   );
-}
+});
 
 export interface MessageDisplayPrefs {
   /** Auto-expand the reasoning container while the agent is actively thinking. */
@@ -512,7 +522,7 @@ function agentMessageProfileLabel(profile: AgentProfile | undefined): string | n
 
 /** Collapsed-by-default container holding an agent turn's intermediate work, so
  *  threads stay readable — only the answer and the (collapsed) details show. */
-function AgentDetails({
+const AgentDetails = observer(function AgentDetails({
   blocks,
   actions,
   autoExpand = false,
@@ -534,7 +544,9 @@ function AgentDetails({
   // block being active, because some agents stream their thinking as plain text
   // rather than reasoning events. Afterwards the user's manual toggle always
   // wins, so the container can be collapsed mid-thought.
-  const [open, setOpen] = useState(autoExpand && live);
+  const [store] = useState(() => new AgentDetailsStore(autoExpand && live));
+  const { open, tick, setOpen, bumpTick } = store;
+  void tick;
   const previousLive = useRef(live);
   const detailsId = useId();
   const { t } = useI18n();
@@ -548,14 +560,13 @@ function AgentDetails({
   // Parse the persisted "17s" duration string into seconds for a tidy m/s label.
   const doneSeconds = reasoningDuration ? Number.parseInt(reasoningDuration, 10) : Number.NaN;
   // Re-render once per second so the live elapsed label ticks.
-  const [, forceTick] = useState(0);
   useEffect(() => {
     if (!showSpinner) {
       return;
     }
-    const id = setInterval(() => forceTick((n) => n + 1), 1000);
+    const id = setInterval(bumpTick, 1000);
     return () => clearInterval(id);
-  }, [showSpinner]);
+  }, [bumpTick, showSpinner]);
   useEffect(() => {
     if (previousLive.current && !live && hasResultAfter) {
       setOpen(false);
@@ -663,11 +674,11 @@ function AgentDetails({
       </Collapse>
     </Box>
   );
-}
+});
 
 const DEFAULT_DISPLAY_PREFS: MessageDisplayPrefs = { reasoningAutoExpand: true };
 
-function AgentMessage({
+const AgentMessage = observer(function AgentMessage({
   message,
   delay,
   actions,
@@ -684,13 +695,14 @@ function AgentMessage({
   const blocks = message.blocks ?? [];
   const live = isMessageLive(blocks);
   const emptyLive = blocks.length === 0 && message.startedAtMs !== undefined;
-  const [, forceMessageTick] = useState(0);
+  const [store] = useState(() => new AgentMessageStore());
+  const { hideCompletedPlans, hideResolvedInputs, previewImage, tick, setHideCompletedPlans, setHideResolvedInputs, setPreviewImage, bumpTick } = store;
+  void tick;
   const diffBlocks = blocks.filter((block): block is DiffBlock => block.kind === DIFF_KIND);
   // The live plan is pinned under the message; completed plans archive into
   // details after a short grace period so the thread does not keep duplicating
   // stale checklists.
   const planBlocks = blocks.filter((block): block is PlanBlock => block.kind === "plan");
-  const [hideCompletedPlans, setHideCompletedPlans] = useState(false);
   const completedPlanSignature = planStateSignature(planBlocks);
   const hasCompletedPlan = planBlocks.some(isCompletedPlanBlock);
   useEffect(() => {
@@ -704,8 +716,6 @@ function AgentMessage({
   }, [completedPlanSignature, hasCompletedPlan]);
   const visiblePlanBlocks = planBlocks.filter((block) => !hideCompletedPlans || !isCompletedPlanBlock(block));
   const archivedPlanBlocks = hideCompletedPlans ? planBlocks.filter(isCompletedPlanBlock) : [];
-  const [hideResolvedInputs, setHideResolvedInputs] = useState(false);
-  const [previewImage, setPreviewImage] = useState<MessageAttachment | null>(null);
   const resolvedInputsSignature = resolvedInputSignature(blocks);
   const hasResolvedInput = resolvedInputsSignature.length > 0;
   useEffect(() => {
@@ -747,9 +757,9 @@ function AgentMessage({
     if (!emptyLive) {
       return;
     }
-    const id = setInterval(() => forceMessageTick((n) => n + 1), 1000);
+    const id = setInterval(bumpTick, 1000);
     return () => clearInterval(id);
-  }, [emptyLive]);
+  }, [bumpTick, emptyLive]);
   return (
     <>
       <Stack direction="row" spacing={1.25} sx={{ alignItems: "flex-start", width: "100%", minWidth: 0, ...rise(delay), ...revealActionsOnHover }}>
@@ -815,7 +825,7 @@ function AgentMessage({
       <ImageLightbox src={previewImage?.target ?? null} label={previewImage?.name} onClose={() => setPreviewImage(null)} />
     </>
   );
-}
+});
 
 export function Message({
   message,

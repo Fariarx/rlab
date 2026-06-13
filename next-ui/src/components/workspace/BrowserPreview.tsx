@@ -7,6 +7,7 @@ import RateReviewIcon from "@mui/icons-material/RateReview";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import SendIcon from "@mui/icons-material/Send";
 import { Alert, Box, Button, CircularProgress, IconButton, InputBase, Stack, TextField, ToggleButton, ToggleButtonGroup, Tooltip, Typography } from "@mui/material";
+import { observer } from "mobx-react-lite";
 import { type FormEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactElement, useEffect, useMemo, useRef, useState } from "react";
 import {
   browserPreviewDefaultUrl,
@@ -37,6 +38,7 @@ import {
   type PreviewMode,
 } from "./browser-preview-model";
 import { isReplayableBrowserActivityEvent, replayBrowserActivityEvent } from "./browser-preview-live-replay";
+import { BrowserPreviewStore, PreviewTabFaviconStore } from "./browser-preview-store";
 import {
   annotationPanelHeightCss,
   annotationPanelSx,
@@ -129,8 +131,9 @@ function mirrorStatusDotPulse(status: MirrorStatus): boolean {
 }
 
 /** A tab favicon with a graceful globe fallback (offline / blocked / blank). */
-function PreviewTabFavicon({ url }: { readonly url: string }) {
-  const [failed, setFailed] = useState(false);
+const PreviewTabFavicon = observer(function PreviewTabFavicon({ url }: { readonly url: string }) {
+  const [store] = useState(() => new PreviewTabFaviconStore());
+  const { failed, setFailed } = store;
   const host = tabHost(url);
   if (!host || failed) {
     return <LanguageIcon sx={{ fontSize: 13, color: "text.tertiary", flex: "0 0 auto" }} />;
@@ -146,9 +149,9 @@ function PreviewTabFavicon({ url }: { readonly url: string }) {
       sx={{ flex: "0 0 auto", borderRadius: "2px", display: "block" }}
     />
   );
-}
+});
 
-export function BrowserPreview({
+export const BrowserPreview = observer(function BrowserPreview({
   sessionId,
   active,
   bridgeActive = active,
@@ -159,38 +162,62 @@ export function BrowserPreview({
   serverHostOverride = "",
 }: BrowserPreviewProps) {
   const { t } = useI18n();
+  const tRef = useRef(t);
+  tRef.current = t;
   const { toast } = useToast();
   const frameRef = useRef<HTMLIFrameElement | null>(null);
   const frameListenerCleanupRef = useRef<(() => void) | null>(null);
   const suppressFrameDirtyUntilRef = useRef(0);
-  const [url, setUrl] = useState("");
-  const [liveUrl, setLiveUrl] = useState<string | null>(null);
+  const [store] = useState(() => new BrowserPreviewStore());
+  const {
+    url,
+    setUrl,
+    liveUrl,
+    setLiveUrl,
+    frameKey,
+    setFrameKey,
+    mode,
+    setMode,
+    snapshot,
+    setSnapshot,
+    tabs,
+    setTabs,
+    activeTabId,
+    setActiveTabId,
+    activityEvents,
+    setActivityEvents,
+    eventStreamStatus,
+    setEventStreamStatus,
+    error,
+    setError,
+    liveReplayBlocked,
+    setLiveReplayBlocked,
+    mirrorStatus,
+    setMirrorStatus,
+    frameHistory,
+    setFrameHistory,
+    dragStart,
+    setDragStart,
+    selection,
+    setSelection,
+    componentSelection,
+    setComponentSelection,
+    selectionViewport,
+    setSelectionViewport,
+    comment,
+    setComment,
+    browserInstalled,
+    setBrowserInstalled,
+    installingBrowser,
+    setInstallingBrowser,
+    installBrowserError,
+    setInstallBrowserError,
+  } = store;
   const liveUrlRef = useRef<string | null>(null);
   const userLiveNavigationStartedRef = useRef(false);
   const browserEventCursorRef = useRef(0);
   const agentNavigationUrlRef = useRef<string | null>(null);
   const localMirrorDirtyPendingRef = useRef(false);
-  const [frameKey, setFrameKey] = useState(0);
-  const [mode, setMode] = useState<PreviewMode>("interact");
-  const [snapshot, setSnapshot] = useState<BrowserSnapshot | null>(null);
-  const [tabs, setTabs] = useState<readonly BrowserTab[]>([]);
-  const [activeTabId, setActiveTabId] = useState<string | null>(null);
-  const [activityEvents, setActivityEvents] = useState<readonly BrowserActivityEvent[]>([]);
-  const [eventStreamStatus, setEventStreamStatus] = useState<EventStreamStatus>("idle");
-  const [error, setError] = useState<string | null>(null);
-  const [liveReplayBlocked, setLiveReplayBlocked] = useState(false);
-  const [mirrorStatus, setMirrorStatus] = useState<MirrorStatus>("idle");
-  const [frameHistory, setFrameHistory] = useState<FrameHistoryState>({ entries: [], index: -1 });
-  const [dragStart, setDragStart] = useState<BrowserPoint | null>(null);
-  const [selection, setSelection] = useState<BrowserSelectionRect | null>(null);
-  const [componentSelection, setComponentSelection] = useState<BrowserComponentSelection | null>(null);
-  const [selectionViewport, setSelectionViewport] = useState<BrowserViewport | null>(null);
-  const [comment, setComment] = useState("");
-  // Preview is powered by Playwright's Chromium. Track whether the browser binary
-  // is installed so we can show an install CTA instead of a broken browser bar.
-  const [browserInstalled, setBrowserInstalled] = useState<boolean | null>(null);
-  const [installingBrowser, setInstallingBrowser] = useState(false);
-  const [installBrowserError, setInstallBrowserError] = useState<string | null>(null);
   const viewport = selectionViewport ?? snapshot?.viewport;
   const selectionReady = liveUrl !== null && selection !== null && selection.width >= 4 && selection.height >= 4;
   const committedSelectionReady = selectionReady && dragStart === null;
@@ -323,7 +350,7 @@ export function BrowserPreview({
     }
     let canceled = false;
     const eventCursorAtRequest = browserEventCursorRef.current;
-    void loadBrowserState(sessionId, t("browserPreviewInvalidResponse"))
+    void loadBrowserState(sessionId, tRef.current("browserPreviewInvalidResponse"))
       .then((next) => {
         if (canceled || next === null) {
           return;
@@ -343,12 +370,12 @@ export function BrowserPreview({
         }
         const message = operationError instanceof Error ? operationError.message : String(operationError);
         setMirrorStatus("error");
-        setError(t("browserPreviewOpenError", { error: message }));
+        setError(tRef.current("browserPreviewOpenError", { error: message }));
       });
     return () => {
       canceled = true;
     };
-  }, [bridgeActive, sessionId, t]);
+  }, [bridgeActive, sessionId]);
 
   useEffect(() => {
     if (!bridgeActive || typeof EventSource === "undefined") {
@@ -411,7 +438,7 @@ export function BrowserPreview({
       // event itself carries no tab list, so re-pull the snapshot to refresh the
       // strip and active tab.
       if (parsed.type === "tab.created" || parsed.type === "tab.closed" || parsed.type === "tab.selected") {
-        void loadBrowserState(sessionId, t("browserPreviewInvalidResponse"))
+        void loadBrowserState(sessionId, tRef.current("browserPreviewInvalidResponse"))
           .then((next) => {
             if (alive && next) {
               applySnapshot(next, { preserveLocalStale: localMirrorDirtyPendingRef.current });
@@ -1265,4 +1292,4 @@ export function BrowserPreview({
       </Box>
     </Box>
   );
-}
+});

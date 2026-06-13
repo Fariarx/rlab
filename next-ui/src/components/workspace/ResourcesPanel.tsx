@@ -4,6 +4,7 @@ import InsertDriveFileOutlinedIcon from "@mui/icons-material/InsertDriveFileOutl
 import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
 import LinkIcon from "@mui/icons-material/Link";
 import { Box, ButtonBase, Collapse, Stack, Typography } from "@mui/material";
+import { observer } from "mobx-react-lite";
 import { type ReactNode, useMemo, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import type { TranslationKey } from "../../i18n/I18nProvider";
@@ -14,6 +15,7 @@ import type { ChatMessage } from "../agent";
 import { EmptyState } from "../ui";
 import { ImageLightbox } from "./ImageLightbox";
 import { useWorkspaceUi } from "./workspace-ui";
+import { ImageBannerStore, ResourceGroupStore, ResourcesPanelStore } from "./workspace-local-stores";
 
 function KindIcon({ kind }: { readonly kind: ConversationResource["kind"] }) {
   const Icon = kind === "image" ? ImageOutlinedIcon : kind === "link" ? LinkIcon : DescriptionOutlinedIcon;
@@ -26,8 +28,9 @@ function KindIcon({ kind }: { readonly kind: ConversationResource["kind"] }) {
 
 
 /** Small banner thumbnail for image cards, with a graceful fallback. */
-function ImageBanner({ resource }: { readonly resource: ConversationResource }) {
-  const [failed, setFailed] = useState(false);
+const ImageBanner = observer(function ImageBanner({ resource }: { readonly resource: ConversationResource }) {
+  const [store] = useState(() => new ImageBannerStore());
+  const { failed, setFailed } = store;
   return (
     <Box sx={{ width: "100%", aspectRatio: "16 / 9", flex: "0 0 auto", borderRadius: (theme) => `${theme.custom.radii.sm}px`, overflow: "hidden", backgroundColor: (theme) => theme.custom.surfaces.s3, display: "flex", alignItems: "center", justifyContent: "center" }}>
       {failed ? (
@@ -37,7 +40,7 @@ function ImageBanner({ resource }: { readonly resource: ConversationResource }) 
       )}
     </Box>
   );
-}
+});
 
 /** A compact resource card with uniform height. Image cards lead with a
  *  thumbnail; all cards show a kind icon + label. */
@@ -94,8 +97,9 @@ function ResourceCard({ resource, onClick }: { readonly resource: ConversationRe
 
 /** A collapsible section per resource type; open by default so each type shows
  *  at least its first entry without a click. */
-function ResourceGroup({ title, count, children }: { readonly title: string; readonly count: number; readonly children: ReactNode }) {
-  const [open, setOpen] = useState(true);
+const ResourceGroup = observer(function ResourceGroup({ title, count, children }: { readonly title: string; readonly count: number; readonly children: ReactNode }) {
+  const [store] = useState(() => new ResourceGroupStore());
+  const { open, setOpen } = store;
   return (
     <Box sx={{ borderRadius: (theme) => `${theme.custom.radii.md}px`, backgroundColor: (theme) => theme.custom.surfaces.s1, overflow: "hidden" }}>
       <ButtonBase
@@ -116,7 +120,7 @@ function ResourceGroup({ title, count, children }: { readonly title: string; rea
       </Collapse>
     </Box>
   );
-}
+});
 
 const RESOURCE_GROUPS: ReadonlyArray<{ readonly kind: ResourceKind; readonly labelKey: TranslationKey }> = [
   { kind: "image", labelKey: "resourcesImages" },
@@ -129,10 +133,11 @@ const RESOURCE_GROUPS: ReadonlyArray<{ readonly kind: ResourceKind; readonly lab
  * grouped into collapsible sections by type (newest first within each). Images
  * open a viewer, links open in the browser Preview, files download or jump to Git.
  */
-export function ResourcesPanel({ messages, bottomInset = 0 }: { readonly messages: readonly ChatMessage[]; readonly bottomInset?: number }) {
+export const ResourcesPanel = observer(function ResourcesPanel({ messages, bottomInset = 0 }: { readonly messages: readonly ChatMessage[]; readonly bottomInset?: number }) {
   const { t } = useI18n();
   const ui = useWorkspaceUi();
-  const [lightbox, setLightbox] = useState<ConversationResource | null>(null);
+  const [store] = useState(() => new ResourcesPanelStore());
+  const { lightbox, setLightbox } = store;
   const resources = useMemo(() => collectResources(messages), [messages]);
 
   const isAbsolutePath = (value: string): boolean => value.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(value);
@@ -195,4 +200,4 @@ export function ResourcesPanel({ messages, bottomInset = 0 }: { readonly message
       <ImageLightbox src={lightbox?.url ?? null} label={lightbox?.label} onClose={() => setLightbox(null)} />
     </Stack>
   );
-}
+});

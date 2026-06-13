@@ -1,12 +1,13 @@
 ﻿import { act, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { observer } from "mobx-react-lite";
 import { useWorkspace } from "../src/components/workspace/use-workspace";
 import { buildInitialWorkspaceState, type WorkspaceState } from "../src/components/workspace/workspace-state";
 import { applyWorkspaceMutationsToState, type WorkspaceMutation } from "../src/lib/workspace-mutations";
 
 const WORKSPACE_SYNC_TICK_MS = 2_000;
 
-function Probe() {
+const Probe = observer(function Probe() {
   const workspace = useWorkspace();
   const selected = workspace.find(workspace.selectedId);
   return (
@@ -96,7 +97,7 @@ function Probe() {
       </button>
     </div>
   );
-}
+});
 
 function activeRunsPayloadFromState(state: WorkspaceState) {
   return {
@@ -1860,7 +1861,7 @@ describe("useWorkspace", () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByTestId("selected")).not.toHaveTextContent("chat-2");
+      expect(screen.getByTestId("selected").textContent).not.toBe("chat-2");
       expect(state.selectedId).not.toBe("chat-2");
     });
 

@@ -3,10 +3,12 @@ import CheckIcon from "@mui/icons-material/Check";
 import FolderOpenIcon from "@mui/icons-material/FolderOpen";
 import FolderOutlinedIcon from "@mui/icons-material/FolderOutlined";
 import { Alert, Box, Dialog, DialogActions, DialogContent, DialogTitle, InputAdornment, LinearProgress, List, ListItemButton, ListItemIcon, ListItemText, Stack, TextField, Tooltip, Typography, useMediaQuery, useTheme } from "@mui/material";
+import { observer } from "mobx-react-lite";
 import { type KeyboardEvent, useEffect, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import { Button, IconButton } from "../ui";
 import type { CreateProjectInput } from "./use-workspace";
+import { CreateProjectDialogStore } from "./workspace-local-stores";
 
 interface DirectoryListing {
   readonly path: string;
@@ -37,23 +39,33 @@ async function readFolderPayload(response: Response): Promise<FolderPayload> {
   return typeof payload === "object" && payload !== null ? (payload as FolderPayload) : {};
 }
 
-export function CreateProjectDialog({ open, defaultProfile, onClose, onCreate }: CreateProjectDialogProps) {
+export const CreateProjectDialog = observer(function CreateProjectDialog({ open, defaultProfile, onClose, onCreate }: CreateProjectDialogProps) {
   const { t } = useI18n();
   const theme = useTheme();
   // Fill the screen on phones — a tiny floating popover was unusable there.
   const fullScreen = useMediaQuery(theme.breakpoints.down("sm"));
-  const [name, setName] = useState("");
-  const [path, setPath] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  // The dialog flips between the form and an in-app folder browser (the OS dialog
-  // can't open on a headless server), rendered inline so it works on mobile.
-  const [mode, setMode] = useState<"form" | "browse">("browse");
-  const [browseCancelAction, setBrowseCancelAction] = useState<"close" | "form">("close");
-  const [listing, setListing] = useState<DirectoryListing | null>(null);
-  const [listingBusy, setListingBusy] = useState(false);
-  // The editable path shown in the browser; type + Enter to jump anywhere.
-  const [pathInput, setPathInput] = useState("");
+  const [store] = useState(() => new CreateProjectDialogStore());
+  const {
+    name,
+    setName,
+    path,
+    setPath,
+    error,
+    setError,
+    busy,
+    setBusy,
+    mode,
+    setMode,
+    browseCancelAction,
+    setBrowseCancelAction,
+    listing,
+    setListing,
+    listingBusy,
+    setListingBusy,
+    pathInput,
+    setPathInput,
+    reset,
+  } = store;
 
   const loadDirectory = async (target?: string) => {
     setListingBusy(true);
@@ -84,14 +96,7 @@ export function CreateProjectDialog({ open, defaultProfile, onClose, onCreate }:
     if (!open) {
       return;
     }
-    setName("");
-    setPath("");
-    setError(null);
-    setBusy(false);
-    setMode("browse");
-    setBrowseCancelAction("close");
-    setListing(null);
-    setPathInput("");
+    reset();
     void loadDirectory();
   }, [open]);
 
@@ -280,4 +285,4 @@ export function CreateProjectDialog({ open, defaultProfile, onClose, onCreate }:
       )}
     </Dialog>
   );
-}
+});

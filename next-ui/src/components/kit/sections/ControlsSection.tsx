@@ -2,6 +2,7 @@ import DeleteIcon from "@mui/icons-material/Delete";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import SettingsIcon from "@mui/icons-material/Settings";
 import StarIcon from "@mui/icons-material/StarBorder";
+import { observer } from "mobx-react-lite";
 import { useState } from "react";
 import {
   Box,
@@ -19,10 +20,11 @@ import {
   Typography,
 } from "../../ui";
 import { KitSectionShell } from "../KitSectionShell";
+import { ControlsSectionStore } from "./kit-section-stores";
 
-export function ControlsSection() {
-  const [view, setView] = useState("list");
-  const [env, setEnv] = useState("staging");
+export const ControlsSection = observer(function ControlsSection() {
+  const [store] = useState(() => new ControlsSectionStore());
+  const { view, env, setView, setEnv } = store;
 
   return (
     <KitSectionShell
@@ -99,4 +101,4 @@ export function ControlsSection() {
       </Box>
     </KitSectionShell>
   );
-}
+});

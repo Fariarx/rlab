@@ -1,11 +1,13 @@
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutlined";
 import EditIcon from "@mui/icons-material/Edit";
 import { Box, Stack, type SxProps, type Theme, Typography } from "@mui/material";
+import { observer } from "mobx-react-lite";
 import { Highlight, type PrismTheme } from "prism-react-renderer";
 import { useMemo, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import type { DiffBlock, ReviewCommentEntry } from "../agent";
 import { Button, IconButton } from "../ui";
+import { DiffCommentComposerStore, DiffCommentRowStore, GitDiffLinesStore } from "./git-diff-viewer-store";
 
 type DiffViewerLineKind = "add" | "del" | "ctx" | "meta";
 
@@ -171,7 +173,7 @@ function gutterColor(kind: DiffViewerLineKind): (theme: Theme) => string {
  *  wrap inside the container (no horizontal scroll) and the list grows to fit
  *  its content (the surrounding panel owns the scroll). Added/removed rows carry
  *  a bright coloured gutter number and left accent border. */
-export function GitDiffLines({
+export const GitDiffLines = observer(function GitDiffLines({
   lines,
   path,
   comments = [],
@@ -189,7 +191,8 @@ export function GitDiffLines({
   const code = lines.map(lineContent).join("\n");
   const language = prismLanguageForPath(path ?? "");
   const interactive = Boolean(onAddComment);
-  const [activeLine, setActiveLine] = useState<number | null>(null);
+  const [store] = useState(() => new GitDiffLinesStore());
+  const { activeLine, setActiveLine } = store;
   const commentsByLine = useMemo(() => {
     const map = new Map<number, ReviewCommentEntry[]>();
     for (const comment of comments) {
@@ -277,7 +280,7 @@ export function GitDiffLines({
       )}
     </Highlight>
   );
-}
+});
 
 /** The comments anchored to one diff line, plus an inline composer when the user
  *  is adding a new one. */
@@ -306,7 +309,7 @@ function DiffCommentThread({
   );
 }
 
-function DiffCommentRow({
+const DiffCommentRow = observer(function DiffCommentRow({
   comment,
   onUpdate,
   onDelete,
@@ -316,7 +319,8 @@ function DiffCommentRow({
   readonly onDelete?: (id: string) => void;
 }) {
   const { t } = useI18n();
-  const [editing, setEditing] = useState(false);
+  const [store] = useState(() => new DiffCommentRowStore());
+  const { editing, setEditing } = store;
 
   if (editing) {
     return (
@@ -348,9 +352,9 @@ function DiffCommentRow({
       )}
     </Stack>
   );
-}
+});
 
-function DiffCommentComposer({
+const DiffCommentComposer = observer(function DiffCommentComposer({
   initial = "",
   onSubmit,
   onCancel,
@@ -360,7 +364,8 @@ function DiffCommentComposer({
   readonly onCancel: () => void;
 }) {
   const { t } = useI18n();
-  const [draft, setDraft] = useState(initial);
+  const [store] = useState(() => new DiffCommentComposerStore(initial));
+  const { draft, setDraft } = store;
   const submit = () => {
     const body = draft.trim();
     if (body.length > 0) {
@@ -411,4 +416,4 @@ function DiffCommentComposer({
       </Stack>
     </Stack>
   );
-}
+});

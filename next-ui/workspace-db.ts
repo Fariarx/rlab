@@ -75,10 +75,6 @@ function tableHasForeignKeys(handle: DatabaseHandle, name: string): boolean {
   return (handle.prepare(`PRAGMA foreign_key_list(${name})`).all() as unknown[]).length > 0;
 }
 
-function workspaceTablesNeedForeignKeyMigration(handle: DatabaseHandle): boolean {
-  return tableExists(handle, "messages") && (!tableHasForeignKeys(handle, "conversations") || !tableHasForeignKeys(handle, "messages") || !tableHasForeignKeys(handle, "composer_drafts"));
-}
-
 function assertForeignKeyIntegrity(handle: DatabaseHandle): void {
   const violations = handle.prepare("PRAGMA foreign_key_check").all() as Array<{ table: string; rowid: number; parent: string; fkid: number }>;
   if (violations.length > 0) {
@@ -87,36 +83,16 @@ function assertForeignKeyIntegrity(handle: DatabaseHandle): void {
   }
 }
 
-function migrateWorkspaceTablesToForeignKeys(handle: DatabaseHandle): void {
-  if (!workspaceTablesNeedForeignKeyMigration(handle)) {
-    return;
-  }
-  handle.exec("BEGIN");
-  try {
-    handle.exec(`
-ALTER TABLE projects RENAME TO projects_old;
-ALTER TABLE conversations RENAME TO conversations_old;
-ALTER TABLE messages RENAME TO messages_old;
-ALTER TABLE composer_drafts RENAME TO composer_drafts_old;
-${TABLE_SCHEMA}
-INSERT INTO projects(id, position, data) SELECT id, position, data FROM projects_old;
-INSERT INTO conversations(id, project_id, position, data) SELECT id, project_id, position, data FROM conversations_old;
-INSERT INTO messages(id, conversation_id, position, data) SELECT id, conversation_id, position, data FROM messages_old;
-INSERT INTO composer_drafts(conversation_id, data) SELECT conversation_id, data FROM composer_drafts_old;
-DROP TABLE composer_drafts_old;
-DROP TABLE messages_old;
-DROP TABLE conversations_old;
-DROP TABLE projects_old;
-${INDEX_SCHEMA}
-`);
-    handle.exec("COMMIT");
-  } catch (error) {
-    try {
-      handle.exec("ROLLBACK");
-    } catch {
-      // ignore rollback failure; surface the original migration error
+function assertCurrentSchema(handle: DatabaseHandle): void {
+  for (const table of ["projects", "conversations", "messages", "composer_drafts", "kv"]) {
+    if (!tableExists(handle, table)) {
+      throw new Error(`Workspace database schema is incomplete: missing ${table}. Reset the workspace database.`);
     }
-    throw error;
+  }
+  for (const table of ["conversations", "messages", "composer_drafts"]) {
+    if (!tableHasForeignKeys(handle, table)) {
+      throw new Error(`Workspace database schema is outdated: ${table} has no declared foreign keys. Reset the workspace database.`);
+    }
   }
 }
 
@@ -132,12 +108,9 @@ export function initWorkspaceDb(file: string): void {
   handle.exec("PRAGMA foreign_keys = ON");
   handle.exec("PRAGMA journal_mode = WAL");
   handle.exec("PRAGMA synchronous = NORMAL");
-  if (tableExists(handle, "messages")) {
-    migrateWorkspaceTablesToForeignKeys(handle);
-  } else {
-    handle.exec(TABLE_SCHEMA);
-    handle.exec(INDEX_SCHEMA);
-  }
+  handle.exec(TABLE_SCHEMA);
+  handle.exec(INDEX_SCHEMA);
+  assertCurrentSchema(handle);
   assertForeignKeyIntegrity(handle);
   db = handle;
 }

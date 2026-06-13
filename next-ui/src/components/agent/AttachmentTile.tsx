@@ -4,8 +4,10 @@ import DescriptionOutlinedIcon from "@mui/icons-material/DescriptionOutlined";
 import ImageOutlinedIcon from "@mui/icons-material/ImageOutlined";
 import InsertDriveFileOutlinedIcon from "@mui/icons-material/InsertDriveFileOutlined";
 import { Box, Stack, Typography } from "@mui/material";
+import { observer } from "mobx-react-lite";
 import { useState } from "react";
 import { IconButton } from "../ui";
+import { ImageFailedStore } from "./agent-local-stores";
 
 function extOf(name: string): string {
   const dot = name.lastIndexOf(".");
@@ -57,8 +59,9 @@ export interface AttachmentTileProps {
  * with its extension, plus a name + size caption. Shared by the composer (with a
  * remove button) and sent messages (read-only), so both look identical.
  */
-export function AttachmentTile({ name, mime, sizeBytes, previewSrc, onOpen, onRemove, removeLabel }: AttachmentTileProps) {
-  const [imgFailed, setImgFailed] = useState(false);
+export const AttachmentTile = observer(function AttachmentTile({ name, mime, sizeBytes, previewSrc, onOpen, onRemove, removeLabel }: AttachmentTileProps) {
+  const [store] = useState(() => new ImageFailedStore());
+  const { failed: imgFailed, setFailed: setImgFailed } = store;
   const ext = extOf(name);
   const size = formatBytes(sizeBytes);
   const showImage = Boolean(previewSrc) && !imgFailed;
@@ -167,4 +170,4 @@ export function AttachmentTile({ name, mime, sizeBytes, previewSrc, onOpen, onRe
       )}
     </Box>
   );
-}
+});

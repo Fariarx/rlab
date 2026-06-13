@@ -1,4 +1,4 @@
-import { makeAutoObservable, reaction, runInAction } from "mobx";
+import { action, computed, makeObservable, observable, runInAction } from "mobx";
 import { useEffect, useState } from "react";
 import { accessModeForAgentProfile, compactCommandForAgent, normalizeAgentProfile, type AgentBlock, type AgentProfile, type ApprovalDecision, type ChatMessage, type CompactionSettings, type ComposerDraft, type ConversationStatus, type ConversationSummary, type ConversationView, type Project, type ReviewCommentEntry } from "../agent";
 import { translate } from "../../i18n/I18nProvider";
@@ -214,7 +214,7 @@ export interface Workspace {
   readonly loadError: string | null;
 }
 
-class WorkspaceStore implements Workspace {
+export class WorkspaceStore implements Workspace {
   // Pre-load placeholder (replaced by the server's state). Demo data only in dev
   // so a production build never flashes sample conversations before hydration.
   state: WorkspaceState = import.meta.env.DEV ? buildInitialWorkspaceState() : buildEmptyWorkspaceState();
@@ -267,46 +267,46 @@ class WorkspaceStore implements Workspace {
   private nextDirtyThreadVersion = 0;
 
   constructor() {
-    makeAutoObservable<
-      WorkspaceStore,
-      | "hydrated"
-      | "loadSeq"
-      | "runs"
-      | "saveTimer"
-      | "saveRetryTimer"
-      | "pendingMutations"
-      | "pendingSaveUrgent"
-      | "saveInFlight"
-      | "syncInFlight"
-      | "pollTimer"
-      | "loadRetryTimer"
-      | "skipNextSave"
-      | "fullyLoadedThreadIds"
-      | "threadLoads"
-      | "dirtyThreadVersions"
-      | "nextDirtyThreadVersion"
-    >(
-      this,
-      {
-        hydrated: false,
-        loadSeq: false,
-        runs: false,
-        saveTimer: false,
-        saveRetryTimer: false,
-        pendingMutations: false,
-        pendingSaveUrgent: false,
-        saveInFlight: false,
-        syncInFlight: false,
-        pollTimer: false,
-        loadRetryTimer: false,
-        skipNextSave: false,
-        fullyLoadedThreadIds: false,
-        threadLoads: false,
-        dirtyThreadVersions: false,
-        nextDirtyThreadVersion: false,
-      },
-      { autoBind: true },
-    );
+    makeObservable(this, {
+      state: observable.ref,
+      loadError: observable,
+      loaded: observable,
+      loading: observable,
+      chats: computed,
+      projects: computed,
+      threads: computed,
+      composerDrafts: computed,
+      selectedId: computed,
+      settings: computed,
+      loadThread: action.bound,
+      loadAllThreads: action.bound,
+      mount: action.bound,
+      unmount: action.bound,
+      reloadWorkspace: action.bound,
+      select: action.bound,
+      newChat: action.bound,
+      createProject: action.bound,
+      newProjectChat: action.bound,
+      setConversationProfile: action.bound,
+      rename: action.bound,
+      togglePin: action.bound,
+      archive: action.bound,
+      remove: action.bound,
+      sendMessage: action.bound,
+      sendQueuedMessageNow: action.bound,
+      setCompaction: action.bound,
+      setConversationView: action.bound,
+      compactConversation: action.bound,
+      addReviewComments: action.bound,
+      stopRun: action.bound,
+      retryMessage: action.bound,
+      forkConversationFromMessage: action.bound,
+      editAndResendMessage: action.bound,
+      decideApproval: action.bound,
+      selectOptions: action.bound,
+      updateComposerDraft: action.bound,
+      updateSettings: action.bound,
+    });
   }
 
   get chats(): readonly ConversationSummary[] {
@@ -1713,20 +1713,14 @@ class WorkspaceStore implements Workspace {
 
 /** Stateful workspace: conversations (chats + project groups), per-conversation
  * threads, and operations that mutate them while agent runs stream through the
- * dev backend. The source of truth is a MobX store; the hook bridges observable
- * updates into React renders for components that are not wrapped in observer(). */
+ * dev backend. The source of truth is a MobX store; React components consuming
+ * it must be wrapped in observer() so MobX, not a hook bridge, drives renders. */
 export function useWorkspace(): Workspace {
   const [store] = useState(() => new WorkspaceStore());
-  const [, setVersion] = useState(0);
 
   useEffect(() => {
-    const rerender = reaction(
-      () => [store.state, store.loaded, store.loading, store.loadError] as const,
-      () => setVersion((version) => version + 1),
-    );
     store.mount();
     return () => {
-      rerender();
       store.unmount();
     };
   }, [store]);

@@ -232,11 +232,11 @@ describe("workspace-db", () => {
     );
   });
 
-  it("migrates legacy tables to declared foreign keys", () => {
-    const legacyFile = join(dir, "legacy.db");
+  it("rejects databases without declared foreign keys", () => {
+    const schemaFile = join(dir, "outdated.db");
     closeWorkspaceDb();
-    const legacy = new DatabaseSync(legacyFile);
-    legacy.exec(`
+    const outdated = new DatabaseSync(schemaFile);
+    outdated.exec(`
 CREATE TABLE projects (id TEXT PRIMARY KEY, position INTEGER NOT NULL, data TEXT NOT NULL);
 CREATE TABLE conversations (id TEXT PRIMARY KEY, project_id TEXT, position INTEGER NOT NULL, data TEXT NOT NULL);
 CREATE TABLE messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, position INTEGER NOT NULL, data TEXT NOT NULL);
@@ -246,18 +246,8 @@ INSERT INTO conversations(id, project_id, position, data) VALUES('c1', NULL, 0, 
 INSERT INTO messages(id, conversation_id, position, data) VALUES('m1', 'c1', 0, '${JSON.stringify(msg("m1", "answer")).replace(/'/g, "''")}');
 INSERT INTO composer_drafts(conversation_id, data) VALUES('c1', '${JSON.stringify({ text: "draft", attachments: [] }).replace(/'/g, "''")}');
 `);
-    legacy.close();
+    outdated.close();
 
-    initWorkspaceDb(legacyFile);
-    expect(readThreadFromDb("c1").map((message) => message.id)).toEqual(["m1"]);
-    closeWorkspaceDb();
-
-    const migrated = new DatabaseSync(legacyFile);
-    migrated.exec("PRAGMA foreign_keys = ON");
-    expect(migrated.prepare("PRAGMA foreign_key_list(messages)").all()).toHaveLength(1);
-    expect(() =>
-      migrated.prepare("INSERT INTO messages(id, conversation_id, position, data) VALUES('orphan', 'missing', 0, '{}')").run(),
-    ).toThrow();
-    migrated.close();
+    expect(() => initWorkspaceDb(schemaFile)).toThrow("Workspace database schema is outdated");
   });
 });

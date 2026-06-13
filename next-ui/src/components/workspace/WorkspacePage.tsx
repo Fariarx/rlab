@@ -30,6 +30,7 @@ import {
   Tooltip,
   Typography,
 } from "@mui/material";
+import { observer } from "mobx-react-lite";
 import { type DragEvent, type MouseEvent as ReactMouseEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { I18nProvider, useI18n } from "../../i18n/I18nProvider";
 import { normalizeExternalUrl } from "../../lib/external-url";
@@ -38,7 +39,6 @@ import type { HashRoute } from "../../lib/use-hash-route";
 import { getVoiceProvider } from "../../lib/voice-providers";
 import {
   type AgentProfile,
-  type AgentRateLimitMap,
   type ApprovalDecision,
   AGENTS,
   AgentBadge,
@@ -55,7 +55,6 @@ import {
   messageToPlainText,
   type ChatMessage,
   type ComposerDraft,
-  type ComposerPluginLink,
   type ConversationStatus,
   type ConversationView,
   type ReviewCommentEntry,
@@ -72,7 +71,7 @@ import { SettingsDialog } from "../settings/SettingsDialog";
 import { Button, EmptyState, IconButton, useToast } from "../ui";
 import { CommandPalette, type CommandPaletteItem } from "./CommandPalette";
 import { CreateProjectDialog } from "./CreateProjectDialog";
-import { BrowserPreview, type BrowserActivityEvent } from "./BrowserPreview";
+import { BrowserPreview } from "./BrowserPreview";
 import { type DiffCommentApi, GitView } from "./GitPanel";
 import { ResourcesPanel } from "./ResourcesPanel";
 import { TerminalView } from "./TerminalView";
@@ -93,9 +92,6 @@ import {
   updateAgentCli,
   wakeupLabel,
   type CliUpdateInfo,
-  type CliUpdateSnapshot,
-  type VoiceConfigSnapshot,
-  type WakeupSummary,
 } from "./workspace-page-api";
 import {
   buildComposerLabel,
@@ -111,6 +107,7 @@ import {
   showDesktopNotification,
   workspaceConversations,
 } from "./workspace-page-helpers";
+import { WorkspacePageStore } from "./workspace-page-store";
 
 const COMPOSER_DRAFT_SAVE_DELAY_MS = 350;
 const EMPTY_COMPOSER_DRAFT: ComposerDraft = { text: "", attachments: [] };
@@ -141,7 +138,7 @@ const WORKSPACE_ERROR_ALERT_SX = {
   },
 } as const;
 
-export function WorkspacePage() {
+export const WorkspacePage = observer(function WorkspacePage() {
   const workspace = useWorkspace();
 
   return (
@@ -149,9 +146,9 @@ export function WorkspacePage() {
       <WorkspacePageView workspace={workspace} />
     </I18nProvider>
   );
-}
+});
 
-export function WorkspacePageView({
+export const WorkspacePageView = observer(function WorkspacePageView({
   workspace: ws,
   route,
   onNavigate,
@@ -169,47 +166,81 @@ export function WorkspacePageView({
   const reloadAgentStatus = useReloadAgentStatus();
   const lastWorkspaceErrorToast = useRef<string | null>(null);
 
-  const [searchOpen, setSearchOpen] = useState(false);
-  const [profile, setProfile] = useState<AgentProfile>(ws.settings.agents.defaultProfile ?? DEFAULT_PROFILE);
-  const [pickerOpen, setPickerOpen] = useState(false);
-  // The "+" button opens this menu to pick where a new chat lives (a standalone
-  // simple chat, or one of the projects). The chat is created immediately on
-  // pick — there's no draft/prelude step.
-  const [newChatMenuAnchor, setNewChatMenuAnchor] = useState<HTMLElement | null>(null);
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
-  const [projectDialogOpen, setProjectDialogOpen] = useState(false);
-  const [view, setView] = useState<ConversationView>("chat");
-  // A URL requested from a chat link's "open in preview"; handed to BrowserPreview
-  // via a nonce so re-opening the same link re-triggers the load.
-  const [browserOpenRequest, setBrowserOpenRequest] = useState<{ readonly url: string; readonly nonce: number }>({ url: "", nonce: 0 });
-  // External "open in Git" target + a nonce so re-clicking the same file re-jumps.
-  const [gitFocus, setGitFocus] = useState<{ readonly path: string; readonly nonce: number }>({ path: "", nonce: 0 });
-  // Bumped to force the Git view to re-fetch status (after a worktree op).
-  const [gitReloadSignal, setGitReloadSignal] = useState(0);
-  const [worktreeBusy, setWorktreeBusy] = useState(false);
-  const [cliUpdateSnapshot, setCliUpdateSnapshot] = useState<CliUpdateSnapshot>({ checkedAt: 0, checking: false, updates: [], errors: {} });
-  const [cliUpdateBusyAgent, setCliUpdateBusyAgent] = useState<string | null>(null);
-  const [voiceConfig, setVoiceConfig] = useState<VoiceConfigSnapshot>({ providers: {} });
-  const [registeredPlugins, setRegisteredPlugins] = useState<readonly ComposerPluginLink[]>([]);
-  // Unstaged line totals for the header Git-tab badge, reported by the Git view.
-  const [gitUnstaged, setGitUnstaged] = useState<{ readonly additions: number; readonly deletions: number }>({ additions: 0, deletions: 0 });
-  // Height of the composer's floating tags row; the thread/Git content reserves
-  // matching bottom space so the (still-floating) tags never hide content.
-  const [composerTagsHeight, setComposerTagsHeight] = useState(0);
-  // How far the multiline-input overlay rises above the single-row baseline.
-  const [composerOverlayLift, setComposerOverlayLift] = useState(0);
-  // Measured height of the floating composer dock (input bar + its outer gap).
-  // The thread/Git content reserves matching bottom space so nothing hides
-  // behind the now-floating composer.
-  const [composerDockHeight, setComposerDockHeight] = useState(0);
+  const [pageStore] = useState(() => new WorkspacePageStore(ws.settings.agents.defaultProfile ?? DEFAULT_PROFILE, normalizeSidebarWidth(ws.settings.appearance.sidebarWidth)));
+  const {
+    searchOpen,
+    setSearchOpen,
+    profile,
+    setProfile,
+    pickerOpen,
+    setPickerOpen,
+    newChatMenuAnchor,
+    setNewChatMenuAnchor,
+    settingsOpen,
+    setSettingsOpen,
+    commandPaletteOpen,
+    setCommandPaletteOpen,
+    projectDialogOpen,
+    setProjectDialogOpen,
+    view,
+    setView,
+    browserOpenRequest,
+    setBrowserOpenRequest,
+    gitFocus,
+    setGitFocus,
+    gitReloadSignal,
+    setGitReloadSignal,
+    worktreeBusy,
+    setWorktreeBusy,
+    cliUpdateSnapshot,
+    setCliUpdateSnapshot,
+    cliUpdateBusyAgent,
+    setCliUpdateBusyAgent,
+    voiceConfig,
+    setVoiceConfig,
+    registeredPlugins,
+    setRegisteredPlugins,
+    gitUnstaged,
+    setGitUnstaged,
+    setComposerTagsHeight,
+    setComposerOverlayLift,
+    setComposerDockHeight,
+    browserActivityEvents,
+    setBrowserActivityEvents,
+    reviewComments,
+    setReviewComments,
+    mentionableFiles,
+    setMentionableFiles,
+    drawerOpen,
+    setDrawerOpen,
+    sidebarCollapsed,
+    setSidebarCollapsed,
+    sidebarWidth,
+    setSidebarWidth,
+    isResizingSidebar,
+    setIsResizingSidebar,
+    confirmDelete,
+    setConfirmDelete,
+    runKey,
+    setRunKey,
+    paneDragging,
+    setPaneDragDepth,
+    wakeups,
+    setWakeups,
+    agentLimits,
+    setAgentLimits,
+    agentLimitsLoaded,
+    setAgentLimitsLoaded,
+    agentLimitRefreshing,
+    setAgentLimitRefreshing,
+    agentLimitRefreshErrors,
+    setAgentLimitRefreshErrors,
+    contentBottomInset,
+    composerVisible,
+    wakeupConversationIds,
+  } = pageStore;
   const composerDockRef = useRef<HTMLDivElement | null>(null);
-  const contentBottomInset = composerDockHeight + (composerTagsHeight > 0 ? composerTagsHeight + 22 : 0) + composerOverlayLift;
   const showTerminal = ws.settings.appearance.showTerminal ?? false;
-  // The terminal has its own command input; the browser preview still uses the
-  // composer menu for browser-agent activity.
-  const composerVisible = view !== "terminal";
-  const [browserActivityEvents, setBrowserActivityEvents] = useState<readonly BrowserActivityEvent[]>([]);
   const showView = useCallback((next: ConversationView) => {
     setView(next);
     if (ws.find(ws.selectedId)) {
@@ -218,7 +249,6 @@ export function WorkspacePageView({
   }, [ws]);
   // Pending code-review comments, attached to diff lines in the Git view and sent
   // to the thread as one block (without starting an agent run).
-  const [reviewComments, setReviewComments] = useState<readonly ReviewCommentEntry[]>([]);
   const reviewSeq = useRef(0);
   const review: DiffCommentApi = {
     comments: reviewComments,
@@ -234,15 +264,6 @@ export function WorkspacePageView({
       showView("chat");
     }
   };
-  const [mentionableFiles, setMentionableFiles] = useState<readonly string[]>([]);
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [sidebarWidth, setSidebarWidth] = useState(() => normalizeSidebarWidth(ws.settings.appearance.sidebarWidth));
-  const [isResizingSidebar, setIsResizingSidebar] = useState(false);
-  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
-  const [runKey, setRunKey] = useState(0);
-  const [paneDragDepth, setPaneDragDepth] = useState(0);
-  const paneDragging = paneDragDepth > 0;
   const composerRef = useRef<ComposerHandle | null>(null);
   const notifiableRuns = useRef(new Set<string>());
   const previousStatuses = useRef(new Map<string, ConversationStatus>());
@@ -255,13 +276,7 @@ export function WorkspacePageView({
 
   const selected = ws.find(ws.selectedId);
   const messages = ws.threads[ws.selectedId] ?? [];
-  const [wakeups, setWakeups] = useState<readonly WakeupSummary[]>([]);
-  const selectedWakeups = useMemo(() => (selected ? wakeups.filter((wakeup) => wakeup.conversationId === selected.id) : []), [selected, wakeups]);
-  const wakeupConversationIds = useMemo(() => new Set(wakeups.map((wakeup) => wakeup.conversationId)), [wakeups]);
-  const [agentLimits, setAgentLimits] = useState<AgentRateLimitMap>({});
-  const [agentLimitsLoaded, setAgentLimitsLoaded] = useState(false);
-  const [agentLimitRefreshing, setAgentLimitRefreshing] = useState<Readonly<Record<string, boolean>>>({});
-  const [agentLimitRefreshErrors, setAgentLimitRefreshErrors] = useState<Readonly<Record<string, string | undefined>>>({});
+  const selectedWakeups = pageStore.selectedWakeups(selected?.id);
   const agentLimitRefreshAttemptRef = useRef<Record<string, number>>({});
   const refreshAgentLimits = useCallback((agentId: string | undefined, requestRefresh: boolean) => {
     const canRequestRefresh = Boolean(requestRefresh && agentId && AGENT_LIMIT_ON_DEMAND_REFRESH_AGENTS.has(agentId));
@@ -1704,4 +1719,4 @@ export function WorkspacePageView({
     </Box>
     </WorkspaceUiProvider>
   );
-}
+});

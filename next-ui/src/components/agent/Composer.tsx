@@ -15,6 +15,7 @@ import StopCircleIcon from "@mui/icons-material/StopCircle";
 import WarningAmberRoundedIcon from "@mui/icons-material/WarningAmberRounded";
 import { Box, Collapse, Divider, InputBase, Menu, MenuItem, Stack, Switch, type SxProps, TextField, type Theme, Tooltip, Typography } from "@mui/material";
 import type { PopoverActions } from "@mui/material/Popover";
+import { observer } from "mobx-react-lite";
 import { type ChangeEvent, type ClipboardEvent, type FormEvent, forwardRef, type KeyboardEvent, type MouseEvent, type PointerEvent, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import { localFileUrl } from "../../lib/external-url";
@@ -59,6 +60,7 @@ import {
   pluginLinkQuery,
   readComposerResponseError,
 } from "./composer-utils";
+import { ComposerStore } from "./composer-store";
 export { voiceLevelCountFromWidth, voiceLevelsFromTimeDomainData } from "./ComposerVoice";
 
 const COMPOSER_BORDER_HOVER_RADIUS_PX = 42;
@@ -248,7 +250,7 @@ interface ComposerProps {
 
 /** Composer — the chat input. Sends on Enter (Shift+Enter for newline). Sticky
  * at the bottom on mobile; the send button stays a comfortable tap target. */
-export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer(
+const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Composer(
   {
     placeholder = "Message the agent…",
     mentionableFiles = [],
@@ -295,23 +297,48 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   },
   ref,
 ) {
-  const [internalValue, setInternalValue] = useState(initialValue);
-  const [internalAttachments, setInternalAttachments] = useState<readonly ComposerAttachmentDraft[]>(initialAttachments);
-  const [sending, setSending] = useState(false);
-  const [activeSuggestion, setActiveSuggestion] = useState(0);
-  const [suggestDismissed, setSuggestDismissed] = useState(false);
-  const [modeMenuAnchor, setModeMenuAnchor] = useState<null | HTMLElement>(null);
-  const [optionsMenuMaxHeight, setOptionsMenuMaxHeight] = useState<number | undefined>(undefined);
+  const [composerStore] = useState(() => new ComposerStore(initialValue, initialAttachments, VOICE_IDLE_LEVELS));
+  const {
+    internalValue,
+    setInternalValue,
+    internalAttachments,
+    setInternalAttachments,
+    sending,
+    setSending,
+    activeSuggestion,
+    setActiveSuggestion,
+    suggestDismissed,
+    setSuggestDismissed,
+    modeMenuAnchor,
+    setModeMenuAnchor,
+    optionsMenuMaxHeight,
+    setOptionsMenuMaxHeight,
+    expanded,
+    setExpanded,
+    overlayLift,
+    setOverlayLift,
+    previewAttachment,
+    setPreviewAttachment,
+    limitOpen,
+    setLimitOpen,
+    voiceState,
+    setVoiceState,
+    voiceRecordingStartedAt,
+    setVoiceRecordingStartedAt,
+    voiceClock,
+    setVoiceClock,
+    voiceLevels,
+    setVoiceLevels,
+    voiceAmbient,
+    setVoiceAmbient,
+    browserVoiceSupported,
+    setBrowserVoiceSupported,
+  } = composerStore;
   // True when the input needs more than one row; it then lifts into an upward-
   // growing overlay (so the bar height never changes), and the floating tags
   // rise above it by `overlayLift`.
-  const [expanded, setExpanded] = useState(false);
-  const [overlayLift, setOverlayLift] = useState(0);
   const onOverlayLiftChangeRef = useRef(onOverlayLiftChange);
   onOverlayLiftChangeRef.current = onOverlayLiftChange;
-  // An image attachment opened full-screen (click a thumbnail to view).
-  const [previewAttachment, setPreviewAttachment] = useState<ComposerAttachmentDraft | null>(null);
-  const [limitOpen, setLimitOpen] = useState(false);
   const optionsMenuActionRef = useRef<PopoverActions | null>(null);
   const optionsMenuListRef = useRef<HTMLUListElement | null>(null);
   const optionsMenuPositionFrameRef = useRef<number | null>(null);
@@ -334,12 +361,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const voiceLevelValuesRef = useRef<readonly number[]>(VOICE_IDLE_LEVELS);
   const voiceLevelLastPaintRef = useRef(0);
   const voiceLevelCountRef = useRef(VOICE_DEFAULT_LEVEL_COUNT);
-  const [voiceState, setVoiceState] = useState<"idle" | "recording" | "transcribing">("idle");
-  const [voiceRecordingStartedAt, setVoiceRecordingStartedAt] = useState<number | null>(null);
-  const [voiceClock, setVoiceClock] = useState(0);
-  const [voiceLevels, setVoiceLevels] = useState<readonly number[]>(VOICE_IDLE_LEVELS);
-  const [voiceAmbient, setVoiceAmbient] = useState(false);
-  const [browserVoiceSupported, setBrowserVoiceSupported] = useState(false);
   const singleRowRef = useRef(0);
   // Shell-style history navigation: -1 means "not browsing"; otherwise an index
   // into `history`. `historyDraftRef` holds the text being composed before the
@@ -1871,3 +1892,5 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     </Box>
   );
 });
+
+export const Composer = observer(ComposerInner);

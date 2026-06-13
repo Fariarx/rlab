@@ -1,5 +1,5 @@
 import { createContext, type ReactNode, useContext, useEffect, useMemo, useState } from "react";
-import { makeAutoObservable, runInAction } from "mobx";
+import { action, computed, makeObservable, observable, runInAction } from "mobx";
 import { observer } from "mobx-react-lite";
 import { AGENTS, AGENT_STATUS, STATIC_AGENT_CLI_INFO, type AgentCliInfo, type AgentCliMap, type AgentId, type AgentOption, type AgentSystemStatus } from "./agents";
 
@@ -119,7 +119,17 @@ class AgentStatusStore {
   private refreshTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor() {
-    makeAutoObservable(this, {}, { autoBind: true });
+    makeObservable(this, {
+      agents: observable.ref,
+      error: observable,
+      loading: observable,
+      live: computed,
+      setStatuses: action.bound,
+      cancel: action.bound,
+      mount: action.bound,
+      unmount: action.bound,
+      reload: action.bound,
+    });
   }
 
   get live(): boolean {

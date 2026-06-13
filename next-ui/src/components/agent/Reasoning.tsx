@@ -2,8 +2,10 @@ import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
 import PsychologyIcon from "@mui/icons-material/Psychology";
 import { Box, Collapse, Stack, Typography } from "@mui/material";
 import { styled } from "@mui/material/styles";
+import { observer } from "mobx-react-lite";
 import { useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
+import { ToggleStore } from "./agent-local-stores";
 import { shimmer } from "./anim";
 import { TypingDots } from "./parts";
 import type { ReasoningBlock } from "./types";
@@ -25,9 +27,10 @@ const ShimmerText = styled("span")(({ theme }) => ({
  * Reasoning — the agent's thinking. Shows a live shimmer + dots while active,
  * otherwise a collapsed "Thought for …" summary that expands to the trace.
  */
-export function Reasoning({ block }: { readonly block: ReasoningBlock }) {
+export const Reasoning = observer(function Reasoning({ block }: { readonly block: ReasoningBlock }) {
   // Always start collapsed; only offer the toggle when there's a trace to show.
-  const [open, setOpen] = useState(false);
+  const [store] = useState(() => new ToggleStore());
+  const { open, setOpen } = store;
   const { t } = useI18n();
   const hasBody = Boolean(block.text && block.text.trim().length > 0);
 
@@ -99,4 +102,4 @@ export function Reasoning({ block }: { readonly block: ReasoningBlock }) {
       </Collapse>
     </Box>
   );
-}
+});

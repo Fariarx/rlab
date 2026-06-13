@@ -1,8 +1,10 @@
 import CheckIcon from "@mui/icons-material/Check";
 import { Box, Stack, Typography } from "@mui/material";
+import { observer } from "mobx-react-lite";
 import { useEffect, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import { Button } from "../ui";
+import { OptionSelectStore } from "./agent-local-stores";
 import { pop } from "./anim";
 import { StatusNote } from "./parts";
 import type { OptionsBlock } from "./types";
@@ -12,17 +14,15 @@ function errorMessage(error: unknown): string {
 }
 
 /** OptionSelect — the agent offers choices; the user picks one or several. */
-export function OptionSelect({
+export const OptionSelect = observer(function OptionSelect({
   block,
   onSelection,
 }: {
   readonly block: OptionsBlock;
   readonly onSelection?: (optionBlockId: string, selectedLabels: readonly string[]) => void | Promise<void>;
 }) {
-  const [selected, setSelected] = useState<readonly string[]>(block.selected ?? []);
-  const [confirmed, setConfirmed] = useState(Boolean(block.selected?.length));
-  const [pending, setPending] = useState(false);
-  const [selectionError, setSelectionError] = useState<string | null>(null);
+  const [store] = useState(() => new OptionSelectStore(block.selected ?? []));
+  const { selected, setSelected, confirmed, setConfirmed, pending, setPending, selectionError, setSelectionError } = store;
   const { t } = useI18n();
 
   useEffect(() => {
@@ -137,4 +137,4 @@ export function OptionSelect({
       </Box>
     </Box>
   );
-}
+});

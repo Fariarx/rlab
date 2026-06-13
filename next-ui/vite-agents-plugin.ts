@@ -34,7 +34,7 @@ import {
   type Locale,
 } from "./src/lib/app-settings";
 import { getVoiceProvider, isVoiceProviderId, VOICE_PROVIDERS, type VoiceProviderId } from "./src/lib/voice-providers";
-import { buildEmptyWorkspaceState, buildInitialWorkspaceState, cloneWorkspaceState, type WorkspaceState } from "./src/lib/workspace-state";
+import { buildEmptyWorkspaceState, buildInitialWorkspaceState, type WorkspaceState } from "./src/lib/workspace-state";
 import { parseWorkspaceMutationRequestBody, workspaceMutationBadRequestMessages } from "./src/lib/workspace-mutations";
 import {
   applyWorkspaceDbMutations,
@@ -56,7 +56,6 @@ import {
 } from "./workspace-db";
 import {
   AGENTS,
-  agentProfileEquals,
   claudeAgentNameFromMode,
   DEFAULT_AGENT_OPTION_ID,
   getAgent,
@@ -131,7 +130,6 @@ const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url));
 const WORKSPACE_STATE_DIR = process.env.RLAB_DATA_DIR
   ? (isAbsolute(process.env.RLAB_DATA_DIR) ? process.env.RLAB_DATA_DIR : resolve(process.cwd(), process.env.RLAB_DATA_DIR))
   : join(PLUGIN_DIR, ".data");
-const WORKSPACE_STATE_FILE = join(WORKSPACE_STATE_DIR, "workspace-state.json");
 const WORKSPACE_DB_FILE = join(WORKSPACE_STATE_DIR, "workspace.db");
 const RUN_AUDIT_FILE = join(WORKSPACE_STATE_DIR, "run-audit.ndjson");
 const SCHEDULED_WAKEUPS_FILE = join(WORKSPACE_STATE_DIR, "scheduled-wakeups.json");
@@ -2076,108 +2074,6 @@ export async function applyBrowserStorageSnapshot(page: Pick<Page, "evaluate" | 
 
 type WorkspaceConversation = WorkspaceState["chats"][number];
 
-const legacySeedCopy: Record<string, { readonly title: string; readonly snippet: string }> = {
-  "chat-2": { title: "Draft release notes for 0.1.69", snippet: "Writing the changelog…" },
-  "chat-3": { title: "Postgres vs SQLite for us", snippet: "Needs input: expected QPS?" },
-  "chat-1": { title: "Explain our auth flow", snippet: "Walked through the token lifecycle" },
-  "chat-5": { title: "Summarize incident #4127", snippet: "Failed to fetch the log bundle" },
-  "chat-4": { title: "Brainstorm onboarding copy", snippet: "Draft saved" },
-  "c-flaky": { title: "Flaky auth.login test", snippet: "Switched the suite to fake timers" },
-  "c-jwt": { title: "Rotate JWT secrets", snippet: "Waiting for approval to deploy" },
-  "c-rl": { title: "Rate-limit middleware", snippet: "Shipped · 6 files changed" },
-  "c-theme": { title: "Dark / light theme tokens", snippet: "All tokens migrated" },
-  "c-virt": { title: "Virtualize the board list", snippet: "Draft — not started" },
-  "c-toast": { title: "Fix toast stacking", snippet: "Build failed on CI step 3" },
-  "c-tf": { title: "Terraform drift", snippet: "Needs input: 2 resources to destroy" },
-  "c-node": { title: "Bump Node to 22", snippet: "Queued behind the release" },
-};
-
-const legacyServiceSnippetRu: Record<string, string> = {
-  Done: "Готово",
-  "Run failed": "Запуск завершился с ошибкой",
-  "Run canceled": "Запуск остановлен",
-};
-
-function seedConversationById(state: WorkspaceState): Map<string, WorkspaceConversation> {
-  return new Map([...state.chats, ...state.projects.flatMap((project) => project.conversations)].map((conversation) => [conversation.id, conversation]));
-}
-
-function migrateConversationProfile(conversation: WorkspaceConversation, fresh: WorkspaceConversation | undefined): Pick<WorkspaceConversation, "agent" | "profile"> {
-  const profile = normalizeAgentProfile(conversation.profile, conversation.agent);
-  if (
-    legacySeedCopy[conversation.id] &&
-    fresh?.profile &&
-    profile.agent === fresh.profile.agent &&
-    profile.model === "default" &&
-    profile.reasoning === "default" &&
-    profile.mode === "default" &&
-    !agentProfileEquals(profile, fresh.profile)
-  ) {
-    return { agent: fresh.profile.agent, profile: normalizeAgentProfile(fresh.profile, fresh.profile.agent) };
-  }
-  return { agent: profile.agent, profile };
-}
-
-function migrateSeedConversation(conversation: WorkspaceConversation, freshById: ReadonlyMap<string, WorkspaceConversation>, locale: WorkspaceState["settings"]["general"]["locale"]): WorkspaceConversation {
-  const legacy = legacySeedCopy[conversation.id];
-  const fresh = freshById.get(conversation.id);
-  const seedSnippet = legacy && fresh && conversation.snippet === legacy.snippet ? fresh.snippet : conversation.snippet;
-  const snippet = locale === "ru" ? legacyServiceSnippetRu[seedSnippet] ?? seedSnippet : seedSnippet;
-  const profile = migrateConversationProfile(conversation, fresh);
-  const next: WorkspaceConversation = {
-    ...conversation,
-    ...profile,
-    title: legacy && fresh && conversation.title === legacy.title ? fresh.title : conversation.title,
-    snippet,
-  };
-  return next.title === conversation.title && next.snippet === conversation.snippet && next.agent === conversation.agent && next.profile === conversation.profile ? conversation : next;
-}
-
-function shouldMigrateSeedThread(conversationId: string, messages: WorkspaceState["threads"][string] | undefined): boolean {
-  if (!legacySeedCopy[conversationId] || !messages || messages.length !== 2) {
-    return false;
-  }
-  const serialized = JSON.stringify(messages);
-  return (
-    serialized.includes("On it. I'll work on") ||
-    serialized.includes("Scoping “") ||
-    serialized.includes("Draft release notes for 0.1.69 from the merged PRs.") ||
-    serialized.includes("Investigate the flaky `auth.login` test")
-  );
-}
-
-export function migrateSeedWorkspaceState(state: WorkspaceState): WorkspaceState {
-  const fresh = buildInitialWorkspaceState();
-  const freshById = seedConversationById(fresh);
-  let changed = false;
-
-  const chats = state.chats.map((conversation) => {
-    const migrated = migrateSeedConversation(conversation, freshById, state.settings.general.locale);
-    changed ||= migrated !== conversation;
-    return migrated;
-  });
-
-  const projects = state.projects.map((project) => {
-    const conversations = project.conversations.map((conversation) => {
-      const migrated = migrateSeedConversation(conversation, freshById, state.settings.general.locale);
-      changed ||= migrated !== conversation;
-      return migrated;
-    });
-    return conversations === project.conversations ? project : { ...project, conversations };
-  });
-
-  const freshThreads = fresh.threads;
-  const threads = { ...state.threads };
-  for (const conversationId of Object.keys(freshThreads)) {
-    if (shouldMigrateSeedThread(conversationId, state.threads[conversationId])) {
-      threads[conversationId] = freshThreads[conversationId];
-      changed = true;
-    }
-  }
-
-  return changed ? { ...state, chats, projects, threads } : state;
-}
-
 const interruptedRunSnippet: Record<Locale, string> = {
   en: "Background run interrupted",
   ru: "Фоновый запуск прерван",
@@ -2370,7 +2266,7 @@ function readWorkspaceState(): WorkspaceState {
   }
   const raw = readWorkspaceStateFromDb();
   cachedWorkspaceLocale = raw.settings?.general?.locale ?? cachedWorkspaceLocale;
-  const normalized = normalizeSeedProjectPaths(migrateSeedWorkspaceState(cloneWorkspaceState(raw)));
+  const normalized = normalizeSeedProjectPaths(raw);
   const reconciled = reconcileStaleBackgroundRuns(normalized, new Set(backgroundRunHandles.keys()));
   if (reconciled !== normalized) {
     persistWorkspaceDelta(normalized, reconciled);
@@ -2558,7 +2454,7 @@ function persistWorkspaceDelta(before: WorkspaceState, after: WorkspaceState): v
 }
 
 export function storageHealthSnapshot(): {
-  readonly storage: { readonly ok: boolean; readonly stateFile: string; readonly lockFile: string; readonly backupFile: string; readonly error?: string };
+  readonly storage: { readonly ok: boolean; readonly stateFile: string; readonly lockFile: string; readonly error?: string };
   readonly agents: { readonly visible: readonly string[] };
   readonly browser: { readonly installed: boolean };
 } {
@@ -2571,7 +2467,6 @@ export function storageHealthSnapshot(): {
         ok: true,
         stateFile: WORKSPACE_DB_FILE,
         lockFile: `${WORKSPACE_DB_FILE}-wal`,
-        backupFile: `${WORKSPACE_STATE_FILE}.pre-sqlite`,
       },
       agents: { visible: visibleAgentDetectionIds() },
       browser,
@@ -2582,7 +2477,6 @@ export function storageHealthSnapshot(): {
         ok: false,
         stateFile: WORKSPACE_DB_FILE,
         lockFile: `${WORKSPACE_DB_FILE}-wal`,
-        backupFile: `${WORKSPACE_STATE_FILE}.pre-sqlite`,
         error: errorMessage(error),
       },
       agents: { visible: visibleAgentDetectionIds() },

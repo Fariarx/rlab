@@ -1,15 +1,18 @@
 import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
 import RateReviewOutlinedIcon from "@mui/icons-material/RateReviewOutlined";
 import { Box, Collapse, Stack, Typography } from "@mui/material";
+import { observer } from "mobx-react-lite";
 import { useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
+import { ToggleStore } from "./agent-local-stores";
 import type { ReviewBlock } from "./types";
 
 /** ReviewCard — a collapsible block summarising the diff-line comments a user
  *  sent to the agent (one block per batch). Collapsed by default. */
-export function ReviewCard({ block }: { readonly block: ReviewBlock }) {
+export const ReviewCard = observer(function ReviewCard({ block }: { readonly block: ReviewBlock }) {
   const { t } = useI18n();
-  const [open, setOpen] = useState(false);
+  const [store] = useState(() => new ToggleStore());
+  const { open, setOpen } = store;
   const count = block.comments.length;
 
   return (
@@ -63,4 +66,4 @@ export function ReviewCard({ block }: { readonly block: ReviewBlock }) {
       </Collapse>
     </Box>
   );
-}
+});

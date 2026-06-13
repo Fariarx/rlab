@@ -1,8 +1,10 @@
 import SearchIcon from "@mui/icons-material/Search";
 import { Box, Dialog, DialogContent, DialogTitle, InputAdornment, Stack, TextField, Typography } from "@mui/material";
+import { observer } from "mobx-react-lite";
 import { useEffect, useMemo, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import { Button, KeyHint } from "../ui";
+import { CommandPaletteStore } from "./workspace-local-stores";
 
 export interface CommandPaletteItem {
   readonly id: string;
@@ -31,10 +33,10 @@ function itemMatches(item: CommandPaletteItem, query: string): boolean {
   return [item.label, item.description, ...(item.keywords ?? [])].some((value) => value != null && normalize(value).includes(query));
 }
 
-export function CommandPalette({ open, items, onClose }: CommandPaletteProps) {
+export const CommandPalette = observer(function CommandPalette({ open, items, onClose }: CommandPaletteProps) {
   const { t } = useI18n();
-  const [query, setQuery] = useState("");
-  const [activeIndex, setActiveIndex] = useState(0);
+  const [store] = useState(() => new CommandPaletteStore());
+  const { query, setQuery, activeIndex, setActiveIndex } = store;
   const normalizedQuery = normalize(query);
 
   useEffect(() => {
@@ -158,4 +160,4 @@ export function CommandPalette({ open, items, onClose }: CommandPaletteProps) {
       </DialogContent>
     </Dialog>
   );
-}
+});

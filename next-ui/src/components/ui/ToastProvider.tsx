@@ -1,6 +1,10 @@
 import { Stack } from "@mui/material";
+import { observer } from "mobx-react-lite";
 import { createContext, type ReactNode, useCallback, useContext, useMemo, useRef, useState } from "react";
-import { Toast, type ToastSeverity } from "./Toast";
+import { Toast } from "./Toast";
+import { ToastProviderStore, type ToastOptions } from "./toast-store";
+
+export type { ToastOptions } from "./toast-store";
 
 /**
  * ToastProvider — an imperative, queued notification system layered over the
@@ -8,45 +12,33 @@ import { Toast, type ToastSeverity } from "./Toast";
  * queue; this stacks them bottom-left (top on mobile) and auto-dismisses. Mount once near the
  * app root, then call `useToast()` anywhere beneath it.
  */
-export interface ToastOptions {
-  readonly message: ReactNode;
-  readonly severity?: ToastSeverity;
-  /** Auto-dismiss delay in ms; defaults to 5000. Pass 0 to disable. */
-  readonly duration?: number;
-  readonly action?: ReactNode;
-}
-
 interface ToastApi {
   toast: (options: ToastOptions) => string;
   dismiss: (id: string) => void;
-}
-
-interface ActiveToast extends ToastOptions {
-  readonly id: string;
 }
 
 const ToastContext = createContext<ToastApi | null>(null);
 
 let toastSeq = 0;
 
-export function ToastProvider({ children }: { readonly children: ReactNode }) {
-  const [toasts, setToasts] = useState<readonly ActiveToast[]>([]);
+export const ToastProvider = observer(function ToastProvider({ children }: { readonly children: ReactNode }) {
+  const [store] = useState(() => new ToastProviderStore());
   const timers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
 
   const dismiss = useCallback((id: string) => {
-    setToasts((current) => current.filter((item) => item.id !== id));
+    store.dismissToast(id);
     const timer = timers.current.get(id);
     if (timer != null) {
       clearTimeout(timer);
       timers.current.delete(id);
     }
-  }, []);
+  }, [store]);
 
   const toast = useCallback(
     (options: ToastOptions) => {
       toastSeq += 1;
       const id = `toast-${toastSeq}`;
-      setToasts((current) => [...current, { ...options, id }]);
+      store.addToast({ ...options, id });
 
       const duration = options.duration ?? 5000;
       if (duration > 0) {
@@ -57,7 +49,7 @@ export function ToastProvider({ children }: { readonly children: ReactNode }) {
       }
       return id;
     },
-    [dismiss],
+    [dismiss, store],
   );
 
   const api = useMemo<ToastApi>(() => ({ toast, dismiss }), [toast, dismiss]);
@@ -80,7 +72,7 @@ export function ToastProvider({ children }: { readonly children: ReactNode }) {
           "& > *": { pointerEvents: "auto" },
         }}
       >
-        {toasts.map((item) => (
+        {store.toasts.map((item) => (
           <Toast
             key={item.id}
             severity={item.severity}
@@ -92,7 +84,7 @@ export function ToastProvider({ children }: { readonly children: ReactNode }) {
       </Stack>
     </ToastContext.Provider>
   );
-}
+});
 
 export function useToast(): ToastApi {
   const context = useContext(ToastContext);

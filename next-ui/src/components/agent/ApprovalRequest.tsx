@@ -1,9 +1,11 @@
 import ThumbDownAltIcon from "@mui/icons-material/ThumbDownAlt";
 import ThumbUpAltIcon from "@mui/icons-material/ThumbUpAlt";
 import { Box, Stack, Typography } from "@mui/material";
+import { observer } from "mobx-react-lite";
 import { useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import { Button } from "../ui";
+import { ApprovalRequestStore } from "./agent-local-stores";
 import { StatusNote } from "./parts";
 import type { ApprovalBlock, ApprovalDecision } from "./types";
 
@@ -12,7 +14,7 @@ function errorMessage(error: unknown): string {
 }
 
 /** ApprovalRequest — the agent asks the user to approve or reject an action. */
-export function ApprovalRequest({
+export const ApprovalRequest = observer(function ApprovalRequest({
   block,
   onDecision,
 }: {
@@ -20,9 +22,8 @@ export function ApprovalRequest({
   readonly onDecision?: (approvalId: string, decision: ApprovalDecision) => void | Promise<void>;
 }) {
   const { t } = useI18n();
-  const [result, setResult] = useState<ApprovalDecision | null>(block.decision ?? null);
-  const [pendingDecision, setPendingDecision] = useState<ApprovalDecision | null>(null);
-  const [decisionError, setDecisionError] = useState<string | null>(null);
+  const [store] = useState(() => new ApprovalRequestStore(block.decision ?? null));
+  const { result, setResult, pendingDecision, setPendingDecision, decisionError, setDecisionError } = store;
 
   const decide = (decision: ApprovalDecision) => {
     if (!block.id || !onDecision) {
@@ -89,4 +90,4 @@ export function ApprovalRequest({
       </Box>
     </Box>
   );
-}
+});

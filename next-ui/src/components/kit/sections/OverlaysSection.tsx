@@ -1,3 +1,4 @@
+import { observer } from "mobx-react-lite";
 import { useState, type MouseEvent } from "react";
 import {
   Box,
@@ -17,12 +18,12 @@ import {
   useToast,
 } from "../../ui";
 import { KitSectionShell } from "../KitSectionShell";
+import { OverlaysSectionStore } from "./kit-section-stores";
 
-export function OverlaysSection() {
+export const OverlaysSection = observer(function OverlaysSection() {
   const { toast } = useToast();
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [anchor, setAnchor] = useState<null | HTMLElement>(null);
-  const [tab, setTab] = useState(0);
+  const [store] = useState(() => new OverlaysSectionStore());
+  const { dialogOpen, anchor, tab, setDialogOpen, setAnchor, setTab } = store;
 
   const openMenu = (event: MouseEvent<HTMLButtonElement>) => setAnchor(event.currentTarget);
   const closeMenu = () => setAnchor(null);
@@ -88,4 +89,4 @@ export function OverlaysSection() {
       </Menu>
     </KitSectionShell>
   );
-}
+});

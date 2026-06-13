@@ -6,12 +6,14 @@ import MoreHorizIcon from "@mui/icons-material/MoreHoriz";
 import PushPinOutlinedIcon from "@mui/icons-material/PushPinOutlined";
 import PushPinRoundedIcon from "@mui/icons-material/PushPinRounded";
 import { Box, InputBase, Menu, MenuItem, Stack, Tooltip, Typography } from "@mui/material";
+import { observer } from "mobx-react-lite";
 import { type KeyboardEvent, type MouseEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import { useI18n } from "../../i18n/I18nProvider";
 import { conversationPreviewSnippet } from "../../lib/conversation-preview";
 import { normalizeClockLabel } from "../../lib/time-format";
 import { IconButton, StatusDot } from "../ui";
+import { ConversationListStore, ConversationRowStore } from "./agent-local-stores";
 import { type AgentId, getAgent, withAlpha } from "./agents";
 import { rise } from "./anim";
 import { messageToPlainText } from "./message-actions";
@@ -156,7 +158,7 @@ function ConversationAvatar({ conversation, hasWakeup }: { readonly conversation
   );
 }
 
-function ConversationRow({
+const ConversationRow = observer(function ConversationRow({
   conversation,
   subtitle,
   active,
@@ -177,9 +179,8 @@ function ConversationRow({
   readonly actions: ConversationActions;
   readonly hasWakeup: boolean;
 }) {
-  const [menuAnchor, setMenuAnchor] = useState<null | HTMLElement>(null);
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(conversation.title);
+  const [store] = useState(() => new ConversationRowStore(conversation.title));
+  const { menuAnchor, setMenuAnchor, editing, setEditing, draft, setDraft } = store;
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const menuOpen = Boolean(menuAnchor);
   const { t } = useI18n();
@@ -370,7 +371,7 @@ function ConversationRow({
       </Menu>
     </Stack>
   );
-}
+});
 
 /** A collapsible sidebar group header. Rows are rendered by the virtual list,
  *  so the header owns only collapse state and collapsed summary indicators. */
@@ -451,7 +452,7 @@ function ConversationGroupHeader({
   );
 }
 
-export function ConversationList({
+export const ConversationList = observer(function ConversationList({
   projects,
   chats,
   threads = {},
@@ -470,7 +471,8 @@ export function ConversationList({
 }) {
   const virtuosoRef = useRef<VirtuosoHandle | null>(null);
   const rowRefs = useRef(new Map<string, HTMLDivElement>());
-  const [collapsedGroups, setCollapsedGroups] = useState<ReadonlySet<string>>(() => new Set());
+  const [store] = useState(() => new ConversationListStore());
+  const { collapsedGroups, setCollapsedGroups } = store;
   const { t } = useI18n();
 
   const wakeupConversationKey = useMemo(() => [...wakeupConversationIds].sort().join("\n"), [wakeupConversationIds]);
@@ -679,4 +681,4 @@ export function ConversationList({
       />
     </Box>
   );
-}
+});

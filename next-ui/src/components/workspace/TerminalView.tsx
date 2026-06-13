@@ -7,9 +7,12 @@ import TerminalIcon from "@mui/icons-material/Terminal";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import { Box, CircularProgress, Stack, Typography } from "@mui/material";
+import { observer } from "mobx-react-lite";
 import { useEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { useI18n } from "../../i18n/I18nProvider";
 import { EmptyState, IconButton } from "../ui";
+import { TerminalViewStore } from "./terminal-view-store";
 
 type TerminalControlMessage =
   | { readonly type: "restore"; readonly snapshot: string; readonly cols: number; readonly rows: number }
@@ -642,13 +645,12 @@ function disposeTerminal(cwd: string): void {
   terminals.delete(cwd);
 }
 
-export function TerminalView({ cwd }: { readonly cwd?: string }) {
+export const TerminalView = observer(function TerminalView({ cwd }: { readonly cwd?: string }) {
   const { t } = useI18n();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<RlabTerminal | null>(null);
-  const [status, setStatus] = useState<TerminalStatus>({ connecting: Boolean(cwd), running: false, error: null, exitCode: null });
-  const [terminalEpoch, setTerminalEpoch] = useState(0);
-  const [inputModifiers, setInputModifiers] = useState<TerminalInputModifiers>(INACTIVE_TERMINAL_MODIFIERS);
+  const [store] = useState(() => new TerminalViewStore({ connecting: Boolean(cwd), running: false, error: null, exitCode: null }, INACTIVE_TERMINAL_MODIFIERS));
+  const { status, setStatus, terminalEpoch, setTerminalEpoch, inputModifiers, setInputModifiers } = store;
 
   useEffect(() => {
     const container = containerRef.current;
@@ -696,10 +698,18 @@ export function TerminalView({ cwd }: { readonly cwd?: string }) {
     setTerminalEpoch((value) => value + 1);
   };
   const toggleInputModifier = (modifier: TerminalInputModifier) => {
-    setInputModifiers((current) => ({ ...current, [modifier]: !current[modifier] }));
+    let nextModifiers = inputModifiers;
+    flushSync(() => {
+      setInputModifiers((current) => {
+        nextModifiers = { ...current, [modifier]: !current[modifier] };
+        return nextModifiers;
+      });
+    });
+    terminalRef.current?.setInputModifiers(nextModifiers, () => setInputModifiers(INACTIVE_TERMINAL_MODIFIERS));
   };
   const sendKeySequence = (sequence: string) => {
-    setInputModifiers(INACTIVE_TERMINAL_MODIFIERS);
+    flushSync(() => setInputModifiers(INACTIVE_TERMINAL_MODIFIERS));
+    terminalRef.current?.setInputModifiers(INACTIVE_TERMINAL_MODIFIERS, () => setInputModifiers(INACTIVE_TERMINAL_MODIFIERS));
     terminalRef.current?.sendKeySequence(sequence);
   };
 
@@ -882,4 +892,4 @@ export function TerminalView({ cwd }: { readonly cwd?: string }) {
       />
     </Stack>
   );
-}
+});
