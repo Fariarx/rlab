@@ -5,7 +5,7 @@ rlab is the product in this directory: a single-page **agent workspace** (Chats/
 This file is high-signal, not comprehensive. Add to it when something was non-obvious, took several tries, or touched files you wouldn't have guessed.
 
 ## Architecture
-- **Frontend**: SPA under `src`. Routing is a hash-switch (`#/kit`, etc.). App state lives in a MobX store (`src/components/workspace/use-workspace.ts`) and is persisted server-side in an **embedded SQLite database** (`workspace.db`, WAL) — see `workspace-db.ts`. The tree is normalized into `projects`/`conversations`/`messages`/`composer_drafts`/`kv` rows, and message threads load lazily: **`GET /api/workspace` returns a shell** (conversation summaries, projects, drafts, settings) with only the **selected** conversation's thread; other threads load on open via **`GET /api/thread?conversationId=…`** (client `loadThread`, tracked by `fullyLoadedThreadIds`; full-text search first `loadAllThreads`). Do **not** add a UI path that writes the whole workspace back. Full workspace writes are intentionally disabled: `PUT /api/workspace` returns 410, and the client must persist via `POST /api/workspace/mutations` with row-level operations (`upsertConversation`, `deleteConversation`, `upsertMessage`, `replaceConversationThread`, etc.). `initializeWorkspaceStateInDb` is insert-only for an empty DB; there must be no function that can delete/rewrite all projects/conversations/messages from a client payload. The streaming hot path upserts only the single changed message + conversation row. `node:sqlite` is loaded via `process.getBuiltinModule` so bundlers don't choke on the experimental built-in.
+- **Frontend**: SPA under `src`. Routing is a hash-switch (`#/kit`, etc.). App state lives in a MobX store (`src/components/workspace/use-workspace.ts`) and is persisted server-side in an **embedded Emmett SQLite event store** (`events.db`, WAL) — see `workspace-db.ts`. The source of truth is the `emt_messages` event log plus `rlab_command_results` for command idempotency; old normalized `projects`/`conversations`/`messages` tables are rejected as legacy state. Read models are projections (`workspace_projection`, `conversation_projection`, `message_projection`, `run_projection`, `projection_checkpoints`) and must be rebuildable from `emt_messages` with `rebuildRlabProjections()`. The client loads a projected shell with **`GET /api/state/snapshot`** and lazy-loads threads with **`GET /api/state/thread?conversationId=…`**. Writes go through **`POST /api/commands`** with command envelopes, and all tabs/devices subscribe to **`GET /api/state/events`** (SSE) to converge on the same server event stream. Do **not** reintroduce `/api/workspace`, `/api/thread`, or mutation/baseRevision conflict APIs. `workspace-mutations.ts` is still used internally as a reducer/adapter boundary, not as the public persistence protocol. `node:sqlite` is loaded via `process.getBuiltinModule` so bundlers don't choke on the experimental built-in.
 - **MobX frontend state**: prefer class stores with explicit `makeObservable(this, { ... })` annotations (`observable`, `computed`, `action.bound`) over React hook state for coordinated app/UI state. Do not use `makeAutoObservable` in new stores. Components that read store data must be wrapped in `observer()`; hooks may create/mount a store, but must not bridge MobX updates through `reaction + setState`.
 - **Backend**: `vite-agents-plugin.ts` — a Vite plugin that serves `/api/*` via connect middleware in **both** `configureServer` (dev) and `configurePreviewServer` (prod preview). There is no separate server process; `bin/rlab.mjs` runs `vite preview`.
 - **Deploy mental model — read this before redeploying:**
@@ -40,6 +40,11 @@ npm run smoke:agents # quick agent smoke run
 ```
 `npm install` drops devDeps unless you pass `--include=dev`.
 
+Intentional event-store reset:
+```bash
+rlab reset --yes      # deletes events.db plus WAL/SHM in RLAB_DATA_DIR/default .data
+```
+
 ### Deploy to prod
 The prod service is named **`rlab`** (not `rlab-prod` or anything else).
 ```bash
@@ -67,7 +72,7 @@ edit → `npm run typecheck` → `npm test` → (if you touched `src/`) `npm run
 - Bound to localhost only; public access goes through Caddy with a token-in-link login that sets a cookie. Agents run as `kanban` (their creds live under `/home/kanban`). Never run the service as root.
 
 ## Gotchas
-- **Frequent `Workspace save failed (502)` = the event loop is blocked by persistence, NOT a proxy fault.** This was the JSON-blob era: the whole state was rewritten on every streamed token, so a few-MB state + a streaming run pinned the loop (sync `JSON.stringify` of MBs) and every UI `PUT /api/workspace` queued behind it → Caddy **502** (and `GET /api/health` taking 20s while `storage.ok` is `true`). The fix is the current SQLite row store (`workspace-db.ts`): the streaming hot path now upserts one message row (~KBs), not the whole tree. If 502s ever recur, confirm it's the loop (not the proxy) with `ps -o %cpu` on the rlab node (spinning) and the listen-socket backlog `ss -ltn 'sport = :4280'` (a non-zero `Recv-Q` = the loop isn't accepting), then look for whatever is doing O(state) sync work per event.
+- **Frequent `Workspace save failed (502)` = the event loop is blocked by persistence, NOT a proxy fault.** This was the JSON-blob era: the whole state was rewritten on every streamed token, so a few-MB state + a streaming run pinned the loop (sync `JSON.stringify` of MBs) and every UI `PUT /api/workspace` queued behind it → Caddy **502** (and `GET /api/health` taking 20s while `storage.ok` is `true`). The fix is the current Emmett SQLite event store (`workspace-db.ts`): the hot path appends narrow events/commands, not the whole workspace tree. If 502s ever recur, confirm it's the loop (not the proxy) with `ps -o %cpu` on the rlab node (spinning) and the listen-socket backlog `ss -ltn 'sport = :4280'` (a non-zero `Recv-Q` = the loop isn't accepting), then look for whatever is doing O(state) sync work per event.
 - **`src/components/ui/` re-exports MUI v9 directly** (`Button`, `Switch`, `TextField`, `CircularProgress`, …). So use the **MUI** API here, NOT the Tailwind `ui` primitives the repo-root `AGENTS.md` describes (that doc is the `web-ui`/kanban Button with `variant="default|primary|danger|ghost"`, `icon`, `fill` — wrong project). In next-ui it's `variant="contained|outlined|text"`, `size="small"`, `startIcon`, `fullWidth`. And MUI v9 dropped `inputProps`: pass `slotProps={{ input: {…} }}` (Switch/checkbox) or `slotProps={{ htmlInput: {…} }}` (TextField) instead — `inputProps` is a type error.
 - `pkill -f "<pattern matching the running shell>"` self-matches and exits 143/144 — run the remaining steps of a chained command separately.
 - **The prod worktree is shared.** If another agent edits these files concurrently, your edits or a `dist` rebuild can be clobbered — check `git status` / mtimes before assuming an unexpected change is yours.
@@ -87,6 +92,6 @@ Source:
 
 Runtime (prod):
 - Ports: dev `5187`, prod `4280` (localhost only; public via Caddy + token-in-link).
-- `/home/kanban/.rlab-prod/workspace.db` (+ `-wal`/`-shm`) — the SQLite workspace store (all conversations + threads).
+- `/home/kanban/.rlab-prod/events.db` (+ `-wal`/`-shm`) — the Emmett SQLite workspace event store.
 - `/home/kanban/.rlab-prod/run-audit.ndjson` — per-run audit log; `…/attachments/` — uploaded files.
 - `/home/kanban/.claude/projects/<project-hash>/<session-id>.jsonl` — Claude session transcripts (for resume).

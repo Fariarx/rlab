@@ -99,7 +99,7 @@ describe("WorkspacePage", () => {
       if (activeRuns) {
         return activeRuns;
       }
-      if (path === "/api/workspace" && (!init || init.method === "GET")) {
+      if (path === "/api/state/snapshot" && (!init || init.method === "GET")) {
         return Response.json({
           ...workspace,
           chats: workspace.chats.map((chat) => (chat.id === selectedId ? { ...chat, agent: "opencode", profile } : chat)),
@@ -132,7 +132,7 @@ describe("WorkspacePage", () => {
       if (activeRuns) {
         return activeRuns;
       }
-      if (path === "/api/workspace" && (!init || init.method === "GET")) {
+      if (path === "/api/state/snapshot" && (!init || init.method === "GET")) {
         return Response.json(workspace);
       }
       if (path === "/api/project-files") {
@@ -190,12 +190,12 @@ describe("WorkspacePage", () => {
       if (activeRuns) {
         return activeRuns;
       }
-      if (path === "/api/workspace" && (!init || init.method === "GET")) {
+      if (path === "/api/state/snapshot" && (!init || init.method === "GET")) {
         return Response.json(workspace);
       }
       if (isWorkspaceMutationRequest(path, init)) {
         workspace = applyWorkspaceMutationRequest(workspace, init);
-        return Response.json({ ok: true, revision: 1 });
+        return Response.json({ ok: true, checkpoint: "1" });
       }
       if (path === "/api/project-files") {
         return Response.json({ files: [] });
@@ -238,12 +238,12 @@ describe("WorkspacePage", () => {
       if (activeRuns) {
         return activeRuns;
       }
-      if (path === "/api/workspace" && (!init || init.method === "GET")) {
+      if (path === "/api/state/snapshot" && (!init || init.method === "GET")) {
         return Response.json(workspace);
       }
       if (isWorkspaceMutationRequest(path, init)) {
         workspace = applyWorkspaceMutationRequest(workspace, init);
-        return Response.json({ ok: true, revision: 1 });
+        return Response.json({ ok: true, checkpoint: "1" });
       }
       if (path === "/api/project-files") {
         return Response.json({ files: [] });
@@ -401,12 +401,12 @@ describe("WorkspacePage", () => {
       if (activeRuns) {
         return activeRuns;
       }
-      if (path === "/api/workspace" && (!init || init.method === "GET")) {
+      if (path === "/api/state/snapshot" && (!init || init.method === "GET")) {
         return Response.json(workspace);
       }
       if (isWorkspaceMutationRequest(path, init)) {
         workspace = applyWorkspaceMutationRequest(workspace, init);
-        return Response.json({ ok: true, revision: 1 });
+        return Response.json({ ok: true, checkpoint: "1" });
       }
       if (path === "/api/project-files") {
         return Response.json({ files: [] });
@@ -454,12 +454,12 @@ describe("WorkspacePage", () => {
       if (activeRuns) {
         return activeRuns;
       }
-      if (path === "/api/workspace" && (!init || init.method === "GET")) {
+      if (path === "/api/state/snapshot" && (!init || init.method === "GET")) {
         return Response.json(workspace);
       }
       if (isWorkspaceMutationRequest(path, init)) {
         workspace = applyWorkspaceMutationRequest(workspace, init);
-        return Response.json({ ok: true, revision: 1 });
+        return Response.json({ ok: true, checkpoint: "1" });
       }
       return Response.json({});
     });
@@ -491,12 +491,12 @@ describe("WorkspacePage", () => {
       if (activeRuns) {
         return activeRuns;
       }
-      if (path === "/api/workspace" && (!init || init.method === "GET")) {
+      if (path === "/api/state/snapshot" && (!init || init.method === "GET")) {
         return Response.json(workspace);
       }
       if (isWorkspaceMutationRequest(path, init)) {
         workspace = applyWorkspaceMutationRequest(workspace, init);
-        return Response.json({ ok: true, revision: 1 });
+        return Response.json({ ok: true, checkpoint: "1" });
       }
       if (path === "/api/run") {
         const body = JSON.parse(String(init?.body ?? "{}")) as { readonly prompt?: string };
@@ -560,12 +560,12 @@ describe("WorkspacePage", () => {
       if (activeRuns) {
         return activeRuns;
       }
-      if (path === "/api/workspace" && (!init || init.method === "GET")) {
+      if (path === "/api/state/snapshot" && (!init || init.method === "GET")) {
         return Response.json(workspace);
       }
       if (isWorkspaceMutationRequest(path, init)) {
         workspace = applyWorkspaceMutationRequest(workspace, init);
-        return Response.json({ ok: true, revision: 1 });
+        return Response.json({ ok: true, checkpoint: "1" });
       }
       if (path === "/api/run") {
         const stream = new ReadableStream<Uint8Array>({
@@ -627,12 +627,12 @@ describe("WorkspacePage", () => {
       if (activeRuns) {
         return activeRuns;
       }
-      if (path === "/api/workspace" && (!init || init.method === "GET")) {
+      if (path === "/api/state/snapshot" && (!init || init.method === "GET")) {
         return Response.json(workspace);
       }
       if (isWorkspaceMutationRequest(path, init)) {
         workspace = applyWorkspaceMutationRequest(workspace, init);
-        return Response.json({ ok: true, revision: 1 });
+        return Response.json({ ok: true, checkpoint: "1" });
       }
       if (path === "/api/project-files") {
         return Response.json({ files: [] });
@@ -734,12 +734,12 @@ describe("WorkspacePage", () => {
         if (activeRuns) {
           return activeRuns;
         }
-        if (path === "/api/workspace" && (!init || init.method === "GET")) {
+        if (path === "/api/state/snapshot" && (!init || init.method === "GET")) {
           return Response.json(workspace);
         }
         if (isWorkspaceMutationRequest(path, init)) {
         workspace = applyWorkspaceMutationRequest(workspace, init);
-        return Response.json({ ok: true, revision: 1 });
+        return Response.json({ ok: true, checkpoint: "1" });
       }
         if (path === "/api/project-files") {
           return Response.json({ files: [] });
@@ -765,9 +765,9 @@ describe("WorkspacePage", () => {
       if (activeRuns) {
         return activeRuns;
       }
-      if (path === "/api/workspace" && (!init || init.method === "GET")) {
+      if (path === "/api/state/snapshot" && (!init || init.method === "GET")) {
         loadAttempts += 1;
-        return loadAttempts === 1 ? new Response("unavailable", { status: 503 }) : Response.json({ ...workspaceApi.state, revision: workspaceApi.revision });
+        return loadAttempts === 1 ? new Response("unavailable", { status: 503 }) : Response.json({ ...workspaceApi.state, checkpoint: String(workspaceApi.revision) });
       }
       const workspaceResponse = workspaceApi.handle(url, init);
       if (workspaceResponse) {
@@ -841,12 +841,12 @@ describe("WorkspacePage", () => {
       if (activeRuns) {
         return activeRuns;
       }
-      if (path === "/api/workspace" && (!init || init.method === "GET")) {
+      if (path === "/api/state/snapshot" && (!init || init.method === "GET")) {
         return Response.json(workspace);
       }
       if (isWorkspaceMutationRequest(path, init)) {
         workspace = applyWorkspaceMutationRequest(workspace, init);
-        return Response.json({ ok: true, revision: 1 });
+        return Response.json({ ok: true, checkpoint: "1" });
       }
       if (path === "/api/run-approval") {
         return Response.json({ id: "approval-1", decision: "approved" });
@@ -902,12 +902,12 @@ describe("WorkspacePage", () => {
       if (activeRuns) {
         return activeRuns;
       }
-      if (path === "/api/workspace" && (!init || init.method === "GET")) {
+      if (path === "/api/state/snapshot" && (!init || init.method === "GET")) {
         return Response.json(savedWorkspace);
       }
       if (isWorkspaceMutationRequest(path, init)) {
         savedWorkspace = applyWorkspaceMutationRequest(savedWorkspace, init);
-        return Response.json({ ok: true, revision: 1 });
+        return Response.json({ ok: true, checkpoint: "1" });
       }
       if (path === "/api/run-input") {
         return Response.json({ id: "toolu_question:q0", selected: ["Summary"] });
@@ -954,12 +954,12 @@ describe("WorkspacePage", () => {
       if (activeRuns) {
         return activeRuns;
       }
-      if (path === "/api/workspace" && (!init || init.method === "GET")) {
+      if (path === "/api/state/snapshot" && (!init || init.method === "GET")) {
         return Response.json(workspace);
       }
       if (isWorkspaceMutationRequest(path, init)) {
         workspace = applyWorkspaceMutationRequest(workspace, init);
-        return Response.json({ ok: true, revision: 1 });
+        return Response.json({ ok: true, checkpoint: "1" });
       }
       if (path === "/api/run-approval") {
         return Response.json({ error: "Live approval decisions are not supported by the current agent adapter." }, { status: 501 });
@@ -985,12 +985,12 @@ describe("WorkspacePage", () => {
       if (activeRuns) {
         return activeRuns;
       }
-      if (path === "/api/workspace" && (!init || init.method === "GET")) {
+      if (path === "/api/state/snapshot" && (!init || init.method === "GET")) {
         return Response.json(workspace);
       }
       if (isWorkspaceMutationRequest(path, init)) {
         workspace = applyWorkspaceMutationRequest(workspace, init);
-        return Response.json({ ok: true, revision: 1 });
+        return Response.json({ ok: true, checkpoint: "1" });
       }
       if (path === "/api/project-files") {
         return Response.json({ files: [] });
@@ -1038,12 +1038,12 @@ describe("WorkspacePage", () => {
       if (activeRuns) {
         return activeRuns;
       }
-      if (path === "/api/workspace" && (!init || init.method === "GET")) {
+      if (path === "/api/state/snapshot" && (!init || init.method === "GET")) {
         return Response.json(workspace);
       }
       if (isWorkspaceMutationRequest(path, init)) {
         workspace = applyWorkspaceMutationRequest(workspace, init);
-        return Response.json({ ok: true, revision: 1 });
+        return Response.json({ ok: true, checkpoint: "1" });
       }
       if (path === "/api/project-files") {
         return Response.json({ files: [] });
@@ -1106,12 +1106,12 @@ describe("WorkspacePage", () => {
       if (activeRuns) {
         return activeRuns;
       }
-      if (path === "/api/workspace" && (!init || init.method === "GET")) {
+      if (path === "/api/state/snapshot" && (!init || init.method === "GET")) {
         return Response.json(workspace);
       }
       if (isWorkspaceMutationRequest(path, init)) {
         workspace = applyWorkspaceMutationRequest(workspace, init);
-        return Response.json({ ok: true, revision: 1 });
+        return Response.json({ ok: true, checkpoint: "1" });
       }
       if (path === "/api/project-files") {
         return Response.json({ files: [] });
@@ -1169,12 +1169,12 @@ describe("WorkspacePage", () => {
       if (activeRuns) {
         return activeRuns;
       }
-      if (path === "/api/workspace" && (!init || init.method === "GET")) {
+      if (path === "/api/state/snapshot" && (!init || init.method === "GET")) {
         return Response.json(workspace);
       }
       if (isWorkspaceMutationRequest(path, init)) {
         workspace = applyWorkspaceMutationRequest(workspace, init);
-        return Response.json({ ok: true, revision: 1 });
+        return Response.json({ ok: true, checkpoint: "1" });
       }
       if (path === "/api/project-files") {
         return Response.json({ files: [] });
@@ -1234,12 +1234,12 @@ describe("WorkspacePage", () => {
       if (activeRuns) {
         return activeRuns;
       }
-      if (path === "/api/workspace" && (!init || init.method === "GET")) {
+      if (path === "/api/state/snapshot" && (!init || init.method === "GET")) {
         return Response.json(workspace);
       }
       if (isWorkspaceMutationRequest(path, init)) {
         workspace = applyWorkspaceMutationRequest(workspace, init);
-        return Response.json({ ok: true, revision: 1 });
+        return Response.json({ ok: true, checkpoint: "1" });
       }
       if (path === "/api/project-files") {
         return Response.json({ files: [] });
@@ -1267,12 +1267,12 @@ describe("WorkspacePage", () => {
       if (activeRuns) {
         return activeRuns;
       }
-      if (path === "/api/workspace" && (!init || init.method === "GET")) {
+      if (path === "/api/state/snapshot" && (!init || init.method === "GET")) {
         return Response.json(workspace);
       }
       if (isWorkspaceMutationRequest(path, init)) {
         workspace = applyWorkspaceMutationRequest(workspace, init);
-        return Response.json({ ok: true, revision: 1 });
+        return Response.json({ ok: true, checkpoint: "1" });
       }
       if (path === "/api/project-files") {
         return Response.json({ files: [] });
@@ -1332,12 +1332,12 @@ describe("WorkspacePage", () => {
       if (activeRuns) {
         return activeRuns;
       }
-      if (path === "/api/workspace" && (!init || init.method === "GET")) {
+      if (path === "/api/state/snapshot" && (!init || init.method === "GET")) {
         return Response.json(workspace);
       }
       if (isWorkspaceMutationRequest(path, init)) {
         workspace = applyWorkspaceMutationRequest(workspace, init);
-        return Response.json({ ok: true, revision: 1 });
+        return Response.json({ ok: true, checkpoint: "1" });
       }
       if (path === "/api/project-files") {
         return Response.json({ files: [] });
@@ -1375,12 +1375,12 @@ describe("WorkspacePage", () => {
       if (activeRuns) {
         return activeRuns;
       }
-      if (path === "/api/workspace" && (!init || init.method === "GET")) {
+      if (path === "/api/state/snapshot" && (!init || init.method === "GET")) {
         return Response.json(workspace);
       }
       if (isWorkspaceMutationRequest(path, init)) {
         workspace = applyWorkspaceMutationRequest(workspace, init);
-        return Response.json({ ok: true, revision: 1 });
+        return Response.json({ ok: true, checkpoint: "1" });
       }
       if (path === "/api/project-files") {
         return Response.json({ files: [] });
@@ -1417,12 +1417,12 @@ describe("WorkspacePage", () => {
       if (activeRuns) {
         return activeRuns;
       }
-      if (path === "/api/workspace" && (!init || init.method === "GET")) {
+      if (path === "/api/state/snapshot" && (!init || init.method === "GET")) {
         return Response.json(workspace);
       }
       if (isWorkspaceMutationRequest(path, init)) {
         workspace = applyWorkspaceMutationRequest(workspace, init);
-        return Response.json({ ok: true, revision: 1 });
+        return Response.json({ ok: true, checkpoint: "1" });
       }
       if (path === "/api/project-files") {
         return Response.json({ files: [] });
@@ -1474,12 +1474,12 @@ describe("WorkspacePage", () => {
       if (activeRuns) {
         return activeRuns;
       }
-      if (path === "/api/workspace" && (!init || init.method === "GET")) {
+      if (path === "/api/state/snapshot" && (!init || init.method === "GET")) {
         return Response.json(workspace);
       }
       if (isWorkspaceMutationRequest(path, init)) {
         workspace = applyWorkspaceMutationRequest(workspace, init);
-        return Response.json({ ok: true, revision: 1 });
+        return Response.json({ ok: true, checkpoint: "1" });
       }
       if (path === "/api/project-files") {
         return Response.json({ files: [] });
@@ -1511,12 +1511,12 @@ describe("WorkspacePage", () => {
       if (activeRuns) {
         return activeRuns;
       }
-      if (path === "/api/workspace" && (!init || init.method === "GET")) {
+      if (path === "/api/state/snapshot" && (!init || init.method === "GET")) {
         return Response.json(workspace);
       }
       if (isWorkspaceMutationRequest(path, init)) {
         workspace = applyWorkspaceMutationRequest(workspace, init);
-        return Response.json({ ok: true, revision: 1 });
+        return Response.json({ ok: true, checkpoint: "1" });
       }
       if (path === "/api/project-files") {
         return Response.json({ files: [] });
@@ -1571,12 +1571,12 @@ describe("WorkspacePage", () => {
       if (activeRuns) {
         return activeRuns;
       }
-      if (path === "/api/workspace" && (!init || init.method === "GET")) {
+      if (path === "/api/state/snapshot" && (!init || init.method === "GET")) {
         return Response.json(workspace);
       }
       if (isWorkspaceMutationRequest(path, init)) {
         workspace = applyWorkspaceMutationRequest(workspace, init);
-        return Response.json({ ok: true, revision: 1 });
+        return Response.json({ ok: true, checkpoint: "1" });
       }
       if (path === "/api/project-files") {
         return Response.json({ files: [] });
@@ -1610,6 +1610,7 @@ describe("WorkspacePage", () => {
   });
 
 });
+
 
 
 

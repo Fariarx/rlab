@@ -1,180 +1,86 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import process from "node:process";
-import type { AgentBlock, ChatMessage, ComposerDraft, ConversationSummary, Project } from "./src/domain/agent-types";
+import { randomUUID } from "node:crypto";
+import { defaultTag, schemaSQL } from "@event-driven-io/emmett-sqlite";
+import type { AgentBlock, ChatMessage, ConversationSummary } from "./src/domain/agent-types";
 import { conversationPreviewSnippet, messagePreviewText, previewSnippet } from "./src/lib/conversation-preview";
+import type { RunEvent } from "./src/lib/run-event-accumulator";
+import {
+  applyRlabEventToState,
+  commandStreamName,
+  commandToEvent,
+  parseRlabEvent,
+  type RecordedRlabEvent,
+  type RlabCommandEnvelope,
+  type RlabEvent,
+  type RlabEventMetadata,
+  type RlabEventType,
+  type RlabRunCancelledData,
+  type RlabRunCompletedData,
+  type RlabRunFailedData,
+  type RlabRunInputProvidedData,
+  type RlabRunInterruptedData,
+  type RlabRunOutputRecordedData,
+  type RlabRunRequestedData,
+  type RlabRunStartedData,
+  type RlabRunWaitingForInputData,
+  upsertAgentMessageForUserTurnInThread,
+  workspaceMutationToCommand,
+} from "./src/lib/rlab-events";
 import type { WorkspaceMutation } from "./src/lib/workspace-mutations";
-import type { WorkspaceState } from "./src/lib/workspace-state";
+import { buildEmptyWorkspaceState, cloneWorkspaceState, type WorkspaceState } from "./src/lib/workspace-state";
 
-// `node:sqlite` is an experimental built-in that bundlers (vite/vitest) refuse to
-// resolve statically. Load it via the runtime accessor so neither the dev-server
-// transform nor the prod config loader tries to bundle it. Same engine + types.
 const { DatabaseSync } = process.getBuiltinModule("node:sqlite");
 type DatabaseHandle = InstanceType<typeof DatabaseSync>;
 
-/**
- * SQLite-backed workspace storage. The workspace used to live in one JSON blob
- * that was rewritten in full on every change — a multi-MB sync `JSON.stringify`
- * per streamed agent token, which blocked the event loop and surfaced as Caddy
- * 502s. Here the tree is normalized into rows so the streaming hot path upserts
- * only the single changed message + conversation (≈KBs), while full-state reads/
- * writes (UI saves, seeding) reassemble/replace the tree in one WAL transaction.
- *
- * Uses the built-in `node:sqlite` (Node 22+) — no native dependency to compile.
- * The SQL is plain enough to swap to better-sqlite3 unchanged if ever needed.
- */
-
 let db: DatabaseHandle | null = null;
-const WORKSPACE_REVISION_KEY = "workspaceRevision";
 const PREVIEW_SNIPPET_LOOKBACK_MESSAGES = 20;
-
-const TABLE_SCHEMA = `
-CREATE TABLE IF NOT EXISTS projects (
-  id TEXT PRIMARY KEY,
-  position INTEGER NOT NULL,
-  data TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS conversations (
-  id TEXT PRIMARY KEY,
-  project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
-  position INTEGER NOT NULL,
-  data TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS messages (
-  id TEXT PRIMARY KEY,
-  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-  position INTEGER NOT NULL,
-  data TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS composer_drafts (
-  conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
-  data TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS kv (
-  key TEXT PRIMARY KEY,
-  value TEXT NOT NULL
+const RLAB_COMMAND_RESULTS_SQL = `
+CREATE TABLE IF NOT EXISTS rlab_command_results (
+  command_id TEXT PRIMARY KEY,
+  global_position INTEGER NOT NULL
 );
 `;
+const RLAB_PROJECTIONS_SQL = `
+CREATE TABLE IF NOT EXISTS projection_checkpoints (
+  name TEXT PRIMARY KEY,
+  global_position INTEGER NOT NULL
+);
 
-const INDEX_SCHEMA = `
-CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_position ON projects(position);
-CREATE INDEX IF NOT EXISTS idx_conversations_project ON conversations(project_id, position);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_root_position ON conversations(position) WHERE project_id IS NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_project_position ON conversations(project_id, position) WHERE project_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, position);
-CREATE INDEX IF NOT EXISTS idx_messages_conversation_desc ON messages(conversation_id, position DESC);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_conversation_position ON messages(conversation_id, position);
+CREATE TABLE IF NOT EXISTS run_projection (
+  run_id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  data TEXT NOT NULL,
+  updated_global_position INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS conversation_projection (
+  conversation_id TEXT PRIMARY KEY,
+  project_id TEXT,
+  position INTEGER NOT NULL,
+  data TEXT NOT NULL,
+  updated_global_position INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS message_projection (
+  message_id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL,
+  position INTEGER NOT NULL,
+  data TEXT NOT NULL,
+  updated_global_position INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_message_projection_conversation_position
+ON message_projection(conversation_id, position);
+
+CREATE TABLE IF NOT EXISTS workspace_projection (
+  name TEXT PRIMARY KEY,
+  data TEXT NOT NULL,
+  updated_global_position INTEGER NOT NULL
+);
 `;
-
-function tableExists(handle: DatabaseHandle, name: string): boolean {
-  const row = handle.prepare("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) as { present: number } | undefined;
-  return row !== undefined;
-}
-
-function tableHasForeignKeys(handle: DatabaseHandle, name: string): boolean {
-  return (handle.prepare(`PRAGMA foreign_key_list(${name})`).all() as unknown[]).length > 0;
-}
-
-function assertForeignKeyIntegrity(handle: DatabaseHandle): void {
-  const violations = handle.prepare("PRAGMA foreign_key_check").all() as Array<{ table: string; rowid: number; parent: string; fkid: number }>;
-  if (violations.length > 0) {
-    const first = violations[0];
-    throw new Error(`Workspace database foreign key violation in ${first.table} row ${first.rowid} referencing ${first.parent}.`);
-  }
-}
-
-function assertCurrentSchema(handle: DatabaseHandle): void {
-  for (const table of ["projects", "conversations", "messages", "composer_drafts", "kv"]) {
-    if (!tableExists(handle, table)) {
-      throw new Error(`Workspace database schema is incomplete: missing ${table}. Reset the workspace database.`);
-    }
-  }
-  for (const table of ["conversations", "messages", "composer_drafts"]) {
-    if (!tableHasForeignKeys(handle, table)) {
-      throw new Error(`Workspace database schema is outdated: ${table} has no declared foreign keys. Reset the workspace database.`);
-    }
-  }
-}
-
-/** Open (or create) the workspace database in WAL mode. Idempotent. */
-export function initWorkspaceDb(file: string): void {
-  if (db) {
-    return;
-  }
-  mkdirSync(dirname(file), { recursive: true });
-  const handle = new DatabaseSync(file);
-  // WAL: concurrent readers + a single writer, no torn writes — this also kills
-  // the "Storage state is locked" race the old lock-file approach hit.
-  handle.exec("PRAGMA foreign_keys = ON");
-  handle.exec("PRAGMA journal_mode = WAL");
-  handle.exec("PRAGMA synchronous = NORMAL");
-  try {
-    handle.exec(TABLE_SCHEMA);
-    handle.exec(INDEX_SCHEMA);
-    assertCurrentSchema(handle);
-    assertForeignKeyIntegrity(handle);
-    db = handle;
-  } catch (error) {
-    handle.close();
-    throw error;
-  }
-}
-
-function database(): DatabaseHandle {
-  if (!db) {
-    throw new Error("Workspace database is not initialised.");
-  }
-  return db;
-}
-
-function transaction(run: () => void): void {
-  const handle = database();
-  handle.exec("BEGIN");
-  try {
-    run();
-    handle.exec("COMMIT");
-  } catch (error) {
-    try {
-      handle.exec("ROLLBACK");
-    } catch {
-      // ignore rollback failure; surface the original error
-    }
-    throw error;
-  }
-}
-
-function readWorkspaceRevisionFromHandle(handle: DatabaseHandle): number {
-  const row = handle.prepare("SELECT value FROM kv WHERE key = ?").get(WORKSPACE_REVISION_KEY) as { value: string } | undefined;
-  if (!row) {
-    return 0;
-  }
-  try {
-    const parsed = JSON.parse(row.value) as unknown;
-    return typeof parsed === "number" && Number.isFinite(parsed) && parsed >= 0 ? Math.trunc(parsed) : 0;
-  } catch {
-    return 0;
-  }
-}
-
-function writeWorkspaceRevision(handle: DatabaseHandle, revision: number): void {
-  handle
-    .prepare("INSERT INTO kv(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
-    .run(WORKSPACE_REVISION_KEY, JSON.stringify(revision));
-}
-
-function bumpWorkspaceRevisionInTransaction(handle: DatabaseHandle): number {
-  const next = readWorkspaceRevisionFromHandle(handle) + 1;
-  writeWorkspaceRevision(handle, next);
-  return next;
-}
-
-/** Monotonic workspace version used by /api/workspace optimistic concurrency. */
-export function readWorkspaceRevision(): number {
-  return readWorkspaceRevisionFromHandle(database());
-}
-
-type ProjectMeta = Omit<Project, "conversations">;
-type MessageRow = { readonly conversationId: string; readonly data: string };
 
 export type WorkspaceDbMutation = WorkspaceMutation;
 
@@ -183,20 +89,724 @@ export class WorkspaceRevisionConflictError extends Error {
   readonly currentRevision: number;
 
   constructor(expectedRevision: number, currentRevision: number) {
-    super(`Workspace revision conflict: expected ${expectedRevision}, current ${currentRevision}.`);
+    super(`Workspace event position conflict: expected ${expectedRevision}, current ${currentRevision}.`);
     this.name = "WorkspaceRevisionConflictError";
     this.expectedRevision = expectedRevision;
     this.currentRevision = currentRevision;
   }
 }
 
-function projectMeta(project: Project): ProjectMeta {
-  const { conversations: _conversations, ...meta } = project;
-  return meta;
+export class EventStreamConflictError extends Error {
+  readonly streamName: string;
+  readonly expectedStreamVersion: number;
+  readonly currentStreamVersion: number;
+
+  constructor(streamName: string, expectedStreamVersion: number, currentStreamVersion: number) {
+    super(`Event stream ${streamName} version conflict: expected ${expectedStreamVersion}, current ${currentStreamVersion}.`);
+    this.name = "EventStreamConflictError";
+    this.streamName = streamName;
+    this.expectedStreamVersion = expectedStreamVersion;
+    this.currentStreamVersion = currentStreamVersion;
+  }
 }
 
-function messageFromRow(row: MessageRow): ChatMessage {
-  return JSON.parse(row.data) as ChatMessage;
+type StoredEventRow = {
+  readonly stream_id: string;
+  readonly stream_position: number;
+  readonly message_type: string;
+  readonly message_data: string;
+  readonly message_metadata: string;
+  readonly global_position: number;
+};
+
+type MessageRow = { readonly conversationId: string; readonly data: string };
+
+interface HandledCommandEvent {
+  readonly envelope: RlabCommandEnvelope;
+  readonly streamName: string;
+  readonly expectedStreamVersion: number;
+  readonly event: RlabEvent;
+}
+
+export type RunProjectionStatus = "requested" | "running" | "waiting" | "completed" | "failed" | "cancelled";
+
+export interface RunProjection {
+  readonly runId: string;
+  readonly conversationId: string;
+  readonly userMessageId?: string;
+  readonly agentMessageId?: string;
+  readonly requested?: RlabRunRequestedData;
+  readonly startedAt?: string;
+  readonly status: RunProjectionStatus;
+  readonly events: readonly RunEvent[];
+  readonly inputId?: string;
+  readonly error?: string;
+  readonly updatedGlobalPosition: string;
+}
+
+type RunLifecycleEvent = Extract<
+  RlabEvent,
+  | { readonly type: "run.requested" }
+  | { readonly type: "run.started" }
+  | { readonly type: "run.outputRecorded" }
+  | { readonly type: "run.waitingForInput" }
+  | { readonly type: "run.inputProvided" }
+  | { readonly type: "run.completed" }
+  | { readonly type: "run.failed" }
+  | { readonly type: "run.cancelled" }
+  | { readonly type: "run.interrupted" }
+  | { readonly type: "run.rawBatchRecorded" }
+>;
+export type RunLifecycleEventInput = Omit<RunLifecycleEvent, "metadata">;
+
+type EventSubscriber = (event: RecordedRlabEvent) => void;
+const subscribers = new Set<EventSubscriber>();
+
+export function subscribeWorkspaceEvents(subscriber: EventSubscriber): () => void {
+  subscribers.add(subscriber);
+  return () => {
+    subscribers.delete(subscriber);
+  };
+}
+
+function database(): DatabaseHandle {
+  if (!db) {
+    throw new Error("Workspace event store is not initialised.");
+  }
+  return db;
+}
+
+function transaction<T>(run: () => T): T {
+  const handle = database();
+  handle.exec("BEGIN");
+  try {
+    const result = run();
+    handle.exec("COMMIT");
+    return result;
+  } catch (error) {
+    try {
+      handle.exec("ROLLBACK");
+    } catch {
+      // Surface the original error.
+    }
+    throw error;
+  }
+}
+
+export function initWorkspaceDb(file: string): void {
+  if (db) {
+    return;
+  }
+  mkdirSync(dirname(file), { recursive: true });
+  const handle = new DatabaseSync(file);
+  handle.exec("PRAGMA foreign_keys = ON");
+  handle.exec("PRAGMA journal_mode = WAL");
+  handle.exec("PRAGMA synchronous = NORMAL");
+  try {
+    ensureNoLegacyWorkspaceSchema(handle);
+    for (const sql of schemaSQL) {
+      handle.exec(sql);
+    }
+    handle.exec(RLAB_COMMAND_RESULTS_SQL);
+    handle.exec(RLAB_PROJECTIONS_SQL);
+    db = handle;
+    rebuildRlabProjections();
+  } catch (error) {
+    handle.close();
+    throw error;
+  }
+}
+
+function ensureNoLegacyWorkspaceSchema(handle: DatabaseHandle): void {
+  const legacyTables = handle
+    .prepare(
+      `SELECT name
+       FROM sqlite_master
+       WHERE type = 'table'
+         AND name IN ('projects', 'conversations', 'messages', 'composer_drafts', 'kv')`,
+    )
+    .all() as { readonly name: string }[];
+  if (legacyTables.length > 0) {
+    throw new Error("Workspace database schema is outdated; expected an event-sourced Emmett SQLite store.");
+  }
+}
+
+export function closeWorkspaceDb(): void {
+  if (db) {
+    db.close();
+    db = null;
+  }
+  subscribers.clear();
+}
+
+function readLastGlobalPositionFromHandle(handle: DatabaseHandle): number {
+  const row = handle.prepare("SELECT COALESCE(MAX(global_position), 0) AS position FROM emt_messages WHERE partition = ? AND is_archived = 0").get(defaultTag) as
+    | { position: number }
+    | undefined;
+  return row?.position ?? 0;
+}
+
+export function readWorkspaceRevision(): number {
+  return readLastGlobalPositionFromHandle(database());
+}
+
+export function readWorkspaceCheckpoint(): string {
+  return String(readWorkspaceRevision());
+}
+
+export function workspaceDbHasState(): boolean {
+  const row = database().prepare("SELECT EXISTS(SELECT 1 FROM emt_messages WHERE partition = ? AND is_archived = 0) AS present").get(defaultTag) as { present: number };
+  return row.present === 1;
+}
+
+function serverMetadata(commandId: string): RlabEventMetadata {
+  return {
+    schemaVersion: 1,
+    commandId,
+    clientId: "server",
+    correlationId: commandId,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function streamType(streamName: string): string {
+  const colon = streamName.indexOf(":");
+  return colon > 0 ? streamName.slice(0, colon) : streamName;
+}
+
+function readStreamPosition(handle: DatabaseHandle, streamName: string): number {
+  const row = handle
+    .prepare("SELECT stream_position AS position FROM emt_streams WHERE stream_id = ? AND partition = ? AND is_archived = 0")
+    .get(streamName, defaultTag) as { position: number } | undefined;
+  return row?.position ?? 0;
+}
+
+function upsertStreamPosition(handle: DatabaseHandle, streamName: string, position: number): void {
+  handle
+    .prepare(
+      `INSERT INTO emt_streams(stream_id, stream_position, partition, stream_type, stream_metadata, is_archived)
+       VALUES(?, ?, ?, ?, '{}', 0)
+       ON CONFLICT(stream_id, partition, is_archived)
+       DO UPDATE SET stream_position = excluded.stream_position`,
+    )
+    .run(streamName, position, defaultTag, streamType(streamName));
+}
+
+function appendEventInTransaction(handle: DatabaseHandle, streamName: string, event: RlabEvent, expectedStreamVersion?: number): RecordedRlabEvent {
+  const currentStreamVersion = readStreamPosition(handle, streamName);
+  if (expectedStreamVersion !== undefined && currentStreamVersion !== expectedStreamVersion) {
+    throw new EventStreamConflictError(streamName, expectedStreamVersion, currentStreamVersion);
+  }
+  const streamPosition = currentStreamVersion + 1;
+  const globalPosition = readLastGlobalPositionFromHandle(handle) + 1;
+  const messageId = randomUUID();
+  const messageMetadata = {
+    streamName,
+    messageId,
+    streamPosition: String(streamPosition),
+    ...event.metadata,
+  };
+  handle
+    .prepare(
+      `INSERT INTO emt_messages(
+        stream_id,
+        stream_position,
+        partition,
+        message_kind,
+        message_data,
+        message_metadata,
+        message_schema_version,
+        message_type,
+        message_id,
+        is_archived,
+        global_position
+      ) VALUES(?, ?, ?, 'E', ?, ?, ?, ?, ?, 0, ?)`,
+    )
+    .run(streamName, streamPosition, defaultTag, JSON.stringify(event.data), JSON.stringify(messageMetadata), String(event.metadata.schemaVersion), event.type, messageId, globalPosition);
+  upsertStreamPosition(handle, streamName, streamPosition);
+  return {
+    type: event.type,
+    data: event.data,
+    metadata: event.metadata,
+    streamName,
+    streamPosition: String(streamPosition),
+    globalPosition: String(globalPosition),
+  };
+}
+
+function publishRecordedEvents(events: readonly RecordedRlabEvent[]): void {
+  if (events.length === 0 || subscribers.size === 0) {
+    return;
+  }
+  for (const event of events) {
+    for (const subscriber of subscribers) {
+      subscriber(event);
+    }
+  }
+}
+
+function projectionCheckpoint(handle: DatabaseHandle, name: string): number {
+  const row = handle.prepare("SELECT global_position AS position FROM projection_checkpoints WHERE name = ?").get(name) as { readonly position: number } | undefined;
+  return row?.position ?? 0;
+}
+
+function setProjectionCheckpoint(handle: DatabaseHandle, name: string, position: number): void {
+  handle
+    .prepare(
+      `INSERT INTO projection_checkpoints(name, global_position)
+       VALUES(?, ?)
+       ON CONFLICT(name) DO UPDATE SET global_position = excluded.global_position`,
+    )
+    .run(name, position);
+}
+
+function readRunProjectionInTransaction(handle: DatabaseHandle, runId: string): RunProjection | null {
+  const row = handle.prepare("SELECT data FROM run_projection WHERE run_id = ?").get(runId) as { readonly data: string } | undefined;
+  return row ? (JSON.parse(row.data) as RunProjection) : null;
+}
+
+function writeRunProjectionInTransaction(handle: DatabaseHandle, projection: RunProjection): void {
+  handle
+    .prepare(
+      `INSERT INTO run_projection(run_id, conversation_id, status, data, updated_global_position)
+       VALUES(?, ?, ?, ?, ?)
+       ON CONFLICT(run_id) DO UPDATE SET
+         conversation_id = excluded.conversation_id,
+         status = excluded.status,
+         data = excluded.data,
+         updated_global_position = excluded.updated_global_position`,
+    )
+    .run(projection.runId, projection.conversationId, projection.status, JSON.stringify(projection), Number(projection.updatedGlobalPosition));
+}
+
+function readWorkspaceProjectionInTransaction(handle: DatabaseHandle): WorkspaceState {
+  const row = handle.prepare("SELECT data FROM workspace_projection WHERE name = 'workspace'").get() as { readonly data: string } | undefined;
+  return row ? (JSON.parse(row.data) as WorkspaceState) : buildEmptyWorkspaceState();
+}
+
+function writeWorkspaceProjectionInTransaction(handle: DatabaseHandle, state: WorkspaceState, globalPosition: number): void {
+  handle
+    .prepare(
+      `INSERT INTO workspace_projection(name, data, updated_global_position)
+       VALUES('workspace', ?, ?)
+       ON CONFLICT(name) DO UPDATE SET
+         data = excluded.data,
+         updated_global_position = excluded.updated_global_position`,
+    )
+    .run(JSON.stringify(state), globalPosition);
+}
+
+function writeConversationProjectionRowsInTransaction(handle: DatabaseHandle, state: WorkspaceState, globalPosition: number): void {
+  handle.prepare("DELETE FROM conversation_projection").run();
+  let position = 0;
+  const insert = handle.prepare(
+    `INSERT INTO conversation_projection(conversation_id, project_id, position, data, updated_global_position)
+     VALUES(?, ?, ?, ?, ?)`,
+  );
+  for (const conversation of state.chats) {
+    insert.run(conversation.id, null, position, JSON.stringify(conversation), globalPosition);
+    position += 1;
+  }
+  for (const project of state.projects) {
+    for (const conversation of project.conversations) {
+      insert.run(conversation.id, project.id, position, JSON.stringify(conversation), globalPosition);
+      position += 1;
+    }
+  }
+}
+
+function writeThreadProjectionRowsInTransaction(handle: DatabaseHandle, conversationId: string, messages: readonly ChatMessage[], globalPosition: number): void {
+  handle.prepare("DELETE FROM message_projection WHERE conversation_id = ?").run(conversationId);
+  const insert = handle.prepare(
+    `INSERT INTO message_projection(message_id, conversation_id, position, data, updated_global_position)
+     VALUES(?, ?, ?, ?, ?)`,
+  );
+  messages.forEach((message, index) => {
+    insert.run(message.id, conversationId, index, JSON.stringify(message), globalPosition);
+  });
+}
+
+function writeAllMessageProjectionRowsInTransaction(handle: DatabaseHandle, state: WorkspaceState, globalPosition: number): void {
+  handle.prepare("DELETE FROM message_projection").run();
+  for (const [conversationId, messages] of Object.entries(state.threads)) {
+    writeThreadProjectionRowsInTransaction(handle, conversationId, messages, globalPosition);
+  }
+}
+
+function projectWorkspaceReadModelsInTransaction(handle: DatabaseHandle, event: RlabEvent, state: WorkspaceState, globalPosition: number): void {
+  switch (event.type) {
+    case "workspace.initialized":
+      writeConversationProjectionRowsInTransaction(handle, state, globalPosition);
+      writeAllMessageProjectionRowsInTransaction(handle, state, globalPosition);
+      return;
+    case "workspace.conversationUpserted":
+    case "workspace.conversationUpdated":
+      writeConversationProjectionRowsInTransaction(handle, state, globalPosition);
+      return;
+    case "workspace.conversationDeleted":
+      writeConversationProjectionRowsInTransaction(handle, state, globalPosition);
+      handle.prepare("DELETE FROM message_projection WHERE conversation_id = ?").run(event.data.conversationId);
+      return;
+    case "workspace.messageUpserted":
+    case "workspace.messagesUpserted":
+    case "workspace.conversationThreadReplaced":
+    case "workspace.agentMessageUpsertedForUserTurn":
+      writeThreadProjectionRowsInTransaction(handle, event.data.conversationId, state.threads[event.data.conversationId] ?? [], globalPosition);
+      return;
+    case "workspace.selectedConversationSet":
+    case "workspace.settingsSet":
+    case "workspace.projectUpserted":
+    case "workspace.composerDraftSet":
+    case "workspace.composerDraftDeleted":
+    case "run.rawBatchRecorded":
+    case "run.requested":
+    case "run.started":
+    case "run.outputRecorded":
+    case "run.waitingForInput":
+    case "run.inputProvided":
+    case "run.completed":
+    case "run.failed":
+    case "run.cancelled":
+    case "run.interrupted":
+      return;
+  }
+}
+
+function projectWorkspaceEventInTransaction(handle: DatabaseHandle, recorded: RecordedRlabEvent): void {
+  const position = Number.parseInt(recorded.globalPosition, 10);
+  if (!Number.isFinite(position) || position <= projectionCheckpoint(handle, "workspace_projection")) {
+    return;
+  }
+  const current = readWorkspaceProjectionInTransaction(handle);
+  const event = toRlabEvent(recorded);
+  const next = applyRlabEventToState(current, event);
+  writeWorkspaceProjectionInTransaction(handle, next, position);
+  projectWorkspaceReadModelsInTransaction(handle, event, next, position);
+  setProjectionCheckpoint(handle, "workspace_projection", position);
+}
+
+function runProjectionFromRecordedEvent(event: RecordedRlabEvent): RunProjection | null {
+  const globalPosition = event.globalPosition;
+  switch (event.type) {
+    case "run.requested": {
+      const data = event.data as RlabRunRequestedData;
+      return {
+        runId: data.runId,
+        conversationId: data.conversationId,
+        userMessageId: data.userMessageId,
+        agentMessageId: data.agentMessageId,
+        requested: data,
+        status: "requested",
+        events: [],
+        updatedGlobalPosition: globalPosition,
+      };
+    }
+    default:
+      return null;
+  }
+}
+
+function projectRunEventInTransaction(handle: DatabaseHandle, recorded: RecordedRlabEvent): void {
+  const position = Number.parseInt(recorded.globalPosition, 10);
+  if (!Number.isFinite(position) || position <= projectionCheckpoint(handle, "run_projection")) {
+    return;
+  }
+  const base = runProjectionFromRecordedEvent(recorded);
+  if (base) {
+    writeRunProjectionInTransaction(handle, base);
+    setProjectionCheckpoint(handle, "run_projection", position);
+    return;
+  }
+  const runData = "runId" in recorded.data && typeof recorded.data.runId === "string" ? recorded.data : null;
+  if (!runData) {
+    setProjectionCheckpoint(handle, "run_projection", position);
+    return;
+  }
+  const current = readRunProjectionInTransaction(handle, runData.runId) ?? {
+    runId: runData.runId,
+    conversationId: "conversationId" in runData && typeof runData.conversationId === "string" ? runData.conversationId : "",
+    status: "running",
+    events: [],
+    updatedGlobalPosition: recorded.globalPosition,
+  } satisfies RunProjection;
+  let next: RunProjection = { ...current, updatedGlobalPosition: recorded.globalPosition };
+  switch (recorded.type) {
+    case "run.started": {
+      const data = recorded.data as RlabRunStartedData;
+      next = {
+        ...next,
+        conversationId: data.conversationId,
+        userMessageId: data.userMessageId,
+        agentMessageId: data.agentMessageId,
+        startedAt: data.startedAt,
+        status: "running",
+      };
+      break;
+    }
+    case "run.outputRecorded": {
+      const data = recorded.data as RlabRunOutputRecordedData;
+      const output = data.event;
+      const status: RunProjectionStatus = output.type === "approval" || output.type === "options" ? "waiting" : next.status === "requested" ? "running" : next.status;
+      next = { ...next, conversationId: data.conversationId, status, events: [...next.events, output] };
+      break;
+    }
+    case "run.waitingForInput": {
+      const data = recorded.data as RlabRunWaitingForInputData;
+      next = { ...next, conversationId: data.conversationId, status: "waiting", inputId: data.inputId };
+      break;
+    }
+    case "run.inputProvided": {
+      const data = recorded.data as RlabRunInputProvidedData;
+      next = { ...next, conversationId: data.conversationId, status: "running", inputId: undefined };
+      break;
+    }
+    case "run.completed": {
+      const data = recorded.data as RlabRunCompletedData;
+      next = {
+        ...next,
+        conversationId: data.conversationId,
+        status: "completed",
+        events: data.event ? [...next.events, data.event] : next.events,
+      };
+      break;
+    }
+    case "run.failed": {
+      const data = recorded.data as RlabRunFailedData;
+      next = { ...next, conversationId: data.conversationId, status: "failed", error: data.error };
+      break;
+    }
+    case "run.cancelled": {
+      const data = recorded.data as RlabRunCancelledData;
+      next = { ...next, conversationId: data.conversationId, status: "cancelled" };
+      break;
+    }
+    case "run.interrupted": {
+      const data = recorded.data as RlabRunInterruptedData;
+      next = { ...next, conversationId: data.conversationId, status: "failed", error: data.reason };
+      break;
+    }
+    case "run.rawBatchRecorded": {
+      const data = recorded.data as { readonly runId: string; readonly conversationId: string; readonly events: readonly RunEvent[] };
+      next = { ...next, conversationId: data.conversationId, events: [...next.events, ...data.events] };
+      break;
+    }
+  }
+  writeRunProjectionInTransaction(handle, next);
+  setProjectionCheckpoint(handle, "run_projection", position);
+}
+
+function projectRecordedEventInTransaction(handle: DatabaseHandle, recorded: RecordedRlabEvent): void {
+  projectWorkspaceEventInTransaction(handle, recorded);
+  projectRunEventInTransaction(handle, recorded);
+}
+
+function workspaceConversationIds(state: WorkspaceState): ReadonlySet<string> {
+  return new Set([...state.chats, ...state.projects.flatMap((project) => project.conversations)].map((conversation) => conversation.id));
+}
+
+function ensureConversationExistsInState(state: WorkspaceState, conversationId: string): void {
+  if (!workspaceConversationIds(state).has(conversationId)) {
+    throw new Error(`Conversation ${conversationId} does not exist.`);
+  }
+}
+
+function ensureProjectExistsInState(state: WorkspaceState, projectId: string): void {
+  if (!state.projects.some((project) => project.id === projectId)) {
+    throw new Error(`Project ${projectId} does not exist.`);
+  }
+}
+
+function messageConversationId(state: WorkspaceState, messageId: string): string | undefined {
+  for (const [conversationId, messages] of Object.entries(state.threads)) {
+    if (messages.some((message) => message.id === messageId)) {
+      return conversationId;
+    }
+  }
+  return undefined;
+}
+
+function validateMessagesBelongToConversation(state: WorkspaceState, conversationId: string, messages: readonly ChatMessage[]): void {
+  ensureConversationExistsInState(state, conversationId);
+  const seen = new Set<string>();
+  for (const message of messages) {
+    if (seen.has(message.id)) {
+      throw new Error(`Duplicate message id ${message.id} in replacement thread.`);
+    }
+    seen.add(message.id);
+    const existingConversationId = messageConversationId(state, message.id);
+    if (existingConversationId !== undefined && existingConversationId !== conversationId) {
+      throw new Error(`Message ${message.id} already belongs to conversation ${existingConversationId}.`);
+    }
+  }
+}
+
+function validateEventAgainstState(state: WorkspaceState, event: RlabEvent): void {
+  switch (event.type) {
+    case "workspace.initialized":
+      if (workspaceDbHasState()) {
+        throw new Error("Refusing to initialize a workspace event store that already has state.");
+      }
+      return;
+    case "workspace.selectedConversationSet":
+      if (event.data.conversationId) {
+        ensureConversationExistsInState(state, event.data.conversationId);
+      }
+      return;
+    case "workspace.conversationUpserted":
+      if (event.data.projectId !== null) {
+        ensureProjectExistsInState(state, event.data.projectId);
+      }
+      return;
+    case "workspace.conversationUpdated":
+      ensureConversationExistsInState(state, event.data.conversation.id);
+      return;
+    case "workspace.composerDraftSet":
+      ensureConversationExistsInState(state, event.data.conversationId);
+      return;
+    case "workspace.messageUpserted":
+      validateMessagesBelongToConversation(state, event.data.conversationId, [event.data.message]);
+      return;
+    case "workspace.messagesUpserted":
+    case "workspace.conversationThreadReplaced":
+      validateMessagesBelongToConversation(state, event.data.conversationId, event.data.messages);
+      return;
+    case "workspace.agentMessageUpsertedForUserTurn": {
+      ensureConversationExistsInState(state, event.data.conversationId);
+      const userMessage = state.threads[event.data.conversationId]?.find((message) => message.id === event.data.userMessageId);
+      if (!userMessage) {
+        throw new Error(`User message ${event.data.userMessageId} is missing from conversation ${event.data.conversationId}.`);
+      }
+      if (userMessage.role !== "user") {
+        throw new Error(`Message ${event.data.userMessageId} is not a user message.`);
+      }
+      validateMessagesBelongToConversation(state, event.data.conversationId, [event.data.message]);
+      return;
+    }
+    case "workspace.settingsSet":
+    case "workspace.projectUpserted":
+    case "workspace.conversationDeleted":
+    case "workspace.composerDraftDeleted":
+      return;
+    case "run.rawBatchRecorded":
+    case "run.requested":
+    case "run.started":
+    case "run.outputRecorded":
+    case "run.waitingForInput":
+    case "run.inputProvided":
+    case "run.completed":
+    case "run.failed":
+    case "run.cancelled":
+    case "run.interrupted":
+      ensureConversationExistsInState(state, event.data.conversationId);
+      return;
+  }
+}
+
+function validateEventsAgainstProjectedState(events: readonly { readonly event: RlabEvent }[]): void {
+  let validationState = projectStateFromEvents();
+  for (const { event } of events) {
+    validateEventAgainstState(validationState, event);
+    validationState = applyRlabEventToState(validationState, event);
+  }
+}
+
+function appendEvents(events: readonly { readonly streamName: string; readonly event: RlabEvent }[]): RecordedRlabEvent[] {
+  if (events.length === 0) {
+    return [];
+  }
+  validateEventsAgainstProjectedState(events);
+  const recorded = transaction(() => {
+    const handle = database();
+    const items = events.map(({ streamName, event }) => appendEventInTransaction(handle, streamName, event));
+    for (const item of items) {
+      projectRecordedEventInTransaction(handle, item);
+    }
+    return items;
+  });
+  publishRecordedEvents(recorded);
+  return recorded;
+}
+
+function recordedEventFromRow(row: StoredEventRow): RecordedRlabEvent {
+  const rawMetadata = JSON.parse(row.message_metadata) as Record<string, unknown>;
+  const metadata: RlabEventMetadata = {
+    schemaVersion: typeof rawMetadata.schemaVersion === "number" ? rawMetadata.schemaVersion : 1,
+    commandId: typeof rawMetadata.commandId === "string" ? rawMetadata.commandId : "",
+    clientId: typeof rawMetadata.clientId === "string" ? rawMetadata.clientId : "",
+    correlationId: typeof rawMetadata.correlationId === "string" ? rawMetadata.correlationId : "",
+    ...(typeof rawMetadata.causationId === "string" ? { causationId: rawMetadata.causationId } : {}),
+    createdAt: typeof rawMetadata.createdAt === "string" ? rawMetadata.createdAt : "",
+  };
+  const event = parseRlabEvent({
+    type: row.message_type,
+    data: JSON.parse(row.message_data) as unknown,
+    metadata,
+  });
+  return {
+    type: event.type,
+    data: event.data,
+    metadata: event.metadata,
+    streamName: row.stream_id,
+    streamPosition: String(row.stream_position),
+    globalPosition: String(row.global_position),
+  };
+}
+
+export function readWorkspaceEventsAfter(position: string | number | bigint, limit = 500): RecordedRlabEvent[] {
+  const numericPosition = typeof position === "bigint" ? Number(position) : typeof position === "number" ? position : Number.parseInt(position, 10);
+  const after = Number.isFinite(numericPosition) ? Math.max(0, Math.trunc(numericPosition)) : 0;
+  const rows = database()
+    .prepare(
+      `SELECT stream_id, stream_position, message_type, message_data, message_metadata, global_position
+       FROM emt_messages
+       WHERE partition = ? AND is_archived = 0 AND global_position > ?
+       ORDER BY global_position
+       LIMIT ?`,
+    )
+    .all(defaultTag, after, limit) as StoredEventRow[];
+  return rows.map(recordedEventFromRow);
+}
+
+export function readAllWorkspaceEvents(): RecordedRlabEvent[] {
+  return readWorkspaceEventsAfter(0, Number.MAX_SAFE_INTEGER);
+}
+
+export function readRunProjection(runId: string): RunProjection | null {
+  return readRunProjectionInTransaction(database(), runId);
+}
+
+export function readRunProjections(statuses?: ReadonlySet<RunProjectionStatus>): RunProjection[] {
+  const rows = database().prepare("SELECT data FROM run_projection ORDER BY updated_global_position").all() as { readonly data: string }[];
+  const projections = rows.map((row) => JSON.parse(row.data) as RunProjection);
+  return statuses ? projections.filter((projection) => statuses.has(projection.status)) : projections;
+}
+
+export function rebuildRlabProjections(): number {
+  return transaction(() => {
+    const handle = database();
+    handle.prepare("DELETE FROM workspace_projection").run();
+    handle.prepare("DELETE FROM conversation_projection").run();
+    handle.prepare("DELETE FROM message_projection").run();
+    handle.prepare("DELETE FROM run_projection").run();
+    handle.prepare("DELETE FROM projection_checkpoints").run();
+    const events = readAllWorkspaceEvents();
+    for (const event of events) {
+      projectRecordedEventInTransaction(handle, event);
+    }
+    return Number(events.at(-1)?.globalPosition ?? 0);
+  });
+}
+
+function toRlabEvent(recorded: RecordedRlabEvent): RlabEvent {
+  return {
+    type: recorded.type,
+    data: recorded.data,
+    metadata: recorded.metadata,
+  } as RlabEvent;
+}
+
+function projectStateFromEvents(): WorkspaceState {
+  return readWorkspaceProjectionInTransaction(database());
 }
 
 function previewSnippetsFromLoadedThreads(threads: Readonly<Record<string, readonly ChatMessage[]>>): ReadonlyMap<string, string> {
@@ -207,16 +817,14 @@ function previewSnippetsFromLoadedThreads(threads: Readonly<Record<string, reado
   );
 }
 
-function readConversationPreviewSnippets(handle: DatabaseHandle): ReadonlyMap<string, string> {
-  const conversations = handle.prepare("SELECT id FROM conversations ORDER BY id").all() as Array<{ id: string }>;
-  const recentMessages = handle.prepare("SELECT conversation_id AS conversationId, data FROM messages WHERE conversation_id = ? ORDER BY position DESC LIMIT ?");
+function readConversationPreviewSnippets(state: WorkspaceState): ReadonlyMap<string, string> {
   const snippets = new Map<string, string>();
-  for (const conversation of conversations) {
-    const rows = recentMessages.all(conversation.id, PREVIEW_SNIPPET_LOOKBACK_MESSAGES) as MessageRow[];
-    for (const row of rows) {
-      const text = messagePreviewText(messageFromRow(row));
+  for (const conversation of [...state.chats, ...state.projects.flatMap((project) => project.conversations)]) {
+    const rows = (state.threads[conversation.id] ?? []).slice(-PREVIEW_SNIPPET_LOOKBACK_MESSAGES).reverse();
+    for (const message of rows) {
+      const text = messagePreviewText(message);
       if (text.length > 0) {
-        snippets.set(row.conversationId, previewSnippet(text, 60));
+        snippets.set(conversation.id, previewSnippet(text, 60));
         break;
       }
     }
@@ -229,368 +837,200 @@ function withConversationPreview(conversation: ConversationSummary, snippets: Re
   return snippet === undefined || snippet === conversation.snippet ? conversation : { ...conversation, snippet };
 }
 
-/** True once a workspace has been persisted — used to gate one-time import/seed. */
-export function workspaceDbHasState(): boolean {
-  const row = database().prepare("SELECT EXISTS(SELECT 1 FROM kv WHERE key = 'settings') AS present").get() as { present: number };
-  return row.present === 1;
+function withPreviewSnippets(state: WorkspaceState, includeThreadIds?: ReadonlySet<string>): WorkspaceState {
+  const snippets = includeThreadIds ? readConversationPreviewSnippets(state) : previewSnippetsFromLoadedThreads(state.threads);
+  return {
+    ...state,
+    chats: state.chats.map((conversation) => withConversationPreview(conversation, snippets)),
+    projects: state.projects.map((project) => ({
+      ...project,
+      conversations: project.conversations.map((conversation) => withConversationPreview(conversation, snippets)),
+    })),
+  };
 }
 
-/** Reassemble the WorkspaceState tree from the normalized tables. With
- *  `includeThreadIds` only those conversations' message threads are loaded (the
- *  lazy "shell" the client gets first); omit it to load every thread. */
 export function readWorkspaceStateFromDb(includeThreadIds?: ReadonlySet<string>): WorkspaceState {
-  const handle = database();
-  const projectRows = handle.prepare("SELECT id, data FROM projects ORDER BY position").all() as Array<{ id: string; data: string }>;
-  const convRows = handle.prepare("SELECT project_id AS projectId, data FROM conversations ORDER BY position").all() as Array<{ projectId: string | null; data: string }>;
-  const msgRows = (includeThreadIds
-    ? [...includeThreadIds].flatMap((id) => handle.prepare("SELECT conversation_id AS conversationId, data FROM messages WHERE conversation_id = ? ORDER BY position").all(id))
-    : handle.prepare("SELECT conversation_id AS conversationId, data FROM messages ORDER BY conversation_id, position").all()) as MessageRow[];
-  const draftRows = handle.prepare("SELECT conversation_id AS conversationId, data FROM composer_drafts").all() as Array<{ conversationId: string; data: string }>;
-  const kvRows = handle.prepare("SELECT key, value FROM kv").all() as Array<{ key: string; value: string }>;
-
-  const convsByProject = new Map<string | null, ConversationSummary[]>();
-  for (const row of convRows) {
-    const list = convsByProject.get(row.projectId) ?? [];
-    list.push(JSON.parse(row.data) as ConversationSummary);
-    convsByProject.set(row.projectId, list);
+  const fullState = withPreviewSnippets(projectStateFromEvents(), includeThreadIds);
+  if (!includeThreadIds) {
+    return fullState;
   }
   const threads: Record<string, ChatMessage[]> = {};
-  for (const row of msgRows) {
-    (threads[row.conversationId] ??= []).push(messageFromRow(row));
+  for (const id of includeThreadIds) {
+    if (Object.prototype.hasOwnProperty.call(fullState.threads, id)) {
+      threads[id] = readThreadFromDb(id);
+    }
   }
-  const snippets = includeThreadIds ? readConversationPreviewSnippets(handle) : previewSnippetsFromLoadedThreads(threads);
-  const conversationsForProject = (projectId: string | null): ConversationSummary[] => (convsByProject.get(projectId) ?? []).map((conversation) => withConversationPreview(conversation, snippets));
-  const projects: Project[] = projectRows.map((row) => ({
-    ...(JSON.parse(row.data) as Omit<Project, "conversations">),
-    conversations: conversationsForProject(row.id),
-  }));
-  const composerDrafts: Record<string, ComposerDraft> = {};
-  for (const row of draftRows) {
-    composerDrafts[row.conversationId] = JSON.parse(row.data) as ComposerDraft;
-  }
-  const kv = new Map(kvRows.map((row) => [row.key, row.value] as const));
-  const selectedId = kv.has("selectedId") ? (JSON.parse(kv.get("selectedId") as string) as string) : "";
-  const settings = JSON.parse(kv.get("settings") ?? "null") as WorkspaceState["settings"];
-  return { chats: conversationsForProject(null), projects, threads, composerDrafts, selectedId, settings };
+  return { ...fullState, threads };
 }
 
-/** Seed an empty database. This is intentionally insert-only and refuses to run
- *  once a workspace exists; normal app writes must use WorkspaceDbMutation. */
 export function initializeWorkspaceStateInDb(state: WorkspaceState): number {
-  const handle = database();
   if (workspaceDbHasState()) {
-    throw new Error("Refusing to initialize a workspace database that already has state.");
+    throw new Error("Refusing to initialize a workspace event store that already has state.");
   }
-  const nextRevision = readWorkspaceRevisionFromHandle(handle) + 1;
-  transaction(() => {
-    const insProject = handle.prepare("INSERT INTO projects(id, position, data) VALUES(?, ?, ?)");
-    const insConv = handle.prepare("INSERT INTO conversations(id, project_id, position, data) VALUES(?, ?, ?, ?)");
-    const insMsg = handle.prepare("INSERT INTO messages(id, conversation_id, position, data) VALUES(?, ?, ?, ?)");
-    const insDraft = handle.prepare("INSERT INTO composer_drafts(conversation_id, data) VALUES(?, ?)");
-    const insKv = handle.prepare("INSERT INTO kv(key, value) VALUES(?, ?)");
-    state.chats.forEach((conversation, index) => insConv.run(conversation.id, null, index, JSON.stringify(conversation)));
-    state.projects.forEach((project, projectIndex) => {
-      const { conversations, ...meta } = project;
-      insProject.run(project.id, projectIndex, JSON.stringify(meta));
-      conversations.forEach((conversation, index) => insConv.run(conversation.id, project.id, index, JSON.stringify(conversation)));
+  const commandId = `initialize-${randomUUID()}`;
+  const event: RlabEvent = {
+    type: "workspace.initialized",
+    data: { state: cloneWorkspaceState(state) },
+    metadata: serverMetadata(commandId),
+  };
+  const recorded = appendEvents([{ streamName: "workspace", event }]);
+  return Number(recorded.at(-1)?.globalPosition ?? 0);
+}
+
+function handleRlabCommandEnvelope(handle: DatabaseHandle, envelope: RlabCommandEnvelope, streamVersions: Map<string, number>): HandledCommandEvent | null {
+  const existing = handle.prepare("SELECT global_position AS position FROM rlab_command_results WHERE command_id = ?").get(envelope.commandId) as
+    | { position: number }
+    | undefined;
+  if (existing) {
+    return null;
+  }
+  const streamName = commandStreamName(envelope.command);
+  const expectedStreamVersion = streamVersions.get(streamName) ?? readStreamPosition(handle, streamName);
+  streamVersions.set(streamName, expectedStreamVersion + 1);
+  return {
+    envelope,
+    streamName,
+    expectedStreamVersion,
+    event: commandToEvent(envelope),
+  };
+}
+
+export function appendRlabCommandEnvelopes(envelopes: readonly RlabCommandEnvelope[]): number {
+  if (envelopes.length === 0) {
+    return readWorkspaceRevision();
+  }
+  const handle = database();
+  const recorded = transaction(() => {
+    const streamVersions = new Map<string, number>();
+    const commandIds = new Set<string>();
+    const events: HandledCommandEvent[] = [];
+    for (const envelope of envelopes) {
+      if (commandIds.has(envelope.commandId)) {
+        continue;
+      }
+      commandIds.add(envelope.commandId);
+      const handled = handleRlabCommandEnvelope(handle, envelope, streamVersions);
+      if (handled) {
+        events.push(handled);
+      }
+    }
+    if (events.length === 0) {
+      return [];
+    }
+    validateEventsAgainstProjectedState(events);
+    return events.map(({ envelope, streamName, event, expectedStreamVersion }) => {
+      const item = appendEventInTransaction(handle, streamName, event, expectedStreamVersion);
+      handle.prepare("INSERT INTO rlab_command_results(command_id, global_position) VALUES(?, ?)").run(envelope.commandId, Number(item.globalPosition));
+      projectRecordedEventInTransaction(handle, item);
+      return item;
     });
-    for (const [conversationId, messages] of Object.entries(state.threads)) {
-      messages.forEach((message, index) => insMsg.run(message.id, conversationId, index, JSON.stringify(message)));
-    }
-    for (const [conversationId, draft] of Object.entries(state.composerDrafts)) {
-      insDraft.run(conversationId, JSON.stringify(draft));
-    }
-    insKv.run("selectedId", JSON.stringify(state.selectedId));
-    insKv.run("settings", JSON.stringify(state.settings));
-    writeWorkspaceRevision(handle, nextRevision);
   });
-  return nextRevision;
-}
-
-function projectWhere(projectId: string | null): string {
-  return projectId === null ? "project_id IS NULL" : "project_id = ?";
-}
-
-function projectParams(projectId: string | null): readonly string[] {
-  return projectId === null ? [] : [projectId];
-}
-
-function nextConversationPosition(handle: DatabaseHandle, projectId: string | null): number {
-  return (handle.prepare(`SELECT COALESCE(MAX(position), -1) + 1 AS next FROM conversations WHERE ${projectWhere(projectId)}`).get(...projectParams(projectId)) as { next: number }).next;
-}
-
-function shiftConversationPositionsForFrontInsert(handle: DatabaseHandle, projectId: string | null): void {
-  handle.prepare(`UPDATE conversations SET position = position + 1 WHERE ${projectWhere(projectId)}`).run(...projectParams(projectId));
-}
-
-function projectExists(handle: DatabaseHandle, projectId: string): boolean {
-  const row = handle.prepare("SELECT 1 AS present FROM projects WHERE id = ?").get(projectId) as { present: number } | undefined;
-  return row !== undefined;
-}
-
-function conversationExists(handle: DatabaseHandle, conversationId: string): boolean {
-  const row = handle.prepare("SELECT 1 AS present FROM conversations WHERE id = ?").get(conversationId) as { present: number } | undefined;
-  return row !== undefined;
-}
-
-function ensureProjectExists(handle: DatabaseHandle, projectId: string): void {
-  if (!projectExists(handle, projectId)) {
-    throw new Error(`Project ${projectId} does not exist.`);
+  if (recorded.length === 0) {
+    return readWorkspaceRevision();
   }
+  publishRecordedEvents(recorded);
+  return Number(recorded.at(-1)?.globalPosition ?? readWorkspaceRevision());
 }
 
-function ensureConversationExists(handle: DatabaseHandle, conversationId: string): void {
-  if (!conversationExists(handle, conversationId)) {
-    throw new Error(`Conversation ${conversationId} does not exist.`);
-  }
+function runLifecycleCommandId(event: RunLifecycleEventInput): string {
+  return `${event.type}-${event.data.runId}-${randomUUID()}`;
 }
 
-function upsertProjectInTransaction(handle: DatabaseHandle, project: ProjectMeta, insertAtFront = false): void {
-  const existing = handle.prepare("SELECT position FROM projects WHERE id = ?").get(project.id) as { position: number } | undefined;
-  if (existing) {
-    handle.prepare("UPDATE projects SET data = ? WHERE id = ?").run(JSON.stringify(project), project.id);
-    return;
-  }
-  if (insertAtFront) {
-    handle.prepare("UPDATE projects SET position = position + 1").run();
-  }
-  const position = insertAtFront ? 0 : (handle.prepare("SELECT COALESCE(MAX(position), -1) + 1 AS next FROM projects").get() as { next: number }).next;
-  handle.prepare("INSERT INTO projects(id, position, data) VALUES(?, ?, ?)").run(project.id, position, JSON.stringify(project));
+export function appendRunLifecycleEvent(input: RunLifecycleEventInput): number {
+  const event = { ...input, metadata: serverMetadata(runLifecycleCommandId(input)) } as RunLifecycleEvent;
+  const recorded = appendEvents([{ streamName: `run:${input.data.runId}`, event }]);
+  return Number(recorded.at(-1)?.globalPosition ?? readWorkspaceRevision());
 }
 
-function upsertConversationInTransaction(handle: DatabaseHandle, conversation: ConversationSummary, projectId: string | null, insertAtFront = false): void {
-  if (projectId !== null) {
-    ensureProjectExists(handle, projectId);
-  }
-  const existing = handle.prepare("SELECT project_id AS projectId, position FROM conversations WHERE id = ?").get(conversation.id) as { projectId: string | null; position: number } | undefined;
-  if (existing && existing.projectId === projectId) {
-    handle.prepare("UPDATE conversations SET data = ? WHERE id = ?").run(JSON.stringify(conversation), conversation.id);
-    return;
-  }
-  if (existing) {
-    handle.prepare("DELETE FROM conversations WHERE id = ?").run(conversation.id);
-  }
-  if (insertAtFront) {
-    shiftConversationPositionsForFrontInsert(handle, projectId);
-  }
-  const position = insertAtFront ? 0 : nextConversationPosition(handle, projectId);
-  handle.prepare("INSERT INTO conversations(id, project_id, position, data) VALUES(?, ?, ?, ?)").run(conversation.id, projectId, position, JSON.stringify(conversation));
-}
-
-function updateConversationInTransaction(handle: DatabaseHandle, conversation: ConversationSummary): void {
-  const result = handle.prepare("UPDATE conversations SET data = ? WHERE id = ?").run(JSON.stringify(conversation), conversation.id);
-  if (result.changes === 0) {
-    throw new Error(`Conversation ${conversation.id} does not exist.`);
-  }
-}
-
-function upsertMessageInTransaction(handle: DatabaseHandle, conversationId: string, message: ChatMessage): void {
-  ensureConversationExists(handle, conversationId);
-  const existing = handle.prepare("SELECT conversation_id AS conversationId, position FROM messages WHERE id = ?").get(message.id) as { conversationId: string; position: number } | undefined;
-  if (existing) {
-    if (existing.conversationId !== conversationId) {
-      throw new Error(`Message ${message.id} already belongs to conversation ${existing.conversationId}.`);
-    }
-    handle.prepare("UPDATE messages SET data = ? WHERE id = ?").run(JSON.stringify(message), message.id);
-    return;
-  }
-  const position = (handle.prepare("SELECT COALESCE(MAX(position), -1) + 1 AS next FROM messages WHERE conversation_id = ?").get(conversationId) as { next: number }).next;
-  handle.prepare("INSERT INTO messages(id, conversation_id, position, data) VALUES(?, ?, ?, ?)").run(message.id, conversationId, position, JSON.stringify(message));
-}
-
-function replaceConversationThreadInTransaction(handle: DatabaseHandle, conversationId: string, messages: readonly ChatMessage[]): void {
-  ensureConversationExists(handle, conversationId);
-  const seen = new Set<string>();
-  for (const message of messages) {
-    if (seen.has(message.id)) {
-      throw new Error(`Duplicate message id ${message.id} in replacement thread.`);
-    }
-    seen.add(message.id);
-    const existing = handle.prepare("SELECT conversation_id AS conversationId FROM messages WHERE id = ?").get(message.id) as { conversationId: string } | undefined;
-    if (existing && existing.conversationId !== conversationId) {
-      throw new Error(`Message ${message.id} already belongs to conversation ${existing.conversationId}.`);
-    }
-  }
-  handle.prepare("DELETE FROM messages WHERE conversation_id = ?").run(conversationId);
-  const insMsg = handle.prepare("INSERT INTO messages(id, conversation_id, position, data) VALUES(?, ?, ?, ?)");
-  messages.forEach((message, index) => insMsg.run(message.id, conversationId, index, JSON.stringify(message)));
+export function appendRunOutputEvent(runId: string, conversationId: string, event: RunEvent): number {
+  return appendRunLifecycleEvent({ type: "run.outputRecorded", data: { runId, conversationId, event } });
 }
 
 export function applyWorkspaceDbMutations(
   mutations: readonly WorkspaceDbMutation[],
   options: { readonly expectedRevision?: number } = {},
 ): number {
-  const handle = database();
-  let nextRevision = readWorkspaceRevisionFromHandle(handle);
-  if (mutations.length === 0) {
-    if (options.expectedRevision !== undefined && options.expectedRevision !== nextRevision) {
-      throw new WorkspaceRevisionConflictError(options.expectedRevision, nextRevision);
-    }
-    return nextRevision;
+  const current = readWorkspaceRevision();
+  if (options.expectedRevision !== undefined && options.expectedRevision !== current) {
+    throw new WorkspaceRevisionConflictError(options.expectedRevision, current);
   }
-  transaction(() => {
-    nextRevision = readWorkspaceRevisionFromHandle(handle);
-    if (options.expectedRevision !== undefined && options.expectedRevision !== nextRevision) {
-      throw new WorkspaceRevisionConflictError(options.expectedRevision, nextRevision);
-    }
-    for (const mutation of mutations) {
-      switch (mutation.type) {
-        case "setSelectedConversation":
-          if (mutation.conversationId) {
-            ensureConversationExists(handle, mutation.conversationId);
-          }
-          handle.prepare("INSERT INTO kv(key, value) VALUES('selectedId', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(JSON.stringify(mutation.conversationId));
-          if (mutation.conversationId) {
-            const row = handle.prepare("SELECT data FROM conversations WHERE id = ?").get(mutation.conversationId) as { data: string } | undefined;
-            if (row) {
-              const conversation = JSON.parse(row.data) as ConversationSummary;
-              updateConversationInTransaction(handle, { ...conversation, unread: false });
-            }
-          }
-          break;
-        case "setSettings":
-          handle.prepare("INSERT INTO kv(key, value) VALUES('settings', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(JSON.stringify(mutation.settings));
-          break;
-        case "upsertProject":
-          upsertProjectInTransaction(handle, mutation.project, mutation.insertAtFront);
-          break;
-        case "upsertConversation":
-          upsertConversationInTransaction(handle, mutation.conversation, mutation.projectId, mutation.insertAtFront);
-          break;
-        case "updateConversation":
-          updateConversationInTransaction(handle, mutation.conversation);
-          break;
-        case "deleteConversation":
-          handle.prepare("DELETE FROM conversations WHERE id = ?").run(mutation.conversationId);
-          handle.prepare("DELETE FROM messages WHERE conversation_id = ?").run(mutation.conversationId);
-          handle.prepare("DELETE FROM composer_drafts WHERE conversation_id = ?").run(mutation.conversationId);
-          break;
-        case "setComposerDraft":
-          ensureConversationExists(handle, mutation.conversationId);
-          handle
-            .prepare("INSERT INTO composer_drafts(conversation_id, data) VALUES(?, ?) ON CONFLICT(conversation_id) DO UPDATE SET data = excluded.data")
-            .run(mutation.conversationId, JSON.stringify(mutation.draft));
-          break;
-        case "deleteComposerDraft":
-          handle.prepare("DELETE FROM composer_drafts WHERE conversation_id = ?").run(mutation.conversationId);
-          break;
-        case "upsertMessage":
-          upsertMessageInTransaction(handle, mutation.conversationId, mutation.message);
-          break;
-        case "upsertMessages":
-          for (const message of mutation.messages) {
-            upsertMessageInTransaction(handle, mutation.conversationId, message);
-          }
-          break;
-        case "replaceConversationThread":
-          replaceConversationThreadInTransaction(handle, mutation.conversationId, mutation.messages);
-          break;
-      }
-    }
-    nextRevision = bumpWorkspaceRevisionInTransaction(handle);
-  });
-  return nextRevision;
-}
-
-/** Blocks of a single agent message, for the streaming merge (hot path). */
-export function readMessageBlocks(messageId: string): readonly AgentBlock[] | undefined {
-  const row = database().prepare("SELECT data FROM messages WHERE id = ?").get(messageId) as { data: string } | undefined;
-  return row ? (JSON.parse(row.data) as ChatMessage).blocks : undefined;
-}
-
-/** A single message row in full — for building a run-update without loading the
- *  whole workspace (the per-event notify hot path). */
-export function readMessage(messageId: string): ChatMessage | undefined {
-  const row = database().prepare("SELECT data FROM messages WHERE id = ?").get(messageId) as { data: string } | undefined;
-  return row ? (JSON.parse(row.data) as ChatMessage) : undefined;
-}
-
-/** Upsert one message row (the streaming hot path). New messages append at the
- *  end of their conversation; existing ones update in place. */
-export function upsertMessage(conversationId: string, message: ChatMessage): void {
-  const handle = database();
-  transaction(() => {
-    upsertMessageInTransaction(handle, conversationId, message);
-    bumpWorkspaceRevisionInTransaction(handle);
-  });
-}
-
-/** Upsert a bound agent reply immediately after its user message. Any stale
- *  non-user messages between that user turn and the next user turn are removed,
- *  which makes retries/reattached background runs converge in SQLite exactly the
- *  way the live in-memory thread does. */
-export function upsertAgentMessageForUserTurn(conversationId: string, userMessageId: string, message: ChatMessage): void {
-  const handle = database();
-  if (message.role !== "agent") {
-    throw new Error("Only agent messages can be upserted for a user turn.");
-  }
-  const existingAgent = handle.prepare("SELECT conversation_id AS conversationId FROM messages WHERE id = ?").get(message.id) as { conversationId: string } | undefined;
-  if (existingAgent && existingAgent.conversationId !== conversationId) {
-    throw new Error(`Message ${message.id} belongs to a different conversation.`);
-  }
-  const userRow = handle.prepare("SELECT position, data FROM messages WHERE conversation_id = ? AND id = ?").get(conversationId, userMessageId) as
-    | { position: number; data: string }
-    | undefined;
-  if (!userRow) {
-    throw new Error(`User message ${userMessageId} is missing from conversation ${conversationId}.`);
-  }
-  const userMessage = JSON.parse(userRow.data) as ChatMessage;
-  if (userMessage.role !== "user") {
-    throw new Error(`Message ${userMessageId} is not a user message.`);
-  }
-  const laterRows = handle.prepare("SELECT position, data FROM messages WHERE conversation_id = ? AND position > ? ORDER BY position").all(conversationId, userRow.position) as Array<{
-    position: number;
-    data: string;
-  }>;
-  const nextUserPosition = laterRows.find((row) => (JSON.parse(row.data) as ChatMessage).role === "user")?.position;
-  transaction(() => {
-    handle.prepare("DELETE FROM messages WHERE id = ?").run(message.id);
-    if (nextUserPosition === undefined) {
-      handle.prepare("DELETE FROM messages WHERE conversation_id = ? AND position > ?").run(conversationId, userRow.position);
-    } else {
-      handle.prepare("DELETE FROM messages WHERE conversation_id = ? AND position > ? AND position < ?").run(conversationId, userRow.position, nextUserPosition);
-      if (nextUserPosition === userRow.position + 1) {
-        handle.prepare("UPDATE messages SET position = position + 1 WHERE conversation_id = ? AND position >= ?").run(conversationId, nextUserPosition);
-      }
-    }
-    handle.prepare("INSERT INTO messages(id, conversation_id, position, data) VALUES(?, ?, ?, ?)").run(message.id, conversationId, userRow.position + 1, JSON.stringify(message));
-    bumpWorkspaceRevisionInTransaction(handle);
-  });
-}
-
-/** Read a single conversation summary (hot path: patch status without loading
- *  the whole workspace). */
-export function readConversation(conversationId: string): ConversationSummary | undefined {
-  const row = database().prepare("SELECT data FROM conversations WHERE id = ?").get(conversationId) as { data: string } | undefined;
-  return row ? (JSON.parse(row.data) as ConversationSummary) : undefined;
-}
-
-/** Update a single conversation's summary in place (keeps its position/project). */
-export function updateConversationData(conversation: ConversationSummary): void {
-  const handle = database();
-  transaction(() => {
-    updateConversationInTransaction(handle, conversation);
-    bumpWorkspaceRevisionInTransaction(handle);
-  });
-}
-
-/** The persisted selected conversation id (so the client shell can ship its
- *  thread eagerly). Cheap single-row read. */
-export function readSelectedConversationId(): string {
-  const row = database().prepare("SELECT value FROM kv WHERE key = 'selectedId'").get() as { value: string } | undefined;
-  return row ? (JSON.parse(row.value) as string) : "";
-}
-
-/** Load a single conversation's full message thread (lazy-load on open). */
-export function readThreadFromDb(conversationId: string): ChatMessage[] {
-  return (database().prepare("SELECT data FROM messages WHERE conversation_id = ? ORDER BY position").all(conversationId) as Array<{ data: string }>).map(
-    (row) => JSON.parse(row.data) as ChatMessage,
+  const clientId = "server-legacy-adapter";
+  return appendRlabCommandEnvelopes(
+    mutations.map((mutation) => ({
+      commandId: `mutation-${randomUUID()}`,
+      clientId,
+      command: workspaceMutationToCommand(mutation),
+    })),
   );
 }
 
-export function closeWorkspaceDb(): void {
-  if (db) {
-    db.close();
-    db = null;
-  }
+export function readMessageBlocks(messageId: string): readonly AgentBlock[] | undefined {
+  return readMessage(messageId)?.blocks;
+}
+
+export function readMessage(messageId: string): ChatMessage | undefined {
+  const row = database().prepare("SELECT data FROM message_projection WHERE message_id = ?").get(messageId) as { readonly data: string } | undefined;
+  return row ? (JSON.parse(row.data) as ChatMessage) : undefined;
+}
+
+export function upsertMessage(conversationId: string, message: ChatMessage): void {
+  void appendRlabCommandEnvelopes([
+    {
+      commandId: `message-upsert-${randomUUID()}`,
+      clientId: "server",
+      command: { type: "workspace.upsertMessage", conversationId, message },
+    },
+  ]);
+}
+
+export function upsertAgentMessageForUserTurn(conversationId: string, userMessageId: string, message: ChatMessage): void {
+  const commandId = `agent-message-upsert-${randomUUID()}`;
+  appendEvents([
+    {
+      streamName: `conversation:${conversationId}`,
+      event: {
+        type: "workspace.agentMessageUpsertedForUserTurn",
+        data: { conversationId, userMessageId, message },
+        metadata: serverMetadata(commandId),
+      },
+    },
+  ]);
+}
+
+export function readConversation(conversationId: string): ConversationSummary | undefined {
+  const row = database().prepare("SELECT data FROM conversation_projection WHERE conversation_id = ?").get(conversationId) as { readonly data: string } | undefined;
+  return row ? (JSON.parse(row.data) as ConversationSummary) : undefined;
+}
+
+export function updateConversationData(conversation: ConversationSummary): void {
+  void appendRlabCommandEnvelopes([
+    {
+      commandId: `conversation-update-${randomUUID()}`,
+      clientId: "server",
+      command: { type: "workspace.updateConversation", conversation },
+    },
+  ]);
+}
+
+export function readSelectedConversationId(): string {
+  return projectStateFromEvents().selectedId;
+}
+
+export function readThreadFromDb(conversationId: string): ChatMessage[] {
+  const rows = database()
+    .prepare("SELECT data FROM message_projection WHERE conversation_id = ? ORDER BY position")
+    .all(conversationId) as { readonly data: string }[];
+  return rows.map((row) => JSON.parse(row.data) as ChatMessage);
+}
+
+export function replaceThreadAfterAgentMessage(conversationId: string, userMessageId: string, message: ChatMessage): void {
+  const state = projectStateFromEvents();
+  const nextThread = upsertAgentMessageForUserTurnInThread(state.threads[conversationId] ?? [], userMessageId, message);
+  void appendRlabCommandEnvelopes([
+    {
+      commandId: `thread-replace-${randomUUID()}`,
+      clientId: "server",
+      command: { type: "workspace.replaceConversationThread", conversationId, messages: nextThread },
+    },
+  ]);
 }

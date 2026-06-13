@@ -27,7 +27,10 @@ import {
   type RunEventAccumulator,
 } from "./src/lib/run-event-accumulator";
 import { attachPtyTerminalWebSockets, PtyTerminalManager } from "./src/server/pty-terminal";
-import { attachExactApiRoutes, methodOnly, type ApiHandler, type ExactApiRoute } from "./src/server/api-router";
+import { attachExactApiRoutes } from "./src/server/api-router";
+import { createRlabApiRoutes, type RlabApiRouteHandlers } from "./src/server/api-routes";
+import type { AgentRunRequest } from "./src/server/agents/run-plugin";
+import { createAgentRunPluginRegistry, type AgentRunAdapters } from "./src/server/agents/run-registry";
 import {
   cloneAppSettings,
   defaultAppSettings,
@@ -35,23 +38,30 @@ import {
 } from "./src/lib/app-settings";
 import { getVoiceProvider, isVoiceProviderId, VOICE_PROVIDERS, type VoiceProviderId } from "./src/lib/voice-providers";
 import { buildEmptyWorkspaceState, buildInitialWorkspaceState, type WorkspaceState } from "./src/lib/workspace-state";
-import { parseWorkspaceMutationRequestBody, workspaceMutationBadRequestMessages } from "./src/lib/workspace-mutations";
+import { parseRlabCommandRequestBody } from "./src/lib/rlab-events";
 import {
   applyWorkspaceDbMutations,
+  appendRlabCommandEnvelopes,
+  appendRunLifecycleEvent,
+  appendRunOutputEvent,
   initWorkspaceDb,
   initializeWorkspaceStateInDb,
   readConversation,
+  readWorkspaceCheckpoint,
+  readWorkspaceEventsAfter,
   readMessage,
   readMessageBlocks,
+  readRunProjection,
+  readRunProjections,
   readSelectedConversationId,
   readThreadFromDb,
-  readWorkspaceRevision,
   readWorkspaceStateFromDb,
+  subscribeWorkspaceEvents,
   updateConversationData,
   upsertAgentMessageForUserTurn,
   upsertMessage,
   workspaceDbHasState,
-  WorkspaceRevisionConflictError,
+  type RunProjection,
   type WorkspaceDbMutation,
 } from "./workspace-db";
 import {
@@ -124,13 +134,13 @@ const { DatabaseSync: NodeSqliteDatabaseSync } = process.getBuiltinModule("node:
 type AgentStatus = "available" | "running" | "needs-setup" | "unavailable" | "unsupported";
 
 const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url));
-// Persisted workspace state lives under `.data/` next to the plugin by default.
+// Persisted application events live under `.data/` next to the plugin by default.
 // `RLAB_DATA_DIR` relocates it — useful when running the prod server as a
 // service (point it at a writable data volume) and for isolating e2e runs.
 const WORKSPACE_STATE_DIR = process.env.RLAB_DATA_DIR
   ? (isAbsolute(process.env.RLAB_DATA_DIR) ? process.env.RLAB_DATA_DIR : resolve(process.cwd(), process.env.RLAB_DATA_DIR))
   : join(PLUGIN_DIR, ".data");
-const WORKSPACE_DB_FILE = join(WORKSPACE_STATE_DIR, "workspace.db");
+const WORKSPACE_DB_FILE = join(WORKSPACE_STATE_DIR, "events.db");
 const RUN_AUDIT_FILE = join(WORKSPACE_STATE_DIR, "run-audit.ndjson");
 const SCHEDULED_WAKEUPS_FILE = join(WORKSPACE_STATE_DIR, "scheduled-wakeups.json");
 const ATTACHMENTS_DIR = join(WORKSPACE_STATE_DIR, "attachments");
@@ -2240,6 +2250,10 @@ export function cancelBackgroundRunRequestState(state: WorkspaceState, runId: st
   };
 }
 
+function conversationIdForActiveRun(state: WorkspaceState, runId: string): string | null {
+  return [...state.chats, ...state.projects.flatMap((project) => project.conversations)].find((conversation) => conversation.activeRunId === runId)?.id ?? null;
+}
+
 /** Demo conversations are seeded only in development or with RLAB_DEMO=1; a
  *  production server starts with a clean, empty workspace. */
 function isDemoWorkspaceEnabled(): boolean {
@@ -2274,10 +2288,11 @@ function readWorkspaceState(): WorkspaceState {
   return reconciled;
 }
 
-/** The lightweight state the client `GET /api/workspace` returns: the full shell
+/** The lightweight state the client `GET /api/state/snapshot` returns: the full shell
  *  (conversation summaries, projects, drafts, settings) but only the SELECTED
- *  conversation's message thread. Other threads load lazily via GET /api/thread,
- *  so a giant history is no longer a giant initial payload. */
+ *  conversation's message thread. Other threads load lazily via
+ *  GET /api/state/thread, so a giant history is no longer a giant initial
+ *  payload. */
 function readWorkspaceShellForClient(): WorkspaceState {
   ensureWorkspaceDb();
   if (!workspaceDbHasState()) {
@@ -2637,7 +2652,7 @@ function sendJson(res: ServerResponse, statusCode: number, payload: unknown): vo
 
 export function workspacePutErrorStatus(error: unknown): 400 | 500 {
   const message = errorMessage(error);
-  if (error instanceof SyntaxError || workspaceMutationBadRequestMessages.has(message)) {
+  if (error instanceof SyntaxError || message.startsWith("Invalid command")) {
     return 400;
   }
   if (
@@ -3491,55 +3506,87 @@ function handleBrowserEvents(req: IncomingMessage, res: ServerResponse): void {
   })();
 }
 
-function handleWorkspace(req: IncomingMessage, res: ServerResponse): void {
-  if (req.method === "GET") {
+function handleCommands(req: IncomingMessage, res: ServerResponse): void {
+  readJsonBody(req, res, (body) => {
     try {
-      sendJson(res, 200, { ...readWorkspaceShellForClient(), revision: readWorkspaceRevision() });
+      ensureWorkspaceDb();
+      const request = parseRlabCommandRequestBody(body);
+      const checkpoint = appendRlabCommandEnvelopes(request.commands);
+      sendJson(res, 200, { ok: true, checkpoint: String(checkpoint) });
     } catch (error) {
-      sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) });
+      sendJson(res, workspacePutErrorStatus(error), { error: errorMessage(error) });
     }
-    return;
-  }
-
-  if (req.method === "PUT") {
-    sendJson(res, 410, { error: "Full workspace writes are disabled. Use /api/workspace/mutations." });
-    return;
-  }
-
-  res.statusCode = 405;
-  res.end();
+  });
 }
 
-function handleWorkspaceRevision(_req: IncomingMessage, res: ServerResponse): void {
+function handleStateSnapshot(req: IncomingMessage, res: ServerResponse): void {
   try {
     ensureWorkspaceDb();
-    sendJson(res, 200, { revision: readWorkspaceRevision() });
+    const params = new URL(req.url ?? "/", "http://localhost").searchParams;
+    const threadId = params.get("thread")?.trim();
+    const state = threadId ? { ...readWorkspaceShellForClient(), threads: { [threadId]: readThreadFromDb(threadId) } } : readWorkspaceShellForClient();
+    sendJson(res, 200, { ...state, checkpoint: readWorkspaceCheckpoint() });
   } catch (error) {
     sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) });
   }
 }
 
-function handleWorkspaceMutations(req: IncomingMessage, res: ServerResponse): void {
-  readJsonBody(req, res, (body) => {
-    try {
-      ensureWorkspaceDb();
-      const { mutations, baseRevision } = parseWorkspaceMutationRequestBody(body);
-      const revision = applyWorkspaceDbMutations(mutations, { expectedRevision: baseRevision });
-      sendJson(res, 200, { ok: true, revision });
-    } catch (error) {
-      if (error instanceof WorkspaceRevisionConflictError) {
-        sendJson(res, 409, {
-          error: error.message,
-          code: "workspace_revision_conflict",
-          expectedRevision: error.expectedRevision,
-          revision: error.currentRevision,
-          workspace: readWorkspaceState(),
-        });
-        return;
-      }
-      sendJson(res, workspacePutErrorStatus(error), { error: errorMessage(error) });
+function handleStateThread(req: IncomingMessage, res: ServerResponse): void {
+  try {
+    ensureWorkspaceDb();
+    const conversationId = new URL(req.url ?? "/", "http://localhost").searchParams.get("conversationId") ?? "";
+    if (!conversationId) {
+      sendJson(res, 400, { error: "Missing conversationId." });
+      return;
     }
-  });
+    sendJson(res, 200, readClientThread(conversationId));
+  } catch (error) {
+    sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) });
+  }
+}
+
+function writeWorkspaceSseEvent(res: ServerResponse, event: ReturnType<typeof readWorkspaceEventsAfter>[number]): void {
+  res.write(`id: ${event.globalPosition}\n`);
+  res.write("event: rlab\n");
+  res.write(`data: ${JSON.stringify(event)}\n\n`);
+}
+
+function handleStateEvents(req: IncomingMessage, res: ServerResponse): void {
+  try {
+    ensureWorkspaceDb();
+    const url = new URL(req.url ?? "/", "http://localhost");
+    const fromParam = url.searchParams.get("from") ?? req.headers["last-event-id"];
+    let cursor = typeof fromParam === "string" ? fromParam : "0";
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("Connection", "keep-alive");
+
+    for (;;) {
+      const batch = readWorkspaceEventsAfter(cursor, 500);
+      if (batch.length === 0) {
+        break;
+      }
+      for (const event of batch) {
+        writeWorkspaceSseEvent(res, event);
+        cursor = event.globalPosition;
+      }
+      if (batch.length < 500) {
+        break;
+      }
+    }
+    const heartbeat = setInterval(() => res.write(": heartbeat\n\n"), 15_000);
+    const unsubscribe = subscribeWorkspaceEvents((event) => {
+      writeWorkspaceSseEvent(res, event);
+    });
+    req.on("close", () => {
+      clearInterval(heartbeat);
+      unsubscribe();
+      res.end();
+    });
+  } catch (error) {
+    sendJson(res, 500, { error: errorMessage(error) });
+  }
 }
 
 function handleFolderPicker(_req: IncomingMessage, res: ServerResponse): void {
@@ -4196,6 +4243,7 @@ function handleRunApproval(req: IncomingMessage, res: ServerResponse): void {
       const decision = parseRunApprovalPayload(body);
       const resolved = resolvePendingRunApproval(decision);
       appendRunAuditEvent(RUN_AUDIT_FILE, { type: "approval_decision", id: resolved.id, decision: resolved.decision });
+      appendRunInputProvidedEvent(resolved.id, resolved.decision);
       const before = readWorkspaceState();
       persistWorkspaceDelta(before, applyRunApprovalDecisionState(before, resolved));
       sendJson(res, 200, resolved);
@@ -4210,6 +4258,7 @@ function handleRunInput(req: IncomingMessage, res: ServerResponse): void {
     try {
       const selection = parseRunInputPayload(body);
       const resolved = resolvePendingRunInput(selection);
+      appendRunInputProvidedEvent(resolved.id, resolved.selected);
       const before = readWorkspaceState();
       persistWorkspaceDelta(before, applyRunInputSelectionState(before, resolved));
       sendJson(res, 200, resolved);
@@ -4893,28 +4942,7 @@ interface RunCancelRequest {
   readonly runId: string;
 }
 
-interface RunRequest {
-  readonly agent: string;
-  readonly model: string;
-  readonly reasoning: string;
-  readonly mode: AgentProfile["mode"];
-  readonly prompt: string;
-  readonly accessMode: AgentAccessMode;
-  /** CLI approval shortcut for agents where auto-confirm is a sandbox setting,
-   *  not a chat work mode (Gemini `--approval-mode yolo`). */
-  readonly autoConfirm?: boolean;
-  /** Native session id to resume (same agent continuing the conversation). */
-  readonly resume?: string;
-  /** Server-assigned session id for a NEW session (agents that let us set it,
-   *  e.g. Gemini `--session-id`). Agents that mint their own id ignore this. */
-  readonly sessionId?: string;
-  /** Auto-compact the conversation when its context window fills (Claude
-   *  `autoCompactEnabled`). Defaults to true when unset. */
-  readonly autoCompact?: boolean;
-  /** Compaction window override in tokens (Claude `autoCompactWindow`); unset =
-   *  the model's full context window. */
-  readonly compactWindow?: number;
-}
+type RunRequest = AgentRunRequest;
 
 type ScheduledWakeupTrigger =
   | { readonly type: "time"; readonly fireAtMs: number }
@@ -5693,15 +5721,20 @@ export interface BackgroundRunHandle {
 
 interface BackgroundRunAccumulator extends RunEventAccumulator {
   agent?: AgentId;
+  terminalLifecycleRecorded?: boolean;
   lastPersistedAt: number;
   persistTimer: ReturnType<typeof setTimeout> | null;
 }
 
-interface RunSpec {
-  readonly bin: string;
-  readonly env?: readonly string[];
-  readonly args: (request: RunRequest) => string[];
-  readonly createTranslator: () => (line: string) => RunEvent[];
+interface AgentExecutionContext {
+  readonly cwd: string;
+  readonly env: NodeJS.ProcessEnv;
+  readonly res: ServerResponse;
+  readonly send: (event: RunEvent) => void;
+  readonly sendDone: () => void;
+  readonly end: () => void;
+  readonly binding: BackgroundRunBinding | null;
+  readonly accumulator: BackgroundRunAccumulator | null;
 }
 
 const TASK_WAKEUP_TOOL_NAME = "TaskWakeup";
@@ -6313,32 +6346,33 @@ export function buildOpenCodeRunArgs(request: RunArgsRequest): string[] {
   return args;
 }
 
-// CLI invocation per agent. Only agents with a real adapter run; others report
-// "not wired" so the UI degrades honestly.
-const RUN: Record<string, RunSpec> = {
-  "claude-code": {
+const AGENT_RUN_ADAPTERS = {
+  claudeCode: {
     bin: "claude",
-    args: (request) => buildClaudeRunArgs(request),
-    createTranslator: createClaudeStreamTranslator,
+    run: (request, context) => runClaudeSdk(request, context.cwd, context.env, context.res, context.send, context.sendDone, context.end, context.binding, context.accumulator),
   },
   codex: {
     bin: "codex",
     env: DETECT.codex.env,
-    args: (request) => buildCodexRunArgs(request),
-    createTranslator: createCodexStreamTranslator,
+    run: (request, context) => runCodexAppServer(request, context.cwd, context.res, context.send, context.sendDone, context.end, context.binding, context.accumulator),
   },
   gemini: {
     bin: "gemini",
     env: DETECT.gemini.env,
-    args: (request) => buildGeminiRunArgs(request),
+    buildArgs: (request) => buildGeminiRunArgs(request),
     createTranslator: createGeminiStreamTranslator,
   },
-  opencode: {
+  openCode: {
     bin: "opencode",
-    args: (request) => buildOpenCodeRunArgs(request),
+    buildArgs: (request) => buildOpenCodeRunArgs(request),
     createTranslator: createOpenCodeStreamTranslator,
+    run: (request, context) => runOpenCodeServer(request, context.cwd, context.res, context.send, context.sendDone, context.end, context.binding, context.accumulator),
   },
-};
+} satisfies AgentRunAdapters<AgentExecutionContext>;
+
+// Only agents with a registered run plugin execute; hidden/legacy ids report
+// "not wired" so the UI degrades honestly.
+const RUN = createAgentRunPluginRegistry(AGENT_RUN_ADAPTERS);
 
 export function validateRunAccessModeForAgent(agent: string, accessMode: AgentAccessMode): string | null {
   if (agent === "cursor" && accessMode === "read-only") {
@@ -6961,6 +6995,62 @@ export function createRunApprovalHandler(send: (event: RunEvent) => void, scopeI
 
 const backgroundRunHandles = new Map<string, BackgroundRunHandle>();
 
+function pendingScopedRunId(id: string): string | null {
+  const colon = id.indexOf(":");
+  return colon > 0 ? id.slice(0, colon) : null;
+}
+
+function appendRunInputProvidedEvent(id: string, value: unknown): void {
+  const runId = pendingScopedRunId(id);
+  if (!runId) {
+    return;
+  }
+  const projection = readRunProjection(runId);
+  if (!projection) {
+    throw new Error(`Run ${runId} is missing from run projection.`);
+  }
+  appendRunLifecycleEvent({
+    type: "run.inputProvided",
+    data: { runId, conversationId: projection.conversationId, inputId: id, value },
+  });
+}
+
+function appendRunEventFact(binding: BackgroundRunBinding, event: RunEvent): void {
+  if (event.type === "done") {
+    return;
+  }
+  appendRunOutputEvent(binding.runId, binding.conversationId, event);
+  if (event.type === "approval" || event.type === "options") {
+    appendRunLifecycleEvent({
+      type: "run.waitingForInput",
+      data: {
+        runId: binding.runId,
+        conversationId: binding.conversationId,
+        inputId: event.id,
+        inputType: event.type === "approval" ? "approval" : "options",
+      },
+    });
+  }
+}
+
+function appendRunTerminalLifecycleEvent(binding: BackgroundRunBinding, accumulator: BackgroundRunAccumulator, canceled: boolean): void {
+  if (accumulator.terminalLifecycleRecorded) {
+    return;
+  }
+  accumulator.terminalLifecycleRecorded = true;
+  if (canceled) {
+    appendRunLifecycleEvent({ type: "run.cancelled", data: { runId: binding.runId, conversationId: binding.conversationId, reason: "cancelled" } });
+    return;
+  }
+  const error = accumulator.statuses.find((status) => status.level === "error")?.text;
+  if (error) {
+    appendRunLifecycleEvent({ type: "run.failed", data: { runId: binding.runId, conversationId: binding.conversationId, error } });
+    return;
+  }
+  const doneEvent: Extract<RunEvent, { type: "done" }> = { type: "done", ...(accumulator.costUsd === undefined ? {} : { costUsd: accumulator.costUsd }), ...(accumulator.usage === undefined ? {} : { usage: accumulator.usage }) };
+  appendRunLifecycleEvent({ type: "run.completed", data: { runId: binding.runId, conversationId: binding.conversationId, event: doneEvent } });
+}
+
 export function activeBackgroundRunSnapshotsFromHandles(handles: ReadonlyMap<string, BackgroundRunHandle>): ActiveBackgroundRunSnapshot[] {
   return Array.from(handles.values(), ({ binding, startedAt }) => ({
     runId: binding.runId,
@@ -6971,8 +7061,31 @@ export function activeBackgroundRunSnapshotsFromHandles(handles: ReadonlyMap<str
   }));
 }
 
+export function activeBackgroundRunSnapshotsFromSources(
+  handles: ReadonlyMap<string, BackgroundRunHandle>,
+  projections: readonly RunProjection[],
+): ActiveBackgroundRunSnapshot[] {
+  const byRunId = new Map(activeBackgroundRunSnapshotsFromHandles(handles).map((snapshot) => [snapshot.runId, snapshot]));
+  for (const projection of projections) {
+    if (!projection.userMessageId || !projection.agentMessageId) {
+      continue;
+    }
+    if (!byRunId.has(projection.runId)) {
+      byRunId.set(projection.runId, {
+        runId: projection.runId,
+        conversationId: projection.conversationId,
+        userMessageId: projection.userMessageId,
+        agentMessageId: projection.agentMessageId,
+        startedAt: projection.startedAt ?? new Date(0).toISOString(),
+      });
+    }
+  }
+  return [...byRunId.values()];
+}
+
 function activeBackgroundRunSnapshots(): ActiveBackgroundRunSnapshot[] {
-  return activeBackgroundRunSnapshotsFromHandles(backgroundRunHandles);
+  ensureWorkspaceDb();
+  return activeBackgroundRunSnapshotsFromSources(backgroundRunHandles, readRunProjections(new Set(["requested", "running", "waiting"])));
 }
 
 const scheduledWakeupTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -7373,6 +7486,7 @@ function notifyBackgroundRunUpdate(binding: BackgroundRunBinding, done: boolean)
 function createBackgroundAccumulator(): BackgroundRunAccumulator {
   return {
     ...createRunEventAccumulator(),
+    terminalLifecycleRecorded: false,
     lastPersistedAt: 0,
     persistTimer: null,
   };
@@ -7878,6 +7992,33 @@ function minimalRunState(conversation: WorkspaceConversation | undefined, conver
 function startPersistedBackgroundRun(binding: BackgroundRunBinding, request: RunRequest): BackgroundRunAccumulator {
   const accumulator = createBackgroundAccumulator();
   ensureWorkspaceDb();
+  if (!isAgentId(request.agent)) {
+    throw new Error(`Invalid run agent ${request.agent}.`);
+  }
+  appendRunLifecycleEvent({
+    type: "run.requested",
+    data: {
+      runId: binding.runId,
+      conversationId: binding.conversationId,
+      userMessageId: binding.userMessageId,
+      agentMessageId: binding.agentMessageId,
+      prompt: request.prompt,
+      agent: request.agent,
+      model: request.model,
+      reasoning: request.reasoning,
+      mode: request.mode,
+    },
+  });
+  appendRunLifecycleEvent({
+    type: "run.started",
+    data: {
+      runId: binding.runId,
+      conversationId: binding.conversationId,
+      userMessageId: binding.userMessageId,
+      agentMessageId: binding.agentMessageId,
+      startedAt: new Date(accumulator.startMs).toISOString(),
+    },
+  });
   const existing = [readMessage(binding.userMessageId), readMessage(binding.agentMessageId)].filter((message): message is ChatMessage => message !== undefined);
   const minimal = minimalRunState(readConversation(binding.conversationId), binding.conversationId, existing);
   persistConversationDelta(startBackgroundRunState(minimal, binding, request, accumulator), binding.conversationId, binding);
@@ -7911,6 +8052,7 @@ export function backgroundRunStatusPatch(
 }
 
 function applyBackgroundRunEvent(binding: BackgroundRunBinding, accumulator: BackgroundRunAccumulator, event: RunEvent): void {
+  appendRunEventFact(binding, event);
   accumulateBackgroundRunEvent(accumulator, event);
   if (event.type === "done") {
     return;
@@ -7973,6 +8115,7 @@ function finishPersistedBackgroundRun(binding: BackgroundRunBinding, accumulator
   const agentMessage = readMessage(binding.agentMessageId);
   const minimal = minimalRunState(conversation, binding.conversationId, agentMessage ? [agentMessage] : []);
   persistConversationDelta(finishBackgroundRunState(minimal, binding, accumulator, canceled), binding.conversationId, binding);
+  appendRunTerminalLifecycleEvent(binding, accumulator, canceled);
   accumulator.lastPersistedAt = Date.now();
 }
 
@@ -10372,9 +10515,13 @@ function handleRunCancel(req: IncomingMessage, res: ServerResponse): void {
       const handle = backgroundRunHandles.get(request.runId);
       const currentState = readWorkspaceState();
       const canceled = cancelBackgroundRunRequestState(currentState, request.runId, Boolean(handle));
+      const cancelledConversationId = handle?.binding.conversationId ?? conversationIdForActiveRun(currentState, request.runId);
       if (!handle) {
         if (canceled.canceled) {
           persistWorkspaceDelta(currentState, canceled.state);
+          if (cancelledConversationId) {
+            appendRunLifecycleEvent({ type: "run.cancelled", data: { runId: request.runId, conversationId: cancelledConversationId, reason: "cancelled" } });
+          }
           sendJson(res, 200, { runId: request.runId, canceled: true, detached: true });
           return;
         }
@@ -10521,13 +10668,17 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
       return;
     }
 
-    const spec = RUN[agent];
-    const usesSdkRuntime = agent === "claude-code";
-    const resolvedBin = spec && !usesSdkRuntime ? resolveBinOnPath(spec.bin) : null;
+    const spec = RUN.get(agent);
     if (!spec || !isAgentId(agent)) {
       sendJson(res, 400, { error: `Running ${agent || "this agent"} is not wired yet.` });
       return;
     }
+    const usesSdkRuntime = spec.runtime === "sdk";
+    if (!usesSdkRuntime && !spec.bin) {
+      sendJson(res, 500, { error: `Run plugin ${agent} has no executable configured.` });
+      return;
+    }
+    const resolvedBin = !usesSdkRuntime && spec.bin ? resolveBinOnPath(spec.bin) : null;
     if (!usesSdkRuntime && !resolvedBin) {
       sendJson(res, 503, { error: `${spec.bin} is not installed on this machine.` });
       return;
@@ -10705,18 +10856,8 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
       return;
     }
 
-    if (agent === "claude-code") {
-      void runClaudeSdk(executionRequest, cwd, runEnv, res, send, sendDone, sender.end, binding, accumulator);
-      return;
-    }
-
-    if (agent === "opencode") {
-      void runOpenCodeServer(executionRequest, cwd, res, send, sendDone, sender.end, binding, accumulator);
-      return;
-    }
-
-    if (agent === "codex") {
-      void runCodexAppServer(executionRequest, cwd, res, send, sendDone, sender.end, binding, accumulator);
+    if (spec.run) {
+      void spec.run(executionRequest, { cwd, env: runEnv, res, send, sendDone, end: sender.end, binding, accumulator });
       return;
     }
 
@@ -10729,7 +10870,12 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
         finishAndEnd();
         return;
       }
-      child = spawnResolvedBin(resolvedBin, spec.args(executionRequest), agentProcessSpawnOptions({ cwd, env: runEnv, stdio: ["ignore", "pipe", "pipe"] }));
+      if (!spec.buildArgs || !spec.createTranslator) {
+        send({ type: "error", text: `Run plugin ${agent} is missing CLI execution handlers.` });
+        finishAndEnd();
+        return;
+      }
+      child = spawnResolvedBin(resolvedBin, spec.buildArgs(executionRequest), agentProcessSpawnOptions({ cwd, env: runEnv, stdio: ["ignore", "pipe", "pipe"] }));
     } catch (error) {
       send({ type: "error", text: error instanceof Error ? `Failed to launch ${spec.bin}: ${error.message}` : `Failed to launch ${spec.bin}` });
       finishAndEnd();
@@ -10918,94 +11064,71 @@ function attach(server: ViteDevServer | PreviewServer): void {
     attachPtyTerminalWebSockets(server.httpServer as unknown as HttpServer, terminalManager);
   }
   server.middlewares.use(PREVIEW_PROXY_PREFIX, handlePreviewProxy);
-  const routes: ExactApiRoute[] = [
-    {
-      path: "/api/health",
-      handler: methodOnly("GET", (_req, res) => {
-        const health = storageHealthSnapshot();
-        sendJson(res, health.storage.ok ? 200 : 500, health);
-      }),
+  const routeHandlers = {
+    health: (_req, res) => {
+      const health = storageHealthSnapshot();
+      sendJson(res, health.storage.ok ? 200 : 500, health);
     },
-    { path: "/api/browser/session", handler: methodOnly("POST", handleBrowserSession) },
-    { path: "/api/browser/sync", handler: methodOnly("POST", handleBrowserSync) },
-    { path: "/api/browser/dirty", handler: methodOnly("POST", handleBrowserDirty) },
-    { path: "/api/browser/action", handler: methodOnly("POST", handleBrowserAction) },
-    { path: "/api/browser/bridge/sync", handler: methodOnly("POST", handleBrowserBridgeSync) },
-    { path: "/api/browser/bridge/action", handler: methodOnly("POST", handleBrowserBridgeAction) },
-    { path: "/api/browser/bridge/snapshot", handler: methodOnly("GET", handleBrowserBridgeSnapshot) },
-    { path: "/api/browser/snapshot", handler: methodOnly("GET", handleBrowserSnapshot) },
-    { path: "/api/browser/events", handler: methodOnly("GET", handleBrowserEvents) },
-    { path: "/api/workspace/revision", handler: methodOnly("GET", handleWorkspaceRevision) },
-    { path: "/api/workspace/mutations", handler: methodOnly("POST", handleWorkspaceMutations) },
-    { path: "/api/workspace", handler: handleWorkspace },
-    {
-      path: "/api/thread",
-      handler: methodOnly("GET", (req, res) => {
+    browserSession: handleBrowserSession,
+    browserSync: handleBrowserSync,
+    browserDirty: handleBrowserDirty,
+    browserAction: handleBrowserAction,
+    browserBridgeSync: handleBrowserBridgeSync,
+    browserBridgeAction: handleBrowserBridgeAction,
+    browserBridgeSnapshot: handleBrowserBridgeSnapshot,
+    browserSnapshot: handleBrowserSnapshot,
+    browserEvents: handleBrowserEvents,
+    commands: handleCommands,
+    stateSnapshot: handleStateSnapshot,
+    stateThread: handleStateThread,
+    stateEvents: handleStateEvents,
+    agents: (_req, res) => {
+      void (async () => {
         try {
-          const conversationId = new URL(req.url ?? "/", "http://localhost").searchParams.get("conversationId") ?? "";
-          if (!conversationId) {
-            sendJson(res, 400, { error: "Missing conversationId." });
-            return;
-          }
-          sendJson(res, 200, readClientThread(conversationId));
+          sendJson(res, 200, await detectAgentsWithLiveModels());
         } catch (error) {
-          sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) });
+          sendJson(res, 500, { error: errorMessage(error) });
         }
-      }),
+      })();
     },
-    {
-      path: "/api/agents",
-      handler: methodOnly("GET", (_req, res) => {
-        void (async () => {
-          try {
-            sendJson(res, 200, await detectAgentsWithLiveModels());
-          } catch (error) {
-            sendJson(res, 500, { error: errorMessage(error) });
-          }
-        })();
-      }),
+    rlabPlugins: (_req, res) => {
+      sendJson(res, 200, { plugins: registeredRlabPluginLinks() });
     },
-    {
-      path: "/api/rlab-plugins",
-      handler: methodOnly("GET", (_req, res) => {
-        sendJson(res, 200, { plugins: registeredRlabPluginLinks() });
-      }),
-    },
-    { path: "/api/agent-config", handler: handleAgentConfig },
-    { path: "/api/voice-config", handler: handleVoiceConfig },
-    { path: "/api/voice/transcribe", handler: methodOnly("POST", handleVoiceTranscribe) },
-    { path: "/api/agent-install", handler: methodOnly("POST", handleAgentInstall) },
-    { path: "/api/playwright-install", handler: methodOnly("POST", handlePlaywrightInstall) },
-    { path: "/api/folder-picker", handler: methodOnly("POST", handleFolderPicker) },
-    { path: "/api/list-directories", handler: methodOnly("POST", handleListDirectories) },
-    { path: "/api/folder-info", handler: methodOnly("POST", handleFolderInfo) },
-    { path: "/api/project-files", handler: methodOnly("POST", handleProjectFiles) },
-    { path: "/api/attachments", handler: methodOnly("POST", handleAttachmentUpload) },
-    { path: "/api/local-file", handler: methodOnly("GET", handleLocalFile) },
-    { path: "/api/version", handler: methodOnly("GET", handleVersion) },
-    { path: "/api/agent-limits", handler: methodOnly("GET", handleAgentLimits) },
-    { path: "/api/cli-updates", handler: methodOnly("GET", handleCliUpdates) },
-    { path: "/api/git-status", handler: methodOnly("POST", handleGitStatus) },
-    { path: "/api/git-tree", handler: methodOnly("POST", handleGitTree) },
-    { path: "/api/git-diff", handler: methodOnly("POST", handleGitDiff) },
-    { path: "/api/git-stage", handler: methodOnly("POST", handleGitStage) },
-    { path: "/api/git-unstage", handler: methodOnly("POST", handleGitUnstage) },
-    { path: "/api/git-commit", handler: methodOnly("POST", handleGitCommit) },
-    { path: "/api/git-checkout", handler: methodOnly("POST", handleGitCheckout) },
-    { path: "/api/git-push", handler: methodOnly("POST", handleGitPush) },
-    { path: "/api/git-worktree-create", handler: methodOnly("POST", handleGitWorktreeCreate) },
-    { path: "/api/git-worktree-merge", handler: methodOnly("POST", handleGitWorktreeMerge) },
-    { path: "/api/git-init", handler: methodOnly("POST", handleGitInit) },
-    { path: "/api/terminal", handler: handleTerminalSession },
-    { path: "/api/runs", handler: methodOnly("GET", handleActiveRuns) },
-    { path: "/api/wakeups", handler: handleWakeups },
-    { path: "/api/run-attach", handler: methodOnly("GET", handleRunAttach) },
-    { path: "/api/run", handler: methodOnly("POST", handleRun) },
-    { path: "/api/run-approval", handler: methodOnly("POST", handleRunApproval) },
-    { path: "/api/run-cancel", handler: methodOnly("POST", handleRunCancel) },
-    { path: "/api/run-input", handler: methodOnly("POST", handleRunInput) },
-  ];
-  attachExactApiRoutes(server, routes);
+    agentConfig: handleAgentConfig,
+    voiceConfig: handleVoiceConfig,
+    voiceTranscribe: handleVoiceTranscribe,
+    agentInstall: handleAgentInstall,
+    playwrightInstall: handlePlaywrightInstall,
+    folderPicker: handleFolderPicker,
+    listDirectories: handleListDirectories,
+    folderInfo: handleFolderInfo,
+    projectFiles: handleProjectFiles,
+    attachments: handleAttachmentUpload,
+    localFile: handleLocalFile,
+    version: handleVersion,
+    agentLimits: handleAgentLimits,
+    cliUpdates: handleCliUpdates,
+    gitStatus: handleGitStatus,
+    gitTree: handleGitTree,
+    gitDiff: handleGitDiff,
+    gitStage: handleGitStage,
+    gitUnstage: handleGitUnstage,
+    gitCommit: handleGitCommit,
+    gitCheckout: handleGitCheckout,
+    gitPush: handleGitPush,
+    gitWorktreeCreate: handleGitWorktreeCreate,
+    gitWorktreeMerge: handleGitWorktreeMerge,
+    gitInit: handleGitInit,
+    terminal: handleTerminalSession,
+    runs: handleActiveRuns,
+    wakeups: handleWakeups,
+    runAttach: handleRunAttach,
+    run: handleRun,
+    runApproval: handleRunApproval,
+    runCancel: handleRunCancel,
+    runInput: handleRunInput,
+  } satisfies RlabApiRouteHandlers;
+  attachExactApiRoutes(server, createRlabApiRoutes(routeHandlers));
   prewarmAgentDetectionCache();
   startCliUpdateMonitor();
 }

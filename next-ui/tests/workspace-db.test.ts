@@ -6,12 +6,18 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ChatMessage, ConversationSummary } from "../src/domain/agent-types";
 import { buildEmptyWorkspaceState, type WorkspaceState } from "../src/lib/workspace-state";
 import {
+  appendRlabCommandEnvelopes,
+  appendRunLifecycleEvent,
   closeWorkspaceDb,
   applyWorkspaceDbMutations,
   initializeWorkspaceStateInDb,
   initWorkspaceDb,
   readConversation,
+  readMessage,
   readMessageBlocks,
+  readRunProjection,
+  readWorkspaceEventsAfter,
+  rebuildRlabProjections,
   readThreadFromDb,
   readWorkspaceRevision,
   readWorkspaceStateFromDb,
@@ -47,7 +53,7 @@ afterEach(() => {
 });
 
 describe("workspace-db", () => {
-  it("round-trips a full workspace state through the normalized tables", () => {
+  it("round-trips a full workspace state through event-store projections", () => {
     const state: WorkspaceState = {
       ...buildEmptyWorkspaceState(),
       chats: [conv("c1"), conv("c2")],
@@ -67,6 +73,11 @@ describe("workspace-db", () => {
     expect(read.threads.pm1).toBeUndefined();
     expect(read.composerDrafts.c1.text).toBe("draft");
     expect(read.selectedId).toBe("c1");
+
+    rebuildRlabProjections();
+    expect(readConversation("pc1")?.title).toBe("pc1");
+    expect(readMessage("m2")?.blocks).toEqual([{ kind: "text", text: "two" }]);
+    expect(readThreadFromDb("c1").map((message) => message.id)).toEqual(["m1", "m2"]);
   });
 
   it("upserts a single message + conversation without rewriting the whole tree (hot path)", () => {
@@ -249,5 +260,95 @@ INSERT INTO composer_drafts(conversation_id, data) VALUES('c1', '${JSON.stringif
     outdated.close();
 
     expect(() => initWorkspaceDb(schemaFile)).toThrow("Workspace database schema is outdated");
+  });
+
+  it("projects run lifecycle events and rebuilds the run read model from the event log", () => {
+    initializeWorkspaceStateInDb({ ...buildEmptyWorkspaceState(), chats: [conv("c1")], threads: { c1: [userMsg("u1", "run it")] }, selectedId: "c1" });
+
+    appendRunLifecycleEvent({
+      type: "run.requested",
+      data: {
+        runId: "run-1",
+        conversationId: "c1",
+        userMessageId: "u1",
+        agentMessageId: "a1",
+        prompt: "run it",
+        agent: "codex",
+        model: "default",
+        reasoning: "default",
+        mode: "default",
+      },
+    });
+    appendRunLifecycleEvent({
+      type: "run.started",
+      data: { runId: "run-1", conversationId: "c1", userMessageId: "u1", agentMessageId: "a1", startedAt: "2026-06-06T14:00:00.000Z" },
+    });
+    appendRunLifecycleEvent({ type: "run.outputRecorded", data: { runId: "run-1", conversationId: "c1", event: { type: "text", text: "hello" } } });
+    appendRunLifecycleEvent({ type: "run.completed", data: { runId: "run-1", conversationId: "c1", event: { type: "done", costUsd: 0.01 } } });
+
+    expect(readRunProjection("run-1")).toMatchObject({
+      runId: "run-1",
+      conversationId: "c1",
+      userMessageId: "u1",
+      agentMessageId: "a1",
+      status: "completed",
+      events: [
+        { type: "text", text: "hello" },
+        { type: "done", costUsd: 0.01 },
+      ],
+    });
+
+    rebuildRlabProjections();
+
+    expect(readRunProjection("run-1")).toMatchObject({
+      runId: "run-1",
+      status: "completed",
+      events: [
+        { type: "text", text: "hello" },
+        { type: "done", costUsd: 0.01 },
+      ],
+    });
+  });
+
+  it("deduplicates run request commands by command id", () => {
+    initializeWorkspaceStateInDb({ ...buildEmptyWorkspaceState(), chats: [conv("c1")], threads: { c1: [userMsg("u1", "run it")] }, selectedId: "c1" });
+    const envelope = {
+      commandId: "cmd-run-1",
+      clientId: "test",
+      command: {
+        type: "run.request",
+        runId: "run-1",
+        conversationId: "c1",
+        userMessageId: "u1",
+        agentMessageId: "a1",
+        prompt: "run it",
+        agent: "codex",
+        model: "default",
+        reasoning: "default",
+        mode: "default",
+      },
+    } as const;
+
+    const before = readWorkspaceRevision();
+    appendRlabCommandEnvelopes([envelope, envelope]);
+    const afterFirst = readWorkspaceRevision();
+    appendRlabCommandEnvelopes([envelope]);
+
+    expect(readWorkspaceRevision()).toBe(afterFirst);
+    expect(readWorkspaceEventsAfter(before)).toEqual([
+      expect.objectContaining({
+        type: "run.requested",
+        streamName: "run:run-1",
+        streamPosition: "1",
+        globalPosition: String(before + 1),
+        metadata: expect.objectContaining({
+          schemaVersion: 1,
+          commandId: "cmd-run-1",
+          clientId: "test",
+          correlationId: "cmd-run-1",
+        }),
+      }),
+    ]);
+    expect(readRunProjection("run-1")).toMatchObject({ runId: "run-1", status: "requested" });
   });
 });

@@ -718,7 +718,9 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
 
   const stopVoiceTracks = useCallback(() => {
     stopVoiceAnalyser();
-    mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+    mediaStreamRef.current?.getTracks().forEach((track) => {
+      track.stop();
+    });
     mediaStreamRef.current = null;
   }, [stopVoiceAnalyser]);
 

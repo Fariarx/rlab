@@ -3,9 +3,74 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { observer } from "mobx-react-lite";
 import { useWorkspace } from "../src/components/workspace/use-workspace";
 import { buildInitialWorkspaceState, type WorkspaceState } from "../src/components/workspace/workspace-state";
-import { applyWorkspaceMutationsToState, type WorkspaceMutation } from "../src/lib/workspace-mutations";
+import { applyWorkspaceMutationsToState } from "../src/lib/workspace-mutations";
+import { applyRlabEventToState, commandToEvent, type RecordedRlabEvent, type RlabCommandEnvelope, type RlabEvent } from "../src/lib/rlab-events";
 
-const WORKSPACE_SYNC_TICK_MS = 2_000;
+type WorkspaceEventSourceListener = (event: { readonly data: string }) => void;
+
+class MockWorkspaceEventSource {
+  readonly url: string;
+  onerror: (() => void) | null = null;
+  private readonly listeners = new Map<string, Set<WorkspaceEventSourceListener>>();
+
+  constructor(url: string | URL) {
+    this.url = String(url);
+    workspaceEventSources.sources.add(this);
+  }
+
+  addEventListener(type: string, listener: EventListenerOrEventListenerObject): void {
+    const listeners = this.listeners.get(type) ?? new Set<WorkspaceEventSourceListener>();
+    listeners.add(listener as unknown as WorkspaceEventSourceListener);
+    this.listeners.set(type, listeners);
+  }
+
+  removeEventListener(type: string, listener: EventListenerOrEventListenerObject): void {
+    this.listeners.get(type)?.delete(listener as unknown as WorkspaceEventSourceListener);
+  }
+
+  close(): void {
+    workspaceEventSources.sources.delete(this);
+  }
+
+  dispatch(type: string, data: string): void {
+    for (const listener of this.listeners.get(type) ?? []) {
+      listener({ data });
+    }
+  }
+}
+
+const workspaceEventSources = {
+  sources: new Set<MockWorkspaceEventSource>(),
+  position: 1,
+  reset(position: number): void {
+    this.position = position;
+    this.sources.clear();
+  },
+  emit(event: Omit<RlabEvent, "metadata">): void {
+    this.position += 1;
+    this.emitAt(this.position, event);
+  },
+  emitAt(position: number, event: Omit<RlabEvent, "metadata">): void {
+    this.position = position;
+    const recorded: RecordedRlabEvent = {
+      type: event.type,
+      data: event.data,
+      metadata: {
+        schemaVersion: 1,
+        commandId: `test-event-${this.position}`,
+        clientId: "test",
+        correlationId: `test-event-${this.position}`,
+        createdAt: "2026-06-06T14:00:00.000Z",
+      },
+      streamName: "workspace",
+      streamPosition: String(this.position),
+      globalPosition: String(this.position),
+    };
+    for (const source of this.sources) {
+      source.dispatch("rlab", JSON.stringify(recorded));
+    }
+  },
+};
 
 const Probe = observer(function Probe() {
   const workspace = useWorkspace();
@@ -132,8 +197,8 @@ interface RunRequestRecord {
 }
 
 function applyWorkspaceMutationRequest(state: WorkspaceState, init: RequestInit | undefined): WorkspaceState {
-  const payload = JSON.parse(String(init?.body ?? "{}")) as { mutations?: WorkspaceMutation[] };
-  return applyWorkspaceMutationsToState(state, payload.mutations ?? []);
+  const payload = JSON.parse(String(init?.body ?? "{}")) as { commands?: RlabCommandEnvelope[] };
+  return (payload.commands ?? []).reduce((current, envelope) => applyRlabEventToState(current, commandToEvent(envelope)), state);
 }
 
 describe("useWorkspace", () => {
@@ -155,6 +220,7 @@ describe("useWorkspace", () => {
     attachRunRequests = [];
     runRequests = [];
     runCancelRequests = [];
+    workspaceEventSources.reset(serverRevision);
     originalLocalStorage = Object.getOwnPropertyDescriptor(window, "localStorage");
     localStorageSetItem = vi.fn();
     Object.defineProperty(window, "localStorage", {
@@ -165,22 +231,20 @@ describe("useWorkspace", () => {
         setItem: localStorageSetItem,
       },
     });
+    vi.stubGlobal("EventSource", MockWorkspaceEventSource);
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
-        if (url === "/api/workspace" && (!init || init.method === "GET")) {
-          return Response.json({ ...state, revision: serverRevision });
+        if (url === "/api/state/snapshot" && (!init || init.method === "GET")) {
+          return Response.json({ ...state, checkpoint: String(serverRevision) });
         }
-        if (url === "/api/workspace/revision" && (!init || init.method === "GET")) {
-          return Response.json({ revision: serverRevision });
-        }
-        if (url === "/api/workspace/mutations" && init?.method === "POST") {
+        if (url === "/api/commands" && init?.method === "POST") {
           state = applyWorkspaceMutationRequest(state, init);
           serverRevision += 1;
-          return Response.json({ ok: true, revision: serverRevision });
+          return Response.json({ ok: true, checkpoint: String(serverRevision) });
         }
-        if (url.startsWith("/api/thread?")) {
+        if (url.startsWith("/api/state/thread?")) {
           const conversationId = new URL(url, "http://localhost").searchParams.get("conversationId") ?? "";
           return Response.json({ messages: state.threads[conversationId] ?? [] });
         }
@@ -235,7 +299,7 @@ describe("useWorkspace", () => {
 
     await screen.findByText("chat-2");
 
-    expect(fetch).toHaveBeenCalledWith("/api/workspace", expect.objectContaining({ method: "GET" }));
+    expect(fetch).toHaveBeenCalledWith("/api/state/snapshot", expect.objectContaining({ method: "GET" }));
   });
 
   it("does not save freshly loaded server workspace state back to the workspace API", async () => {
@@ -246,7 +310,7 @@ describe("useWorkspace", () => {
       await Promise.resolve();
     });
 
-    expect(vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace/mutations" && init?.method === "POST")).toHaveLength(0);
+    expect(vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/commands" && init?.method === "POST")).toHaveLength(0);
   });
 
   it("syncs remote workspace updates without stealing the local selected conversation", async () => {
@@ -266,14 +330,55 @@ describe("useWorkspace", () => {
     serverRevision += 1;
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(WORKSPACE_SYNC_TICK_MS);
-      await vi.advanceTimersByTimeAsync(0);
-      await Promise.resolve();
-      await Promise.resolve();
+      const conversation = state.chats.find((chat) => chat.id === "chat-2");
+      if (!conversation) {
+        throw new Error("Missing chat-2 fixture.");
+      }
+      workspaceEventSources.emit({ type: "workspace.conversationUpdated", data: { conversation } });
     });
 
     expect(screen.getByTestId("selected")).toHaveTextContent("chat-2");
     expect(screen.getByTestId("selected-title")).toHaveTextContent("Remote title");
+  });
+
+  it("reloads the workspace snapshot when the event stream has a global position gap", async () => {
+    vi.useFakeTimers();
+    let workspaceReads = 0;
+    render(<Probe />);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByTestId("selected-title")).toHaveTextContent("Release notes для 0.1.69");
+
+    state = {
+      ...state,
+      chats: state.chats.map((chat) => (chat.id === "chat-2" ? { ...chat, title: "Reloaded title" } : chat)),
+    };
+    serverRevision = 5;
+    vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/state/snapshot" && (!init || init.method === "GET")) {
+        workspaceReads += 1;
+        return Response.json({ ...state, checkpoint: String(serverRevision) });
+      }
+      if (url === "/api/runs") {
+        return Response.json(activeRunsPayloadFromState(state));
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    await act(async () => {
+      workspaceEventSources.emitAt(5, {
+        type: "workspace.conversationUpdated",
+        data: { conversation: state.chats.find((chat) => chat.id === "chat-2")! },
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(workspaceReads).toBeGreaterThan(0);
+    expect(screen.getByTestId("selected-title")).toHaveTextContent("Reloaded title");
   });
 
   it("refreshes the locally selected thread when the remote shell omits it", async () => {
@@ -287,16 +392,13 @@ describe("useWorkspace", () => {
     } satisfies WorkspaceState["threads"][string][number];
     vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url === "/api/workspace" && (!init || init.method === "GET")) {
+      if (url === "/api/state/snapshot" && (!init || init.method === "GET")) {
         if (remoteShellMode) {
-          return Response.json({ ...state, selectedId: "chat-1", threads: { "chat-1": state.threads["chat-1"] ?? [] }, revision: serverRevision });
+          return Response.json({ ...state, selectedId: "chat-1", threads: { "chat-1": state.threads["chat-1"] ?? [] }, checkpoint: String(serverRevision) });
         }
-        return Response.json({ ...state, revision: serverRevision });
+        return Response.json({ ...state, checkpoint: String(serverRevision) });
       }
-      if (url === "/api/workspace/revision" && (!init || init.method === "GET")) {
-        return Response.json({ revision: serverRevision });
-      }
-      if (url.startsWith("/api/thread?")) {
+      if (url.startsWith("/api/state/thread?")) {
         const conversationId = new URL(url, "http://localhost").searchParams.get("conversationId") ?? "";
         return Response.json({ messages: state.threads[conversationId] ?? [] });
       }
@@ -324,10 +426,7 @@ describe("useWorkspace", () => {
     serverRevision += 1;
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(WORKSPACE_SYNC_TICK_MS);
-      await vi.advanceTimersByTimeAsync(0);
-      await Promise.resolve();
-      await Promise.resolve();
+      workspaceEventSources.emit({ type: "workspace.messageUpserted", data: { conversationId: "chat-2", message: remoteMessage } });
     });
 
     expect(screen.getByTestId("selected")).toHaveTextContent("chat-2");
@@ -339,14 +438,14 @@ describe("useWorkspace", () => {
     let workspaceReads = 0;
     vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url === "/api/workspace" && (!init || init.method === "GET")) {
+      if (url === "/api/state/snapshot" && (!init || init.method === "GET")) {
         workspaceReads += 1;
         if (workspaceReads === 1) {
           throw new TypeError("Failed to fetch");
         }
         return Response.json(state);
       }
-      if (url === "/api/workspace/mutations" && init?.method === "POST") {
+      if (url === "/api/commands" && init?.method === "POST") {
         state = applyWorkspaceMutationRequest(state, init);
         return Response.json({ ok: true });
       }
@@ -382,7 +481,7 @@ describe("useWorkspace", () => {
     screen.getByRole("button", { name: "send" }).click();
 
     await waitFor(() => {
-      expect(fetch).toHaveBeenCalledWith("/api/workspace/mutations", expect.objectContaining({ method: "POST" }));
+      expect(fetch).toHaveBeenCalledWith("/api/commands", expect.objectContaining({ method: "POST" }));
     });
     expect(state.threads["chat-2"].some((message) => message.text === "Persist this message")).toBe(true);
     expect(localStorageSetItem).not.toHaveBeenCalledWith(expect.stringContaining("rlab-workspace"), expect.any(String));
@@ -392,17 +491,18 @@ describe("useWorkspace", () => {
     render(<Probe />);
 
     await screen.findByText("chat-2");
-    const savesBefore = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace/mutations" && init?.method === "POST").length;
+    const savesBefore = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/commands" && init?.method === "POST").length;
     screen.getByRole("button", { name: "remove-chat-1" }).click();
 
     await waitFor(() => {
-      const saves = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace/mutations" && init?.method === "POST");
+      const saves = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/commands" && init?.method === "POST");
       expect(saves).toHaveLength(savesBefore + 1);
     });
-    const saves = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace/mutations" && init?.method === "POST");
-    const payload = JSON.parse(String(saves.at(-1)?.[1]?.body ?? "{}")) as { mutations?: WorkspaceMutation[] };
-    expect(payload.mutations).toContainEqual({ type: "deleteConversation", conversationId: "chat-1" });
-    expect(payload.mutations?.some((mutation) => mutation.type === "replaceConversationThread")).toBe(false);
+    const saves = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/commands" && init?.method === "POST");
+    const payload = JSON.parse(String(saves.at(-1)?.[1]?.body ?? "{}")) as { commands?: RlabCommandEnvelope[] };
+    const commands = payload.commands?.map((envelope) => envelope.command) ?? [];
+    expect(commands).toContainEqual({ type: "workspace.deleteConversation", conversationId: "chat-1" });
+    expect(commands.some((command) => command.type === "workspace.replaceConversationThread")).toBe(false);
     expect(state.chats.some((chat) => chat.id === "chat-1")).toBe(false);
   });
 
@@ -428,11 +528,11 @@ describe("useWorkspace", () => {
 
     await screen.findByText("chat-2");
     const originalThread = state.threads["chat-1"];
-    const savesBefore = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace/mutations" && init?.method === "POST").length;
+    const savesBefore = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/commands" && init?.method === "POST").length;
     screen.getByRole("button", { name: "archive-chat-1" }).click();
 
     await waitFor(() => {
-      const saves = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace/mutations" && init?.method === "POST");
+      const saves = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/commands" && init?.method === "POST");
       expect(saves).toHaveLength(savesBefore + 1);
     });
 
@@ -500,7 +600,7 @@ describe("useWorkspace", () => {
       await vi.advanceTimersByTimeAsync(0);
     });
     expect(screen.getByText("chat-2")).toBeInTheDocument();
-    const savesBefore = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace/mutations" && init?.method === "POST").length;
+    const savesBefore = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/commands" && init?.method === "POST").length;
 
     await act(async () => {
       screen.getByRole("button", { name: "draft-a" }).click();
@@ -510,13 +610,13 @@ describe("useWorkspace", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(249);
     });
-    expect(vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace/mutations" && init?.method === "POST")).toHaveLength(savesBefore);
+    expect(vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/commands" && init?.method === "POST")).toHaveLength(savesBefore);
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1);
     });
 
-    const savesAfter = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace/mutations" && init?.method === "POST");
+    const savesAfter = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/commands" && init?.method === "POST");
     expect(savesAfter).toHaveLength(savesBefore + 1);
     expect(state.composerDrafts["chat-2"]?.text).toBe("ab");
     expect(localStorageSetItem).not.toHaveBeenCalledWith(expect.stringContaining("rlab-workspace"), expect.any(String));
@@ -527,10 +627,10 @@ describe("useWorkspace", () => {
     let saveAttempts = 0;
     vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url === "/api/workspace" && (!init || init.method === "GET")) {
+      if (url === "/api/state/snapshot" && (!init || init.method === "GET")) {
         return Response.json(state);
       }
-      if (url === "/api/workspace/mutations" && init?.method === "POST") {
+      if (url === "/api/commands" && init?.method === "POST") {
         saveAttempts += 1;
         if (saveAttempts === 1) {
           return Response.json({ error: "database is locked" }, { status: 502 });
@@ -574,21 +674,19 @@ describe("useWorkspace", () => {
     expect(screen.getByTestId("error")).toHaveTextContent("none");
   });
 
-  it("rebases pending workspace mutations after a revision conflict", async () => {
+  it("retries pending workspace commands after a save failure while accepting remote events", async () => {
     vi.useFakeTimers();
     let serverRevision = 7;
     let saveAttempts = 0;
-    const baseRevisions: number[] = [];
+    workspaceEventSources.reset(serverRevision);
 
     vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url === "/api/workspace" && (!init || init.method === "GET")) {
-        return Response.json({ ...state, revision: serverRevision });
+      if (url === "/api/state/snapshot" && (!init || init.method === "GET")) {
+        return Response.json({ ...state, checkpoint: String(serverRevision) });
       }
-      if (url === "/api/workspace/mutations" && init?.method === "POST") {
+      if (url === "/api/commands" && init?.method === "POST") {
         saveAttempts += 1;
-        const payload = JSON.parse(String(init.body ?? "{}")) as { readonly baseRevision?: number; readonly mutations?: readonly WorkspaceMutation[] };
-        baseRevisions.push(payload.baseRevision ?? -1);
         if (saveAttempts === 1) {
           const remoteConversation = state.chats.find((chat) => chat.id === "chat-2");
           if (!remoteConversation) {
@@ -596,20 +694,16 @@ describe("useWorkspace", () => {
           }
           state = applyWorkspaceMutationsToState(state, [{ type: "updateConversation", conversation: { ...remoteConversation, title: "Remote title" } }]);
           serverRevision = 8;
-          return Response.json(
-            {
-              error: "Workspace revision conflict: expected 7, current 8.",
-              code: "workspace_revision_conflict",
-              expectedRevision: 7,
-              revision: serverRevision,
-              workspace: state,
-            },
-            { status: 409 },
-          );
+          const updatedConversation = state.chats.find((chat) => chat.id === "chat-2");
+          if (!updatedConversation) {
+            throw new Error("Missing updated chat-2 fixture.");
+          }
+          workspaceEventSources.emit({ type: "workspace.conversationUpdated", data: { conversation: updatedConversation } });
+          return Response.json({ error: "Workspace save failed." }, { status: 503 });
         }
         state = applyWorkspaceMutationRequest(state, init);
         serverRevision = 9;
-        return Response.json({ ok: true, revision: serverRevision });
+        return Response.json({ ok: true, checkpoint: String(serverRevision) });
       }
       if (url === "/api/runs") {
         return Response.json(activeRunsPayloadFromState(state));
@@ -647,26 +741,26 @@ describe("useWorkspace", () => {
     expect(saveAttempts).toBe(2);
     expect(state.composerDrafts["chat-2"]?.text).toBe("a");
     expect(screen.getByTestId("error")).toHaveTextContent("none");
-    expect(baseRevisions).toEqual([7, 8]);
     expect(serverRevision).toBe(9);
   });
 
-  it("does not clear live agent reasoning when a stale initial message save conflicts", async () => {
+  it("does not clear live agent reasoning when an initial message save is retried", async () => {
     vi.useFakeTimers();
     let serverRevision = 3;
     let saveAttempts = 0;
     let resolveFirstSave: (() => void) | null = null;
-    const mutationPayloads: Array<{ readonly baseRevision?: number; readonly mutations?: readonly WorkspaceMutation[] }> = [];
+    const commandPayloads: Array<{ readonly commands?: readonly RlabCommandEnvelope[] }> = [];
+    workspaceEventSources.reset(serverRevision);
 
     vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url === "/api/workspace" && (!init || init.method === "GET")) {
-        return Response.json({ ...state, revision: serverRevision });
+      if (url === "/api/state/snapshot" && (!init || init.method === "GET")) {
+        return Response.json({ ...state, checkpoint: String(serverRevision) });
       }
-      if (url === "/api/workspace/mutations" && init?.method === "POST") {
+      if (url === "/api/commands" && init?.method === "POST") {
         saveAttempts += 1;
-        const payload = JSON.parse(String(init.body ?? "{}")) as { readonly baseRevision?: number; readonly mutations?: readonly WorkspaceMutation[] };
-        mutationPayloads.push(payload);
+        const payload = JSON.parse(String(init.body ?? "{}")) as { readonly commands?: readonly RlabCommandEnvelope[] };
+        commandPayloads.push(payload);
         if (saveAttempts === 1) {
           return await new Promise<Response>((resolve) => {
             resolveFirstSave = () => {
@@ -676,24 +770,18 @@ describe("useWorkspace", () => {
               }
               state = applyWorkspaceMutationsToState(state, [{ type: "updateConversation", conversation: { ...remoteConversation, title: "Remote title" } }]);
               serverRevision = 4;
-              resolve(
-                Response.json(
-                  {
-                    error: "Workspace revision conflict: expected 3, current 4.",
-                    code: "workspace_revision_conflict",
-                    expectedRevision: 3,
-                    revision: serverRevision,
-                    workspace: state,
-                  },
-                  { status: 409 },
-                ),
-              );
+              const updatedConversation = state.chats.find((chat) => chat.id === "chat-2");
+              if (!updatedConversation) {
+                throw new Error("Missing updated chat-2 fixture.");
+              }
+              workspaceEventSources.emit({ type: "workspace.conversationUpdated", data: { conversation: updatedConversation } });
+              resolve(Response.json({ error: "Workspace save failed." }, { status: 503 }));
             };
           });
         }
         state = applyWorkspaceMutationRequest(state, init);
         serverRevision += 1;
-        return Response.json({ ok: true, revision: serverRevision });
+        return Response.json({ ok: true, checkpoint: String(serverRevision) });
       }
       if (url === "/api/runs") {
         return Response.json(activeRunsPayloadFromState(state));
@@ -750,10 +838,10 @@ describe("useWorkspace", () => {
     });
 
     expect(saveAttempts).toBe(2);
-    expect(mutationPayloads[1]?.baseRevision).toBe(4);
     expect(
-      mutationPayloads[1]?.mutations?.some(
-        (mutation) => mutation.type === "upsertMessage" && mutation.message.role === "agent" && (mutation.message.blocks ?? []).length === 0,
+      commandPayloads[1]?.commands?.some(
+        ({ command }) =>
+          command.type === "workspace.upsertMessage" && command.message.role === "agent" && (command.message.blocks ?? []).length === 0,
       ),
     ).toBe(false);
     expect(screen.getByTestId("agent-blocks")).toHaveTextContent("live reasoning");
@@ -858,10 +946,10 @@ describe("useWorkspace", () => {
     let activeRunReads = 0;
     vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url === "/api/workspace" && (!init || init.method === "GET")) {
+      if (url === "/api/state/snapshot" && (!init || init.method === "GET")) {
         return Response.json(state);
       }
-      if (url === "/api/workspace/mutations" && init?.method === "POST") {
+      if (url === "/api/commands" && init?.method === "POST") {
         state = applyWorkspaceMutationRequest(state, init);
         return Response.json({ ok: true });
       }
@@ -930,7 +1018,11 @@ describe("useWorkspace", () => {
     };
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(2100);
+      const conversation = state.chats.find((chat) => chat.id === "chat-2");
+      if (!conversation) {
+        throw new Error("Missing chat-2 fixture.");
+      }
+      workspaceEventSources.emit({ type: "workspace.conversationUpdated", data: { conversation } });
     });
 
     expect(screen.getByTestId("status")).toHaveTextContent("done");
@@ -1008,10 +1100,10 @@ describe("useWorkspace", () => {
     };
     vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url === "/api/workspace" && (!init || init.method === "GET")) {
+      if (url === "/api/state/snapshot" && (!init || init.method === "GET")) {
         return Response.json(state);
       }
-      if (url === "/api/workspace/mutations" && init?.method === "POST") {
+      if (url === "/api/commands" && init?.method === "POST") {
         state = applyWorkspaceMutationRequest(state, init);
         return Response.json({ ok: true });
       }
@@ -1147,10 +1239,10 @@ describe("useWorkspace", () => {
     };
     vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url === "/api/workspace" && (!init || init.method === "GET")) {
+      if (url === "/api/state/snapshot" && (!init || init.method === "GET")) {
         return Response.json(state);
       }
-      if (url === "/api/workspace/mutations" && init?.method === "POST") {
+      if (url === "/api/commands" && init?.method === "POST") {
         state = applyWorkspaceMutationRequest(state, init);
         return Response.json({ ok: true });
       }
@@ -1256,10 +1348,10 @@ describe("useWorkspace", () => {
     const encoder = new TextEncoder();
     vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url === "/api/workspace" && (!init || init.method === "GET")) {
+      if (url === "/api/state/snapshot" && (!init || init.method === "GET")) {
         return Response.json(state);
       }
-      if (url === "/api/workspace/mutations" && init?.method === "POST") {
+      if (url === "/api/commands" && init?.method === "POST") {
         state = applyWorkspaceMutationRequest(state, init);
         return Response.json({ ok: true });
       }
@@ -1346,13 +1438,13 @@ describe("useWorkspace", () => {
     });
     expect(screen.getByText("chat-2")).toBeInTheDocument();
 
-    const initialWorkspaceReads = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace" && (!init || init.method === "GET")).length;
+    const initialWorkspaceReads = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/state/snapshot" && (!init || init.method === "GET")).length;
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(4500);
     });
 
-    const workspaceReads = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace" && (!init || init.method === "GET")).length;
+    const workspaceReads = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/state/snapshot" && (!init || init.method === "GET")).length;
     expect(workspaceReads).toBe(initialWorkspaceReads);
   });
 
@@ -1432,10 +1524,10 @@ describe("useWorkspace", () => {
     };
     vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url === "/api/workspace" && (!init || init.method === "GET")) {
+      if (url === "/api/state/snapshot" && (!init || init.method === "GET")) {
         return Response.json(state);
       }
-      if (url === "/api/workspace/mutations" && init?.method === "POST") {
+      if (url === "/api/commands" && init?.method === "POST") {
         state = applyWorkspaceMutationRequest(state, init);
         return Response.json({ ok: true });
       }
@@ -1504,7 +1596,7 @@ describe("useWorkspace", () => {
     await waitFor(() => {
       expect(attachRunRequests).toEqual(["/api/run-attach?runId=run-existing"]);
     });
-    const workspaceSavesBeforeAttachUpdate = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace/mutations" && init?.method === "POST").length;
+    const workspaceSavesBeforeAttachUpdate = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/commands" && init?.method === "POST").length;
 
     attachRunController?.enqueue(
       new TextEncoder().encode(
@@ -1528,7 +1620,7 @@ describe("useWorkspace", () => {
     await waitFor(() => {
       expect(screen.getByTestId("status")).toHaveTextContent("running");
     });
-    const workspaceSavesAfterAttachUpdate = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace/mutations" && init?.method === "POST").length;
+    const workspaceSavesAfterAttachUpdate = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/commands" && init?.method === "POST").length;
     expect(workspaceSavesAfterAttachUpdate).toBe(workspaceSavesBeforeAttachUpdate);
   });
 
@@ -1580,10 +1672,10 @@ describe("useWorkspace", () => {
   it("does not save accepted local background run stream updates back through the workspace API", async () => {
     vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url === "/api/workspace" && (!init || init.method === "GET")) {
+      if (url === "/api/state/snapshot" && (!init || init.method === "GET")) {
         return Response.json(state);
       }
-      if (url === "/api/workspace/mutations" && init?.method === "POST") {
+      if (url === "/api/commands" && init?.method === "POST") {
         state = applyWorkspaceMutationRequest(state, init);
         return Response.json({ ok: true });
       }
@@ -1621,14 +1713,14 @@ describe("useWorkspace", () => {
     await waitFor(() => {
       expect(runRequests).toHaveLength(1);
     });
-    const workspaceSavesBeforeStreamUpdate = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace/mutations" && init?.method === "POST").length;
+    const workspaceSavesBeforeStreamUpdate = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/commands" && init?.method === "POST").length;
 
     activeRunController?.enqueue(new TextEncoder().encode(`${JSON.stringify({ type: "text", text: "server token" })}\n`));
 
     await waitFor(() => {
       expect(screen.getByTestId("status")).toHaveTextContent("running");
     });
-    const workspaceSavesAfterStreamUpdate = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace/mutations" && init?.method === "POST").length;
+    const workspaceSavesAfterStreamUpdate = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/commands" && init?.method === "POST").length;
     expect(workspaceSavesAfterStreamUpdate).toBe(workspaceSavesBeforeStreamUpdate);
   });
 
@@ -1650,11 +1742,11 @@ describe("useWorkspace", () => {
     let activeRunReads = 0;
     vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url === "/api/workspace" && (!init || init.method === "GET")) {
+      if (url === "/api/state/snapshot" && (!init || init.method === "GET")) {
         workspaceReads += 1;
         return Response.json(workspaceReads === 1 ? runningState : doneState);
       }
-      if (url === "/api/workspace/mutations" && init?.method === "POST") {
+      if (url === "/api/commands" && init?.method === "POST") {
         state = applyWorkspaceMutationRequest(state, init);
         return Response.json({ ok: true });
       }
@@ -1812,13 +1904,13 @@ describe("useWorkspace", () => {
     });
     expect(screen.getByText("chat-2")).toBeInTheDocument();
     const rendersAfterLoad = renders;
-    const workspaceSavesAfterLoad = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace/mutations" && init?.method === "POST").length;
+    const workspaceSavesAfterLoad = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/commands" && init?.method === "POST").length;
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(2100);
     });
 
-    const workspaceSavesAfterPoll = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace/mutations" && init?.method === "POST").length;
+    const workspaceSavesAfterPoll = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/commands" && init?.method === "POST").length;
     expect(renders).toBe(rendersAfterLoad);
     expect(workspaceSavesAfterPoll).toBe(workspaceSavesAfterLoad);
   });
@@ -1929,4 +2021,5 @@ describe("useWorkspace", () => {
     });
   });
 });
+
 

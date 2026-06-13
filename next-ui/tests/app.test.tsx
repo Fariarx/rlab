@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+﻿import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/App";
 import { buildInitialWorkspaceState, type WorkspaceState } from "../src/components/workspace/workspace-state";
@@ -26,12 +26,12 @@ describe("App", () => {
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const path = String(input);
-        if (path === "/api/workspace" && (!init || init.method === "GET")) {
+        if (path === "/api/state/snapshot" && (!init || init.method === "GET")) {
           return Response.json(state);
         }
         if (isWorkspaceMutationRequest(path, init)) {
           state = applyWorkspaceMutationRequest(state, init);
-          return Response.json({ ok: true, revision: 1 });
+          return Response.json({ ok: true, checkpoint: "1" });
         }
         if (path === "/api/agents") {
           return Response.json({
@@ -62,12 +62,12 @@ describe("App", () => {
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const path = String(input);
-        if (path === "/api/workspace" && (!init || init.method === "GET")) {
+        if (path === "/api/state/snapshot" && (!init || init.method === "GET")) {
           return Response.json(state);
         }
         if (isWorkspaceMutationRequest(path, init)) {
           state = applyWorkspaceMutationRequest(state, init);
-          return Response.json({ ok: true, revision: 1 });
+          return Response.json({ ok: true, checkpoint: "1" });
         }
         if (path === "/api/agents") {
           agentAttempts += 1;
@@ -109,12 +109,12 @@ describe("App", () => {
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const path = String(input);
-        if (path === "/api/workspace" && (!init || init.method === "GET")) {
+        if (path === "/api/state/snapshot" && (!init || init.method === "GET")) {
           return Response.json(state);
         }
         if (isWorkspaceMutationRequest(path, init)) {
           state = applyWorkspaceMutationRequest(state, init);
-          return Response.json({ ok: true, revision: 1 });
+          return Response.json({ ok: true, checkpoint: "1" });
         }
         if (path === "/api/agents") {
           return Response.json({
@@ -155,7 +155,7 @@ describe("App", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
-        if (String(input) === "/api/workspace") {
+        if (String(input) === "/api/state/snapshot") {
           return Response.json(state);
         }
         return Response.json({});
@@ -171,3 +171,4 @@ describe("App", () => {
     });
   });
 });
+

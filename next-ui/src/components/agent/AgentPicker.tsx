@@ -12,7 +12,6 @@ import {
   type AgentId,
   type AgentOption,
   type AgentProfile,
-  type AgentWorkMode,
   agentStatusKey,
   defaultProfileForAgent,
   getAgent,

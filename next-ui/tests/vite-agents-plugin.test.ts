@@ -31,6 +31,7 @@ import {
   emitOpenCodeParts,
   activeBackgroundRunUpdateFromState,
   activeBackgroundRunSnapshotsFromHandles,
+  activeBackgroundRunSnapshotsFromSources,
   applyBrowserStorageSnapshot,
   appendRunAuditEvent,
   appendRlabChatToolsPrompt,
@@ -217,7 +218,7 @@ describe("vite agents plugin", () => {
   it("reports storage and visible-agent health without exposing hidden agents", () => {
     const snapshot = storageHealthSnapshot();
 
-    expect(snapshot.storage.stateFile).toContain("workspace.db");
+    expect(snapshot.storage.stateFile).toContain("events.db");
     expect(snapshot.storage.ok).toBe(true);
     expect(snapshot.agents.visible).toEqual(["claude-code", "codex", "gemini", "opencode"]);
   });
@@ -3707,6 +3708,66 @@ Built-in agents:
         userMessageId: "u-background",
         agentMessageId: "a-background",
         startedAt: "2026-06-06T14:00:02.000Z",
+      },
+    ]);
+  });
+
+  it("recovers active background run snapshots from run projections", () => {
+    const binding: BackgroundRunBinding = {
+      conversationId: "chat-2",
+      runId: "run-background",
+      userMessageId: "u-background",
+      userMessageTime: "2026-06-06T14:00:00.000Z",
+      agentMessageId: "a-background",
+      agentMessageTime: "2026-06-06T14:00:01.000Z",
+    };
+    const handles = new Map<string, BackgroundRunHandle>([
+      [
+        binding.runId,
+        {
+          binding,
+          startedAt: "2026-06-06T14:00:02.000Z",
+          cancel: () => undefined,
+        },
+      ],
+    ]);
+
+    expect(
+      activeBackgroundRunSnapshotsFromSources(handles, [
+        {
+          runId: "run-projected",
+          conversationId: "chat-3",
+          userMessageId: "u-projected",
+          agentMessageId: "a-projected",
+          startedAt: "2026-06-06T15:00:00.000Z",
+          status: "waiting",
+          events: [],
+          updatedGlobalPosition: "42",
+        },
+        {
+          runId: "run-background",
+          conversationId: "stale-chat",
+          userMessageId: "stale-user",
+          agentMessageId: "stale-agent",
+          status: "running",
+          events: [],
+          updatedGlobalPosition: "43",
+        },
+      ]),
+    ).toEqual([
+      {
+        runId: "run-background",
+        conversationId: "chat-2",
+        userMessageId: "u-background",
+        agentMessageId: "a-background",
+        startedAt: "2026-06-06T14:00:02.000Z",
+      },
+      {
+        runId: "run-projected",
+        conversationId: "chat-3",
+        userMessageId: "u-projected",
+        agentMessageId: "a-projected",
+        startedAt: "2026-06-06T15:00:00.000Z",
       },
     ]);
   });
