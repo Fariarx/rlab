@@ -1,4 +1,4 @@
-import type { ChatMessage, ConversationSummary, Project } from "../components/agent/types";
+import type { ChatMessage, ConversationSummary, Project } from "../domain/agent-types";
 import { formatClock24 } from "./time-format";
 
 /** The detailed sample thread (flaky-test investigation). */

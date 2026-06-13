@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { ConversationSummary, Project } from "../src/components/agent/types";
+import type { ConversationSummary, Project } from "../src/domain/agent-types";
 import { applyWorkspaceMutationsToState } from "../src/lib/workspace-mutations";
 import { buildEmptyWorkspaceState, type WorkspaceState } from "../src/lib/workspace-state";
 

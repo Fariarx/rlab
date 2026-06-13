@@ -1,7 +1,7 @@
 import { screen, waitFor } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { Message } from "../src/components/agent";
-import { type ChatMessage } from "../src/components/agent/types";
+import { type ChatMessage } from "../src/domain/agent-types";
 import { renderWithTheme } from "./util/render-with-theme";
 
 function thinkingMessage(active: boolean): ChatMessage {

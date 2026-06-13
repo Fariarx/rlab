@@ -4,6 +4,8 @@ import { useWorkspace } from "../src/components/workspace/use-workspace";
 import { buildInitialWorkspaceState, type WorkspaceState } from "../src/components/workspace/workspace-state";
 import { applyWorkspaceMutationsToState, type WorkspaceMutation } from "../src/lib/workspace-mutations";
 
+const WORKSPACE_SYNC_TICK_MS = 2_000;
+
 function Probe() {
   const workspace = useWorkspace();
   const selected = workspace.find(workspace.selectedId);
@@ -144,9 +146,11 @@ describe("useWorkspace", () => {
   let attachRunRequests: string[] = [];
   let runRequests: RunRequestRecord[] = [];
   let runCancelRequests: Array<{ readonly runId?: string }> = [];
+  let serverRevision = 1;
 
   beforeEach(() => {
     state = buildInitialWorkspaceState();
+    serverRevision = 1;
     attachRunRequests = [];
     runRequests = [];
     runCancelRequests = [];
@@ -165,11 +169,19 @@ describe("useWorkspace", () => {
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         if (url === "/api/workspace" && (!init || init.method === "GET")) {
-          return Response.json(state);
+          return Response.json({ ...state, revision: serverRevision });
+        }
+        if (url === "/api/workspace/revision" && (!init || init.method === "GET")) {
+          return Response.json({ revision: serverRevision });
         }
         if (url === "/api/workspace/mutations" && init?.method === "POST") {
           state = applyWorkspaceMutationRequest(state, init);
-          return Response.json({ ok: true });
+          serverRevision += 1;
+          return Response.json({ ok: true, revision: serverRevision });
+        }
+        if (url.startsWith("/api/thread?")) {
+          const conversationId = new URL(url, "http://localhost").searchParams.get("conversationId") ?? "";
+          return Response.json({ messages: state.threads[conversationId] ?? [] });
         }
         if (url === "/api/runs") {
           return Response.json(activeRunsPayloadFromState(state));
@@ -234,6 +246,91 @@ describe("useWorkspace", () => {
     });
 
     expect(vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace/mutations" && init?.method === "POST")).toHaveLength(0);
+  });
+
+  it("syncs remote workspace updates without stealing the local selected conversation", async () => {
+    vi.useFakeTimers();
+    render(<Probe />);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByTestId("selected")).toHaveTextContent("chat-2");
+
+    state = {
+      ...state,
+      selectedId: "chat-1",
+      chats: state.chats.map((chat) => (chat.id === "chat-2" ? { ...chat, title: "Remote title" } : chat)),
+    };
+    serverRevision += 1;
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(WORKSPACE_SYNC_TICK_MS);
+      await vi.advanceTimersByTimeAsync(0);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(screen.getByTestId("selected")).toHaveTextContent("chat-2");
+    expect(screen.getByTestId("selected-title")).toHaveTextContent("Remote title");
+  });
+
+  it("refreshes the locally selected thread when the remote shell omits it", async () => {
+    vi.useFakeTimers();
+    let remoteShellMode = false;
+    const remoteMessage = {
+      id: "a-remote-sync",
+      role: "agent",
+      time: "16:00",
+      blocks: [{ kind: "text", text: "Remote answer" }],
+    } satisfies WorkspaceState["threads"][string][number];
+    vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/workspace" && (!init || init.method === "GET")) {
+        if (remoteShellMode) {
+          return Response.json({ ...state, selectedId: "chat-1", threads: { "chat-1": state.threads["chat-1"] ?? [] }, revision: serverRevision });
+        }
+        return Response.json({ ...state, revision: serverRevision });
+      }
+      if (url === "/api/workspace/revision" && (!init || init.method === "GET")) {
+        return Response.json({ revision: serverRevision });
+      }
+      if (url.startsWith("/api/thread?")) {
+        const conversationId = new URL(url, "http://localhost").searchParams.get("conversationId") ?? "";
+        return Response.json({ messages: state.threads[conversationId] ?? [] });
+      }
+      if (url === "/api/runs") {
+        return Response.json(activeRunsPayloadFromState(state));
+      }
+      return new Response("not found", { status: 404 });
+    });
+    render(<Probe />);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByTestId("selected")).toHaveTextContent("chat-2");
+
+    state = {
+      ...state,
+      selectedId: "chat-1",
+      threads: {
+        ...state.threads,
+        "chat-2": [...state.threads["chat-2"], remoteMessage],
+      },
+    };
+    remoteShellMode = true;
+    serverRevision += 1;
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(WORKSPACE_SYNC_TICK_MS);
+      await vi.advanceTimersByTimeAsync(0);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(screen.getByTestId("selected")).toHaveTextContent("chat-2");
+    expect(screen.getByTestId("thread-ids")).toHaveTextContent("a-remote-sync");
   });
 
   it("retries failed initial workspace loads every 15 seconds", async () => {
@@ -1757,7 +1854,10 @@ describe("useWorkspace", () => {
 
     await screen.findByText("chat-2");
     const sourceMessageIds = new Set(state.threads["chat-2"].map((message) => message.id));
-    screen.getByRole("button", { name: "fork-a1" }).click();
+    await act(async () => {
+      screen.getByRole("button", { name: "fork-a1" }).click();
+      await Promise.resolve();
+    });
 
     await waitFor(() => {
       expect(screen.getByTestId("selected")).not.toHaveTextContent("chat-2");

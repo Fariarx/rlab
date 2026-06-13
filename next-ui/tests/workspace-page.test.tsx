@@ -8,7 +8,7 @@ import { App } from "../src/App";
 import { WorkspacePage } from "../src/components/workspace/WorkspacePage";
 import { buildInitialWorkspaceState } from "../src/components/workspace/workspace-state";
 import { renderWithThemeAndVirtuoso } from "./util/render-with-virtuoso";
-import { applyWorkspaceMutationRequest, isWorkspaceMutationRequest } from "./util/workspace-api";
+import { applyWorkspaceMutationRequest, createWorkspaceApiFixture, isWorkspaceMutationRequest, requestPath } from "./util/workspace-api";
 
 type PersistedComposerAttachmentDraft = {
   readonly id: string;
@@ -30,22 +30,19 @@ function activeRunsResponse(path: string): Response | null {
 describe("WorkspacePage", () => {
   beforeEach(() => {
     window.location.hash = "";
-    let workspace = buildInitialWorkspaceState();
+    const workspaceApi = createWorkspaceApiFixture(buildInitialWorkspaceState());
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
-        const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
-      const activeRuns = activeRunsResponse(path);
-      if (activeRuns) {
-        return activeRuns;
-      }
-        if (path === "/api/workspace" && (!init || init.method === "GET")) {
-          return Response.json(workspace);
+        const path = requestPath(url);
+        const activeRuns = activeRunsResponse(path);
+        if (activeRuns) {
+          return activeRuns;
         }
-        if (isWorkspaceMutationRequest(path, init)) {
-        workspace = applyWorkspaceMutationRequest(workspace, init);
-        return Response.json({ ok: true, revision: 1 });
-      }
+        const workspaceResponse = workspaceApi.handle(url, init);
+        if (workspaceResponse) {
+          return workspaceResponse;
+        }
         if (path === "/api/project-files") {
           return Response.json({ files: [] });
         }
@@ -760,21 +757,21 @@ describe("WorkspacePage", () => {
   });
 
   it("retries loading workspace state after a workspace API error", async () => {
-    let workspace = buildInitialWorkspaceState();
+    const workspaceApi = createWorkspaceApiFixture(buildInitialWorkspaceState());
     let loadAttempts = 0;
     const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
-      const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+      const path = requestPath(url);
       const activeRuns = activeRunsResponse(path);
       if (activeRuns) {
         return activeRuns;
       }
       if (path === "/api/workspace" && (!init || init.method === "GET")) {
         loadAttempts += 1;
-        return loadAttempts === 1 ? new Response("unavailable", { status: 503 }) : Response.json(workspace);
+        return loadAttempts === 1 ? new Response("unavailable", { status: 503 }) : Response.json({ ...workspaceApi.state, revision: workspaceApi.revision });
       }
-      if (isWorkspaceMutationRequest(path, init)) {
-        workspace = applyWorkspaceMutationRequest(workspace, init);
-        return Response.json({ ok: true, revision: 1 });
+      const workspaceResponse = workspaceApi.handle(url, init);
+      if (workspaceResponse) {
+        return workspaceResponse;
       }
       if (path === "/api/project-files") {
         return Response.json({ files: [] });

@@ -1,4 +1,4 @@
-import type { ChatMessage, ComposerDraft, ConversationSummary, ConversationStatus, Project } from "../components/agent/types";
+import type { ChatMessage, ComposerDraft, ConversationSummary, ConversationStatus, Project } from "../domain/agent-types";
 import { isAgentId } from "./agent-catalog";
 import { isAppSettings, type AppSettings } from "./app-settings";
 import type { WorkspaceState } from "./workspace-state";

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { type ChatMessage } from "../src/components/agent/types";
+import { type ChatMessage } from "../src/domain/agent-types";
 import { collectResources } from "../src/lib/conversation-resources";
 import { normalizeExternalUrl } from "../src/lib/external-url";
 

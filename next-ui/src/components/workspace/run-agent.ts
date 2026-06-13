@@ -2,37 +2,22 @@ import type {
   AgentBlock,
   AgentAccessMode,
   AgentProfile,
-  CodeBlockData,
   CompactionSettings,
   ConversationStatus,
-  DiffBlock,
-  PlanBlock,
-  RunState,
   RunUsage,
-  SearchBlock,
-  SuggestedActionsBlock,
 } from "../agent";
 import { translate } from "../../i18n/I18nProvider";
 import { truncateAgentToolOutput } from "../../lib/agent-output";
+import {
+  accumulateRunEvent,
+  createRunEventAccumulator,
+  runEventAccumulatorHasOutput,
+  runEventAccumulatorNeedsInput,
+  runEventBlocks,
+  type RunEvent,
+} from "../../lib/run-event-accumulator";
 import type { Locale } from "./app-settings";
-
-type RunEvent =
-  | { type: "start" }
-  | { type: "reasoning"; text: string }
-  | { type: "text"; text: string }
-  | { type: "tool"; id: string; name: string; summary?: string; args?: Record<string, string> }
-  | { type: "tool_result"; id: string; ok: boolean; output: string }
-  | { type: "diff"; id?: string; file: string; additions: number; deletions: number; lines: DiffBlock["lines"] }
-  | { type: "plan"; id?: string; steps: PlanBlock["steps"] }
-  | { type: "code"; language: string; code: string }
-  | { type: "search"; id?: string; query: string; state: RunState; results?: SearchBlock["results"] }
-  | { type: "suggested"; actions: SuggestedActionsBlock["actions"] }
-  | { type: "approval"; id: string; title: string; detail?: string }
-  | { type: "options"; id: string; prompt: string; multi?: boolean; options: ReadonlyArray<{ readonly id: string; readonly label: string; readonly description?: string }> }
-  | { type: "status"; level: "info" | "ok" | "warn" | "error"; text: string }
-  | { type: "error"; text: string }
-  | { type: "session"; id: string }
-  | { type: "done"; costUsd?: number; usage?: RunUsage };
+import { finishLiveBlock } from "./workspace-run-state";
 
 const LIVE_BLOCK_FLUSH_MS = 32;
 
@@ -42,27 +27,6 @@ export interface RunConversationResult {
   readonly usage?: RunUsage;
   readonly sessionId?: string;
 }
-
-type StreamingTool = {
-  id: string;
-  name: string;
-  summary?: string;
-  args?: Record<string, string>;
-  state: "running" | "ok" | "error";
-  output?: string;
-};
-
-type StreamingSearch = {
-  id?: string;
-  query: string;
-  state: RunState;
-  results: SearchBlock["results"];
-};
-
-type StreamingPlan = {
-  id?: string;
-  steps: PlanBlock["steps"];
-};
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -83,89 +47,6 @@ async function responseErrorMessage(response: Response, fallback: string): Promi
   return typeof payload === "object" && payload !== null && "error" in payload && typeof payload.error === "string" && payload.error.trim().length > 0
     ? payload.error.trim()
     : fallback;
-}
-
-function splitDiffLines(value: string): string[] {
-  if (value.length === 0) {
-    return [];
-  }
-  return value.replace(/\r\n/g, "\n").split("\n");
-}
-
-function editPairToLines(oldText: string, newText: string): DiffBlock["lines"] {
-  return [
-    ...splitDiffLines(oldText).map((text) => ({ type: "del" as const, text })),
-    ...splitDiffLines(newText).map((text) => ({ type: "add" as const, text })),
-  ];
-}
-
-function parseMultiEditLines(value: string): DiffBlock["lines"] | null {
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    if (!Array.isArray(parsed)) {
-      return null;
-    }
-    const lines: Array<{ readonly type: "add" | "del" | "ctx"; readonly text: string }> = [];
-    for (const item of parsed) {
-      if (!isRecord(item) || typeof item.old_string !== "string" || typeof item.new_string !== "string") {
-        return null;
-      }
-      lines.push(...editPairToLines(item.old_string, item.new_string));
-    }
-    return lines;
-  } catch {
-    return null;
-  }
-}
-
-function toolToDiffBlock(tool: StreamingTool): DiffBlock | null {
-  if (tool.state === "error") {
-    return null;
-  }
-  const args = tool.args;
-  const file = args?.file_path ?? args?.path;
-  if (!file) {
-    return null;
-  }
-
-  const normalizedName = tool.name.toLowerCase();
-  let lines: DiffBlock["lines"] | null = null;
-  if (normalizedName === "write" && typeof args?.content === "string") {
-    lines = splitDiffLines(args.content).map((text) => ({ type: "add", text }));
-  } else if (normalizedName === "edit" && typeof args?.old_string === "string" && typeof args?.new_string === "string") {
-    lines = editPairToLines(args.old_string, args.new_string);
-  } else if (normalizedName === "multiedit" && typeof args?.edits === "string") {
-    lines = parseMultiEditLines(args.edits);
-  }
-
-  if (!lines) {
-    return null;
-  }
-
-  return {
-    kind: "diff",
-    file,
-    additions: lines.filter((line) => line.type === "add").length,
-    deletions: lines.filter((line) => line.type === "del").length,
-    lines,
-  };
-}
-
-function finishLiveBlock(block: AgentBlock, state: "ok" | "error"): AgentBlock {
-  switch (block.kind) {
-    case "reasoning":
-      return block.active ? { ...block, active: false } : block;
-    case "text":
-      return block.streaming ? { ...block, streaming: false } : block;
-    case "tool":
-    case "command":
-    case "search":
-      return block.state === "running" ? { ...block, state } : block;
-    case "plan":
-      return block.steps.some((step) => step.state === "running") ? { ...block, steps: block.steps.map((step) => (step.state === "running" ? { ...step, state } : step)) } : block;
-    default:
-      return block;
-  }
 }
 
 interface RunPersistenceBinding {
@@ -409,101 +290,13 @@ export async function runConversation(opts: {
   readonly onSession?: (sessionId: string) => void;
   readonly onBlocks: (blocks: AgentBlock[]) => void;
 }): Promise<RunConversationResult> {
-  let hasReasoning = false;
-  let started = false;
   let sessionId: string | undefined;
-  let text = "";
-  let hasText = false;
-  const tools: StreamingTool[] = [];
-  // Reasoning segments, narration text, and tool calls in the order they
-  // actually arrived, so the UI can show them interleaved chronologically inside
-  // the Reasoning container. Text that arrives after the last reasoning/tool is
-  // the final answer ("result") and is the only thing rendered outside it.
-  const timeline: Array<
-    | { kind: "reasoning"; text: string }
-    | { kind: "text"; text: string }
-    | { readonly kind: "tool"; readonly tool: StreamingTool }
-    | { readonly kind: "search"; readonly search: StreamingSearch }
-    | { readonly kind: "code"; readonly data: CodeBlockData }
-  > = [];
-  const diffs: DiffBlock[] = [];
-  const plans: StreamingPlan[] = [];
-  const codes: CodeBlockData[] = [];
-  const searches: StreamingSearch[] = [];
-  const suggested: SuggestedActionsBlock[] = [];
-  const approvals: Array<{ id: string; title: string; detail?: string }> = [];
-  const options: Array<{ id: string; prompt: string; multi?: boolean; options: ReadonlyArray<{ readonly id: string; readonly label: string; readonly description?: string }> }> = [];
-  const statuses: Array<{ level: "ok" | "warn" | "error"; text: string }> = [];
-  let costUsd: number | undefined;
-  let usage: RunUsage | undefined;
-  let done = false;
   let doneEventReceived = false;
   let canceled = false;
   let detached = false;
   let accepted = false;
-  const start = performance.now();
-  // Wall-clock start so the live reasoning timer shows real elapsed time.
-  const startedAtMs = Date.now();
-
-  const rebuild = (): AgentBlock[] => {
-    const blocks: AgentBlock[] = [];
-    // Reasoning segments and tools interleaved in arrival order (chronological).
-    const firstReasoningIdx = timeline.findIndex((item) => item.kind === "reasoning");
-    let lastReasoningIdx = -1;
-    for (let i = timeline.length - 1; i >= 0; i -= 1) {
-      if (timeline[i].kind === "reasoning") {
-        lastReasoningIdx = i;
-        break;
-      }
-    }
-    const duration = `${Math.max(1, Math.round((performance.now() - start) / 1000))}s`;
-    // The final answer is the trailing run of text after the last reasoning/tool;
-    // earlier text is narration that stays interleaved with the tools.
-    let lastNonTextIdx = -1;
-    let lastTextIdx = -1;
-    timeline.forEach((item, idx) => {
-      if (item.kind === "text") {
-        lastTextIdx = idx;
-      } else {
-        lastNonTextIdx = idx;
-      }
-    });
-    timeline.forEach((item, idx) => {
-      if (item.kind === "reasoning") {
-        const active = !done && idx === lastReasoningIdx;
-        blocks.push({ kind: "reasoning", text: item.text, active, duration: done && idx === firstReasoningIdx ? duration : undefined, ...(active ? { startedAtMs } : {}) });
-      } else if (item.kind === "text") {
-        blocks.push({ kind: "text", text: item.text, streaming: !done && idx === lastTextIdx, result: done && idx > lastNonTextIdx });
-      } else if (item.kind === "search") {
-        const s = item.search;
-        blocks.push({ kind: "search", query: s.query, state: s.state, results: s.results });
-      } else if (item.kind === "code") {
-        blocks.push(item.data);
-      } else {
-        const t = item.tool;
-        blocks.push(toolToDiffBlock(t) ?? { kind: "tool", name: t.name, summary: t.summary, args: t.args, state: t.state, output: t.output });
-      }
-    });
-    // Before anything streams in, show the empty "thinking" placeholder.
-    if (timeline.length === 0 && started && !done) {
-      blocks.push({ kind: "reasoning", text: "", active: true, startedAtMs });
-    }
-    for (const plan of plans) {
-      blocks.push({ kind: "plan", steps: plan.steps });
-    }
-    blocks.push(...diffs);
-    blocks.push(...suggested);
-    for (const approval of approvals) {
-      blocks.push({ kind: "approval", id: approval.id, title: approval.title, detail: approval.detail });
-    }
-    for (const option of options) {
-      blocks.push({ kind: "options", id: option.id, prompt: option.prompt, multi: option.multi, options: option.options });
-    }
-    for (const s of statuses) {
-      blocks.push({ kind: "status", level: s.level, text: s.text });
-    }
-    return blocks;
-  };
+  const accumulator = createRunEventAccumulator();
+  const rebuild = (): AgentBlock[] => runEventBlocks(accumulator);
 
   let pendingLiveBlocks: AgentBlock[] | null = null;
   let liveFlushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -538,152 +331,24 @@ export async function runConversation(opts: {
   };
 
   const onEvent = (e: RunEvent) => {
-    switch (e.type) {
-      case "reasoning": {
-        started = true;
-        hasReasoning = true;
-        const last = timeline[timeline.length - 1];
-        if (last && last.kind === "reasoning") {
-          last.text += e.text;
-        } else {
-          timeline.push({ kind: "reasoning", text: e.text });
-        }
-        queueLiveBlocks();
-        break;
-      }
-      case "text": {
-        started = true;
-        hasText = true;
-        text += e.text;
-        const last = timeline[timeline.length - 1];
-        if (last && last.kind === "text") {
-          last.text += e.text;
-        } else {
-          timeline.push({ kind: "text", text: e.text });
-        }
-        queueLiveBlocks();
-        break;
-      }
-      case "tool":
-        started = true;
-        {
-          const existing = tools.find((t) => t.id === e.id);
-          if (existing) {
-            existing.name = e.name;
-            existing.summary = e.summary;
-            existing.args = e.args;
-          } else {
-            const tool: StreamingTool = { id: e.id, name: e.name, summary: e.summary, args: e.args, state: "running" };
-            tools.push(tool);
-            timeline.push({ kind: "tool", tool });
-          }
-        }
-        emitBlocks();
-        break;
-      case "tool_result": {
-        started = true;
-        const tool = tools.find((t) => t.id === e.id);
-        if (tool) {
-          tool.state = e.ok ? "ok" : "error";
-          tool.output = truncateAgentToolOutput(e.output);
-        }
-        emitBlocks();
-        break;
-      }
-      case "diff": {
-        started = true;
-        const block: DiffBlock = { kind: "diff", file: e.file, additions: e.additions, deletions: e.deletions, lines: e.lines };
-        const existingIndex = diffs.findIndex((item) => item.file === e.file);
-        if (existingIndex >= 0) {
-          diffs[existingIndex] = block;
-        } else {
-          diffs.push(block);
-        }
-        emitBlocks();
-        break;
-      }
-      case "plan": {
-        started = true;
-        plans.splice(0, plans.length, { id: e.id, steps: e.steps });
-        emitBlocks();
-        break;
-      }
-      case "code": {
-        started = true;
-        const data: CodeBlockData = { kind: "code", language: e.language, code: e.code };
-        codes.push(data);
-        timeline.push({ kind: "code", data });
-        emitBlocks();
-        break;
-      }
-      case "search": {
-        started = true;
-        const existing = e.id ? searches.find((item) => item.id === e.id) : searches.find((item) => item.query === e.query);
-        if (existing) {
-          existing.query = e.query;
-          existing.state = e.state;
-          existing.results = e.results ?? existing.results;
-        } else {
-          const search: StreamingSearch = { id: e.id, query: e.query, state: e.state, results: e.results ?? [] };
-          searches.push(search);
-          timeline.push({ kind: "search", search });
-        }
-        emitBlocks();
-        break;
-      }
-      case "suggested":
-        started = true;
-        suggested.push({ kind: "suggested", actions: e.actions });
-        emitBlocks();
-        break;
-      case "approval":
-        started = true;
-        approvals.push({ id: e.id, title: e.title, detail: e.detail });
-        emitBlocks();
-        break;
-      case "options":
-        started = true;
-        {
-          const existing = options.find((item) => item.id === e.id);
-          if (existing) {
-            existing.prompt = e.prompt;
-            existing.multi = e.multi;
-            existing.options = e.options;
-          } else {
-            options.push({ id: e.id, prompt: e.prompt, multi: e.multi, options: e.options });
-          }
-        }
-        emitBlocks();
-        break;
-      case "status":
-        started = true;
-        // "info" stays ephemeral (model/cwd/access diagnostics); "ok" is a
-        // meaningful success note (e.g. context compaction) and renders.
-        if (e.level === "ok" || e.level === "warn" || e.level === "error") {
-          statuses.push({ level: e.level, text: e.text });
-          emitBlocks();
-        }
-        break;
-      case "error":
-        started = true;
-        statuses.push({ level: "error", text: e.text });
-        emitBlocks();
-        break;
-      case "start":
-        started = true;
-        emitBlocks();
-        break;
-      case "session":
-        sessionId = e.id;
-        opts.onSession?.(e.id);
-        break;
-      case "done":
-        doneEventReceived = true;
-        costUsd = e.costUsd;
-        usage = e.usage;
-        break;
-      default:
-        break;
+    if (e.type === "session") {
+      sessionId = e.id;
+      opts.onSession?.(e.id);
+    } else if (e.type === "done") {
+      doneEventReceived = true;
+    }
+
+    accumulateRunEvent(accumulator, e, { formatToolOutput: truncateAgentToolOutput });
+
+    if (e.type === "reasoning" || e.type === "text") {
+      queueLiveBlocks();
+      return;
+    }
+    if (e.type === "status" && e.level === "info") {
+      return;
+    }
+    if (e.type !== "session" && e.type !== "done" && e.type !== "wakeup" && e.type !== "cancel_wakeup") {
+      emitBlocks();
     }
   };
 
@@ -707,7 +372,7 @@ export async function runConversation(opts: {
       if (opts.binding && accepted) {
         detached = true;
       } else {
-        statuses.push({ level: "error", text: translate(opts.locale, "runStreamClosedError") });
+        accumulateRunEvent(accumulator, { type: "error", text: translate(opts.locale, "runStreamClosedError") });
       }
     }
   } catch (err) {
@@ -716,7 +381,7 @@ export async function runConversation(opts: {
     } else if (opts.binding && accepted) {
       detached = true;
     } else {
-      statuses.push({ level: "error", text: err instanceof Error ? err.message : String(err) });
+      accumulateRunEvent(accumulator, { type: "error", text: err instanceof Error ? err.message : String(err) });
     }
   }
 
@@ -727,21 +392,11 @@ export async function runConversation(opts: {
   }
 
   flushLiveBlocks();
-  done = true;
-  const hadError = statuses.some((s) => s.level === "error");
-  const hadOutput =
-    hasText ||
-    hasReasoning ||
-    tools.length > 0 ||
-    diffs.length > 0 ||
-    plans.length > 0 ||
-    codes.length > 0 ||
-    searches.length > 0 ||
-    suggested.length > 0 ||
-    approvals.length > 0 ||
-    options.length > 0;
-  const warningOnlyFailure = statuses.some((s) => s.level === "warn") && !hadOutput;
-  const needsInput = approvals.length > 0 || options.length > 0;
+  accumulator.done = true;
+  const hadError = accumulator.statuses.some((s) => s.level === "error");
+  const hadOutput = runEventAccumulatorHasOutput(accumulator);
+  const warningOnlyFailure = accumulator.statuses.some((s) => s.level === "warn") && !hadOutput;
+  const needsInput = runEventAccumulatorNeedsInput(accumulator);
   const status = hadError || warningOnlyFailure ? "error" : needsInput ? "waiting" : "done";
   let finalBlocks = rebuild().map((block) => finishLiveBlock(block, status === "error" ? "error" : "ok"));
   // Always emit a final settled render so a canceled run doesn't leave the
@@ -757,5 +412,5 @@ export async function runConversation(opts: {
   }
   opts.onBlocks(finalBlocks);
 
-  return { status, costUsd, usage, sessionId };
+  return { status, costUsd: accumulator.costUsd, usage: accumulator.usage, sessionId };
 }

@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { ChatMessage, ConversationSummary } from "../src/components/agent/types";
+import type { ChatMessage, ConversationSummary } from "../src/domain/agent-types";
 import { buildEmptyWorkspaceState, type WorkspaceState } from "../src/lib/workspace-state";
 import {
   closeWorkspaceDb,

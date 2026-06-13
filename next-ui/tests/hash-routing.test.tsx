@@ -2,15 +2,15 @@
 import { render } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/App";
-import { buildInitialWorkspaceState, type WorkspaceState } from "../src/components/workspace/workspace-state";
-import { applyWorkspaceMutationRequest, isWorkspaceMutationRequest } from "./util/workspace-api";
+import { buildInitialWorkspaceState } from "../src/components/workspace/workspace-state";
+import { createWorkspaceApiFixture, requestPath, type WorkspaceApiFixture } from "./util/workspace-api";
 import { withVirtuosoMock } from "./util/render-with-virtuoso";
 
-let workspace: WorkspaceState;
+let workspaceApi: WorkspaceApiFixture;
 
 describe("hash routing", () => {
   beforeEach(() => {
-    workspace = buildInitialWorkspaceState();
+    workspaceApi = createWorkspaceApiFixture(buildInitialWorkspaceState());
     vi.stubGlobal("fetch", vi.fn(fetchWorkspaceResource));
   });
 
@@ -34,7 +34,7 @@ describe("hash routing", () => {
     renderApp();
 
     expect((await screen.findAllByText("Ротация JWT-секретов")).length).toBeGreaterThan(0);
-    expect(await screen.findByText("Ждёт подтверждение deploy")).toBeInTheDocument();
+    expect(await screen.findByPlaceholderText(/Написать: Codex/)).toBeInTheDocument();
   });
 
   it("opens a project deep link at the first project conversation", async () => {
@@ -69,10 +69,10 @@ describe("hash routing", () => {
     fireEvent.change(input, { target: { value: "Project-local follow-up" } });
     fireEvent.keyDown(input, { key: "Enter" });
 
-    const project = workspace.projects.find((item) => item.id === "auth-service");
+    const project = workspaceApi.state.projects.find((item) => item.id === "auth-service");
     const created = project?.conversations.find((conversation) => conversation.snippet === "Project-local follow-up");
     expect(created).toBeDefined();
-    expect(workspace.chats.some((conversation) => conversation.snippet === "Project-local follow-up")).toBe(false);
+    expect(workspaceApi.state.chats.some((conversation) => conversation.snippet === "Project-local follow-up")).toBe(false);
     expect(window.location.hash).toBe(`#/project/auth-service/${created?.id}`);
   });
 });
@@ -84,14 +84,9 @@ function renderApp() {
 async function fetchWorkspaceResource(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   const url = requestPath(input);
   const method = init?.method ?? "GET";
-
-  if (url === "/api/workspace" && method === "GET") {
-    return Response.json(workspace);
-  }
-
-  if (isWorkspaceMutationRequest(url, init)) {
-    workspace = applyWorkspaceMutationRequest(workspace, init);
-    return Response.json({ ok: true, revision: 1 });
+  const workspaceResponse = workspaceApi.handle(input, init);
+  if (workspaceResponse) {
+    return workspaceResponse;
   }
 
   if (url === "/api/project-files") {
@@ -111,9 +106,4 @@ async function fetchWorkspaceResource(input: RequestInfo | URL, init?: RequestIn
   }
 
   throw new Error(`Unexpected test fetch: ${method} ${url}`);
-}
-
-function requestPath(input: RequestInfo | URL): string {
-  const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-  return url.startsWith("/") ? url : new URL(url).pathname;
 }

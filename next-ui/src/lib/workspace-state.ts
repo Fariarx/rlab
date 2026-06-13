@@ -1,4 +1,4 @@
-import type { AgentBlock, ChatMessage, ComposerDraft, ConversationSummary, Project } from "../components/agent/types";
+import type { AgentBlock, ChatMessage, ComposerDraft, ConversationSummary, Project } from "../domain/agent-types";
 import { isAgentId, normalizeAgentProfile, type AgentId } from "./agent-catalog";
 import { cloneAppSettings, defaultAppSettings, type AppSettings } from "./app-settings";
 import { buildInitialThreads, initialChats, initialProjects } from "./workspace-sample-data";

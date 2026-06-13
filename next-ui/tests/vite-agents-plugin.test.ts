@@ -108,6 +108,7 @@ import {
   readRunAuditEvents,
 } from "../vite-agents-plugin";
 import { MAX_AGENT_TOOL_OUTPUT_CHARS } from "../src/lib/agent-output";
+import { accumulateRunEvent, createRunEventAccumulator } from "../src/lib/run-event-accumulator";
 import { buildInitialWorkspaceState } from "../src/components/workspace/workspace-state";
 import { type AgentProfile } from "../src/components/agent";
 
@@ -3380,32 +3381,10 @@ Built-in agents:
       },
     };
     const canceledState = cancelBackgroundRunState(runningState, "run-bg");
-    const finished = finishBackgroundRunState(
-      canceledState,
-      binding,
-      {
-        reasoning: "Still running",
-        hasReasoning: true,
-        started: true,
-        text: "partial",
-        hasText: true,
-        tools: [],
-        timeline: [{ kind: "reasoning" as const, text: "Still running" }, { kind: "text" as const, text: "partial" }],
-        diffs: [],
-        plans: [],
-        codes: [],
-        searches: [],
-        suggested: [],
-        approvals: [],
-        options: [],
-        statuses: [],
-        done: false,
-        start: Date.now(),
-        lastPersistedAt: 0,
-        persistTimer: null,
-      },
-      true,
-    );
+    const accumulator = { ...createRunEventAccumulator(Date.now()), lastPersistedAt: 0, persistTimer: null };
+    accumulateRunEvent(accumulator, { type: "reasoning", text: "Still running" });
+    accumulateRunEvent(accumulator, { type: "text", text: "partial" });
+    const finished = finishBackgroundRunState(canceledState, binding, accumulator, true);
 
     const blocks = finished.threads["chat-2"].find((message) => message.id === "a-bg")?.blocks;
 

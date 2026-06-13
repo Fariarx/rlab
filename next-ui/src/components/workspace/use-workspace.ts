@@ -50,6 +50,7 @@ export { buildAgentPrompt, conversationProfile } from "./workspace-state-utils";
 const WORKSPACE_LOAD_RETRY_MS = 15_000;
 const WORKSPACE_SAVE_DEBOUNCE_MS = 250;
 const WORKSPACE_SAVE_RETRY_MS = 2_000;
+const WORKSPACE_SYNC_POLL_MS = 2_000;
 const BACKGROUND_ATTACH_SILENCE_RECONCILE_MS = 20_000;
 
 let idSeq = 1000;
@@ -102,6 +103,7 @@ async function responseErrorMessage(response: Response, fallback: string): Promi
 }
 
 type WorkspaceStatePayload = WorkspaceState & { readonly revision?: number };
+type WorkspaceRevisionPayload = { readonly revision?: number };
 
 class WorkspaceMutationConflictError extends Error {
   readonly revision: number;
@@ -121,6 +123,18 @@ async function loadWorkspaceState(): Promise<WorkspaceStatePayload> {
     throw new Error(await responseErrorMessage(response, `Workspace load failed (${response.status})`));
   }
   return (await response.json()) as WorkspaceStatePayload;
+}
+
+async function loadWorkspaceRevision(): Promise<number> {
+  const response = await fetch("/api/workspace/revision", { method: "GET", cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(await responseErrorMessage(response, `Workspace revision load failed (${response.status})`));
+  }
+  const payload = (await response.json()) as WorkspaceRevisionPayload;
+  if (typeof payload.revision !== "number") {
+    throw new Error("Workspace revision response is missing revision.");
+  }
+  return payload.revision;
 }
 
 async function saveWorkspaceMutations(mutations: readonly WorkspaceMutation[], baseRevision: number): Promise<number | undefined> {
@@ -227,6 +241,8 @@ class WorkspaceStore implements Workspace {
 
   private workspaceRevision = 0;
 
+  private syncInFlight = false;
+
   private pollTimer: ReturnType<typeof setInterval> | null = null;
 
   private loadRetryTimer: ReturnType<typeof setInterval> | null = null;
@@ -261,6 +277,7 @@ class WorkspaceStore implements Workspace {
       | "pendingMutations"
       | "pendingSaveUrgent"
       | "saveInFlight"
+      | "syncInFlight"
       | "pollTimer"
       | "loadRetryTimer"
       | "skipNextSave"
@@ -279,6 +296,7 @@ class WorkspaceStore implements Workspace {
         pendingMutations: false,
         pendingSaveUrgent: false,
         saveInFlight: false,
+        syncInFlight: false,
         pollTimer: false,
         loadRetryTimer: false,
         skipNextSave: false,
@@ -331,10 +349,76 @@ class WorkspaceStore implements Workspace {
     }
   }
 
+  private hasPendingWorkspaceWrites(): boolean {
+    return this.pendingMutations.length > 0 || this.saveInFlight || this.saveTimer !== null || this.saveRetryTimer !== null || this.pendingSaveUrgent;
+  }
+
+  private selectedConversationIdAfterRemoteSync(state: WorkspaceState, preferredSelectedId: string): string {
+    const preferred = findConversation(state, preferredSelectedId);
+    if (preferred && !preferred.archived) {
+      return preferred.id;
+    }
+    const serverSelected = findConversation(state, state.selectedId);
+    if (serverSelected && !serverSelected.archived) {
+      return serverSelected.id;
+    }
+    const conversations = workspaceConversations(state);
+    return conversations.find((conversation) => !conversation.archived)?.id ?? conversations[0]?.id ?? "";
+  }
+
+  private applyRemoteServerState(serverState: WorkspaceState, preferredSelectedId: string): string {
+    const selectedId = this.selectedConversationIdAfterRemoteSync(serverState, preferredSelectedId);
+    const knownConversationIds = new Set(workspaceConversations(serverState).map((conversation) => conversation.id));
+    const shellThreadIds = new Set(Object.keys(serverState.threads));
+    const threads: Record<string, ChatMessage[]> = {};
+    for (const [id, messages] of Object.entries(this.state.threads)) {
+      if (knownConversationIds.has(id)) {
+        threads[id] = messages;
+      }
+    }
+    for (const [id, messages] of Object.entries(serverState.threads)) {
+      if (knownConversationIds.has(id)) {
+        threads[id] = messages;
+      }
+    }
+
+    const nextState = preserveLiveActiveRunMessages({ ...serverState, selectedId, threads }, this.state, this.runs);
+    syncGeneratedIdSequence(nextState);
+    for (const id of [...this.fullyLoadedThreadIds]) {
+      if (!knownConversationIds.has(id)) {
+        this.fullyLoadedThreadIds.delete(id);
+      }
+    }
+    for (const id of shellThreadIds) {
+      if (knownConversationIds.has(id)) {
+        this.fullyLoadedThreadIds.add(id);
+      }
+    }
+    for (const id of [...this.threadLoads.keys()]) {
+      if (!knownConversationIds.has(id)) {
+        this.threadLoads.delete(id);
+      }
+    }
+    for (const id of [...this.dirtyThreadVersions.keys()]) {
+      if (!knownConversationIds.has(id)) {
+        this.dirtyThreadVersions.delete(id);
+      }
+    }
+    if (!serializableEqual(this.state, nextState)) {
+      this.skipNextSave = true;
+      this.state = nextState;
+    }
+    return selectedId;
+  }
+
   /** Lazily fetch a conversation's full message thread (the GET shell omits all
    *  but the selected one). No-op once fully held; never triggers a save. */
   loadThread(id: string): Promise<void> {
-    if (!id || this.fullyLoadedThreadIds.has(id)) {
+    return this.loadThreadFromServer(id, false);
+  }
+
+  private loadThreadFromServer(id: string, force: boolean): Promise<void> {
+    if (!id || (!force && this.fullyLoadedThreadIds.has(id))) {
       return Promise.resolve();
     }
     const existing = this.threadLoads.get(id);
@@ -382,9 +466,10 @@ class WorkspaceStore implements Workspace {
     if (!this.pollTimer) {
       this.pollTimer = setInterval(() => {
         if (this.hydrated && !this.loading) {
+          void this.refreshWorkspaceFromServer();
           void this.refreshBackgroundRuns();
         }
-      }, 2000);
+      }, WORKSPACE_SYNC_POLL_MS);
     }
     if (!this.loadRetryTimer) {
       this.loadRetryTimer = setInterval(() => {
@@ -554,6 +639,51 @@ class WorkspaceStore implements Workspace {
           });
         }
       });
+  }
+
+  private async refreshWorkspaceFromServer(): Promise<void> {
+    if (this.syncInFlight || !this.hydrated || this.loading || this.hasPendingWorkspaceWrites()) {
+      return;
+    }
+    const seq = this.loadSeq;
+    this.syncInFlight = true;
+    try {
+      const revision = await loadWorkspaceRevision();
+      if (seq !== this.loadSeq || revision <= this.workspaceRevision || this.hasPendingWorkspaceWrites()) {
+        return;
+      }
+      const loadedState = await loadWorkspaceState();
+      if (seq !== this.loadSeq || this.hasPendingWorkspaceWrites()) {
+        return;
+      }
+      if (typeof loadedState.revision !== "number") {
+        throw new Error("Workspace state response is missing revision.");
+      }
+      const loadedRevision = loadedState.revision;
+      if (loadedRevision <= this.workspaceRevision) {
+        return;
+      }
+      let selectedId = "";
+      runInAction(() => {
+        const preferredSelectedId = this.state.selectedId;
+        this.workspaceRevision = loadedRevision;
+        selectedId = this.applyRemoteServerState(cloneWorkspaceState(loadedState), preferredSelectedId);
+        this.loadError = null;
+      });
+      if (selectedId) {
+        void this.loadThreadFromServer(selectedId, true);
+      }
+      void this.refreshBackgroundRuns();
+    } catch (error) {
+      if (seq !== this.loadSeq) {
+        return;
+      }
+      runInAction(() => {
+        this.loadError = error instanceof Error ? error.message : String(error);
+      });
+    } finally {
+      this.syncInFlight = false;
+    }
   }
 
   private hasPersistedActiveRuns(): boolean {

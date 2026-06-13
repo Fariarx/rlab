@@ -1,6 +1,6 @@
 import { createContext, type ReactNode, useContext, useMemo } from "react";
 import type { AgentSystemStatus } from "../components/agent/agents";
-import type { ConversationStatus } from "../components/agent/types";
+import type { ConversationStatus } from "../domain/agent-types";
 import type { Locale } from "../components/workspace/app-settings";
 
 const en = {

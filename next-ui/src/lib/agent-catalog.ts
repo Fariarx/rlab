@@ -2,16 +2,9 @@
  * Shared agent catalog. Keep UI labels, persisted profile ids, and CLI values
  * here so the picker and /api/run cannot drift.
  */
-export type AgentId =
-  | "claude-code"
-  | "codex"
-  | "gemini"
-  | "opencode"
-  | "amp"
-  | "cursor"
-  | "qwen"
-  | "copilot"
-  | "droid";
+export const PERSISTED_AGENT_IDS = ["claude-code", "codex", "gemini", "opencode", "amp", "cursor", "qwen", "copilot", "droid"] as const;
+export type PersistedAgentId = (typeof PERSISTED_AGENT_IDS)[number];
+export type AgentId = PersistedAgentId;
 
 export type AgentSystemStatus = "available" | "running" | "needs-setup" | "unavailable" | "unsupported";
 export const KNOWN_AGENT_WORK_MODE_IDS = [
@@ -36,8 +29,8 @@ export interface AgentOption {
   readonly value?: string;
 }
 
-export interface AgentDef {
-  readonly id: AgentId;
+export interface AgentDef<Id extends AgentId = AgentId> {
+  readonly id: Id;
   readonly name: string;
   readonly vendor: string;
   /** CLI executables checked on PATH, in priority order. */
@@ -110,7 +103,7 @@ const OPENCODE_MODEL_OPTIONS = [
   { id: "opencode-nemotron-3-ultra-free", label: "Nemotron 3 Ultra Free", value: "opencode/nemotron-3-ultra-free" },
   { id: "opencode-north-mini-code-free", label: "North Mini Code Free", value: "opencode/north-mini-code-free" },
 ] as const;
-export const AGENTS: readonly AgentDef[] = [
+export const AGENTS = [
   {
     id: "claude-code",
     name: "Claude Code",
@@ -165,18 +158,36 @@ export const AGENTS: readonly AgentDef[] = [
     reasoning: CLAUDE_REASONING_OPTIONS,
     modes: STANDARD_WORK_MODES,
   },
-];
+] as const satisfies readonly AgentDef[];
 
-export const AGENTS_BY_ID: Record<AgentId, AgentDef> = Object.fromEntries(AGENTS.map((agent) => [agent.id, agent])) as Record<
-  AgentId,
-  AgentDef
->;
+export type VisibleAgentId = (typeof AGENTS)[number]["id"];
+export type RunnableAgentId = VisibleAgentId;
 
-export function getAgent(id: AgentId): AgentDef {
-  return AGENTS_BY_ID[id];
+const AGENTS_BY_ID_RECORD = {} as Record<VisibleAgentId, AgentDef<VisibleAgentId>>;
+for (const agent of AGENTS) {
+  AGENTS_BY_ID_RECORD[agent.id] = agent;
+}
+export const AGENTS_BY_ID = AGENTS_BY_ID_RECORD;
+
+const PERSISTED_AGENT_ID_SET: ReadonlySet<AgentId> = new Set(PERSISTED_AGENT_IDS);
+
+function visibleAgentById(id: AgentId): AgentDef<VisibleAgentId> | undefined {
+  return (AGENTS_BY_ID as Partial<Record<AgentId, AgentDef<VisibleAgentId>>>)[id];
 }
 
-export function isAgentId(value: unknown): value is AgentId {
+export function getAgent(id: AgentId): AgentDef<VisibleAgentId> {
+  const agent = visibleAgentById(id);
+  if (!agent) {
+    throw new Error(`Agent is not visible in the runtime catalog: ${id}`);
+  }
+  return agent;
+}
+
+export function isPersistedAgentId(value: unknown): value is PersistedAgentId {
+  return typeof value === "string" && PERSISTED_AGENT_ID_SET.has(value as AgentId);
+}
+
+export function isAgentId(value: unknown): value is VisibleAgentId {
   return typeof value === "string" && value in AGENTS_BY_ID;
 }
 
@@ -217,23 +228,21 @@ export interface AgentCliInfo {
 
 export type AgentCliMap = Partial<Record<AgentId, AgentCliInfo>>;
 
-export const STATIC_AGENT_CLI_INFO: Record<AgentId, AgentCliInfo> = Object.fromEntries(
-  AGENTS.map((agent) => {
-    const status = AGENT_STATUS[agent.id];
-    return [
-      agent.id,
-      {
-        status,
-        bins: agent.cliBins,
-        resolvedBin: null,
-        runAdapter: agent.runAdapter,
-        selectable: status !== "unavailable" && status !== "unsupported",
-        env: [],
-        installCommand: null,
-      },
-    ];
-  }),
-) as unknown as Record<AgentId, AgentCliInfo>;
+const STATIC_AGENT_CLI_INFO_RECORD = {} as Record<AgentId, AgentCliInfo>;
+for (const id of PERSISTED_AGENT_IDS) {
+  const agent = visibleAgentById(id);
+  const status = AGENT_STATUS[id];
+  STATIC_AGENT_CLI_INFO_RECORD[id] = {
+    status,
+    bins: agent?.cliBins ?? [],
+    resolvedBin: null,
+    runAdapter: agent?.runAdapter ?? false,
+    selectable: status !== "unavailable" && status !== "unsupported",
+    env: [],
+    installCommand: null,
+  };
+}
+export const STATIC_AGENT_CLI_INFO: Record<AgentId, AgentCliInfo> = STATIC_AGENT_CLI_INFO_RECORD;
 
 export interface AgentProfile {
   readonly agent: AgentId;

@@ -1,7 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import process from "node:process";
-import type { AgentBlock, ChatMessage, ComposerDraft, ConversationSummary, Project } from "./src/components/agent/types";
+import type { AgentBlock, ChatMessage, ComposerDraft, ConversationSummary, Project } from "./src/domain/agent-types";
 import { conversationPreviewSnippet, messagePreviewText, previewSnippet } from "./src/lib/conversation-preview";
 import type { WorkspaceMutation } from "./src/lib/workspace-mutations";
 import type { WorkspaceState } from "./src/lib/workspace-state";

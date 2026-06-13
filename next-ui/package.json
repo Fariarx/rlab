@@ -23,6 +23,7 @@
     "index.html",
     "vite.config.ts",
     "vite-agents-plugin.ts",
+    "workspace-db.ts",
     "tsconfig.json",
     "README.md"
   ],

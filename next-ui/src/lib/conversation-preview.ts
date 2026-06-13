@@ -1,4 +1,4 @@
-import type { AgentBlock, ChatMessage } from "../components/agent/types";
+import type { AgentBlock, ChatMessage } from "../domain/agent-types";
 
 export function previewSnippet(text: string, max = 60): string {
   const compact = text.replace(/\s+/g, " ").trim();

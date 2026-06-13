@@ -18,6 +18,14 @@ import { parseGitStatusPorcelain, parseNumstatTotals } from "./src/lib/git-statu
 import { normalizeAgentToolOutput, truncateAgentToolOutput } from "./src/lib/agent-output";
 import { conversationPreviewSnippet, previewSnippet } from "./src/lib/conversation-preview";
 import { formatClock24, formatDateTime24 } from "./src/lib/time-format";
+import {
+  accumulateRunEvent,
+  createRunEventAccumulator,
+  runEventAccumulatorHasOutput,
+  runEventBlocks,
+  type RunEvent as SharedRunEvent,
+  type RunEventAccumulator,
+} from "./src/lib/run-event-accumulator";
 import { attachPtyTerminalWebSockets, PtyTerminalManager } from "./src/server/pty-terminal";
 import {
   cloneAppSettings,
@@ -66,7 +74,6 @@ import {
 import {
   type AgentBlock,
   type ChatMessage,
-  type CodeBlockData,
   type ComposerDraft,
   type ConversationSummary,
   type ConversationStatus,
@@ -76,8 +83,7 @@ import {
   type RunState,
   type RunUsage,
   type SearchBlock,
-  type SuggestedActionsBlock,
-} from "./src/components/agent/types";
+} from "./src/domain/agent-types";
 import { pickDirectoryPathFromSystemDialog } from "./src/server/directory-picker";
 export {
   parseAnthropicModelInfos,
@@ -2614,11 +2620,17 @@ function usageAuditPayload(payload: unknown): unknown {
   }
 }
 
-function usageDebugEntries(debug: UsageDebugEntry | readonly UsageDebugEntry[] | undefined): readonly UsageDebugEntry[] {
+function usageDebugEntries(debug: unknown): readonly UsageDebugEntry[] {
   if (debug === undefined) {
     return [];
   }
-  return Array.isArray(debug) ? debug : [debug as UsageDebugEntry];
+  const entries = Array.isArray(debug) ? debug : [debug];
+  return entries.map((entry) => {
+    if (!isRecord(entry) || typeof entry.source !== "string" || !Object.prototype.hasOwnProperty.call(entry, "payload")) {
+      throw new Error("Invalid usage debug entry.");
+    }
+    return { source: entry.source, payload: entry.payload };
+  });
 }
 
 function isScheduledWakeupTrigger(value: unknown): value is ScheduledWakeupTrigger {
@@ -3595,6 +3607,15 @@ function handleWorkspace(req: IncomingMessage, res: ServerResponse): void {
 
   res.statusCode = 405;
   res.end();
+}
+
+function handleWorkspaceRevision(_req: IncomingMessage, res: ServerResponse): void {
+  try {
+    ensureWorkspaceDb();
+    sendJson(res, 200, { revision: readWorkspaceRevision() });
+  } catch (error) {
+    sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) });
+  }
 }
 
 function handleWorkspaceMutations(req: IncomingMessage, res: ServerResponse): void {
@@ -4948,25 +4969,7 @@ function handleTerminalSession(req: IncomingMessage, res: ServerResponse): void 
 
 /* ------------------------------ Real agent run ------------------------------ */
 
-export type RunEvent =
-  | { type: "start" }
-  | { type: "reasoning"; text: string }
-  | { type: "text"; text: string }
-  | { type: "tool"; id: string; name: string; summary?: string; args?: Record<string, string> }
-  | { type: "tool_result"; id: string; ok: boolean; output: string }
-  | { type: "diff"; id?: string; file: string; additions: number; deletions: number; lines: DiffBlock["lines"] }
-  | { type: "plan"; id?: string; steps: PlanBlock["steps"] }
-  | { type: "code"; language: string; code: string }
-  | { type: "search"; id?: string; query: string; state: RunState; results?: SearchBlock["results"] }
-  | { type: "suggested"; actions: SuggestedActionsBlock["actions"] }
-  | { type: "approval"; id: string; title: string; detail?: string }
-  | { type: "options"; id: string; prompt: string; multi?: boolean; options: ReadonlyArray<{ readonly id: string; readonly label: string; readonly description?: string }> }
-  | { type: "status"; level: "info" | "ok" | "warn" | "error"; text: string }
-  | { type: "error"; text: string }
-  | { type: "session"; id: string }
-  | { type: "wakeup"; prompt: string; reason?: string; toolId?: string; delaySeconds?: number; fireAt?: string; cron?: string; script?: string; intervalSeconds?: number }
-  | { type: "cancel_wakeup"; wakeupId?: string; all?: boolean; reason?: string; toolId?: string }
-  | { type: "done"; costUsd?: number; usage?: RunUsage; usageDebug?: UsageDebugEntry | readonly UsageDebugEntry[] };
+export type RunEvent = SharedRunEvent;
 
 interface UsageDebugEntry {
   readonly source: string;
@@ -5787,59 +5790,8 @@ export interface BackgroundRunHandle {
   subscribers?: Set<BackgroundRunSubscriber>;
 }
 
-interface StreamingTool {
-  id: string;
-  name: string;
-  summary?: string;
-  args?: Record<string, string>;
-  state: "running" | "ok" | "error";
-  output?: string;
-}
-
-interface StreamingSearch {
-  id?: string;
-  query: string;
-  state: RunState;
-  results: SearchBlock["results"];
-}
-
-interface StreamingPlan {
-  id?: string;
-  steps: PlanBlock["steps"];
-}
-
-interface BackgroundRunAccumulator {
+interface BackgroundRunAccumulator extends RunEventAccumulator {
   agent?: AgentId;
-  sessionId?: string;
-  reasoning: string;
-  hasReasoning: boolean;
-  started: boolean;
-  text: string;
-  hasText: boolean;
-  readonly tools: StreamingTool[];
-  // Reasoning, narration text, tools, searches, and code in arrival order, so the
-  // UI can render them interleaved chronologically. Mirrors the frontend
-  // accumulator in run-agent.ts; both MUST stay in sync or reloaded (persisted)
-  // conversations render differently from the live ones.
-  readonly timeline: Array<
-    | { kind: "reasoning"; text: string }
-    | { kind: "text"; text: string }
-    | { readonly kind: "tool"; readonly tool: StreamingTool }
-    | { readonly kind: "search"; readonly search: StreamingSearch }
-    | { readonly kind: "code"; readonly data: CodeBlockData }
-  >;
-  readonly diffs: DiffBlock[];
-  readonly plans: StreamingPlan[];
-  readonly codes: CodeBlockData[];
-  readonly searches: StreamingSearch[];
-  readonly suggested: SuggestedActionsBlock[];
-  readonly approvals: Array<{ id: string; title: string; detail?: string }>;
-  readonly options: Array<{ id: string; prompt: string; multi?: boolean; options: ReadonlyArray<{ readonly id: string; readonly label: string; readonly description?: string }> }>;
-  readonly statuses: Array<{ level: "warn" | "error"; text: string }>;
-  costUsd?: number;
-  usage?: RunUsage;
-  done: boolean;
-  readonly start: number;
   lastPersistedAt: number;
   persistTimer: ReturnType<typeof setTimeout> | null;
 }
@@ -6604,36 +6556,6 @@ function parseUnifiedDiffLines(value: string): DiffBlock["lines"] {
       }
       return { type: "ctx" as const, text: line.startsWith(" ") ? line.slice(1) : line };
     });
-}
-
-function toolToDiffBlock(tool: StreamingTool): DiffBlock | null {
-  if (tool.state === "error") {
-    return null;
-  }
-  const args = tool.args;
-  const file = firstString(args, ["file_path", "filePath", "path", "filename", "file"]);
-  if (!file) {
-    return null;
-  }
-  const normalizedName = normalizedToolName(tool.name);
-  let lines: DiffBlock["lines"] | null = null;
-  if ((normalizedName === "write" || normalizedName === "writefile" || normalizedName === "filewrite") && typeof args?.content === "string") {
-    lines = splitDiffLines(args.content).map((text) => ({ type: "add", text }));
-  } else if (
-    (normalizedName === "edit" || normalizedName === "fileedit" || normalizedName === "replace") &&
-    typeof args?.old_string === "string" &&
-    typeof args?.new_string === "string"
-  ) {
-    lines = editPairToLines(args.old_string, args.new_string);
-  } else if (normalizedName === "multiedit" && typeof args?.edits === "string") {
-    lines = parseMultiEditLines(args.edits);
-  } else if ((normalizedName === "applypatch" || normalizedName === "patch" || normalizedName === "fileedit") && typeof args?.diff === "string") {
-    lines = parseUnifiedDiffLines(args.diff);
-  }
-  if (!lines) {
-    return null;
-  }
-  return diffBlockFromLines(file, lines);
 }
 
 function diffBlockFromToolInput(name: string, input: Record<string, unknown> | undefined): DiffBlock | null {
@@ -7554,89 +7476,14 @@ function notifyBackgroundRunUpdate(binding: BackgroundRunBinding, done: boolean)
 
 function createBackgroundAccumulator(): BackgroundRunAccumulator {
   return {
-    reasoning: "",
-    hasReasoning: false,
-    started: false,
-    text: "",
-    hasText: false,
-    tools: [],
-    timeline: [],
-    diffs: [],
-    plans: [],
-    codes: [],
-    searches: [],
-    suggested: [],
-    approvals: [],
-    options: [],
-    statuses: [],
-    done: false,
-    start: Date.now(),
+    ...createRunEventAccumulator(),
     lastPersistedAt: 0,
     persistTimer: null,
   };
 }
 
 function backgroundBlocks(accumulator: BackgroundRunAccumulator): AgentBlock[] {
-  const blocks: AgentBlock[] = [];
-  const plans = accumulator.plans ?? [];
-  const diffs = accumulator.diffs ?? [];
-  const suggested = accumulator.suggested ?? [];
-  // Reasoning, text, tools, searches, and code interleaved in arrival order.
-  const timeline = accumulator.timeline ?? [];
-  const firstReasoningIdx = timeline.findIndex((item) => item.kind === "reasoning");
-  let lastReasoningIdx = -1;
-  for (let i = timeline.length - 1; i >= 0; i -= 1) {
-    if (timeline[i].kind === "reasoning") {
-      lastReasoningIdx = i;
-      break;
-    }
-  }
-  const reasoningDuration = `${Math.max(1, Math.round((Date.now() - accumulator.start) / 1000))}s`;
-  // The final answer is the trailing run of text after the last reasoning/tool;
-  // earlier text is narration that stays interleaved with the tools.
-  let lastNonTextIdx = -1;
-  let lastTextIdx = -1;
-  timeline.forEach((item, idx) => {
-    if (item.kind === "text") {
-      lastTextIdx = idx;
-    } else {
-      lastNonTextIdx = idx;
-    }
-  });
-  timeline.forEach((item, idx) => {
-    if (item.kind === "reasoning") {
-      const active = !accumulator.done && idx === lastReasoningIdx;
-      blocks.push({ kind: "reasoning", text: item.text, active, duration: accumulator.done && idx === firstReasoningIdx ? reasoningDuration : undefined, ...(active ? { startedAtMs: accumulator.start } : {}) });
-    } else if (item.kind === "text") {
-      blocks.push({ kind: "text", text: item.text, streaming: !accumulator.done && idx === lastTextIdx, result: accumulator.done && idx > lastNonTextIdx });
-    } else if (item.kind === "search") {
-      const s = item.search;
-      blocks.push({ kind: "search", query: s.query, state: s.state, results: s.results });
-    } else if (item.kind === "code") {
-      blocks.push(item.data);
-    } else {
-      const tool = item.tool;
-      blocks.push(toolToDiffBlock(tool) ?? { kind: "tool", name: tool.name, summary: tool.summary, args: tool.args, state: tool.state, output: tool.output });
-    }
-  });
-  if (timeline.length === 0 && accumulator.started && !accumulator.done) {
-    blocks.push({ kind: "reasoning", text: "", active: true, startedAtMs: accumulator.start });
-  }
-  for (const plan of plans) {
-    blocks.push({ kind: "plan", steps: plan.steps });
-  }
-  blocks.push(...diffs);
-  blocks.push(...suggested);
-  for (const approval of accumulator.approvals) {
-    blocks.push({ kind: "approval", id: approval.id, title: approval.title, detail: approval.detail });
-  }
-  for (const option of accumulator.options) {
-    blocks.push({ kind: "options", id: option.id, prompt: option.prompt, multi: option.multi, options: option.options });
-  }
-  for (const status of accumulator.statuses) {
-    blocks.push({ kind: "status", level: status.level, text: status.text });
-  }
-  return blocks;
+  return runEventBlocks(accumulator);
 }
 
 function finishBackgroundLiveBlock(block: AgentBlock, state: "ok" | "error"): AgentBlock {
@@ -8008,7 +7855,7 @@ function persistBackgroundRunSnapshot(binding: BackgroundRunBinding, accumulator
     id: binding.agentMessageId,
     role: "agent",
     time: binding.agentMessageTime,
-    startedAtMs: accumulator.start,
+    startedAtMs: accumulator.startMs,
     blocks,
     ...(accumulator.costUsd === undefined ? {} : { costUsd: accumulator.costUsd }),
     ...(accumulator.usage === undefined ? {} : { usage: accumulator.usage }),
@@ -8143,132 +7990,7 @@ function startPersistedBackgroundRun(binding: BackgroundRunBinding, request: Run
 }
 
 function accumulateBackgroundRunEvent(accumulator: BackgroundRunAccumulator, event: RunEvent): void {
-  switch (event.type) {
-    case "session":
-      accumulator.sessionId = event.id;
-      break;
-    case "start":
-      accumulator.started = true;
-      break;
-    case "reasoning": {
-      accumulator.started = true;
-      accumulator.hasReasoning = true;
-      accumulator.reasoning += event.text;
-      const last = accumulator.timeline[accumulator.timeline.length - 1];
-      if (last && last.kind === "reasoning") {
-        last.text += event.text;
-      } else {
-        accumulator.timeline.push({ kind: "reasoning", text: event.text });
-      }
-      break;
-    }
-    case "text": {
-      accumulator.started = true;
-      accumulator.hasText = true;
-      accumulator.text += event.text;
-      const last = accumulator.timeline[accumulator.timeline.length - 1];
-      if (last && last.kind === "text") {
-        last.text += event.text;
-      } else {
-        accumulator.timeline.push({ kind: "text", text: event.text });
-      }
-      break;
-    }
-    case "tool": {
-      accumulator.started = true;
-      const existing = accumulator.tools.find((tool) => tool.id === event.id);
-      if (existing) {
-        existing.name = event.name;
-        existing.summary = event.summary;
-        existing.args = event.args;
-      } else {
-        const tool: StreamingTool = { id: event.id, name: event.name, summary: event.summary, args: event.args, state: "running" };
-        accumulator.tools.push(tool);
-        accumulator.timeline.push({ kind: "tool", tool });
-      }
-      break;
-    }
-    case "tool_result": {
-      accumulator.started = true;
-      const tool = accumulator.tools.find((item) => item.id === event.id);
-      if (tool) {
-        tool.state = event.ok ? "ok" : "error";
-        tool.output = event.output;
-      }
-      break;
-    }
-    case "diff": {
-      accumulator.started = true;
-      const block: DiffBlock = { kind: "diff", file: event.file, additions: event.additions, deletions: event.deletions, lines: event.lines };
-      const existingIndex = event.id ? accumulator.diffs.findIndex((item) => item.file === event.file) : -1;
-      if (existingIndex >= 0) {
-        accumulator.diffs[existingIndex] = block;
-      } else {
-        accumulator.diffs.push(block);
-      }
-      break;
-    }
-    case "plan": {
-      accumulator.started = true;
-      accumulator.plans.splice(0, accumulator.plans.length, { id: event.id, steps: event.steps });
-      break;
-    }
-    case "code": {
-      accumulator.started = true;
-      const data: CodeBlockData = { kind: "code", language: event.language, code: event.code };
-      accumulator.codes.push(data);
-      accumulator.timeline.push({ kind: "code", data });
-      break;
-    }
-    case "search": {
-      accumulator.started = true;
-      const existing = event.id ? accumulator.searches.find((item) => item.id === event.id) : accumulator.searches.find((item) => item.query === event.query);
-      if (existing) {
-        existing.query = event.query;
-        existing.state = event.state;
-        existing.results = event.results ?? existing.results;
-      } else {
-        const search: StreamingSearch = { id: event.id, query: event.query, state: event.state, results: event.results ?? [] };
-        accumulator.searches.push(search);
-        accumulator.timeline.push({ kind: "search", search });
-      }
-      break;
-    }
-    case "suggested":
-      accumulator.started = true;
-      accumulator.suggested.push({ kind: "suggested", actions: event.actions });
-      break;
-    case "approval":
-      accumulator.started = true;
-      accumulator.approvals.push({ id: event.id, title: event.title, detail: event.detail });
-      break;
-    case "options": {
-      accumulator.started = true;
-      const existing = accumulator.options.find((item) => item.id === event.id);
-      if (existing) {
-        existing.prompt = event.prompt;
-        existing.multi = event.multi;
-        existing.options = event.options;
-      } else {
-        accumulator.options.push({ id: event.id, prompt: event.prompt, multi: event.multi, options: event.options });
-      }
-      break;
-    }
-    case "status":
-      accumulator.started = true;
-      if (event.level === "warn" || event.level === "error") {
-        accumulator.statuses.push({ level: event.level, text: event.text });
-      }
-      break;
-    case "error":
-      accumulator.started = true;
-      accumulator.statuses.push({ level: "error", text: event.text });
-      break;
-    case "done":
-      accumulator.costUsd = event.costUsd;
-      accumulator.usage = event.usage;
-      return;
-  }
+  accumulateRunEvent(accumulator, event, { formatToolOutput: truncateAgentToolOutput });
 }
 
 /** The conversation patch a still-streaming background run writes on every event.
@@ -8314,17 +8036,7 @@ export function finishBackgroundRunState(state: WorkspaceState, binding: Backgro
     const hasCanceledStatus = blocks.some((block) => block.kind === "status" && block.level === canceledStatusBlock.level && block.text === canceledStatusBlock.text);
     blocks = blocks.length === 0 ? [canceledStatusBlock] : hasCanceledStatus ? blocks : [...blocks, canceledStatusBlock];
   }
-  const hadOutput =
-    accumulator.hasText ||
-    accumulator.hasReasoning ||
-    accumulator.tools.length > 0 ||
-    (accumulator.diffs?.length ?? 0) > 0 ||
-    (accumulator.plans?.length ?? 0) > 0 ||
-    (accumulator.codes?.length ?? 0) > 0 ||
-    (accumulator.searches?.length ?? 0) > 0 ||
-    (accumulator.suggested?.length ?? 0) > 0 ||
-    accumulator.approvals.length > 0 ||
-    accumulator.options.length > 0;
+  const hadOutput = runEventAccumulatorHasOutput(accumulator);
   const warningOnlyFailure = accumulator.statuses.some((status) => status.level === "warn") && !hadOutput;
   const failed = hadError || warningOnlyFailure;
   const waiting = !canceled && !failed && blocksNeedInput(blocks);
@@ -11112,16 +10824,6 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
       return;
     }
 
-    if (agent === "amp" && accessMode === "read-only") {
-      try {
-        ensureAmpReadOnlySettingsFile();
-      } catch (error) {
-        send({ type: "error", text: error instanceof Error ? `Failed to prepare Amp read-only settings: ${error.message}` : "Failed to prepare Amp read-only settings" });
-        finishAndEnd();
-        return;
-      }
-    }
-
     // stdin = /dev/null so the CLI doesn't wait for piped input (it otherwise
     // stalls ~3s: "no stdin data received").
     let child: ReturnType<typeof spawn>;
@@ -11361,6 +11063,7 @@ function attach(server: ViteDevServer | PreviewServer): void {
   useExactApi(server, "/api/browser/bridge/snapshot", methodOnly("GET", handleBrowserBridgeSnapshot));
   useExactApi(server, "/api/browser/snapshot", methodOnly("GET", handleBrowserSnapshot));
   useExactApi(server, "/api/browser/events", methodOnly("GET", handleBrowserEvents));
+  useExactApi(server, "/api/workspace/revision", methodOnly("GET", handleWorkspaceRevision));
   useExactApi(server, "/api/workspace/mutations", methodOnly("POST", handleWorkspaceMutations));
   useExactApi(server, "/api/workspace", handleWorkspace);
   useExactApi(server, "/api/thread", methodOnly("GET", (req, res) => {
