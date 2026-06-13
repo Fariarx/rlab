@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/server/">
+    <Project Path="server/Rlab.AgentHost/Rlab.AgentHost.csproj" />
+    <Project Path="server/Rlab.Api/Rlab.Api.csproj" />
+    <Project Path="server/Rlab.Domain/Rlab.Domain.csproj" />
+    <Project Path="server/Rlab.Generators/Rlab.Generators.csproj" />
+    <Project Path="server/Rlab.Infrastructure/Rlab.Infrastructure.csproj" />
+    <Project Path="server/Rlab.Tests/Rlab.Tests.csproj" />
+    <Project Path="server/Rlab.Tools/Rlab.Tools.csproj" />
+  </Folder>
+</Solution>

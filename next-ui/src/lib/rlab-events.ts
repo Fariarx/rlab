@@ -125,6 +125,10 @@ export interface RlabRunInterruptedData {
 
 export type RlabEvent =
   | { readonly type: "workspace.initialized"; readonly data: { readonly state: WorkspaceState }; readonly metadata: RlabEventMetadata }
+  | { readonly type: "conversation.created"; readonly data: { readonly conversationId: string; readonly title: string; readonly agent: string; readonly projectId: string | null; readonly time: string }; readonly metadata: RlabEventMetadata }
+  | { readonly type: "conversation.messageAppended"; readonly data: { readonly conversationId: string; readonly message: ChatMessage }; readonly metadata: RlabEventMetadata }
+  | { readonly type: "conversation.runStarted"; readonly data: { readonly conversationId: string; readonly runId: string; readonly userMessageId: string; readonly agentMessageId: string }; readonly metadata: RlabEventMetadata }
+  | { readonly type: "conversation.runFinished"; readonly data: { readonly conversationId: string; readonly runId: string; readonly status: string }; readonly metadata: RlabEventMetadata }
   | { readonly type: "workspace.selectedConversationSet"; readonly data: { readonly conversationId: string }; readonly metadata: RlabEventMetadata }
   | {
       readonly type: "workspace.settingsSet";
@@ -318,6 +322,22 @@ const commandEnvelopeSchema = z.object({
 export const rlabCommandRequestSchema = z.object({ commands: z.array(commandEnvelopeSchema) }) satisfies z.ZodType<RlabCommandRequest>;
 export const rlabEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("workspace.initialized"), data: z.object({ state: workspaceStateSchema }), metadata: eventMetadataSchema }),
+  z.object({
+    type: z.literal("conversation.created"),
+    data: z.object({ conversationId: nonEmptyStringSchema, title: z.string(), agent: agentIdSchema, projectId: z.string().nullable(), time: z.string() }),
+    metadata: eventMetadataSchema,
+  }),
+  z.object({ type: z.literal("conversation.messageAppended"), data: z.object({ conversationId: nonEmptyStringSchema, message: chatMessageSchema }), metadata: eventMetadataSchema }),
+  z.object({
+    type: z.literal("conversation.runStarted"),
+    data: z.object({ conversationId: nonEmptyStringSchema, runId: nonEmptyStringSchema, userMessageId: nonEmptyStringSchema, agentMessageId: nonEmptyStringSchema }),
+    metadata: eventMetadataSchema,
+  }),
+  z.object({
+    type: z.literal("conversation.runFinished"),
+    data: z.object({ conversationId: nonEmptyStringSchema, runId: nonEmptyStringSchema, status: z.union([z.literal("running"), z.literal("waiting"), z.literal("done"), z.literal("error"), z.literal("idle")]) }),
+    metadata: eventMetadataSchema,
+  }),
   z.object({ type: z.literal("workspace.selectedConversationSet"), data: z.object({ conversationId: z.string() }), metadata: eventMetadataSchema }),
   z.object({ type: z.literal("workspace.settingsSet"), data: z.object({ settings: settingsSchema }), metadata: eventMetadataSchema }),
   z.object({ type: z.literal("workspace.projectUpserted"), data: z.object({ project: projectMetaSchema, insertAtFront: z.boolean().optional() }), metadata: eventMetadataSchema }),
@@ -489,6 +509,25 @@ export function commandStreamName(command: RlabCommand): string {
 
 function eventToWorkspaceMutation(event: RlabEvent): WorkspaceMutation | null {
   switch (event.type) {
+    case "conversation.created":
+      return {
+        type: "upsertConversation",
+        projectId: event.data.projectId,
+        insertAtFront: true,
+        conversation: {
+          id: event.data.conversationId,
+          title: event.data.title,
+          snippet: "",
+          time: event.data.time,
+          status: "idle",
+          agent: event.data.agent as ConversationSummary["agent"],
+          unread: false,
+          archived: false,
+          pinned: false,
+        },
+      };
+    case "conversation.messageAppended":
+      return { type: "upsertMessage", conversationId: event.data.conversationId, message: event.data.message };
     case "workspace.selectedConversationSet":
       return { type: "setSelectedConversation", conversationId: event.data.conversationId };
     case "workspace.settingsSet":
@@ -512,6 +551,8 @@ function eventToWorkspaceMutation(event: RlabEvent): WorkspaceMutation | null {
     case "workspace.conversationThreadReplaced":
       return { type: "replaceConversationThread", conversationId: event.data.conversationId, messages: event.data.messages };
     case "workspace.initialized":
+    case "conversation.runStarted":
+    case "conversation.runFinished":
     case "workspace.agentMessageUpsertedForUserTurn":
     case "run.rawBatchRecorded":
     case "run.requested":
@@ -542,6 +583,21 @@ export function applyRlabEventToState(state: WorkspaceState, event: RlabEvent): 
   if (event.type === "workspace.initialized") {
     return cloneWorkspaceState(event.data.state);
   }
+  if (event.type === "conversation.runStarted") {
+    return updateConversationById(state, event.data.conversationId, {
+      activeRunId: event.data.runId,
+      status: "running",
+    });
+  }
+  if (event.type === "conversation.runFinished") {
+    if (event.data.status !== "running" && event.data.status !== "waiting" && event.data.status !== "done" && event.data.status !== "error" && event.data.status !== "idle") {
+      throw new Error(`Unsupported conversation status in event stream: ${event.data.status}.`);
+    }
+    return updateConversationById(state, event.data.conversationId, {
+      activeRunId: undefined,
+      status: event.data.status,
+    });
+  }
   if (event.type === "workspace.agentMessageUpsertedForUserTurn") {
     const thread = state.threads[event.data.conversationId] ?? [];
     return {
@@ -554,6 +610,17 @@ export function applyRlabEventToState(state: WorkspaceState, event: RlabEvent): 
   }
   const mutation = eventToWorkspaceMutation(event);
   return mutation ? applyWorkspaceMutationToState(state, mutation) : state;
+}
+
+function updateConversationById(state: WorkspaceState, conversationId: string, patch: Partial<ConversationSummary>): WorkspaceState {
+  return {
+    ...state,
+    chats: state.chats.map((conversation) => (conversation.id === conversationId ? { ...conversation, ...patch } : conversation)),
+    projects: state.projects.map((project) => ({
+      ...project,
+      conversations: project.conversations.map((conversation) => (conversation.id === conversationId ? { ...conversation, ...patch } : conversation)),
+    })),
+  };
 }
 
 export function projectRlabEvents(events: readonly RlabEvent[], initialState: WorkspaceState = buildEmptyWorkspaceState()): WorkspaceState {

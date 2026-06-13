@@ -1,11 +1,16 @@
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
-import { agentsApiPlugin } from "./vite-agents-plugin";
 
 export default defineConfig({
-  plugins: [react(), agentsApiPlugin()],
+  plugins: [react()],
   server: {
     port: 5187,
+    proxy: {
+      "/api": {
+        target: "http://127.0.0.1:4280",
+        changeOrigin: true,
+      },
+    },
   },
   build: {
     rolldownOptions: {

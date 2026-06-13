@@ -1,6 +1,8 @@
 node_modules
 dist
 coverage
+**/bin/
+**/obj/
 .DS_Store
 test-results
 playwright-report

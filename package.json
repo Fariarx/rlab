@@ -19,7 +19,11 @@
   "scripts": {
     "install:all": "npm --prefix next-ui install",
     "dev": "npm --prefix next-ui run dev",
+    "dev:api": "dotnet run --project server/Rlab.Api",
+    "contracts": "dotnet run --project server/Rlab.Tools -- contracts export --output next-ui/src/generated/rlab-api.ts",
     "build": "npm --prefix next-ui run build",
+    "build:api": "dotnet build Rlab.slnx",
+    "publish:api": "dotnet publish server/Rlab.Api -c Release",
     "start": "npm --prefix next-ui start",
     "serve": "npm --prefix next-ui run serve",
     "typecheck": "npm --prefix next-ui run typecheck",

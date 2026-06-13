@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <ItemGroup>
+    <ProjectReference Include="..\Rlab.Domain\Rlab.Domain.csproj" />
+    <ProjectReference Include="..\Rlab.Infrastructure\Rlab.Infrastructure.csproj" />
+    <ProjectReference Include="..\Rlab.AgentHost\Rlab.AgentHost.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Marten" Version="9.7.5" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RlabDotNetHost Condition="'$(RlabDotNetHost)' == ''">dotnet</RlabDotNetHost>
+  </PropertyGroup>
+
+  <Target Name="BuildFrontendForPublish" BeforeTargets="ComputeFilesToPublish" Condition="'$(SkipFrontendBuild)' != 'true'">
+    <Exec WorkingDirectory="$(MSBuildProjectDirectory)\..\.." Command="&quot;$(RlabDotNetHost)&quot; run --project server/Rlab.Tools -- contracts export --output next-ui/src/generated/rlab-api.ts" />
+    <Exec WorkingDirectory="$(MSBuildProjectDirectory)\..\..\next-ui" Command="npm ci" Condition="!Exists('$(MSBuildProjectDirectory)\..\..\next-ui\node_modules')" />
+    <Exec WorkingDirectory="$(MSBuildProjectDirectory)\..\..\next-ui" Command="npm run build" />
+    <ItemGroup>
+      <RlabFrontendDist Include="$(MSBuildProjectDirectory)\..\..\next-ui\dist\**\*" />
+      <ResolvedFileToPublish Include="@(RlabFrontendDist->'%(FullPath)')" RelativePath="wwwroot\%(RecursiveDir)%(Filename)%(Extension)" CopyToPublishDirectory="PreserveNewest" />
+    </ItemGroup>
+  </Target>
+
+</Project>

@@ -6,8 +6,10 @@ import { attachRunUpdates, cancelRun, loadActiveRuns, runConversation, type Acti
 import { nowLabel, starterThread, truncate } from "./sample-data";
 import { type AppSettings, type AppSettingsPatch, type Locale, mergeAppSettings } from "./app-settings";
 import type { WorkspaceMutation } from "../../lib/workspace-mutations";
-import { applyRlabEventToState, type RecordedRlabEvent, type RlabEvent, workspaceMutationToCommand } from "../../lib/rlab-events";
+import { applyRlabEventToState } from "../../lib/rlab-events";
+import { sseEventToWorkspaceEvent, threadMessageViewsToMessages, workspaceMutationToGeneratedCommandEnvelopes, workspaceViewToState } from "../../lib/rlab-contract-bridge";
 import { buildEmptyWorkspaceState, buildInitialWorkspaceState, cloneWorkspaceState, type WorkspaceState } from "./workspace-state";
+import type { RlabCommandResponse, RlabSseEvent, ThreadMessageView, WorkspaceView } from "../../generated/rlab-api";
 import { conversationPreviewSnippet, previewSnippet } from "../../lib/conversation-preview";
 import {
   blocksHaveLiveOutput,
@@ -102,14 +104,14 @@ async function responseErrorMessage(response: Response, fallback: string): Promi
 }
 
 type WorkspaceStatePayload = WorkspaceState & { readonly checkpoint?: string };
-type CommandResponsePayload = { readonly checkpoint?: string };
 
 async function loadWorkspaceState(): Promise<WorkspaceStatePayload> {
   const response = await fetch("/api/state/snapshot", { method: "GET", cache: "no-store" });
   if (!response.ok) {
     throw new Error(await responseErrorMessage(response, `Workspace load failed (${response.status})`));
   }
-  return (await response.json()) as WorkspaceStatePayload;
+  const payload = (await response.json()) as WorkspaceView;
+  return { ...workspaceViewToState(payload), checkpoint: String(payload.updatedGlobalPosition) };
 }
 
 async function saveWorkspaceMutations(mutations: readonly WorkspaceMutation[], clientId: string): Promise<number | undefined> {
@@ -120,21 +122,13 @@ async function saveWorkspaceMutations(mutations: readonly WorkspaceMutation[], c
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      commands: mutations.map((mutation) => {
-        const commandId = nextId("cmd");
-        return {
-          commandId,
-          clientId,
-          correlationId: commandId,
-          command: workspaceMutationToCommand(mutation),
-        };
-      }),
+      commands: mutations.flatMap((mutation) => workspaceMutationToGeneratedCommandEnvelopes(mutation, clientId, () => nextId("cmd"))),
     }),
   });
   if (!response.ok) {
     throw new Error(await responseErrorMessage(response, `Workspace save failed (${response.status})`));
   }
-  const payload = (await response.json().catch(() => null)) as CommandResponsePayload | null;
+  const payload = (await response.json().catch(() => null)) as RlabCommandResponse | null;
   const checkpoint = typeof payload?.checkpoint === "string" ? Number.parseInt(payload.checkpoint, 10) : undefined;
   return typeof checkpoint === "number" && Number.isFinite(checkpoint) ? checkpoint : undefined;
 }
@@ -324,8 +318,8 @@ export class WorkspaceStore implements Workspace {
     this.eventSource?.close();
     const source = new EventSource(`/api/state/events?from=${encodeURIComponent(String(this.workspaceRevision))}`);
     source.addEventListener("rlab", (event) => {
-      const parsed = JSON.parse(event.data) as RecordedRlabEvent;
-      const position = Number.parseInt(parsed.globalPosition, 10);
+      const parsed = JSON.parse(event.data) as RlabSseEvent;
+      const position = parsed.globalPosition;
       if (!Number.isFinite(position) || position <= this.workspaceRevision) {
         return;
       }
@@ -337,7 +331,7 @@ export class WorkspaceStore implements Workspace {
         return;
       }
       runInAction(() => {
-        const nextState = applyRlabEventToState(this.state, { type: parsed.type, data: parsed.data, metadata: parsed.metadata } as RlabEvent);
+        const nextState = applyRlabEventToState(this.state, sseEventToWorkspaceEvent(parsed));
         this.workspaceRevision = position;
         if (!serializableEqual(this.state, nextState)) {
           this.skipNextSave = true;
@@ -374,17 +368,18 @@ export class WorkspaceStore implements Workspace {
         if (!response.ok) {
           throw new Error(await responseErrorMessage(response, `Thread load failed (${response.status})`));
         }
-        const { messages } = (await response.json()) as { messages: ChatMessage[] };
+        const { messages } = (await response.json()) as { messages: ThreadMessageView[] };
+        const normalizedMessages = threadMessageViewsToMessages(messages);
         runInAction(() => {
           this.fullyLoadedThreadIds.add(id);
           // Preserve any messages the client appended WHILE this fetch was in
           // flight — a freshly sent user message and its streaming agent reply
           // must never be clobbered by the loaded history (otherwise the message
           // vanishes mid-run and the agent appears not to respond).
-          const fetchedIds = new Set(messages.map((message) => message.id));
+          const fetchedIds = new Set(normalizedMessages.map((message) => message.id));
           const inFlight = (this.state.threads[id] ?? []).filter((message) => !fetchedIds.has(message.id));
           this.skipNextSave = true;
-          this.state = { ...this.state, threads: { ...this.state.threads, [id]: [...messages, ...inFlight] } };
+          this.state = { ...this.state, threads: { ...this.state.threads, [id]: [...normalizedMessages, ...inFlight] } };
         });
       } catch (error) {
         runInAction(() => {
