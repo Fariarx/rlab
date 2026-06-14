@@ -9,6 +9,8 @@ import process from "node:process";
 import * as pty from "node-pty";
 import type { RawData, WebSocket } from "ws";
 import { WebSocketServer } from "ws";
+import { AsyncOperationQueue } from "./async-operation-queue";
+import { createTerminalIoOutputState, type TerminalIoOutputState } from "./terminal-io-output-state";
 
 export interface TerminalSessionCreateRequest {
   readonly cwd: string;
@@ -69,7 +71,7 @@ interface TerminalViewer {
   readonly clientId: string;
   pendingOutputChunks: Buffer[];
   restoreComplete: boolean;
-  ioState: IoOutputState | null;
+  ioState: TerminalIoOutputState | null;
   ioSocket: WebSocket | null;
   controlSocket: WebSocket | null;
   detachControlListener: (() => void) | null;
@@ -82,23 +84,9 @@ interface TerminalStreamState {
   detachOutputListener: (() => void) | null;
 }
 
-interface IoOutputState {
-  enqueueOutput: (chunk: Buffer) => void;
-  acknowledgeOutput: (bytes: number) => void;
-  dispose: () => void;
-}
-
 const DEFAULT_COLS = 120;
 const DEFAULT_ROWS = 32;
 const TERMINAL_SCROLLBACK = 10_000;
-const OUTPUT_BATCH_INTERVAL_MS = 4;
-const LOW_LATENCY_CHUNK_BYTES = 256;
-const LOW_LATENCY_IDLE_WINDOW_MS = 5;
-const OUTPUT_BUFFER_HIGH_WATER_MARK_BYTES = 16 * 1024;
-const OUTPUT_BUFFER_LOW_WATER_MARK_BYTES = 4 * 1024;
-const OUTPUT_ACK_HIGH_WATER_MARK_BYTES = 100_000;
-const OUTPUT_ACK_LOW_WATER_MARK_BYTES = 5_000;
-const OUTPUT_RESUME_CHECK_INTERVAL_MS = 16;
 const INITIAL_REPLAY_BUFFER_BYTES = 512 * 1024;
 
 type SerializeAddonConstructor = new () => SerializeAddonInstance;
@@ -215,7 +203,7 @@ function appendInitialReplayChunk(session: TerminalSession, chunk: Buffer): void
 class TerminalStateMirror {
   private readonly terminal: HeadlessTerminalInstance;
   private readonly serializeAddon = new SerializeAddon();
-  private operationQueue: Promise<void> = Promise.resolve();
+  private readonly operations = new AsyncOperationQueue();
 
   constructor(cols: number, rows: number) {
     this.terminal = new HeadlessTerminal({
@@ -229,18 +217,18 @@ class TerminalStateMirror {
 
   applyOutput(chunk: Buffer): void {
     const copy = new Uint8Array(chunk);
-    this.enqueueOperation(() => new Promise<void>((resolve) => this.terminal.write(copy, resolve)));
+    this.operations.enqueue(() => new Promise<void>((resolve) => this.terminal.write(copy, resolve)));
   }
 
   resize(cols: number, rows: number): void {
     if (this.terminal.cols === cols && this.terminal.rows === rows) {
       return;
     }
-    this.enqueueOperation(() => this.terminal.resize(cols, rows));
+    this.operations.enqueue(() => this.terminal.resize(cols, rows));
   }
 
   async getSnapshot(): Promise<TerminalRestoreSnapshot> {
-    await this.operationQueue;
+    await this.operations.idle();
     return {
       snapshot: this.serializeAddon.serialize(),
       cols: this.terminal.cols,
@@ -249,7 +237,7 @@ class TerminalStateMirror {
   }
 
   async getSize(): Promise<{ readonly cols: number; readonly rows: number }> {
-    await this.operationQueue;
+    await this.operations.idle();
     return {
       cols: this.terminal.cols,
       rows: this.terminal.rows,
@@ -258,10 +246,6 @@ class TerminalStateMirror {
 
   dispose(): void {
     this.terminal.dispose();
-  }
-
-  private enqueueOperation(operation: () => void | Promise<void>): void {
-    this.operationQueue = this.operationQueue.catch(() => undefined).then(operation);
   }
 }
 
@@ -376,7 +360,7 @@ export class PtyTerminalManager {
 
   write(id: string, data: Buffer): boolean {
     const session = this.sessions.get(id);
-    if (!session || !session.running) {
+    if (!session?.running) {
       return false;
     }
     session.ptyProcess.write(data.toString("utf8"));
@@ -385,7 +369,7 @@ export class PtyTerminalManager {
 
   resize(id: string, cols: number, rows: number, pixelWidth?: number, pixelHeight?: number): boolean {
     const session = this.sessions.get(id);
-    if (!session || !session.running) {
+    if (!session?.running) {
       return false;
     }
     const resolvedCols = normalizeTerminalSize(cols, DEFAULT_COLS);
@@ -405,7 +389,7 @@ export class PtyTerminalManager {
 
   pause(id: string): boolean {
     const session = this.sessions.get(id);
-    if (!session || !session.running) {
+    if (!session?.running) {
       return false;
     }
     session.ptyProcess.pause();
@@ -414,123 +398,12 @@ export class PtyTerminalManager {
 
   resume(id: string): boolean {
     const session = this.sessions.get(id);
-    if (!session || !session.running) {
+    if (!session?.running) {
       return false;
     }
     session.ptyProcess.resume();
     return true;
   }
-}
-
-function createIoOutputState(ws: WebSocket, streamState: TerminalStreamState, clientId: string, terminalId: string, terminalManager: PtyTerminalManager): IoOutputState {
-  let pendingOutputChunks: Buffer[] = [];
-  let outputFlushTimer: ReturnType<typeof setTimeout> | null = null;
-  let lastOutputSentAt = 0;
-  let outputPaused = false;
-  let resumeCheckTimer: ReturnType<typeof setTimeout> | null = null;
-  let unacknowledgedOutputBytes = 0;
-
-  const shouldPauseOutput = () => ws.bufferedAmount >= OUTPUT_BUFFER_HIGH_WATER_MARK_BYTES || unacknowledgedOutputBytes >= OUTPUT_ACK_HIGH_WATER_MARK_BYTES;
-  const canResumeOutput = () => ws.bufferedAmount < OUTPUT_BUFFER_LOW_WATER_MARK_BYTES && unacknowledgedOutputBytes < OUTPUT_ACK_LOW_WATER_MARK_BYTES;
-
-  const clearResumeCheck = () => {
-    if (resumeCheckTimer !== null) {
-      clearTimeout(resumeCheckTimer);
-      resumeCheckTimer = null;
-    }
-    getWebSocketTransportSocket(ws)?.removeListener("drain", checkResumeAfterBackpressure);
-  };
-
-  const scheduleResumeCheck = () => {
-    if (!outputPaused) {
-      return;
-    }
-    clearResumeCheck();
-    getWebSocketTransportSocket(ws)?.once("drain", checkResumeAfterBackpressure);
-    resumeCheckTimer = setTimeout(() => {
-      resumeCheckTimer = null;
-      checkResumeAfterBackpressure();
-    }, OUTPUT_RESUME_CHECK_INTERVAL_MS);
-  };
-
-  function checkResumeAfterBackpressure(): void {
-    if (!outputPaused) {
-      clearResumeCheck();
-      return;
-    }
-    if (ws.readyState !== ws.OPEN) {
-      return;
-    }
-    if (canResumeOutput()) {
-      outputPaused = false;
-      clearResumeCheck();
-      streamState.backpressuredViewerIds.delete(clientId);
-      if (streamState.backpressuredViewerIds.size === 0) {
-        terminalManager.resume(terminalId);
-      }
-      return;
-    }
-    scheduleResumeCheck();
-  }
-
-  const sendOutputChunk = (chunk: Buffer) => {
-    if (ws.readyState !== ws.OPEN) {
-      return;
-    }
-    ws.send(chunk);
-    lastOutputSentAt = Date.now();
-    unacknowledgedOutputBytes += chunk.byteLength;
-    if (!outputPaused && shouldPauseOutput()) {
-      outputPaused = true;
-      const alreadyBackpressured = streamState.backpressuredViewerIds.size > 0;
-      streamState.backpressuredViewerIds.add(clientId);
-      if (!alreadyBackpressured) {
-        terminalManager.pause(terminalId);
-      }
-      scheduleResumeCheck();
-    }
-  };
-
-  const flushOutputBatch = () => {
-    outputFlushTimer = null;
-    if (pendingOutputChunks.length === 0 || ws.readyState !== ws.OPEN) {
-      pendingOutputChunks = [];
-      return;
-    }
-    sendOutputChunk(Buffer.concat(pendingOutputChunks));
-    pendingOutputChunks = [];
-  };
-
-  return {
-    enqueueOutput: (chunk) => {
-      const now = Date.now();
-      if (pendingOutputChunks.length === 0 && outputFlushTimer === null && chunk.byteLength <= LOW_LATENCY_CHUNK_BYTES && now - lastOutputSentAt >= LOW_LATENCY_IDLE_WINDOW_MS) {
-        sendOutputChunk(chunk);
-        return;
-      }
-      pendingOutputChunks.push(chunk);
-      if (outputFlushTimer === null) {
-        outputFlushTimer = setTimeout(flushOutputBatch, OUTPUT_BATCH_INTERVAL_MS);
-      }
-    },
-    acknowledgeOutput: (bytes) => {
-      unacknowledgedOutputBytes = Math.max(0, unacknowledgedOutputBytes - Math.max(0, Math.floor(bytes)));
-      checkResumeAfterBackpressure();
-    },
-    dispose: () => {
-      if (outputFlushTimer !== null) {
-        clearTimeout(outputFlushTimer);
-      }
-      clearResumeCheck();
-      if (outputPaused) {
-        streamState.backpressuredViewerIds.delete(clientId);
-        if (streamState.backpressuredViewerIds.size === 0) {
-          terminalManager.resume(terminalId);
-        }
-      }
-      pendingOutputChunks = [];
-    },
-  };
 }
 
 export function attachPtyTerminalWebSockets(server: Server, terminalManager: PtyTerminalManager): () => Promise<void> {
@@ -642,7 +515,14 @@ export function attachPtyTerminalWebSockets(server: Server, terminalManager: Pty
     const viewer = getOrCreateViewer(streamState, clientId);
     const previousSocket = viewer.ioSocket;
     viewer.ioState?.dispose();
-    viewer.ioState = createIoOutputState(ws, streamState, clientId, terminalId, terminalManager);
+    viewer.ioState = createTerminalIoOutputState({
+      ws,
+      streamState,
+      clientId,
+      terminalId,
+      terminalManager,
+      transportSocket: getWebSocketTransportSocket(ws),
+    });
     viewer.ioSocket = ws;
     viewer.flushPendingOutput();
     ensureOutputListener(terminalId, streamState);

@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { observer } from "mobx-react-lite";
 import { useWorkspace } from "../src/components/workspace/use-workspace";
-import { buildInitialWorkspaceState, type WorkspaceState } from "../src/components/workspace/workspace-state";
+import { buildInitialWorkspaceState, type WorkspaceState } from "../src/lib/workspace-state";
 import { applyWorkspaceMutationsToState, type WorkspaceMutation } from "../src/lib/workspace-mutations";
 
 const WORKSPACE_SYNC_TICK_MS = 2_000;
@@ -1929,4 +1929,3 @@ describe("useWorkspace", () => {
     });
   });
 });
-

@@ -2,7 +2,7 @@ import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentStatusProvider } from "../src/components/agent";
 import { SettingsDialog } from "../src/components/settings/SettingsDialog";
-import { defaultAppSettings } from "../src/components/workspace/app-settings";
+import { defaultAppSettings } from "../src/lib/app-settings";
 import { renderWithTheme } from "./util/render-with-theme";
 
 describe("SettingsDialog agent configuration", () => {

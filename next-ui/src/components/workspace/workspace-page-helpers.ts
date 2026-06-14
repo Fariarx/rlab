@@ -9,8 +9,14 @@ import {
   type ConversationSummary,
   type ConversationView,
   type DiffBlock,
+  type Project,
 } from "../agent";
-import type { Workspace } from "./use-workspace";
+import { splitUserContent } from "../agent/message/message-content-model";
+
+export interface ConversationRouteWorkspace {
+  readonly chats: readonly ConversationSummary[];
+  readonly projects: readonly Project[];
+}
 
 const CONVERSATION_VIEWS = new Set<ConversationView>(["chat", "git", "resources", "preview", "terminal"]);
 
@@ -24,10 +30,7 @@ export function normalizeConversationView(view: ConversationView | undefined, te
 /** The visible text of a sent user message (attachment blocks and file-link
  *  markdown removed) for ArrowUp history recall. */
 export function composerHistoryText(raw: string): string {
-  return raw
-    .replace(/<attachment\s+name="[^"]*"[^>]*>[\s\S]*?<\/attachment>/g, "")
-    .replace(/!?\[([^\]\n]+)\]\(([^)\s]+)\)/g, (whole, _label, target: string) => (/[\\/]/.test(target) || /\.[a-z0-9]{1,8}$/i.test(target) ? "" : whole))
-    .trim();
+  return splitUserContent(raw).text;
 }
 
 export function buildComposerLabel(profile: AgentProfile): string {
@@ -54,21 +57,21 @@ export function liveModesOrCatalog<T extends { readonly id: string }>(catalogOpt
   return merged;
 }
 
-function projectForConversation(workspace: Workspace, conversationId: string): { readonly id: string; readonly name: string } | null {
+function projectForConversation(workspace: ConversationRouteWorkspace, conversationId: string): { readonly id: string; readonly name: string } | null {
   const project = workspace.projects.find((item) => item.conversations.some((conversation) => conversation.id === conversationId));
   return project ? { id: project.id, name: project.name } : null;
 }
 
-export function routeForConversation(workspace: Workspace, conversationId: string): HashRoute {
+export function routeForConversation(workspace: ConversationRouteWorkspace, conversationId: string): HashRoute {
   const project = projectForConversation(workspace, conversationId);
   return project ? { kind: "project", projectId: project.id, conversationId } : { kind: "chat", conversationId };
 }
 
-export function workspaceConversations(workspace: Workspace): readonly ConversationSummary[] {
+export function workspaceConversations(workspace: ConversationRouteWorkspace): readonly ConversationSummary[] {
   return [...workspace.chats, ...workspace.projects.flatMap((project) => project.conversations)];
 }
 
-export function firstVisibleConversationId(workspace: Workspace): string {
+export function firstVisibleConversationId(workspace: ConversationRouteWorkspace): string {
   const conversations = workspaceConversations(workspace);
   return conversations.find((conversation) => !conversation.archived)?.id ?? conversations[0]?.id ?? "";
 }

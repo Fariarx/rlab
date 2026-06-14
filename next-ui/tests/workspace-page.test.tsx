@@ -1,12 +1,12 @@
 ﻿import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-vi.mock("../src/components/workspace/TerminalView", () => ({
+vi.mock("../src/components/workspace/terminal/TerminalView", () => ({
   TerminalView: ({ cwd }: { readonly cwd?: string }) => <div data-testid="terminal-cwd">{cwd ?? "none"}</div>,
 }));
 
 import { App } from "../src/App";
 import { WorkspacePage } from "../src/components/workspace/WorkspacePage";
-import { buildInitialWorkspaceState } from "../src/components/workspace/workspace-state";
+import { buildInitialWorkspaceState } from "../src/lib/workspace-state";
 import { renderWithThemeAndVirtuoso } from "./util/render-with-virtuoso";
 import { applyWorkspaceMutationRequest, createWorkspaceApiFixture, isWorkspaceMutationRequest, requestPath } from "./util/workspace-api";
 
@@ -1610,7 +1610,6 @@ describe("WorkspacePage", () => {
   });
 
 });
-
 
 
 

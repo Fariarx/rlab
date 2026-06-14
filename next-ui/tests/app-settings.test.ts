@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cloneAppSettings, defaultAppSettings, isAppSettings, mergeAppSettings } from "../src/components/workspace/app-settings";
+import { cloneAppSettings, defaultAppSettings, isAppSettings, mergeAppSettings } from "../src/lib/app-settings";
 
 describe("app settings", () => {
   it("clones and merges agent default profile settings", () => {

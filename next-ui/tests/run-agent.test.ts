@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_PROFILE, type AgentBlock } from "../src/components/agent";
-import { attachRunUpdates, runConversation } from "../src/components/workspace/run-agent";
+import { attachRunUpdates, runConversation } from "../src/client/api/run-agent";
 import { MAX_AGENT_TOOL_OUTPUT_CHARS } from "../src/lib/agent-output";
 
 function streamResponse(events: readonly unknown[]): Response {

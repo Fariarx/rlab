@@ -2,7 +2,7 @@ import FolderOpenIcon from "@mui/icons-material/FolderOpen";
 import MemoryIcon from "@mui/icons-material/Memory";
 import TerminalIcon from "@mui/icons-material/Terminal";
 import { Box, Stack, Typography } from "@mui/material";
-import { TerminalView } from "../../workspace/TerminalView";
+import { TerminalView } from "../../workspace/terminal/TerminalView";
 import { KeyHint, Metric, Panel, StatusDot, Tag } from "../../ui";
 import { KitSectionShell } from "../KitSectionShell";
 

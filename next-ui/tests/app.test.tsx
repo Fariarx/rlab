@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/App";
-import { buildInitialWorkspaceState, type WorkspaceState } from "../src/components/workspace/workspace-state";
+import { buildInitialWorkspaceState, type WorkspaceState } from "../src/lib/workspace-state";
 import { applyWorkspaceMutationRequest, isWorkspaceMutationRequest } from "./util/workspace-api";
 import { withVirtuosoMock } from "./util/render-with-virtuoso";
 

@@ -1,7 +1,7 @@
 import { fireEvent, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { AgentBlockRenderer } from "../src/components/agent";
-import { type WorkspaceUiApi, WorkspaceUiProvider } from "../src/components/workspace/workspace-ui";
+import { type WorkspaceUiApi, WorkspaceUiProvider } from "../src/lib/workspace-ui";
 import { renderWithTheme } from "./util/render-with-theme";
 
 function makeUi(): WorkspaceUiApi {

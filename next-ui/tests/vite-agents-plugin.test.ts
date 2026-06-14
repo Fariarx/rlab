@@ -109,7 +109,7 @@ import {
 } from "../vite-agents-plugin";
 import { MAX_AGENT_TOOL_OUTPUT_CHARS } from "../src/lib/agent-output";
 import { accumulateRunEvent, createRunEventAccumulator } from "../src/lib/run-event-accumulator";
-import { buildInitialWorkspaceState } from "../src/components/workspace/workspace-state";
+import { buildInitialWorkspaceState } from "../src/lib/workspace-state";
 import { type AgentProfile } from "../src/components/agent";
 
 describe("vite agents plugin", () => {
@@ -146,6 +146,7 @@ describe("vite agents plugin", () => {
 
     expect(withTools).toContain("<rlab-chat-tools>");
     expect(withTools).toContain("TaskWakeup supports delaySeconds/fireAt/cron");
+    expect(withTools).toContain('TaskWakeup with action="list"');
     expect(withTools).toContain("{ prompt, script, intervalSeconds, reason }");
     expect(appendRlabChatToolsPrompt(withTools).match(/<rlab-chat-tools>/g)).toHaveLength(1);
   });
@@ -687,7 +688,7 @@ Built-in agents:
       "--permission-mode",
       "plan",
       "--tools",
-      "Read,Glob,Grep,LS,AskUserQuestion,TaskWakeup",
+      "Read,Glob,Grep,LS,AskUserQuestion,TaskWakeup,TaskAwait",
     ]);
   });
 
@@ -759,7 +760,7 @@ Built-in agents:
     expect(readOnlyOptions).toMatchObject({
       permissionMode: "plan",
       settings: { autoCompactEnabled: false, autoCompactWindow: 120000 },
-      tools: ["Read", "Glob", "Grep", "LS", "AskUserQuestion", "TaskWakeup"],
+      tools: ["Read", "Glob", "Grep", "LS", "AskUserQuestion", "TaskWakeup", "TaskAwait"],
     });
   });
 
@@ -1146,7 +1147,7 @@ Built-in agents:
       "--permission-mode",
       "plan",
       "--tools",
-      "Read,Glob,Grep,LS,AskUserQuestion,TaskWakeup",
+      "Read,Glob,Grep,LS,AskUserQuestion,TaskWakeup,TaskAwait",
     ]);
     expect(buildCodexRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" })).toEqual([
       "exec",
@@ -1369,10 +1370,20 @@ Built-in agents:
           inputSchema: expect.objectContaining({
             type: "object",
             properties: expect.objectContaining({
+              action: expect.objectContaining({ enum: ["schedule", "cancel", "list"] }),
               prompt: expect.objectContaining({ type: "string" }),
               cron: expect.objectContaining({ type: "string" }),
               script: expect.objectContaining({ type: "string" }),
               intervalSeconds: expect.objectContaining({ type: "number" }),
+            }),
+          }),
+        }),
+        expect.objectContaining({
+          name: "TaskAwait",
+          inputSchema: expect.objectContaining({
+            type: "object",
+            properties: expect.objectContaining({
+              action: expect.objectContaining({ enum: ["list"] }),
             }),
           }),
         }),
@@ -1415,6 +1426,19 @@ Built-in agents:
     ).toEqual({
       contentItems: [{ type: "inputText", text: "TaskWakeup requires delaySeconds, fireAt, cron, or script." }],
       success: false,
+    });
+
+    expect(
+      codexDynamicToolCallResponse(
+        {
+          tool: "TaskAwait",
+          arguments: { action: "list" },
+        },
+        { conversationId: "chat-empty" },
+      ),
+    ).toEqual({
+      contentItems: [{ type: "inputText", text: "No scheduled TaskWakeup entries for this chat." }],
+      success: true,
     });
   });
 
@@ -1486,6 +1510,23 @@ Built-in agents:
       { type: "tool", id: "wake-1", name: "TaskWakeup", summary: "send OK", args: { prompt: "send OK", delaySeconds: "180" } },
       { type: "tool_result", id: "wake-1", ok: true, output: "accepted" },
       { type: "wakeup", toolId: "wake-1", prompt: "send OK", delaySeconds: 180 },
+    ]);
+    expect(
+      codexAppServerItemEvents(
+        {
+          type: "dynamicToolCall",
+          id: "await-1",
+          tool: "TaskAwait",
+          status: "completed",
+          arguments: { action: "list" },
+          contentItems: [{ type: "inputText", text: "No scheduled TaskWakeup entries for this chat." }],
+          success: true,
+        },
+        true,
+      ),
+    ).toEqual([
+      { type: "tool", id: "await-1", name: "TaskAwait", summary: "TaskAwait", args: { action: "list" } },
+      { type: "tool_result", id: "await-1", ok: true, output: "No scheduled TaskWakeup entries for this chat." },
     ]);
     // webSearch -> search
     expect(codexAppServerItemEvents({ type: "webSearch", id: "w1", query: "rust" }, true)).toEqual([{ type: "search", id: "w1", query: "rust", state: "ok" }]);

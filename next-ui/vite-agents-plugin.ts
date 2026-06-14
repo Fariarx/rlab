@@ -5705,8 +5705,9 @@ interface RunSpec {
 }
 
 const TASK_WAKEUP_TOOL_NAME = "TaskWakeup";
+const TASK_AWAIT_TOOL_NAME = "TaskAwait";
 const CLAUDE_SAFE_READ_TOOLS = ["Read", "Glob", "Grep", "LS"] as const;
-const CLAUDE_READ_ONLY_TOOLS = ["Read", "Glob", "Grep", "LS", "AskUserQuestion", TASK_WAKEUP_TOOL_NAME] as const;
+const CLAUDE_READ_ONLY_TOOLS = ["Read", "Glob", "Grep", "LS", "AskUserQuestion", TASK_WAKEUP_TOOL_NAME, TASK_AWAIT_TOOL_NAME] as const;
 const CLAUDE_EFFORT_LEVELS: ReadonlySet<EffortLevel> = new Set(["low", "medium", "high", "xhigh", "max"]);
 const RLAB_CHAT_TOOLS_PROMPT = [
   "When you need user input that blocks progress, use the AskUserQuestion tool instead of asking as plain text.",
@@ -5717,6 +5718,7 @@ const RLAB_CHAT_TOOLS_PROMPT = [
   "TaskWakeup supports delaySeconds/fireAt/cron for time wakeups and script plus intervalSeconds or cron for condition wakeups; the script runs server-side in the project cwd, exit code 0 fires the wakeup, and non-zero exit codes keep polling.",
   "For condition wakeups, write a deterministic shell script in the TaskWakeup input: { prompt, script, intervalSeconds, reason } or { prompt, script, cron, reason }. Do not describe the script in prose instead of calling the tool.",
   "To cancel task wakeups in this chat, call TaskWakeup with action=\"cancel\" and either wakeupId/id or all=true.",
+  "To inspect scheduled wakeups in this chat, call TaskWakeup with action=\"list\" or call TaskAwait with action=\"list\". The tool result returns wakeup ids, trigger type, next fire/check time, prompt, and reason.",
 ].join("\n");
 const CLAUDE_CHAT_UI_SYSTEM_PROMPT = RLAB_CHAT_TOOLS_PROMPT;
 interface CodexDynamicToolSpec {
@@ -5744,8 +5746,8 @@ const CODEX_RLAB_DYNAMIC_TOOLS: readonly CodexDynamicToolSpec[] = [
       properties: {
         action: {
           type: "string",
-          enum: ["schedule", "cancel"],
-          description: "Use 'schedule' or omit for a new wakeup. Use 'cancel' to remove scheduled wakeups.",
+          enum: ["schedule", "cancel", "list"],
+          description: "Use 'schedule' or omit for a new wakeup. Use 'cancel' to remove scheduled wakeups. Use 'list' to inspect scheduled wakeups in this chat.",
         },
         prompt: {
           type: "string",
@@ -5788,6 +5790,22 @@ const CODEX_RLAB_DYNAMIC_TOOLS: readonly CodexDynamicToolSpec[] = [
         all: {
           type: "boolean",
           description: "Cancel all wakeups for this chat when action is 'cancel'.",
+        },
+      },
+    },
+  },
+  {
+    name: TASK_AWAIT_TOOL_NAME,
+    description:
+      "List scheduled TaskWakeup entries for the current rlab chat. Provide action='list' or omit action. The result includes wakeup ids, trigger type, next fire/check time, prompt, and reason so the agent can decide whether to wait, cancel, or schedule another wakeup.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        action: {
+          type: "string",
+          enum: ["list"],
+          description: "Use 'list' or omit to list scheduled wakeups for this chat.",
         },
       },
     },
@@ -5884,7 +5902,7 @@ function rlabChatToolsPromptAppendix(): string {
     "<rlab-chat-tools>",
     "This rlab chat has server-side tools that are handled by the application, not by the user's project.",
     RLAB_CHAT_TOOLS_PROMPT,
-    "Tool names accepted by rlab for task wakeups: TaskWakeup.",
+    "Tool names accepted by rlab for task wakeups: TaskWakeup, TaskAwait.",
     "</rlab-chat-tools>",
   ].join("\n");
 }
@@ -8060,7 +8078,28 @@ function numericWakeupField(value: unknown): number | undefined {
 
 function isWakeupToolName(name: string): boolean {
   const leaf = name.split("/").at(-1)?.toLowerCase() ?? name.toLowerCase();
-  return leaf === "taskwakeup" || leaf === "task_wakeup" || leaf === "rlab_task_wakeup" || leaf === "schedulewakeup" || leaf === "schedule_wakeup" || leaf === "rlab_schedule_wakeup" || leaf === "wakeup";
+  return (
+    leaf === "taskwakeup" ||
+    leaf === "task_wakeup" ||
+    leaf === "rlab_task_wakeup" ||
+    leaf === "taskawait" ||
+    leaf === "task_await" ||
+    leaf === "rlab_task_await" ||
+    leaf === "schedulewakeup" ||
+    leaf === "schedule_wakeup" ||
+    leaf === "rlab_schedule_wakeup" ||
+    leaf === "wakeup"
+  );
+}
+
+function isTaskAwaitToolName(name: string): boolean {
+  const leaf = name.split("/").at(-1)?.toLowerCase() ?? name.toLowerCase();
+  return leaf === "taskawait" || leaf === "task_await" || leaf === "rlab_task_await";
+}
+
+function isWakeupListRequested(name: string, input: Record<string, unknown> | undefined): boolean {
+  const action = firstString(input, ["action", "operation", "mode"])?.toLowerCase();
+  return action === "list" || action === "show" || action === "get" || action === "status" || (isTaskAwaitToolName(name) && !action);
 }
 
 function wakeupInputValidationError(name: string, input: Record<string, unknown> | undefined): string | null {
@@ -8068,7 +8107,13 @@ function wakeupInputValidationError(name: string, input: Record<string, unknown>
     return `${name} is not a supported rlab dynamic tool.`;
   }
   if (!input) {
-    return `${name} requires a JSON object input.`;
+    return isTaskAwaitToolName(name) ? null : `${name} requires a JSON object input.`;
+  }
+  if (isWakeupListRequested(name, input)) {
+    return null;
+  }
+  if (isTaskAwaitToolName(name)) {
+    return `${name} only supports action='list'.`;
   }
   const action = firstString(input, ["action", "operation", "mode"])?.toLowerCase();
   const cancelRequested = action === "cancel" || action === "delete" || action === "remove" || input.cancel === true || input.cancelled === true || input.canceled === true;
@@ -8108,7 +8153,38 @@ function wakeupInputValidationError(name: string, input: Record<string, unknown>
   return null;
 }
 
-export function codexDynamicToolCallResponse(params: Record<string, unknown>): Record<string, unknown> {
+export interface CodexDynamicToolCallContext {
+  readonly conversationId?: string;
+}
+
+function wakeupTriggerLabel(trigger: ScheduledWakeupTrigger): string {
+  if (trigger.type === "time") {
+    return `time ${new Date(trigger.fireAtMs).toISOString()}`;
+  }
+  if (trigger.type === "cron") {
+    return `cron ${trigger.cron} next ${new Date(trigger.nextFireMs).toISOString()}`;
+  }
+  const next = new Date(trigger.nextCheckMs).toISOString();
+  const cadence = trigger.cron ? `cron ${trigger.cron}` : `every ${trigger.intervalSeconds}s`;
+  return `script ${cadence} next check ${next}`;
+}
+
+function scheduledWakeupListToolText(conversationId: string | undefined): string {
+  if (!conversationId) {
+    return "TaskAwait list requires a conversation-bound run.";
+  }
+  const wakeups = scheduledWakeupSummaries(conversationId);
+  if (wakeups.length === 0) {
+    return "No scheduled TaskWakeup entries for this chat.";
+  }
+  const lines = wakeups.map((wakeup, index) => {
+    const reason = wakeup.reason ? `; reason: ${wakeup.reason}` : "";
+    return `${index + 1}. id: ${wakeup.id}; ${wakeupTriggerLabel(wakeup.trigger)}; prompt: ${wakeup.prompt}${reason}`;
+  });
+  return ["Scheduled TaskWakeup entries for this chat:", ...lines].join("\n");
+}
+
+export function codexDynamicToolCallResponse(params: Record<string, unknown>, context: CodexDynamicToolCallContext = {}): Record<string, unknown> {
   const tool = firstString(params, ["tool"]) ?? "";
   const input = isRecord(params.arguments) ? params.arguments : undefined;
   const validationError = wakeupInputValidationError(tool, input);
@@ -8116,6 +8192,12 @@ export function codexDynamicToolCallResponse(params: Record<string, unknown>): R
     return {
       contentItems: [{ type: "inputText", text: validationError }],
       success: false,
+    };
+  }
+  if (isWakeupListRequested(tool, input)) {
+    return {
+      contentItems: [{ type: "inputText", text: scheduledWakeupListToolText(context.conversationId) }],
+      success: Boolean(context.conversationId),
     };
   }
   const action = firstString(input, ["action", "operation", "mode"])?.toLowerCase();
@@ -8135,6 +8217,9 @@ export function codexDynamicToolCallResponse(params: Record<string, unknown>): R
 
 function wakeupFollowupEvents(id: string, name: string, input: Record<string, unknown> | undefined, ok: boolean): RunEvent[] {
   if (!isWakeupToolName(name)) {
+    return [];
+  }
+  if (isWakeupListRequested(name, input)) {
     return [];
   }
   if (!ok) {
@@ -10106,7 +10191,7 @@ async function runCodexAppServer(
     } else if (method === "item/tool/requestUserInput") {
       result = { answers: {} };
     } else if (method === "item/tool/call") {
-      result = codexDynamicToolCallResponse(params);
+      result = codexDynamicToolCallResponse(params, { conversationId: binding?.conversationId });
     }
     writeMessage({ jsonrpc: "2.0", id, result });
   };

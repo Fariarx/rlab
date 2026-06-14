@@ -1,26 +1,9 @@
 import { action, makeObservable, observable } from "mobx";
+import type { AgentConfigResponse, VoiceConfigResponse } from "../../client/api/settings-api";
 import type { VoiceProviderId } from "../../lib/voice-providers";
 import type { AgentId } from "../agent";
 
-interface AgentConfigInfo {
-  readonly envVar: string;
-  readonly configured: boolean;
-}
-
-interface AgentConfigResponse {
-  readonly agents: Partial<Record<AgentId, AgentConfigInfo>>;
-}
-
-interface VoiceProviderConfigInfo {
-  readonly envVar: string;
-  readonly configured: boolean;
-}
-
-interface VoiceConfigResponse {
-  readonly providers: Partial<Record<VoiceProviderId, VoiceProviderConfigInfo>>;
-}
-
-type AgentOperationNotice =
+export type AgentOperationNotice =
   | {
       readonly type: "install-completed";
       readonly agent: string;

@@ -4,17 +4,11 @@ import FolderOpenIcon from "@mui/icons-material/FolderOpen";
 import FolderOutlinedIcon from "@mui/icons-material/FolderOutlined";
 import { Alert, Box, Dialog, DialogActions, DialogContent, DialogTitle, InputAdornment, LinearProgress, List, ListItemButton, ListItemIcon, ListItemText, Stack, TextField, Tooltip, Typography, useMediaQuery, useTheme } from "@mui/material";
 import { observer } from "mobx-react-lite";
-import { type KeyboardEvent, useEffect, useState } from "react";
+import type { KeyboardEvent } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import { Button, IconButton } from "../ui";
 import type { CreateProjectInput } from "./use-workspace";
-import { CreateProjectDialogStore } from "./workspace-local-stores";
-
-interface DirectoryListing {
-  readonly path: string;
-  readonly parent: string | null;
-  readonly entries: ReadonlyArray<{ readonly name: string; readonly path: string }>;
-}
+import { useCreateProjectDialogController } from "./hooks/use-create-project-dialog-controller";
 
 interface CreateProjectDialogProps {
   readonly open: boolean;
@@ -23,141 +17,27 @@ interface CreateProjectDialogProps {
   readonly onCreate: (input: CreateProjectInput) => void;
 }
 
-interface FolderPayload {
-  readonly path?: string | null;
-  readonly name?: string;
-  readonly error?: string;
-}
-
-function pathName(path: string): string {
-  const segments = path.replace(/[\\/]+$/g, "").split(/[\\/]/).filter(Boolean);
-  return segments.at(-1) ?? path;
-}
-
-async function readFolderPayload(response: Response): Promise<FolderPayload> {
-  const payload = (await response.json()) as unknown;
-  return typeof payload === "object" && payload !== null ? (payload as FolderPayload) : {};
-}
-
 export const CreateProjectDialog = observer(function CreateProjectDialog({ open, defaultProfile, onClose, onCreate }: CreateProjectDialogProps) {
   const { t } = useI18n();
   const theme = useTheme();
   // Fill the screen on phones — a tiny floating popover was unusable there.
   const fullScreen = useMediaQuery(theme.breakpoints.down("sm"));
-  const [store] = useState(() => new CreateProjectDialogStore());
+  const { store, loadDirectory, openBrowser, goToTypedPath, goUp, chooseCurrentFolder, create } = useCreateProjectDialogController({ open, defaultProfile, onClose, onCreate, t });
   const {
     name,
     setName,
     path,
     setPath,
     error,
-    setError,
     busy,
-    setBusy,
     mode,
     setMode,
     browseCancelAction,
-    setBrowseCancelAction,
     listing,
-    setListing,
     listingBusy,
-    setListingBusy,
     pathInput,
     setPathInput,
-    reset,
   } = store;
-
-  const loadDirectory = async (target?: string) => {
-    setListingBusy(true);
-    setError(null);
-    try {
-      const response = await fetch("/api/list-directories", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(target ? { path: target } : {}),
-      });
-      const payload = (await response.json()) as DirectoryListing & { error?: string };
-      if (!response.ok) {
-        // Stay in the browser and surface the error so the user can fix the path
-        // inline (manual entry is the fallback when navigation hits a bad path).
-        setError(payload.error ?? t("folderPickerUnavailable"));
-        return;
-      }
-      setListing({ path: payload.path, parent: payload.parent ?? null, entries: payload.entries ?? [] });
-      setPathInput(payload.path);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught));
-    } finally {
-      setListingBusy(false);
-    }
-  };
-
-  useEffect(() => {
-    if (!open) {
-      return;
-    }
-    reset();
-    void loadDirectory();
-  }, [open]);
-
-  const openBrowser = () => {
-    setError(null);
-    setBrowseCancelAction("form");
-    setMode("browse");
-    void loadDirectory(path.trim() || undefined);
-  };
-
-  const goToTypedPath = () => {
-    void loadDirectory(pathInput.trim() || undefined);
-  };
-
-  const goUp = () => {
-    if (listing?.parent) {
-      void loadDirectory(listing.parent);
-    }
-  };
-
-  const chooseCurrentFolder = () => {
-    if (listing) {
-      setPath(listing.path);
-      setName((current) => current.trim() || pathName(listing.path));
-    }
-    setMode("form");
-  };
-
-  const create = async () => {
-    const trimmedPath = path.trim();
-    const trimmedName = name.trim();
-    if (!trimmedPath) {
-      setError(t("projectPathRequired"));
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    try {
-      const response = await fetch("/api/folder-info", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: trimmedPath }),
-      });
-      const payload = await readFolderPayload(response);
-      if (!response.ok || !payload.path) {
-        setError(payload.error ?? t("projectPathInvalid"));
-        return;
-      }
-      const resolvedName = trimmedName || payload.name || pathName(payload.path);
-      if (!resolvedName.trim()) {
-        setError(t("projectNameRequired"));
-        return;
-      }
-      onCreate({ name: resolvedName, path: payload.path, profile: defaultProfile });
-      onClose();
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught));
-    } finally {
-      setBusy(false);
-    }
-  };
 
   const submitOnEnter = (event: KeyboardEvent) => {
     if (event.key === "Enter" && !busy) {

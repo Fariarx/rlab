@@ -44,14 +44,27 @@ const Separator = styled("span")(({ theme }) => ({
   color: theme.palette.status.idle.main,
 }));
 
+function keyedCaps(caps: readonly string[]): readonly { readonly cap: string; readonly key: string; readonly order: number }[] {
+  const occurrences = new Map<string, number>();
+  const keyed: { readonly cap: string; readonly key: string; readonly order: number }[] = [];
+  let order = 0;
+  for (const cap of caps) {
+    const occurrence = occurrences.get(cap) ?? 0;
+    occurrences.set(cap, occurrence + 1);
+    keyed.push({ cap, key: occurrence === 0 ? cap : `${cap}#${occurrence + 1}`, order });
+    order += 1;
+  }
+  return keyed;
+}
+
 export function KeyHint({ keys, separator, className }: KeyHintProps) {
   const caps = typeof keys === "string" ? [keys] : keys;
 
   return (
     <Row className={className}>
-      {caps.map((cap, index) => (
-        <Fragment key={`${cap}-${index}`}>
-          {index > 0 && separator != null && <Separator>{separator}</Separator>}
+      {keyedCaps(caps).map(({ cap, key, order }) => (
+        <Fragment key={key}>
+          {order > 0 && separator != null && <Separator>{separator}</Separator>}
           <Cap>{cap}</Cap>
         </Fragment>
       ))}

@@ -8,25 +8,44 @@ import MicOffOutlinedIcon from "@mui/icons-material/MicOffOutlined";
 import VpnKeyOutlinedIcon from "@mui/icons-material/VpnKeyOutlined";
 import { Alert, Box, Chip, Dialog, Divider, Popover, Radio, Stack, Switch, Tab, Tabs, TextField, ToggleButton, ToggleButtonGroup, Tooltip, Typography, type SxProps, type Theme } from "@mui/material";
 import { observer } from "mobx-react-lite";
-import { type ReactNode, useCallback, useEffect, useState } from "react";
+import { type ReactNode, useCallback, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
-import type { AppSettings, AppSettingsPatch, DensityMode, Locale, ThemeMode } from "../workspace/app-settings";
-import { getVoiceProvider, VOICE_PROVIDERS, voiceLanguageForLocale, type VoiceProviderId } from "../../lib/voice-providers";
+import type { AppSettings, AppSettingsPatch, DensityMode, Locale, ThemeMode } from "../../lib/app-settings";
+import { getVoiceProvider, VOICE_PROVIDERS, type VoiceProviderId } from "../../lib/voice-providers";
 import {
   AGENTS,
-  type AgentDef,
   type AgentId,
   type AgentOption,
   type AgentProfile,
   AgentGlyph,
   agentStatusKey,
-  defaultProfileForAgent,
-  normalizeAgentProfile,
   useAgentStatus,
   useReloadAgentStatus,
 } from "../agent";
 import { Button, IconButton, StatusDot, TagSelect } from "../ui";
-import { AgentsSectionStore, BrowserPreviewSetupStore, SettingsDialogStore, VoiceSectionStore } from "./settings-dialog-store";
+import { SettingsDialogStore } from "./settings-dialog-store";
+import {
+  agentOperationNoticeMessage,
+  agentOperationNoticeSeverity,
+  appearanceDensityPatch,
+  appearanceReasoningAutoExpandPatch,
+  appearanceReduceMotionPatch,
+  appearanceShowTerminalPatch,
+  appearanceThemePatch,
+  defaultAgentProfileOptionSelection,
+  defaultAgentProfileSelection,
+  generalConfirmDestructiveActionsPatch,
+  generalDesktopNotificationsPatch,
+  generalLocalePatch,
+  generalPreviewServerHostPatch,
+  generalTelemetryPatch,
+  generalVoiceLanguagePatch,
+  generalVoiceProviderPatch,
+  voiceProviderUiState,
+} from "./settings-dialog-model";
+import { useAgentsSectionController } from "./use-agents-section-controller";
+import { useBrowserPreviewSetupController } from "./use-browser-preview-setup-controller";
+import { useVoiceSectionController } from "./use-voice-section-controller";
 
 interface SettingsDialogProps {
   readonly open: boolean;
@@ -95,45 +114,6 @@ function ProfileToggleRow({
   );
 }
 
-interface AgentConfigInfo {
-  readonly envVar: string;
-  readonly configured: boolean;
-}
-
-interface AgentConfigResponse {
-  readonly agents: Partial<Record<AgentId, AgentConfigInfo>>;
-}
-
-interface VoiceProviderConfigInfo {
-  readonly envVar: string;
-  readonly configured: boolean;
-}
-
-interface VoiceConfigResponse {
-  readonly providers: Partial<Record<VoiceProviderId, VoiceProviderConfigInfo>>;
-}
-
-type AgentOperationNotice =
-  | {
-      readonly type: "install-completed";
-      readonly agent: string;
-      readonly command: string;
-    }
-  | {
-      readonly type: "install-failed";
-      readonly agent: string;
-      readonly error: string;
-    }
-  | {
-      readonly type: "api-key-save-failed";
-      readonly agent: string;
-      readonly error: string;
-    }
-  | {
-      readonly type: "api-key-saved";
-      readonly agent: string;
-    };
-
 const AGENT_API_KEY_LABELS: Partial<Record<AgentId, string>> = {
   "claude-code": "Anthropic API key",
   codex: "OpenAI API key",
@@ -143,71 +123,11 @@ const AGENT_API_KEY_LABELS: Partial<Record<AgentId, string>> = {
   droid: "Factory API key",
 };
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function isAgentConfigResponse(value: unknown): value is AgentConfigResponse {
-  return isRecord(value) && isRecord(value.agents);
-}
-
-function isVoiceConfigResponse(value: unknown): value is VoiceConfigResponse {
-  return isRecord(value) && isRecord(value.providers);
-}
-
-async function readResponseError(response: Response, fallback: string): Promise<string> {
-  try {
-    const payload = (await response.json()) as unknown;
-    if (isRecord(payload) && typeof payload.error === "string" && payload.error.trim()) {
-      return payload.error;
-    }
-  } catch {
-    // The status code fallback below is the explicit error when the server did not return JSON.
-  }
-  return fallback;
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 /** Install/repair the Playwright Chromium that powers the in-app Preview tab. */
 const BrowserPreviewSetupRow = observer(function BrowserPreviewSetupRow() {
   const { t } = useI18n();
-  const [store] = useState(() => new BrowserPreviewSetupStore());
-  const { installed, setInstalled, installing, setInstalling, error, setError } = store;
-
-  const refreshStatus = useCallback(async () => {
-    try {
-      const response = await fetch("/api/health");
-      const payload = (await response.json()) as unknown;
-      setInstalled(isRecord(payload) && isRecord(payload.browser) ? payload.browser.installed === true : false);
-    } catch {
-      setInstalled(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void refreshStatus();
-  }, [refreshStatus]);
-
-  const installBrowser = () => {
-    setInstalling(true);
-    setError(null);
-    void (async () => {
-      try {
-        const response = await fetch("/api/playwright-install", { method: "POST" });
-        if (!response.ok) {
-          throw new Error(await readResponseError(response, `Playwright install failed (${response.status})`));
-        }
-        setInstalled(true);
-      } catch (err) {
-        setError(errorMessage(err));
-      } finally {
-        setInstalling(false);
-      }
-    })();
-  };
+  const { store, installBrowser } = useBrowserPreviewSetupController();
+  const { installed, installing, error } = store;
 
   const ready = installed === true;
   const statusLabel = installed === null ? t("browserPreviewChecking") : ready ? t("browserPreviewInstalled") : t("browserPreviewNotInstalled");
@@ -261,138 +181,28 @@ const AgentsSection = observer(function AgentsSection({
   const statusOf = useAgentStatus();
   const reloadAgentStatus = useReloadAgentStatus();
   const { t, agentStatus } = useI18n();
-  const [store] = useState(() => new AgentsSectionStore());
+  const { store, retryLoadConfig, saveApiKey, installAgent } = useAgentsSectionController(reloadAgentStatus);
   const {
     config,
-    setConfig,
-    configReloadToken,
-    setConfigReloadToken,
     configError,
-    setConfigError,
     draftKeys,
     setDraftKeys,
     savingKey,
-    setSavingKey,
     installing,
-    setInstalling,
     operationNotice,
-    setOperationNotice,
     keyPopover,
     setKeyPopover,
   } = store;
 
-  useEffect(() => {
-    let active = true;
-
-    async function loadConfig(): Promise<void> {
-      setConfigError(null);
-      try {
-        const response = await fetch("/api/agent-config");
-        if (!response.ok) {
-          throw new Error(await readResponseError(response, `Agent config load failed (${response.status})`));
-        }
-        const payload = (await response.json()) as unknown;
-        if (!isAgentConfigResponse(payload)) {
-          throw new Error("Agent config response is invalid.");
-        }
-        if (active) {
-          setConfig(payload);
-        }
-      } catch (error) {
-        if (active) {
-          setConfigError(errorMessage(error));
-        }
-      }
-    }
-
-    void loadConfig();
-    return () => {
-      active = false;
-    };
-  }, [configReloadToken]);
-
-  const saveApiKey = (agent: AgentDef) => {
-    const apiKey = draftKeys[agent.id]?.trim();
-    if (!apiKey) {
-      return;
-    }
-    setSavingKey(agent.id);
-    setOperationNotice(null);
-    void (async () => {
-      try {
-        const response = await fetch("/api/agent-config", {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ agent: agent.id, apiKey }),
-        });
-        if (!response.ok) {
-          throw new Error(await readResponseError(response, `Agent config save failed (${response.status})`));
-        }
-        setConfig((current) => ({
-          agents: {
-            ...current.agents,
-            [agent.id]: {
-              envVar: current.agents[agent.id]?.envVar ?? "",
-              configured: true,
-            },
-          },
-        }));
-        setDraftKeys((current) => ({ ...current, [agent.id]: "" }));
-        setOperationNotice({ type: "api-key-saved", agent: agent.name });
-        reloadAgentStatus();
-      } catch (error) {
-        setOperationNotice({ type: "api-key-save-failed", agent: agent.name, error: errorMessage(error) });
-      } finally {
-        setSavingKey(null);
-      }
-    })();
-  };
-
-  const installAgent = (agent: AgentDef) => {
-    setInstalling(agent.id);
-    setOperationNotice(null);
-    void (async () => {
-      try {
-        const response = await fetch("/api/agent-install", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ agent: agent.id }),
-        });
-        if (!response.ok) {
-          throw new Error(await readResponseError(response, `Agent install failed (${response.status})`));
-        }
-        const payload = (await response.json()) as unknown;
-        if (!isRecord(payload) || typeof payload.command !== "string" || !payload.command.trim()) {
-          throw new Error("Agent install response did not include command.");
-        }
-        setOperationNotice({ type: "install-completed", agent: agent.name, command: payload.command });
-        reloadAgentStatus();
-      } catch (error) {
-        setOperationNotice({ type: "install-failed", agent: agent.name, error: errorMessage(error) });
-      } finally {
-        setInstalling(null);
-      }
-    })();
-  };
-
   const selectDefaultAgent = (agent: AgentId) => {
-    onDefaultProfileChange(defaultProfile.agent === agent ? normalizeAgentProfile(defaultProfile) : defaultProfileForAgent(agent));
+    onDefaultProfileChange(defaultAgentProfileSelection(defaultProfile, agent));
   };
 
   const selectDefaultProfileOption = (agent: AgentId, patch: Partial<Omit<AgentProfile, "agent">>) => {
-    onDefaultProfileChange(normalizeAgentProfile({ ...defaultProfile, agent, ...patch }, agent));
+    onDefaultProfileChange(defaultAgentProfileOptionSelection(defaultProfile, agent, patch));
   };
 
-  const operationMessage =
-    operationNotice?.type === "install-completed"
-      ? t("agentInstallCompleted", { agent: operationNotice.agent, command: operationNotice.command })
-      : operationNotice?.type === "install-failed"
-        ? t("agentInstallFailed", { agent: operationNotice.agent, error: operationNotice.error })
-        : operationNotice?.type === "api-key-save-failed"
-          ? t("agentApiKeySaveFailed", { agent: operationNotice.agent, error: operationNotice.error })
-          : operationNotice?.type === "api-key-saved"
-            ? t("apiKeySaved", { agent: operationNotice.agent })
-          : null;
+  const operationMessage = agentOperationNoticeMessage(operationNotice, t);
 
   return (
     <Stack spacing={1}>
@@ -403,7 +213,7 @@ const AgentsSection = observer(function AgentsSection({
         <Alert
           severity="error"
           action={
-            <Button size="small" variant="text" onClick={() => setConfigReloadToken((current) => current + 1)}>
+            <Button size="small" variant="text" onClick={retryLoadConfig}>
               {t("retryAgentConfig")}
             </Button>
           }
@@ -412,7 +222,7 @@ const AgentsSection = observer(function AgentsSection({
         </Alert>
       )}
       {operationMessage && (
-        <Alert severity={operationNotice?.type === "install-completed" || operationNotice?.type === "api-key-saved" ? "success" : "error"}>
+        <Alert severity={agentOperationNoticeSeverity(operationNotice)}>
           {operationMessage}
         </Alert>
       )}
@@ -560,8 +370,8 @@ function AppearanceSection({ settings, onSettingsChange }: Pick<SettingsDialogPr
   const { t } = useI18n();
   const mode = settings.appearance.theme;
   const density = settings.appearance.density;
-  const setTheme = (theme: ThemeMode) => onSettingsChange({ appearance: { theme } });
-  const setDensity = (nextDensity: DensityMode) => onSettingsChange({ appearance: { density: nextDensity } });
+  const setTheme = (theme: ThemeMode) => onSettingsChange(appearanceThemePatch(theme));
+  const setDensity = (nextDensity: DensityMode) => onSettingsChange(appearanceDensityPatch(nextDensity));
   return (
     <Stack divider={<Divider flexItem />}>
       <SettingRow
@@ -612,17 +422,17 @@ function AppearanceSection({ settings, onSettingsChange }: Pick<SettingsDialogPr
       <SettingRow
         title={t("reduceMotion")}
         description={t("reduceMotionDescription")}
-        control={<Switch checked={settings.appearance.reduceMotion} onChange={(e) => onSettingsChange({ appearance: { reduceMotion: e.target.checked } })} />}
+        control={<Switch checked={settings.appearance.reduceMotion} onChange={(e) => onSettingsChange(appearanceReduceMotionPatch(e.target.checked))} />}
       />
       <SettingRow
         title={t("showTerminal")}
         description={t("showTerminalDescription")}
-        control={<Switch checked={settings.appearance.showTerminal} onChange={(e) => onSettingsChange({ appearance: { showTerminal: e.target.checked } })} />}
+        control={<Switch checked={settings.appearance.showTerminal} onChange={(e) => onSettingsChange(appearanceShowTerminalPatch(e.target.checked))} />}
       />
       <SettingRow
         title={t("reasoningAutoExpand")}
         description={t("reasoningAutoExpandDescription")}
-        control={<Switch checked={settings.appearance.reasoningAutoExpand} onChange={(e) => onSettingsChange({ appearance: { reasoningAutoExpand: e.target.checked } })} />}
+        control={<Switch checked={settings.appearance.reasoningAutoExpand} onChange={(e) => onSettingsChange(appearanceReasoningAutoExpandPatch(e.target.checked))} />}
       />
     </Stack>
   );
@@ -631,7 +441,7 @@ function AppearanceSection({ settings, onSettingsChange }: Pick<SettingsDialogPr
 function GeneralSection({ settings, onSettingsChange }: Pick<SettingsDialogProps, "settings" | "onSettingsChange">) {
   const { t } = useI18n();
   const locale = settings.general.locale;
-  const setLocale = (nextLocale: Locale) => onSettingsChange({ general: { locale: nextLocale, voice: { ...settings.general.voice, language: voiceLanguageForLocale(nextLocale) } } });
+  const setLocale = (nextLocale: Locale) => onSettingsChange(generalLocalePatch(settings.general.voice, nextLocale));
   return (
     <Stack divider={<Divider flexItem />}>
       <SettingRow
@@ -653,9 +463,9 @@ function GeneralSection({ settings, onSettingsChange }: Pick<SettingsDialogProps
           </ToggleButtonGroup>
         }
       />
-      <SettingRow title={t("desktopNotifications")} description={t("desktopNotificationsDescription")} control={<Switch checked={settings.general.desktopNotifications} onChange={(e) => onSettingsChange({ general: { desktopNotifications: e.target.checked } })} />} />
-      <SettingRow title={t("confirmDestructive")} description={t("confirmDestructiveDescription")} control={<Switch checked={settings.general.confirmDestructiveActions} onChange={(e) => onSettingsChange({ general: { confirmDestructiveActions: e.target.checked } })} />} />
-      <SettingRow title={t("telemetry")} description={t("telemetryDescription")} control={<Switch checked={settings.general.telemetry} onChange={(e) => onSettingsChange({ general: { telemetry: e.target.checked } })} />} />
+      <SettingRow title={t("desktopNotifications")} description={t("desktopNotificationsDescription")} control={<Switch checked={settings.general.desktopNotifications} onChange={(e) => onSettingsChange(generalDesktopNotificationsPatch(e.target.checked))} />} />
+      <SettingRow title={t("confirmDestructive")} description={t("confirmDestructiveDescription")} control={<Switch checked={settings.general.confirmDestructiveActions} onChange={(e) => onSettingsChange(generalConfirmDestructiveActionsPatch(e.target.checked))} />} />
+      <SettingRow title={t("telemetry")} description={t("telemetryDescription")} control={<Switch checked={settings.general.telemetry} onChange={(e) => onSettingsChange(generalTelemetryPatch(e.target.checked))} />} />
       <SettingRow
         title={t("previewServerHost")}
         description={t("previewServerHostDescription")}
@@ -664,7 +474,7 @@ function GeneralSection({ settings, onSettingsChange }: Pick<SettingsDialogProps
             size="small"
             value={settings.general.previewServerHost}
             placeholder={t("previewServerHostPlaceholder")}
-            onChange={(e) => onSettingsChange({ general: { previewServerHost: e.target.value } })}
+            onChange={(e) => onSettingsChange(generalPreviewServerHostPatch(e.target.value))}
             slotProps={{ htmlInput: { "aria-label": t("previewServerHost"), spellCheck: false, autoCapitalize: "none", autoCorrect: "off" } }}
             sx={{ width: { xs: "100%", sm: "auto" }, minWidth: { sm: 240 }, "& .MuiInputBase-root": { fontFamily: (th) => th.custom.fonts.mono, fontSize: "0.82rem" } }}
           />
@@ -676,84 +486,27 @@ function GeneralSection({ settings, onSettingsChange }: Pick<SettingsDialogProps
 
 const VoiceSection = observer(function VoiceSection({ settings, onSettingsChange, onVoiceConfigChange }: Pick<SettingsDialogProps, "settings" | "onSettingsChange" | "onVoiceConfigChange">) {
   const { t } = useI18n();
-  const [store] = useState(() => new VoiceSectionStore());
+  const successMessage = useCallback((providerName: string) => t("voiceApiKeySaved", { provider: providerName }), [t]);
+  const failureMessage = useCallback((providerName: string, error: string) => t("voiceApiKeySaveFailed", { provider: providerName, error }), [t]);
+  const { store, retryLoadConfig, saveApiKey } = useVoiceSectionController({
+    onVoiceConfigChange,
+    successMessage,
+    failureMessage,
+  });
   const {
     config,
-    setConfig,
     configError,
-    setConfigError,
-    reloadToken,
-    setReloadToken,
     draftKeys,
     setDraftKeys,
     savingKey,
-    setSavingKey,
     notice,
-    setNotice,
     keyPopover,
     setKeyPopover,
   } = store;
 
-  useEffect(() => {
-    let active = true;
-    void (async () => {
-      setConfigError(null);
-      try {
-        const response = await fetch("/api/voice-config");
-        if (!response.ok) {
-          throw new Error(await readResponseError(response, `Voice config load failed (${response.status})`));
-        }
-        const payload = (await response.json()) as unknown;
-        if (!isVoiceConfigResponse(payload)) {
-          throw new Error("Voice config response is invalid.");
-        }
-        if (active) {
-          setConfig(payload);
-        }
-      } catch (error) {
-        if (active) {
-          setConfigError(errorMessage(error));
-        }
-      }
-    })();
-    return () => {
-      active = false;
-    };
-  }, [reloadToken]);
-
   const selectedProvider = settings.general.voice.provider;
-  const setProvider = (provider: VoiceProviderId) => onSettingsChange({ general: { voice: { ...settings.general.voice, provider } } });
-  const setLanguage = (language: string) => onSettingsChange({ general: { voice: { ...settings.general.voice, language } } });
-
-  const saveApiKey = (provider: VoiceProviderId) => {
-    const apiKey = draftKeys[provider]?.trim();
-    if (!apiKey) {
-      return;
-    }
-    setSavingKey(provider);
-    setNotice(null);
-    void (async () => {
-      try {
-        const response = await fetch("/api/voice-config", {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ provider, apiKey }),
-        });
-        if (!response.ok) {
-          throw new Error(await readResponseError(response, `Voice provider config save failed (${response.status})`));
-        }
-        const envVar = getVoiceProvider(provider).envVar ?? "";
-        setConfig((current) => ({ providers: { ...current.providers, [provider]: { envVar, configured: true } } }));
-        setDraftKeys((current) => ({ ...current, [provider]: "" }));
-        setNotice({ severity: "success", message: t("voiceApiKeySaved", { provider: getVoiceProvider(provider).name }) });
-        onVoiceConfigChange?.();
-      } catch (error) {
-        setNotice({ severity: "error", message: t("voiceApiKeySaveFailed", { provider: getVoiceProvider(provider).name, error: errorMessage(error) }) });
-      } finally {
-        setSavingKey(null);
-      }
-    })();
-  };
+  const setProvider = (provider: VoiceProviderId) => onSettingsChange(generalVoiceProviderPatch(settings.general.voice, provider));
+  const setLanguage = (language: string) => onSettingsChange(generalVoiceLanguagePatch(settings.general.voice, language));
 
   return (
     <Stack spacing={1.25}>
@@ -773,7 +526,7 @@ const VoiceSection = observer(function VoiceSection({ settings, onSettingsChange
         <Alert
           severity="error"
           action={
-            <Button size="small" variant="text" onClick={() => setReloadToken((current) => current + 1)}>
+            <Button size="small" variant="text" onClick={retryLoadConfig}>
               {t("retryAgentConfig")}
             </Button>
           }
@@ -783,10 +536,7 @@ const VoiceSection = observer(function VoiceSection({ settings, onSettingsChange
       )}
       {notice && <Alert severity={notice.severity}>{notice.message}</Alert>}
       {VOICE_PROVIDERS.map((provider) => {
-        const selected = selectedProvider === provider.id;
-        const configured = config.providers[provider.id]?.configured === true || provider.kind !== "cloud";
-        const status = provider.id === "none" ? "idle" : configured ? "ok" : "warn";
-        const statusLabel = provider.id === "none" ? t("voiceProviderDisabled") : configured ? t("configured") : t("apiKeyRequired");
+        const providerState = voiceProviderUiState({ config, provider, selectedProvider, t });
         return (
           <Stack
             key={provider.id}
@@ -796,11 +546,11 @@ const VoiceSection = observer(function VoiceSection({ settings, onSettingsChange
               alignItems: "center",
               p: 1.25,
               borderRadius: (theme) => `${theme.custom.radii.md}px`,
-              border: (theme) => `1px solid ${selected ? theme.palette.status.running.border : theme.custom.borders.subtle}`,
-              backgroundColor: (theme) => (selected ? theme.palette.status.running.soft : theme.custom.surfaces.s2),
+              border: (theme) => `1px solid ${providerState.selected ? theme.palette.status.running.border : theme.custom.borders.subtle}`,
+              backgroundColor: (theme) => (providerState.selected ? theme.palette.status.running.soft : theme.custom.surfaces.s2),
             }}
           >
-            <Box sx={{ display: "flex", color: selected ? "primary.main" : "text.secondary", flex: "0 0 auto", px: { xs: 0, sm: 1.5 } }}>
+            <Box sx={{ display: "flex", color: providerState.selected ? "primary.main" : "text.secondary", flex: "0 0 auto", px: { xs: 0, sm: 1.5 } }}>
               {provider.id === "none" ? (
                 <MicOffOutlinedIcon data-testid="voice-provider-none-icon" sx={{ fontSize: 28 }} />
               ) : (
@@ -812,7 +562,7 @@ const VoiceSection = observer(function VoiceSection({ settings, onSettingsChange
                 <Typography noWrap sx={{ fontSize: "0.85rem", fontWeight: 600, color: "text.primary" }}>
                   {provider.name}
                 </Typography>
-                {provider.kind === "cloud" && (
+                {providerState.showAlpha && (
                   <Chip
                     label={t("alphaVersion")}
                     size="small"
@@ -831,27 +581,26 @@ const VoiceSection = observer(function VoiceSection({ settings, onSettingsChange
                 )}
               </Stack>
               <Stack direction="row" spacing={0.75} sx={{ alignItems: "center" }}>
-                <StatusDot status={status} label={statusLabel} size="sm" pulse={false} />
+                <StatusDot status={providerState.status} label={providerState.statusLabel} size="sm" pulse={false} />
                 <Typography noWrap sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.7rem", color: "text.secondary" }}>
-                  {statusLabel}
-                  {provider.envVar ? ` · ${provider.envVar}` : ""}
+                  {providerState.statusDetail}
                 </Typography>
               </Stack>
               <Typography sx={{ mt: 0.25, fontSize: "0.72rem", color: "text.secondary" }}>{provider.languageHint}</Typography>
             </Box>
             <Stack direction="row" spacing={0.5} sx={{ alignItems: "center", flex: "0 0 auto" }}>
-              {provider.kind === "cloud" && (
-                <Tooltip title={configured ? t("apiKeyConfigured", { agent: provider.name }) : t("apiKey")}>
+              {providerState.showApiKey && (
+                <Tooltip title={providerState.configured ? t("apiKeyConfigured", { agent: provider.name }) : t("apiKey")}>
                   <IconButton
                     aria-label={t("voiceApiKeyFor", { provider: provider.name })}
                     onClick={(event) => setKeyPopover({ id: provider.id, anchor: event.currentTarget })}
-                    sx={configured ? { color: (theme) => theme.palette.status.ok.main } : undefined}
+                    sx={providerState.configured ? { color: (theme) => theme.palette.status.ok.main } : undefined}
                   >
                     <VpnKeyOutlinedIcon sx={{ fontSize: 17 }} />
                   </IconButton>
                 </Tooltip>
               )}
-              <Radio checked={selected} onChange={() => setProvider(provider.id)} size="small" aria-label={t("voiceMakeProvider", { provider: provider.name })} />
+              <Radio checked={providerState.selected} onChange={() => setProvider(provider.id)} size="small" aria-label={t("voiceMakeProvider", { provider: provider.name })} />
             </Stack>
           </Stack>
         );

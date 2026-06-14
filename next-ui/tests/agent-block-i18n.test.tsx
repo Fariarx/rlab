@@ -1,7 +1,7 @@
 import { fireEvent, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { AgentBlockRenderer } from "../src/components/agent";
-import { UserAvatar } from "../src/components/agent/parts";
+import { UserAvatar } from "../src/components/agent/blocks/parts";
 import { Toast } from "../src/components/ui";
 import { renderWithTheme } from "./util/render-with-theme";
 

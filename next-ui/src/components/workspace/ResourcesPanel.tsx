@@ -12,10 +12,9 @@ import { type ConversationResource, type ResourceKind, collectResources } from "
 import { localFileUrl } from "../../lib/external-url";
 import { normalizeClockLabel } from "../../lib/time-format";
 import type { ChatMessage } from "../agent";
-import { EmptyState } from "../ui";
-import { ImageLightbox } from "./ImageLightbox";
-import { useWorkspaceUi } from "./workspace-ui";
-import { ImageBannerStore, ResourceGroupStore, ResourcesPanelStore } from "./workspace-local-stores";
+import { EmptyState, ImageLightbox } from "../ui";
+import { useWorkspaceUi } from "../../lib/workspace-ui";
+import { ImageBannerStore, ResourceGroupStore, ResourcesPanelStore } from "./stores/workspace-local-stores";
 
 function KindIcon({ kind }: { readonly kind: ConversationResource["kind"] }) {
   const Icon = kind === "image" ? ImageOutlinedIcon : kind === "link" ? LinkIcon : DescriptionOutlinedIcon;

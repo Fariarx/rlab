@@ -1,6 +1,6 @@
 import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import { BrowserPreview } from "../src/components/workspace/BrowserPreview";
+import { BrowserPreview } from "../src/components/workspace/browser/BrowserPreview";
 import { renderWithTheme } from "./util/render-with-theme";
 
 function storageFromRecord(items: Record<string, string>): Storage {
@@ -57,6 +57,23 @@ function browserSnapshot(overrides: Partial<{
   };
 }
 
+function requestPath(url: string | URL | Request): string {
+  return typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+}
+
+function browserHealthInstalled(): Response {
+  return Response.json({ storage: { ok: true }, agents: { visible: [] }, browser: { installed: true } });
+}
+
+function browserPreviewFetch(snapshot: unknown) {
+  return vi.fn(async (url: string | URL | Request, _init?: RequestInit) => {
+    if (requestPath(url) === "/api/health") {
+      return browserHealthInstalled();
+    }
+    return Response.json(snapshot);
+  });
+}
+
 class MockEventSource {
   static instances: MockEventSource[] = [];
   readonly url: string | URL;
@@ -101,7 +118,7 @@ describe("BrowserPreview", () => {
 
   it("offers to install the Playwright browser when it is missing instead of a broken surface", async () => {
     const fetchMock = vi.fn(async (url: string | URL | Request) => {
-      const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+      const path = requestPath(url);
       if (path === "/api/health") {
         return Response.json({ storage: { ok: true }, agents: { visible: [] }, browser: { installed: false } });
       }
@@ -126,12 +143,7 @@ describe("BrowserPreview", () => {
   });
 
   it("keeps the live frame inside a compact browser chrome with a 250px minimum surface", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        Response.json(browserSnapshot()),
-      ),
-    );
+    vi.stubGlobal("fetch", browserPreviewFetch(browserSnapshot()));
 
     renderWithTheme(<BrowserPreview sessionId="test-session" active />);
 
@@ -161,12 +173,7 @@ describe("BrowserPreview", () => {
   it("navigates back and forward inside the iframe history stack without touching the parent page history", async () => {
     const parentBack = vi.spyOn(window.history, "back");
     const parentForward = vi.spyOn(window.history, "forward");
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        Response.json(browserSnapshot({ url: "http://localhost:3000/", title: "Local app" })),
-      ),
-    );
+    vi.stubGlobal("fetch", browserPreviewFetch(browserSnapshot({ url: "http://localhost:3000/", title: "Local app" })));
 
     renderWithTheme(<BrowserPreview sessionId="test-session" active />);
 
@@ -190,9 +197,7 @@ describe("BrowserPreview", () => {
   });
 
   it("does not send stale iframe storage while opening a different preview URL", async () => {
-    const fetchMock = vi.fn<typeof fetch>(async () =>
-      Response.json(browserSnapshot()),
-    );
+    const fetchMock = browserPreviewFetch(browserSnapshot());
     vi.stubGlobal("fetch", fetchMock);
 
     renderWithTheme(<BrowserPreview sessionId="test-session" active />);
@@ -228,7 +233,10 @@ describe("BrowserPreview", () => {
       { id: "tab-1", url: "http://localhost:3000/one", title: "One", active: false },
       { id: "tab-2", url: "http://localhost:3000/two", title: "Two", active: true },
     ];
-    const fetchMock = vi.fn<typeof fetch>(async (_url, init) => {
+    const fetchMock = vi.fn<typeof fetch>(async (url, init) => {
+      if (requestPath(url) === "/api/health") {
+        return browserHealthInstalled();
+      }
       const body = JSON.parse(String(init?.body ?? "{}")) as { readonly type?: string };
       if (body.type === "select-tab") {
         return Response.json(browserSnapshot({ activeTabId: "tab-2", url: "http://localhost:3000/two", title: "Two", tabs: secondTabs }));
@@ -257,12 +265,7 @@ describe("BrowserPreview", () => {
       { id: "tab-1", url: "http://localhost:3000/one", title: "One", active: false },
       { id: "tab-2", url: "http://localhost:3000/two", title: "Two", active: true },
     ];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        Response.json(browserSnapshot({ activeTabId: "tab-2", url: "http://localhost:3000/two", title: "Two", tabs })),
-      ),
-    );
+    vi.stubGlobal("fetch", browserPreviewFetch(browserSnapshot({ activeTabId: "tab-2", url: "http://localhost:3000/two", title: "Two", tabs })));
 
     renderWithTheme(<BrowserPreview sessionId="test-session" active />);
 
@@ -275,7 +278,7 @@ describe("BrowserPreview", () => {
   it("shows live browser activity events and the last agent click marker", async () => {
     MockEventSource.instances = [];
     vi.stubGlobal("EventSource", MockEventSource);
-    vi.stubGlobal("fetch", vi.fn(async () => Response.json(browserSnapshot({ url: "http://localhost:3000/", title: "Local app" }))));
+    vi.stubGlobal("fetch", browserPreviewFetch(browserSnapshot({ url: "http://localhost:3000/", title: "Local app" })));
     const onActivityEventsChange = vi.fn();
 
     renderWithTheme(<BrowserPreview sessionId="test-session" active onActivityEventsChange={onActivityEventsChange} />);
@@ -304,7 +307,7 @@ describe("BrowserPreview", () => {
   it("keeps the agent bridge stream live while the preview tab is hidden", async () => {
     MockEventSource.instances = [];
     vi.stubGlobal("EventSource", MockEventSource);
-    vi.stubGlobal("fetch", vi.fn(async () => Response.json(browserSnapshot())));
+    vi.stubGlobal("fetch", browserPreviewFetch(browserSnapshot()));
     const onActivityEventsChange = vi.fn();
 
     renderWithTheme(<BrowserPreview sessionId="test-session" active={false} bridgeActive onActivityEventsChange={onActivityEventsChange} />);
@@ -331,12 +334,7 @@ describe("BrowserPreview", () => {
   });
 
   it("shows dirty mirror freshness from the backend instead of claiming full sync", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        Response.json(browserSnapshot({ url: "http://localhost:3000/form", title: "Form", freshness: "dirty", freshnessReason: "iframe input" })),
-      ),
-    );
+    vi.stubGlobal("fetch", browserPreviewFetch(browserSnapshot({ url: "http://localhost:3000/form", title: "Form", freshness: "dirty", freshnessReason: "iframe input" })));
 
     renderWithTheme(<BrowserPreview sessionId="test-session" active />);
 
@@ -346,7 +344,10 @@ describe("BrowserPreview", () => {
 
   it("reports same-origin iframe edits to the mirror dirty endpoint", async () => {
     const fetchMock = vi.fn(async (url: string | URL | Request) => {
-      const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+      const path = requestPath(url);
+      if (path === "/api/health") {
+        return browserHealthInstalled();
+      }
       if (path === "/api/browser/dirty") {
         return Response.json(browserSnapshot({ url: "http://localhost:3000/form", freshness: "dirty", freshnessReason: "iframe input" }));
       }
@@ -378,7 +379,10 @@ describe("BrowserPreview", () => {
 
   it("does not mark a synced external iframe stale just because its DOM is cross-origin", async () => {
     const fetchMock = vi.fn(async (url: string | URL | Request) => {
-      const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+      const path = requestPath(url);
+      if (path === "/api/health") {
+        return browserHealthInstalled();
+      }
       if (path === "/api/browser/dirty") {
         throw new Error("external iframe load should not mark the mirror dirty");
       }
@@ -421,7 +425,7 @@ describe("BrowserPreview", () => {
       },
     });
     const { screenshot: _screenshot, ...bridgeState } = state;
-    vi.stubGlobal("fetch", vi.fn(async () => Response.json(bridgeState)));
+    vi.stubGlobal("fetch", browserPreviewFetch(bridgeState));
     const onActivityEventsChange = vi.fn();
 
     renderWithTheme(<BrowserPreview sessionId="test-session" active onActivityEventsChange={onActivityEventsChange} />);
@@ -436,7 +440,7 @@ describe("BrowserPreview", () => {
   it("replays live agent click, type, scroll, and eval actions into accessible iframe content", async () => {
     MockEventSource.instances = [];
     vi.stubGlobal("EventSource", MockEventSource);
-    vi.stubGlobal("fetch", vi.fn(async () => Response.json(browserSnapshot({ url: "http://localhost:3000/", title: "Local app" }))));
+    vi.stubGlobal("fetch", browserPreviewFetch(browserSnapshot({ url: "http://localhost:3000/", title: "Local app" })));
 
     renderWithTheme(<BrowserPreview sessionId="test-session" active />);
 
@@ -555,12 +559,7 @@ describe("BrowserPreview", () => {
 
   it("sends viewport annotations from the live iframe surface to the agent", async () => {
     const onSendAnnotation = vi.fn();
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        Response.json(browserSnapshot({ url: "http://localhost:3000/", title: "Local app" })),
-      ),
-    );
+    vi.stubGlobal("fetch", browserPreviewFetch(browserSnapshot({ url: "http://localhost:3000/", title: "Local app" })));
 
     renderWithTheme(<BrowserPreview sessionId="test-session" active onSendAnnotation={onSendAnnotation} />);
 
@@ -594,12 +593,7 @@ describe("BrowserPreview", () => {
   });
 
   it("shows compact annotation controls only after drag commit and anchors them below a top selection", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        Response.json(browserSnapshot({ url: "http://localhost:3000/", title: "Local app" })),
-      ),
-    );
+    vi.stubGlobal("fetch", browserPreviewFetch(browserSnapshot({ url: "http://localhost:3000/", title: "Local app" })));
 
     renderWithTheme(<BrowserPreview sessionId="test-session" active onSendAnnotation={vi.fn()} />);
 
@@ -633,12 +627,7 @@ describe("BrowserPreview", () => {
   });
 
   it("keeps pointer capture without forcing a custom cursor while drawing an annotation", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        Response.json(browserSnapshot({ url: "http://localhost:3000/", title: "Local app" })),
-      ),
-    );
+    vi.stubGlobal("fetch", browserPreviewFetch(browserSnapshot({ url: "http://localhost:3000/", title: "Local app" })));
 
     renderWithTheme(<BrowserPreview sessionId="test-session" active onSendAnnotation={vi.fn()} />);
 
@@ -672,12 +661,7 @@ describe("BrowserPreview", () => {
   });
 
   it("clears the current selection when switching annotation modes", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        Response.json(browserSnapshot({ url: "http://localhost:3000/", title: "Local app" })),
-      ),
-    );
+    vi.stubGlobal("fetch", browserPreviewFetch(browserSnapshot({ url: "http://localhost:3000/", title: "Local app" })));
 
     renderWithTheme(<BrowserPreview sessionId="test-session" active onSendAnnotation={vi.fn()} />);
 
@@ -711,12 +695,7 @@ describe("BrowserPreview", () => {
 
   it("sends picked page component details from the live iframe to the agent", async () => {
     const onSendAnnotation = vi.fn();
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        Response.json(browserSnapshot({ url: "http://localhost:3000/", title: "Local app" })),
-      ),
-    );
+    vi.stubGlobal("fetch", browserPreviewFetch(browserSnapshot({ url: "http://localhost:3000/", title: "Local app" })));
 
     renderWithTheme(<BrowserPreview sessionId="test-session" active onSendAnnotation={onSendAnnotation} />);
 

@@ -1,0 +1,148 @@
+import { conversationPreviewSnippet } from "../../../lib/conversation-preview";
+import { messageToPlainText } from "../message/message-actions";
+import { conversationStatusKey as statusToKey, type ChatMessage, type ConversationStatus, type ConversationSummary, type Project } from "../core/types";
+
+const ACTIVE_STATUS_PRIORITY: ReadonlySet<ConversationStatus> = new Set<ConversationStatus>(["running", "waiting", "error"]);
+const VISUAL_STATUS_SORT_RANK = {
+  ok: 0,
+  running: 1,
+  warn: 2,
+  error: 3,
+  info: 4,
+  idle: 5,
+} as const;
+
+export type ConversationListIconKind = "pin" | "project" | "chat";
+
+export interface ConversationListSection {
+  readonly idBase: string;
+  readonly label: string;
+  readonly conversations: readonly ConversationSummary[];
+  readonly baseDelay: number;
+  readonly iconKind: ConversationListIconKind;
+}
+
+export type ConversationListItem =
+  | {
+      readonly kind: "group";
+      readonly idBase: string;
+      readonly label: string;
+      readonly conversations: readonly ConversationSummary[];
+      readonly delay: number;
+      readonly iconKind: ConversationListIconKind;
+    }
+  | {
+      readonly kind: "conversation";
+      readonly conversation: ConversationSummary;
+      readonly delay: number;
+    }
+  | {
+      readonly kind: "empty";
+    };
+
+export function conversationMatches(conversation: ConversationSummary, query: string, threads: Readonly<Record<string, readonly ChatMessage[]>>): boolean {
+  const threadText = (threads[conversation.id] ?? []).map(messageToPlainText).join("\n");
+  const summaryText = conversationPreviewSnippet(threads[conversation.id] ?? [], 60) || conversation.snippet;
+  const archiveText = conversation.archived ? "\narchive archived архив" : "";
+  const searchable = `${conversation.title}\n${summaryText}${archiveText}\n${threadText}`.toLowerCase();
+  return searchable.includes(query);
+}
+
+export function visualStatusKey(conversation: ConversationSummary, hasWakeup: boolean) {
+  if (hasWakeup) {
+    return "warn" as const;
+  }
+  if (ACTIVE_STATUS_PRIORITY.has(conversation.status)) {
+    return statusToKey[conversation.status];
+  }
+  return statusToKey[conversation.status];
+}
+
+export function sortedConversationsByActivity(conversations: readonly ConversationSummary[], wakeupConversationIds: ReadonlySet<string>): readonly ConversationSummary[] {
+  return conversations
+    .map((conversation, index) => ({ conversation, index }))
+    .sort((left, right) => {
+      const leftRank = VISUAL_STATUS_SORT_RANK[visualStatusKey(left.conversation, wakeupConversationIds.has(left.conversation.id))];
+      const rightRank = VISUAL_STATUS_SORT_RANK[visualStatusKey(right.conversation, wakeupConversationIds.has(right.conversation.id))];
+      return leftRank - rightRank || left.index - right.index;
+    })
+    .map((entry) => entry.conversation);
+}
+
+export function visibleConversationSections({
+  projects,
+  chats,
+  wakeupConversationIds,
+  pinnedLabel,
+  chatsLabel,
+}: {
+  readonly projects: readonly Project[];
+  readonly chats: readonly ConversationSummary[];
+  readonly wakeupConversationIds: ReadonlySet<string>;
+  readonly pinnedLabel: string;
+  readonly chatsLabel: string;
+}): readonly ConversationListSection[] {
+  const pinned = sortedConversationsByActivity([...chats, ...projects.flatMap((project) => project.conversations)].filter((conversation) => conversation.pinned && !conversation.archived), wakeupConversationIds);
+  const visibleProjects = projects
+    .map((project) => ({
+      ...project,
+      conversations: sortedConversationsByActivity(project.conversations.filter((conversation) => !conversation.pinned && !conversation.archived), wakeupConversationIds),
+    }))
+    .filter((project) => project.conversations.length > 0);
+  const visibleChats = sortedConversationsByActivity(chats.filter((conversation) => !conversation.pinned && !conversation.archived), wakeupConversationIds);
+
+  const sections: ConversationListSection[] = [];
+  if (pinned.length > 0) {
+    sections.push({ idBase: "pinned-group", label: pinnedLabel, conversations: pinned, baseDelay: 0, iconKind: "pin" });
+  }
+
+  visibleProjects.forEach((project, index) => {
+    sections.push({
+      idBase: `project-group-${project.id}`,
+      label: project.name,
+      conversations: project.conversations,
+      baseDelay: (index + 1) * 120,
+      iconKind: "project",
+    });
+  });
+
+  if (visibleChats.length > 0) {
+    sections.push({
+      idBase: "chats-group",
+      label: chatsLabel,
+      conversations: visibleChats,
+      baseDelay: (visibleProjects.length + 1) * 120,
+      iconKind: "chat",
+    });
+  }
+
+  return sections;
+}
+
+export function buildConversationListItems(sections: readonly ConversationListSection[], collapsedGroups: ReadonlySet<string>): readonly ConversationListItem[] {
+  if (sections.length === 0) {
+    return [{ kind: "empty" }];
+  }
+
+  const items: ConversationListItem[] = [];
+  for (const section of sections) {
+    items.push({
+      kind: "group",
+      idBase: section.idBase,
+      label: section.label,
+      conversations: section.conversations,
+      delay: section.baseDelay,
+      iconKind: section.iconKind,
+    });
+    if (!collapsedGroups.has(section.idBase)) {
+      section.conversations.forEach((conversation, index) => {
+        items.push({ kind: "conversation", conversation, delay: section.baseDelay + index * 50 });
+      });
+    }
+  }
+  return items;
+}
+
+export function visibleConversationIds(items: readonly ConversationListItem[]): readonly string[] {
+  return items.flatMap((item) => (item.kind === "conversation" ? [item.conversation.id] : []));
+}

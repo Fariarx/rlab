@@ -62,8 +62,8 @@ export function AgentBlocksSection() {
             gridTemplateColumns: { xs: "1fr", md: "repeat(2, minmax(0, 1fr))" },
           }}
         >
-          {blocks.map((block, index) => (
-            <Stack key={`${block.kind}-${index}`} spacing={0.75} sx={{ minWidth: 0 }}>
+          {blocks.map((block) => (
+            <Stack key={block.kind} spacing={0.75} sx={{ minWidth: 0 }}>
               <Typography variant="microLabel" sx={{ color: "text.secondary" }}>
                 {block.kind}
               </Typography>

@@ -9,7 +9,7 @@
  * Palette/...) plus the per-component prop-override interfaces.
  */
 import type { CSSProperties } from "react";
-import type { DensityMode } from "../components/workspace/app-settings";
+import type { DensityMode } from "../lib/app-settings";
 import type { Borders, Fonts, Radii, StatusPalette, Surfaces } from "./tokens";
 
 interface CustomTokens {

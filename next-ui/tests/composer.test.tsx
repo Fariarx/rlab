@@ -2,7 +2,7 @@ import { act, fireEvent, screen, waitFor, within } from "@testing-library/react"
 import { createRef } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Composer, type ComposerHandle } from "../src/components/agent";
-import { voiceLevelCountFromWidth, voiceLevelsFromTimeDomainData } from "../src/components/agent/Composer";
+import { voiceLevelCountFromWidth, voiceLevelsFromTimeDomainData } from "../src/components/agent/composer/Composer";
 import { renderWithTheme } from "./util/render-with-theme";
 
 const originalMediaDevicesDescriptor = Object.getOwnPropertyDescriptor(navigator, "mediaDevices");

@@ -63,7 +63,7 @@ const terminalMock = vi.hoisted(() => {
 vi.mock("@xterm/xterm", () => ({ Terminal: terminalMock.FakeTerminal }));
 vi.mock("@xterm/addon-fit", () => ({ FitAddon: terminalMock.FakeFitAddon }));
 
-import { TerminalView } from "../src/components/workspace/TerminalView";
+import { TerminalView } from "../src/components/workspace/terminal/TerminalView";
 import { renderWithTheme } from "./util/render-with-theme";
 
 class FakeWebSocket {

@@ -1,19 +1,10 @@
 import SearchIcon from "@mui/icons-material/Search";
 import { Box, Dialog, DialogContent, DialogTitle, InputAdornment, Stack, TextField, Typography } from "@mui/material";
-import { observer } from "mobx-react-lite";
-import { useEffect, useMemo, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import { Button, KeyHint } from "../ui";
-import { CommandPaletteStore } from "./workspace-local-stores";
+import { type CommandPaletteItem, useCommandPaletteController } from "./hooks/use-command-palette-controller";
 
-export interface CommandPaletteItem {
-  readonly id: string;
-  readonly label: string;
-  readonly description?: string;
-  readonly keywords?: readonly string[];
-  readonly shortcut?: readonly string[];
-  readonly action: () => void;
-}
+export type { CommandPaletteItem } from "./hooks/use-command-palette-controller";
 
 interface CommandPaletteProps {
   readonly open: boolean;
@@ -21,55 +12,9 @@ interface CommandPaletteProps {
   readonly onClose: () => void;
 }
 
-function normalize(value: string): string {
-  return value.trim().toLocaleLowerCase();
-}
-
-function itemMatches(item: CommandPaletteItem, query: string): boolean {
-  if (!query) {
-    return true;
-  }
-
-  return [item.label, item.description, ...(item.keywords ?? [])].some((value) => value != null && normalize(value).includes(query));
-}
-
-export const CommandPalette = observer(function CommandPalette({ open, items, onClose }: CommandPaletteProps) {
+export function CommandPalette({ open, items, onClose }: CommandPaletteProps) {
   const { t } = useI18n();
-  const [store] = useState(() => new CommandPaletteStore());
-  const { query, setQuery, activeIndex, setActiveIndex } = store;
-  const normalizedQuery = normalize(query);
-
-  useEffect(() => {
-    if (open) {
-      setQuery("");
-      setActiveIndex(0);
-    }
-  }, [open]);
-
-  const visibleItems = useMemo(() => items.filter((item) => itemMatches(item, normalizedQuery)), [items, normalizedQuery]);
-  const activeItem = visibleItems[activeIndex] ?? visibleItems[0];
-  const listId = "command-palette-list";
-
-  useEffect(() => {
-    setActiveIndex(0);
-  }, [normalizedQuery]);
-
-  useEffect(() => {
-    if (activeIndex >= visibleItems.length) {
-      setActiveIndex(Math.max(visibleItems.length - 1, 0));
-    }
-  }, [activeIndex, visibleItems.length]);
-
-  const runCommand = (item: CommandPaletteItem) => {
-    item.action();
-    onClose();
-  };
-  const moveActive = (offset: -1 | 1) => {
-    if (visibleItems.length === 0) {
-      return;
-    }
-    setActiveIndex((current) => (current + offset + visibleItems.length) % visibleItems.length);
-  };
+  const { query, setQuery, activeIndex, setActiveIndex, activeItem, visibleItems, listId, moveActive, runCommand } = useCommandPaletteController({ open, items, onClose });
 
   return (
     <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth aria-labelledby="command-palette-title">
@@ -160,4 +105,4 @@ export const CommandPalette = observer(function CommandPalette({ open, items, on
       </DialogContent>
     </Dialog>
   );
-});
+}

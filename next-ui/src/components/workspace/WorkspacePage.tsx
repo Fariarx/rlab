@@ -31,15 +31,11 @@ import {
   Typography,
 } from "@mui/material";
 import { observer } from "mobx-react-lite";
-import { type DragEvent, type MouseEvent as ReactMouseEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { I18nProvider, useI18n } from "../../i18n/I18nProvider";
-import { normalizeExternalUrl } from "../../lib/external-url";
 import { contextWindowForAgentProfile } from "../../lib/model-context";
 import type { HashRoute } from "../../lib/use-hash-route";
-import { getVoiceProvider } from "../../lib/voice-providers";
 import {
-  type AgentProfile,
-  type ApprovalDecision,
   AGENTS,
   AgentBadge,
   AgentPicker,
@@ -48,72 +44,59 @@ import {
   Conversation,
   ConversationList,
   ConversationSearch,
-  DEFAULT_AGENT_OPTION_ID,
   DEFAULT_PROFILE,
-  getAgent,
-  normalizeAgentProfile,
-  messageToPlainText,
-  type ChatMessage,
-  type ComposerDraft,
-  type ConversationStatus,
   type ConversationView,
-  type ReviewCommentEntry,
   useAgentCliInfo,
   useAgentStatus,
   useAgentStatusError,
   useAgentStatusLive,
   useReloadAgentStatus,
   accessModeForAgentProfile,
-  agentProfileEquals,
 } from "../agent";
-import { dropIn } from "../agent/anim";
+import { dropIn } from "../agent/core/anim";
 import { SettingsDialog } from "../settings/SettingsDialog";
 import { Button, EmptyState, IconButton, useToast } from "../ui";
-import { CommandPalette, type CommandPaletteItem } from "./CommandPalette";
+import { CommandPalette } from "./CommandPalette";
 import { CreateProjectDialog } from "./CreateProjectDialog";
-import { BrowserPreview } from "./BrowserPreview";
-import { type DiffCommentApi, GitView } from "./GitPanel";
+import { BrowserPreview } from "./browser/BrowserPreview";
+import { GitView } from "./git/GitPanel";
 import { ResourcesPanel } from "./ResourcesPanel";
-import { TerminalView } from "./TerminalView";
-import { WorkspaceUiProvider, type WorkspaceUiApi } from "./workspace-ui";
-import { DEFAULT_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, normalizeSidebarWidth } from "./app-settings";
+import { TerminalView } from "./terminal/TerminalView";
+import { WorkspaceUiProvider } from "../../lib/workspace-ui";
+import { DEFAULT_SIDEBAR_WIDTH, normalizeSidebarWidth } from "../../lib/app-settings";
 import { conversationProfile, type Workspace, useWorkspace } from "./use-workspace";
-import {
-  CLI_UPDATE_POLL_MS,
-  clearCliUpdateForAgent,
-  createWorktree,
-  deleteWakeup,
-  loadAgentLimits,
-  loadCliUpdates,
-  loadRlabPlugins,
-  loadVoiceConfig,
-  loadWakeups,
-  mergeWorktree,
-  updateAgentCli,
-  wakeupLabel,
-  type CliUpdateInfo,
-} from "./workspace-page-api";
+import { useSidebarResize } from "./hooks/use-sidebar-resize";
 import {
   buildComposerLabel,
-  composerHistoryText,
   conversationHasActiveWork,
-  firstVisibleConversationId,
   latestAgentDiffBlocks,
-  liveModesOrCatalog,
-  normalizeConversationView,
-  routeForConversation,
-  runNotificationForStatus,
-  runToastForStatus,
-  showDesktopNotification,
   workspaceConversations,
 } from "./workspace-page-helpers";
-import { WorkspacePageStore } from "./workspace-page-store";
+import { composerMessageHistory, composerVoiceProvider, scheduledWakeupComposerTags } from "./models/workspace-composer-model";
+import { WorkspacePageStore } from "./stores/workspace-page-store";
+import { useRunNotifications } from "./hooks/use-run-notifications";
+import { usePaneFileDrop } from "./hooks/use-pane-file-drop";
+import { useCliUpdates } from "./hooks/use-cli-updates";
+import { useWakeups } from "./hooks/use-wakeups";
+import { useProjectFiles } from "./hooks/use-project-files";
+import { useAgentLimits } from "./hooks/use-agent-limits";
+import { useVoiceConfig } from "./hooks/use-voice-config";
+import { useRlabPlugins } from "./hooks/use-rlab-plugins";
+import { useGitWorktreeControl } from "./git/use-git-worktree-control";
+import { useAppVersionReload } from "./hooks/use-app-version-reload";
+import { useWorkspaceViewControl } from "./hooks/use-workspace-view-control";
+import { useWorkspaceUiApi } from "./hooks/use-workspace-ui-api";
+import { useComposerDockHeight } from "./hooks/use-composer-dock-height";
+import { useWorkspaceRouteSync } from "./hooks/use-workspace-route-sync";
+import { useWorkspaceCommandItems } from "./hooks/use-workspace-command-items";
+import { useReviewComments } from "./hooks/use-review-comments";
+import { useComposerDraftPersistence } from "./hooks/use-composer-draft-persistence";
+import { useWorkspaceConversationActions } from "./hooks/use-workspace-conversation-actions";
+import { useWorkspaceAgentProfileController } from "./hooks/use-workspace-agent-profile-controller";
+import { useWorkspaceLoadErrorToast } from "./hooks/use-workspace-load-error-toast";
+import { useCommandPaletteShortcut } from "./hooks/use-command-palette-shortcut";
 
-const COMPOSER_DRAFT_SAVE_DELAY_MS = 350;
-const EMPTY_COMPOSER_DRAFT: ComposerDraft = { text: "", attachments: [] };
 const AGENT_AUTO_CONFIRM_AGENTS = new Set(["claude-code", "codex", "gemini"]);
-const AGENT_LIMIT_REFRESH_MIN_INTERVAL_MS = 60_000;
-const AGENT_LIMIT_ON_DEMAND_REFRESH_AGENTS = new Set(["claude-code", "codex", "gemini"]);
 
 // The sidebar title bar and the chat pane header share one fixed height so the
 // two columns line up across the top.
@@ -164,7 +147,6 @@ export const WorkspacePageView = observer(function WorkspacePageView({
   const agentStatusLive = useAgentStatusLive();
   const agentStatusError = useAgentStatusError();
   const reloadAgentStatus = useReloadAgentStatus();
-  const lastWorkspaceErrorToast = useRef<string | null>(null);
 
   const [pageStore] = useState(() => new WorkspacePageStore(ws.settings.agents.defaultProfile ?? DEFAULT_PROFILE, normalizeSidebarWidth(ws.settings.appearance.sidebarWidth)));
   const {
@@ -190,16 +172,6 @@ export const WorkspacePageView = observer(function WorkspacePageView({
     setGitFocus,
     gitReloadSignal,
     setGitReloadSignal,
-    worktreeBusy,
-    setWorktreeBusy,
-    cliUpdateSnapshot,
-    setCliUpdateSnapshot,
-    cliUpdateBusyAgent,
-    setCliUpdateBusyAgent,
-    voiceConfig,
-    setVoiceConfig,
-    registeredPlugins,
-    setRegisteredPlugins,
     gitUnstaged,
     setGitUnstaged,
     setComposerTagsHeight,
@@ -209,8 +181,6 @@ export const WorkspacePageView = observer(function WorkspacePageView({
     setBrowserActivityEvents,
     reviewComments,
     setReviewComments,
-    mentionableFiles,
-    setMentionableFiles,
     drawerOpen,
     setDrawerOpen,
     sidebarCollapsed,
@@ -223,629 +193,124 @@ export const WorkspacePageView = observer(function WorkspacePageView({
     setConfirmDelete,
     runKey,
     setRunKey,
-    paneDragging,
-    setPaneDragDepth,
-    wakeups,
-    setWakeups,
-    agentLimits,
-    setAgentLimits,
-    agentLimitsLoaded,
-    setAgentLimitsLoaded,
-    agentLimitRefreshing,
-    setAgentLimitRefreshing,
-    agentLimitRefreshErrors,
-    setAgentLimitRefreshErrors,
     contentBottomInset,
     composerVisible,
-    wakeupConversationIds,
   } = pageStore;
-  const composerDockRef = useRef<HTMLDivElement | null>(null);
   const showTerminal = ws.settings.appearance.showTerminal;
-  const showView = useCallback((next: ConversationView) => {
-    setView(next);
-    if (ws.find(ws.selectedId)) {
-      ws.setConversationView(ws.selectedId, next);
-    }
-  }, [ws]);
-  // Pending code-review comments, attached to diff lines in the Git view and sent
-  // to the thread as one block (without starting an agent run).
-  const reviewSeq = useRef(0);
-  const review: DiffCommentApi = {
-    comments: reviewComments,
-    onAddComment: (file, line, lineText, body) =>
-      setReviewComments((prev) => [...prev, { id: `rc-${++reviewSeq.current}`, file, line, lineText, body }]),
-    onUpdateComment: (id, body) => setReviewComments((prev) => prev.map((comment) => (comment.id === id ? { ...comment, body } : comment))),
-    onDeleteComment: (id) => setReviewComments((prev) => prev.filter((comment) => comment.id !== id)),
-  };
-  const sendReviewComments = () => {
-    if (selected && reviewComments.length > 0) {
-      ws.addReviewComments(ws.selectedId, reviewComments);
-      setReviewComments([]);
-      showView("chat");
-    }
-  };
-  const composerRef = useRef<ComposerHandle | null>(null);
-  const notifiableRuns = useRef(new Set<string>());
-  const previousStatuses = useRef(new Map<string, ConversationStatus>());
-  const sidebarWidthRef = useRef(sidebarWidth);
-  const sidebarShellRef = useRef<HTMLDivElement | null>(null);
-  const sidebarInnerRef = useRef<HTMLDivElement | null>(null);
-  const resizeFrameRef = useRef<number | null>(null);
-  const pendingDraftSaves = useRef(new Map<string, ReturnType<typeof setTimeout>>());
-  const pendingDraftValues = useRef(new Map<string, ComposerDraft>());
-
   const selected = ws.find(ws.selectedId);
   const messages = ws.threads[ws.selectedId] ?? [];
-  const selectedWakeups = pageStore.selectedWakeups(selected?.id);
-  const agentLimitRefreshAttemptRef = useRef<Record<string, number>>({});
-  const refreshAgentLimits = useCallback((agentId: string | undefined, requestRefresh: boolean) => {
-    const canRequestRefresh = Boolean(requestRefresh && agentId && AGENT_LIMIT_ON_DEMAND_REFRESH_AGENTS.has(agentId));
-    if (requestRefresh && agentId && !canRequestRefresh) {
-      setAgentLimitRefreshErrors((current) => ({ ...current, [agentId]: undefined }));
-    }
-    if (canRequestRefresh && agentId) {
-      const lastAttempt = agentLimitRefreshAttemptRef.current[agentId] ?? 0;
-      if (Date.now() - lastAttempt < AGENT_LIMIT_REFRESH_MIN_INTERVAL_MS) {
-        return;
-      }
-      agentLimitRefreshAttemptRef.current = { ...agentLimitRefreshAttemptRef.current, [agentId]: Date.now() };
-      setAgentLimitRefreshing((current) => ({ ...current, [agentId]: true }));
-      setAgentLimitRefreshErrors((current) => ({ ...current, [agentId]: undefined }));
-    }
+  const persistConversationView = useCallback((conversationId: string, next: ConversationView) => {
+    ws.setConversationView(conversationId, next);
+  }, [ws]);
+  const findConversation = useCallback((conversationId: string) => ws.find(conversationId), [ws]);
+  const selectConversation = useCallback((conversationId: string) => ws.select(conversationId), [ws]);
+  const showView = useWorkspaceViewControl({
+    selectedConversationId: selected?.id,
+    selectedView: selected?.view,
+    terminalEnabled: showTerminal,
+    view,
+    setView,
+    persistConversationView,
+  });
+  const { review, sendReviewComments } = useReviewComments({
+    comments: reviewComments,
+    setComments: setReviewComments,
+    selectedConversationId: selected?.id,
+    addReviewComments: (conversationId, comments) => ws.addReviewComments(conversationId, comments),
+    showChat: () => showView("chat"),
+  });
+  const composerRef = useRef<ComposerHandle | null>(null);
+  const composerDraftPersistence = useComposerDraftPersistence({ updateComposerDraft: ws.updateComposerDraft });
+  const paneFileDrop = usePaneFileDrop({
+    addFiles: (files) => composerRef.current?.addFiles([...files]),
+  });
+  const { sidebarShellRef, sidebarInnerRef, startSidebarResize } = useSidebarResize({
+    sidebarCollapsed,
+    sidebarWidth,
+    isResizingSidebar,
+    persistedSidebarWidth: ws.settings.appearance.sidebarWidth,
+    setSidebarWidth,
+    setIsResizingSidebar,
+    persistSidebarWidth: (width) => ws.updateSettings({ appearance: { sidebarWidth: width } }),
+  });
 
-    loadAgentLimits(agentId, canRequestRefresh)
-      .then((snapshot) => {
-        setAgentLimits(snapshot.limits);
-        setAgentLimitsLoaded(true);
-        if (agentId) {
-          setAgentLimitRefreshErrors((current) => ({ ...current, [agentId]: snapshot.refreshError }));
-        }
-      })
-      .catch((error: unknown) => {
-        setAgentLimitsLoaded(true);
-        if (agentId) {
-          setAgentLimitRefreshErrors((current) => ({
-            ...current,
-            [agentId]: error instanceof Error ? error.message : t("limitsRefreshError"),
-          }));
-        } else {
-          toast({ message: error instanceof Error ? error.message : t("limitsRefreshError"), severity: "error", duration: 3000 });
-        }
-      })
-      .finally(() => {
-        if (agentId) {
-          setAgentLimitRefreshing((current) => ({ ...current, [agentId]: false }));
-        }
-      });
-  }, [t, toast]);
-  const refreshVoiceConfig = useCallback(() => {
-    loadVoiceConfig()
-      .then(setVoiceConfig)
-      .catch((error: unknown) => {
-        setVoiceConfig({ providers: {} });
-        toast({ message: error instanceof Error ? error.message : String(error), severity: "error", duration: 3000 });
-      });
-  }, [toast]);
-  // Sent user messages (oldest first) for ArrowUp/ArrowDown recall in the
-  // composer; attachment blocks / file-link markdown are stripped to the visible
-  // text, and blank entries dropped.
-  const messageHistory = useMemo(
-    () =>
-      messages
-        .filter((message) => message.role === "user")
-        .map((message) => composerHistoryText(message.text ?? ""))
-        .filter((text) => text.length > 0),
-    [messages],
-  );
+  const wakeupsController = useWakeups({
+    selectedConversationId: selected?.id,
+    selectedStatus: selected?.status,
+    messageCount: messages.length,
+    toast,
+  });
+  const conversations = useMemo(() => workspaceConversations({ chats: ws.chats, projects: ws.projects }), [ws.chats, ws.projects]);
+  const runNotifications = useRunNotifications({
+    conversations,
+    selectedId: ws.selectedId,
+    desktopNotifications: ws.settings.general.desktopNotifications,
+    t,
+    toast,
+  });
+  const cliUpdates = useCliUpdates({
+    reloadAgentStatus,
+    t,
+    toast,
+  });
+  const agentLimits = useAgentLimits({ t, toast });
+  const voiceConfig = useVoiceConfig({ toast });
+  const registeredPlugins = useRlabPlugins({ toast });
+  const messageHistory = useMemo(() => composerMessageHistory(messages), [messages]);
   const selectedHasActiveWork = conversationHasActiveWork(selected, messages);
   const lastTurnDiffs = useMemo(() => latestAgentDiffBlocks(messages), [messages]);
   const composerDraft = ws.composerDrafts[ws.selectedId] ?? { text: "", attachments: [] };
-  const selectedVoiceProvider = getVoiceProvider(ws.settings.general.voice.provider);
-  const composerVoiceProvider =
-    selectedVoiceProvider.kind === "none"
-      ? undefined
-      : {
-          id: selectedVoiceProvider.id,
-          name: selectedVoiceProvider.name,
-          kind: selectedVoiceProvider.kind,
-          language: ws.settings.general.voice.language,
-          configured: selectedVoiceProvider.kind === "cloud" ? voiceConfig.providers[selectedVoiceProvider.id]?.configured === true : true,
-        };
+  const voiceProvider = useMemo(
+    () => composerVoiceProvider(ws.settings.general.voice, voiceConfig.config),
+    [voiceConfig.config, ws.settings.general.voice],
+  );
+  const scheduledWakeups = useMemo(
+    () => scheduledWakeupComposerTags({ locale, removeWakeup: wakeupsController.removeWakeup, wakeups: wakeupsController.selectedWakeups }),
+    [locale, wakeupsController.removeWakeup, wakeupsController.selectedWakeups],
+  );
   const selectedCwd = ws.cwdOf(ws.selectedId);
+  const mentionableFiles = useProjectFiles({ cwd: selectedCwd, toast });
   const terminalCwd = selected ? (selectedCwd ?? ".") : undefined;
-  useEffect(() => {
-    refreshAgentLimits(undefined, false);
-  }, [refreshAgentLimits]);
-
-  useEffect(() => {
-    refreshVoiceConfig();
-  }, [refreshVoiceConfig]);
-
-  useEffect(() => {
-    let canceled = false;
-    loadRlabPlugins()
-      .then((plugins) => {
-        if (!canceled) {
-          setRegisteredPlugins(plugins);
-        }
-      })
-      .catch((error: unknown) => {
-        if (!canceled) {
-          setRegisteredPlugins([]);
-          toast({ message: error instanceof Error ? error.message : String(error), severity: "error", duration: 3000 });
-        }
-      });
-    return () => {
-      canceled = true;
-    };
-  }, [toast]);
-
-  useEffect(() => {
-    let canceled = false;
-    const refresh = () => {
-      loadWakeups()
-        .then((items) => {
-          if (!canceled) {
-            setWakeups(items);
-          }
-        })
-        .catch(() => {
-          if (!canceled) {
-            setWakeups([]);
-          }
-        });
-    };
-    refresh();
-    const timer = window.setInterval(refresh, 5000);
-    return () => {
-      canceled = true;
-      window.clearInterval(timer);
-    };
-  }, [selected?.id, selected?.status, messages.length]);
-  const removeWakeup = (wakeupId: string) => {
-    if (!selected) {
-      return;
-    }
-    const conversationId = selected.id;
-    setWakeups((current) => current.filter((wakeup) => wakeup.id !== wakeupId));
-    deleteWakeup(conversationId, wakeupId).catch((error: unknown) => {
-      loadWakeups()
-        .then((items) => setWakeups(items))
-        .catch(() => setWakeups([]));
-      toast({ message: error instanceof Error ? error.message : String(error), severity: "error", duration: 3000 });
-    });
-  };
   const sendBrowserAnnotation = (message: string) => {
     if (!selected) {
       return;
     }
-    notifiableRuns.current.add(ws.selectedId);
+    runNotifications.mark(ws.selectedId);
     ws.sendMessage(ws.selectedId, message);
     showView("chat");
   };
-  // Workspace navigation handed to deeply nested chat components (markdown links,
-  // resource rows) through context — see workspace-ui.tsx.
-  const uiApi = useMemo<WorkspaceUiApi>(
-    () => ({
-      openPreview: (url: string) => {
-        // Bare-domain links (vitest.dev/api) must be upgraded to an absolute URL
-        // before the browser preview, which only accepts http(s)/about:blank.
-        const target = normalizeExternalUrl(url) ?? url;
-        setBrowserOpenRequest((prev) => ({ url: target, nonce: prev.nonce + 1 }));
-        showView("preview");
-      },
-      openGitFile: (file: string) => {
-        setGitFocus((prev) => ({ path: file, nonce: prev.nonce + 1 }));
-        showView("git");
-      },
-    }),
-    [showView],
-  );
+  const uiApi = useWorkspaceUiApi({ showView, setBrowserOpenRequest, setGitFocus });
   const activeCwd = selectedCwd;
   const headerTitle = selected?.title ?? t("noConversation");
   const profileAccessMode = accessModeForAgentProfile(profile);
   const selectedBasePath = ws.basePathOf(ws.selectedId);
-  // Worktree controls for the Git tab. Only for a real project conversation (a
-  // base repo path exists); agent run permissions are now selected per chat.
-  const worktreeApi = selected && selectedBasePath
-    ? {
-        active: true,
-        inWorktree: Boolean(selected.worktreePath),
-        busy: worktreeBusy,
-        onCreate: () => {
-          const conversationId = selected.id;
-          const basePath = selectedBasePath;
-          setWorktreeBusy(true);
-          createWorktree(basePath)
-            .then(({ path }) => {
-              ws.setWorktree(conversationId, path);
-              setGitReloadSignal((value) => value + 1);
-              toast({ message: t("worktreeCreatedToast"), severity: "success", duration: 2500 });
-            })
-            .catch((error) => toast({ message: error instanceof Error ? error.message : String(error), severity: "error", duration: 3500 }))
-            .finally(() => setWorktreeBusy(false));
-        },
-        onMerge: () => {
-          const conversationId = selected.id;
-          const basePath = selectedBasePath;
-          const worktreePath = selected.worktreePath;
-          if (!worktreePath) {
-            return;
-          }
-          setWorktreeBusy(true);
-          mergeWorktree(basePath, worktreePath)
-            .then(() => {
-              ws.setWorktree(conversationId, undefined);
-              setGitReloadSignal((value) => value + 1);
-              toast({ message: t("worktreeMergedToast"), severity: "success", duration: 2500 });
-            })
-            .catch((error) => toast({ message: error instanceof Error ? error.message : String(error), severity: "error", duration: 4000 }))
-            .finally(() => setWorktreeBusy(false));
-        },
-      }
-    : undefined;
+  const worktreeApi = useGitWorktreeControl({
+    conversationId: selected?.id,
+    basePath: selectedBasePath,
+    worktreePath: selected?.worktreePath,
+    setWorktree: (conversationId, worktreePath) => ws.setWorktree(conversationId, worktreePath),
+    reloadGit: () => setGitReloadSignal((value) => value + 1),
+    t,
+    toast,
+  });
   const mode = ws.settings.appearance.theme;
-  const routeKind = route?.kind;
-  const routeProjectId = route?.kind === "project" ? route.projectId : undefined;
-  const routeConversationId = route?.kind === "chat" || route?.kind === "project" ? route.conversationId : undefined;
   const noAgentsAvailable = agentStatusLive && AGENTS.every((agent) => statusOf(agent.id) !== "available" && statusOf(agent.id) !== "running");
   const workspaceHydrating = !ws.loaded;
+  const composerDockRef = useComposerDockHeight({ visible: composerVisible, setHeight: setComposerDockHeight });
+  useWorkspaceRouteSync({
+    route,
+    chats: ws.chats,
+    projects: ws.projects,
+    selectedId: ws.selectedId,
+    findConversation,
+    selectConversation,
+    setProfile,
+    onNavigate,
+  });
 
-  const cancelDraftSave = (id: string) => {
-    const timer = pendingDraftSaves.current.get(id);
-    if (timer) {
-      clearTimeout(timer);
-      pendingDraftSaves.current.delete(id);
-    }
-  };
-
-  const flushDraftSave = (id: string) => {
-    const draft = pendingDraftValues.current.get(id);
-    if (!draft) {
-      cancelDraftSave(id);
-      return;
-    }
-    cancelDraftSave(id);
-    pendingDraftValues.current.delete(id);
-    ws.updateComposerDraft(id, draft);
-  };
-
-  const scheduleDraftSave = (id: string, draft: ComposerDraft) => {
-    pendingDraftValues.current.set(id, {
-      text: draft.text,
-      attachments: draft.attachments.map((attachment) => ({ ...attachment })),
-    });
-    cancelDraftSave(id);
-    pendingDraftSaves.current.set(id, setTimeout(() => flushDraftSave(id), COMPOSER_DRAFT_SAVE_DELAY_MS));
-  };
-
-  useEffect(() => {
-    return () => {
-      for (const id of Array.from(pendingDraftValues.current.keys())) {
-        flushDraftSave(id);
-      }
-      if (resizeFrameRef.current != null) {
-        window.cancelAnimationFrame(resizeFrameRef.current);
-        resizeFrameRef.current = null;
-      }
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!ws.loadError) {
-      lastWorkspaceErrorToast.current = null;
-      return;
-    }
-    if (lastWorkspaceErrorToast.current === ws.loadError) {
-      return;
-    }
-    lastWorkspaceErrorToast.current = ws.loadError;
-    toast({ message: t("workspaceError", { error: ws.loadError }), severity: "error", duration: 5000 });
-  }, [t, toast, ws.loadError]);
-
-  useEffect(() => {
-    if (selected) {
-      setProfile(conversationProfile(selected));
-    } else {
-      setProfile(ws.settings.agents.defaultProfile);
-    }
-  }, [selected, ws.settings.agents.defaultProfile]);
-
-  // Track the floating composer's height so the thread reserves matching bottom
-  // space (it scrolls behind the composer instead of being pushed up by it). The
-  // composer is unmounted in the terminal/preview views, where the inset is 0.
-  useLayoutEffect(() => {
-    const node = composerDockRef.current;
-    if (!composerVisible || !node) {
-      setComposerDockHeight(0);
-      return;
-    }
-    const update = () => setComposerDockHeight(node.offsetHeight);
-    update();
-    if (typeof ResizeObserver === "undefined") {
-      return;
-    }
-    const observer = new ResizeObserver(update);
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, [composerVisible]);
-
-  useLayoutEffect(() => {
-    setView(normalizeConversationView(selected?.view, showTerminal));
-  }, [selected?.id, selected?.view, showTerminal]);
-
-  useEffect(() => {
-    if (!showTerminal && view === "terminal") {
-      showView("chat");
-    }
-  }, [showTerminal, showView, view]);
-
-  useEffect(() => {
-    let alive = true;
-    if (!activeCwd) {
-      setMentionableFiles([]);
-      return;
-    }
-
-    fetch("/api/project-files", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ cwd: activeCwd }),
-    })
-      .then(async (response) => {
-        const payload = (await response.json()) as { files?: string[]; error?: string };
-        if (!response.ok) {
-          throw new Error(payload.error ?? t("projectFilesUnavailable"));
-        }
-        if (alive) {
-          setMentionableFiles(payload.files ?? []);
-        }
-      })
-      .catch((error) => {
-        if (alive) {
-          setMentionableFiles([]);
-          toast({ message: error instanceof Error ? error.message : String(error), severity: "error", duration: 3000 });
-        }
-      });
-
-    return () => {
-      alive = false;
-    };
-  }, [activeCwd, t, toast]);
-
-  // Detect a redeploy: poll the server's build version and, when it changes,
-  // prompt to reload. A long-lived SPA tab navigates via hash routes and never
-  // re-fetches the bundle on its own, so without this it keeps running stale JS
-  // after a deploy (the source of "still broken" reports after a fix shipped).
-  useEffect(() => {
-    let baseline: string | null = null;
-    let prompted = false;
-    let timer: ReturnType<typeof setInterval> | null = null;
-    const check = async () => {
-      try {
-        const response = await fetch("/api/version", { cache: "no-store" });
-        if (!response.ok) {
-          return;
-        }
-        const { version } = (await response.json()) as { version?: string };
-        if (!version || version === "dev") {
-          return;
-        }
-        if (baseline === null) {
-          baseline = version;
-        } else if (version !== baseline && !prompted) {
-          prompted = true;
-          toast({
-            message: t("newVersionAvailable"),
-            severity: "info",
-            duration: 0,
-            action: (
-              <Button variant="subtle" size="small" onClick={() => window.location.reload()}>
-                {t("reloadApp")}
-              </Button>
-            ),
-          });
-        }
-      } catch {
-        // Offline / transient — ignore and retry on the next tick.
-      }
-    };
-    void check();
-    timer = setInterval(check, 60_000);
-    return () => {
-      if (timer) {
-        clearInterval(timer);
-      }
-    };
-  }, [t, toast]);
-
-  useEffect(() => {
-    let alive = true;
-    let timer: ReturnType<typeof setInterval> | null = null;
-    const refresh = async () => {
-      try {
-        const snapshot = await loadCliUpdates(false);
-        if (alive) {
-          setCliUpdateSnapshot(snapshot);
-        }
-      } catch {
-        // The card is for actionable updates, not transient status noise. Manual
-        // update failures are surfaced directly in handleCliUpdate.
-      }
-    };
-    void refresh();
-    timer = setInterval(refresh, CLI_UPDATE_POLL_MS);
-    return () => {
-      alive = false;
-      if (timer) {
-        clearInterval(timer);
-      }
-    };
-  }, []);
-
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLocaleLowerCase() === "k") {
-        event.preventDefault();
-        setCommandPaletteOpen(true);
-      }
-    };
-
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
-
-  useLayoutEffect(() => {
-    const projectConversationId = routeProjectId
-      ? ws.projects.find((project) => project.id === routeProjectId)?.conversations[0]?.id
-      : undefined;
-    const targetConversationId = routeConversationId ?? (routeKind === "project" ? projectConversationId : undefined);
-
-    if ((routeKind === "chat" || routeKind === "project") && targetConversationId) {
-      const conv = ws.find(targetConversationId);
-      if (!conv) {
-        const fallbackId = firstVisibleConversationId(ws);
-        if (fallbackId) {
-          onNavigate?.(routeForConversation(ws, fallbackId));
-          if (ws.selectedId !== fallbackId) {
-            ws.select(fallbackId);
-          }
-        } else {
-          onNavigate?.({ kind: "home" });
-        }
-        return;
-      }
-      if (ws.selectedId !== targetConversationId) {
-        ws.select(targetConversationId);
-      }
-      setProfile((current) => {
-        const nextProfile = conversationProfile(conv);
-        return agentProfileEquals(current, nextProfile) ? current : nextProfile;
-      });
-    }
-  }, [routeKind, routeProjectId, routeConversationId, ws.chats, ws.projects, ws.selectedId, ws.select, ws.find, onNavigate]);
-
-  useEffect(() => {
-    const conversations = workspaceConversations(ws);
-    const nextStatuses = new Map(conversations.map((conversation) => [conversation.id, conversation.status]));
-    for (const conversation of conversations) {
-      const previousStatus = previousStatuses.current.get(conversation.id);
-      const activeRunStatusChanged =
-        previousStatus !== undefined &&
-        previousStatus !== conversation.status &&
-        (previousStatus === "running" || previousStatus === "waiting") &&
-        conversation.status !== "running";
-      if (
-        activeRunStatusChanged &&
-        notifiableRuns.current.has(conversation.id)
-      ) {
-        if (conversation.status !== "waiting") {
-          notifiableRuns.current.delete(conversation.id);
-        }
-        // A plain "done" on the conversation you're already looking at is just
-        // noise — you can see the result. Only surface done for background runs;
-        // keep error / needs-input notifications everywhere (they're actionable).
-        const isForeground = conversation.id === ws.selectedId;
-        const skip = conversation.status === "done" && isForeground;
-        if (!skip) {
-          const runToast = runToastForStatus(conversation.status, conversation.title, t);
-          if (runToast) {
-            toast({ ...runToast, duration: 3500 });
-          }
-          showDesktopNotification(ws.settings.general.desktopNotifications, runNotificationForStatus(conversation.status, conversation.title, t));
-        }
-      }
-    }
-    previousStatuses.current = nextStatuses;
-  }, [ws.chats, ws.projects, ws.selectedId, ws.settings.general.desktopNotifications, t, toast]);
-
-  const openConversation = (id: string, updateRoute = true) => {
-    ws.select(id);
-    const conv = ws.find(id);
-    if (conv) {
-      setProfile(conversationProfile(conv));
-    }
-    if (updateRoute) {
-      onNavigate?.(routeForConversation(ws, id));
-    }
-    setDrawerOpen(false);
-    setRunKey((k) => k + 1);
-  };
-
-  const navigateAfterConversationRemoval = (nextConversationId: string) => {
-    if (nextConversationId && ws.find(nextConversationId)) {
-      onNavigate?.(routeForConversation(ws, nextConversationId));
-    } else {
-      onNavigate?.({ kind: "home" });
-    }
-    setRunKey((k) => k + 1);
-  };
-
-  const removeConversation = (id: string) => {
-    cancelDraftSave(id);
-    pendingDraftValues.current.delete(id);
-    notifiableRuns.current.delete(id);
-    const nextConversationId = ws.remove(id);
-    navigateAfterConversationRemoval(nextConversationId);
-  };
-
-  // Create a new conversation immediately (no draft/prelude step) and focus the
-  // composer so the user can start typing right away. `projectId` undefined ⇒ a
-  // standalone simple chat; otherwise the chat is created inside that project.
-  const createConversation = (projectId?: string) => {
-    const newProfile = ws.settings.agents.defaultProfile ?? DEFAULT_PROFILE;
-    setProfile(newProfile);
-    const id = projectId ? ws.newProjectChat(projectId, newProfile) : ws.newChat(newProfile);
-    setNewChatMenuAnchor(null);
-    setDrawerOpen(false);
-    setView("chat");
-    ws.setConversationView(id, "chat");
-    setRunKey((k) => k + 1);
-    onNavigate?.(routeForConversation(ws, id));
-    // Defer focus until the freshly-created conversation's composer has mounted.
-    requestAnimationFrame(() => composerRef.current?.focus());
-  };
-
-  const submitComposerText = (text: string) => {
-    const activeConversation = ws.find(ws.selectedId);
-    let targetId = activeConversation?.id ?? "";
-    if (!targetId) {
-      const newProfile = ws.settings.agents.defaultProfile ?? DEFAULT_PROFILE;
-      const projectId = routeKind === "project" && routeProjectId && ws.projects.some((project) => project.id === routeProjectId) ? routeProjectId : undefined;
-      setProfile(newProfile);
-      targetId = projectId ? ws.newProjectChat(projectId, newProfile) : ws.newChat(newProfile);
-      setView("chat");
-      ws.setConversationView(targetId, "chat");
-      setRunKey((k) => k + 1);
-      onNavigate?.(routeForConversation(ws, targetId));
-    }
-    pendingDraftValues.current.delete(targetId);
-    cancelDraftSave(targetId);
-    ws.updateComposerDraft(targetId, EMPTY_COMPOSER_DRAFT);
-    notifiableRuns.current.add(targetId);
-    ws.sendMessage(targetId, text);
-  };
-
-  const handleCliUpdate = async (update: CliUpdateInfo) => {
-    setCliUpdateBusyAgent(update.agent);
-    toast({ message: t("cliUpdateStarted", { agent: update.agentName }), severity: "info", duration: 2500 });
-    try {
-      await updateAgentCli(update.agent);
-      reloadAgentStatus();
-      setCliUpdateSnapshot((snapshot) => clearCliUpdateForAgent(snapshot, update.agent));
-      const refreshed = await loadCliUpdates(true);
-      setCliUpdateSnapshot((snapshot) =>
-        refreshed.updates.some((candidate) => candidate.agent === update.agent)
-          ? clearCliUpdateForAgent(refreshed, update.agent)
-          : refreshed,
-      );
-      toast({ message: t("cliUpdateComplete", { agent: update.agentName }), severity: "success", duration: 2500 });
-    } catch (error) {
-      toast({ message: t("cliUpdateFailed", { error: error instanceof Error ? error.message : String(error) }), severity: "error", duration: 5000 });
-    } finally {
-      setCliUpdateBusyAgent(null);
-    }
-  };
+  useWorkspaceLoadErrorToast({ loadError: ws.loadError, t, toast });
+  useAppVersionReload({ t, toast });
+  useCommandPaletteShortcut({ setCommandPaletteOpen });
 
   const openPicker = () => {
     setPickerOpen(true);
@@ -859,298 +324,73 @@ export const WorkspacePageView = observer(function WorkspacePageView({
 
     window.location.hash = "#/kit";
   };
+  const openConversationSearch = useCallback(() => {
+    void ws.loadAllThreads();
+    setSearchOpen(true);
+  }, [setSearchOpen, ws]);
+  const openSettings = useCallback(() => {
+    setSettingsOpen(true);
+  }, [setSettingsOpen]);
+  const openGit = useCallback(() => {
+    showView("git");
+  }, [showView]);
+  const openPreview = useCallback(() => {
+    showView("preview");
+  }, [showView]);
+  const toggleTheme = useCallback(() => {
+    ws.updateSettings({ appearance: { theme: mode === "dark" ? "light" : "dark" } });
+  }, [mode, ws]);
 
-  // The picker now only switches the agent (for the draft or the open
-  // conversation); new chats default to the configured agent.
-  const handlePicked = (picked: AgentProfile) => {
-    setProfile(picked);
-    if (selected) {
-      ws.setConversationProfile(ws.selectedId, picked);
-    }
-  };
+  const { handleAutoConfirmChange, handleModeChange, handlePicked, supportedModes } = useWorkspaceAgentProfileController({
+    defaultProfile: ws.settings.agents.defaultProfile,
+    profile,
+    selected,
+    selectedId: ws.selectedId,
+    setConversationProfile: (conversationId, nextProfile) => ws.setConversationProfile(conversationId, nextProfile),
+    setProfile,
+    cliInfoOf,
+    t,
+  });
+  const bumpRunKey = useCallback(() => setRunKey((k) => k + 1), [setRunKey]);
+  const focusComposer = useCallback(() => composerRef.current?.focus(), []);
 
-  const supportedModes = useMemo<readonly { readonly id: string; readonly label: string }[]>(() => {
-    const def = getAgent(profile.agent);
-    const cliModes = cliInfoOf(profile.agent)?.modes;
-    const sourceModes = cliModes && cliModes.length > 0 ? cliModes : def.modes;
-    return sourceModes
-      .filter((mode) => mode.id !== DEFAULT_AGENT_OPTION_ID && mode.id !== "auto" && mode.id !== "bypass-permissions")
-      .map((mode) => ({
-        id: mode.id,
-        label: mode.id === "plan" ? t("agentModePlan") : mode.label,
-      }));
-  }, [cliInfoOf, profile.agent, t]);
-  const handleModeChange = (modeId: string) => {
-    const next = normalizeAgentProfile({ ...profile, mode: modeId });
-    setProfile(next);
-    if (selected) {
-      ws.setConversationProfile(ws.selectedId, next);
-    }
-  };
-  const handleAutoConfirmChange = (enabled: boolean) => {
-    const next = normalizeAgentProfile({ ...profile, autoConfirm: enabled });
-    setProfile(next);
-    if (selected) {
-      ws.setConversationProfile(ws.selectedId, next);
-    }
-  };
+  const {
+    openConversation,
+    createConversation,
+    submitComposerText,
+    handleCreateProject,
+    conversationActions,
+    doDelete,
+    messageActions,
+  } = useWorkspaceConversationActions({
+    workspace: ws,
+    route,
+    onNavigate,
+    setProfile,
+    setView,
+    setDrawerOpen,
+    setNewChatMenuAnchor,
+    confirmDelete,
+    setConfirmDelete,
+    bumpRunKey,
+    focusComposer,
+    composerDraftPersistence,
+    runNotifications,
+    selectedHasActiveWork,
+    t,
+    toast,
+  });
 
-  const persistedSidebarWidth = normalizeSidebarWidth(ws.settings.appearance.sidebarWidth);
-  useEffect(() => {
-    if (isResizingSidebar || sidebarWidthRef.current === persistedSidebarWidth) {
-      return;
-    }
-    sidebarWidthRef.current = persistedSidebarWidth;
-    setSidebarWidth(persistedSidebarWidth);
-  }, [isResizingSidebar, persistedSidebarWidth]);
-
-  useEffect(() => {
-    sidebarWidthRef.current = sidebarWidth;
-    if (sidebarShellRef.current) {
-      sidebarShellRef.current.style.width = sidebarCollapsed ? "0px" : `${sidebarWidth}px`;
-    }
-    if (sidebarInnerRef.current) {
-      sidebarInnerRef.current.style.width = `${sidebarWidth}px`;
-    }
-  }, [sidebarCollapsed, sidebarWidth]);
-
-  const startSidebarResize = (event: ReactMouseEvent) => {
-    event.preventDefault();
-    const startX = event.clientX;
-    const startWidth = sidebarWidthRef.current;
-    let latestWidth = startWidth;
-    setIsResizingSidebar(true);
-    const applyWidth = (next: number) => {
-      latestWidth = next;
-      sidebarWidthRef.current = next;
-      if (resizeFrameRef.current != null) {
-        return;
-      }
-      resizeFrameRef.current = window.requestAnimationFrame(() => {
-        resizeFrameRef.current = null;
-        if (sidebarShellRef.current) {
-          sidebarShellRef.current.style.width = `${sidebarWidthRef.current}px`;
-        }
-        if (sidebarInnerRef.current) {
-          sidebarInnerRef.current.style.width = `${sidebarWidthRef.current}px`;
-        }
-      });
-    };
-    const onMove = (moveEvent: MouseEvent) => {
-      const next = Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, startWidth + (moveEvent.clientX - startX)));
-      applyWidth(next);
-    };
-    const onUp = () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-      if (resizeFrameRef.current != null) {
-        window.cancelAnimationFrame(resizeFrameRef.current);
-        resizeFrameRef.current = null;
-      }
-      if (sidebarShellRef.current) {
-        sidebarShellRef.current.style.width = `${latestWidth}px`;
-      }
-      if (sidebarInnerRef.current) {
-        sidebarInnerRef.current.style.width = `${latestWidth}px`;
-      }
-      const normalizedWidth = normalizeSidebarWidth(latestWidth);
-      setSidebarWidth(normalizedWidth);
-      ws.updateSettings({ appearance: { sidebarWidth: normalizedWidth } });
-      setIsResizingSidebar(false);
-    };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-  };
-
-  // Files can be dropped anywhere on the chat pane; the whole pane dims and the
-  // dropped files are handed to the active composer.
-  const paneDragHasFiles = (event: DragEvent) => Array.from(event.dataTransfer.types ?? []).includes("Files");
-  const onPaneDragEnter = (event: DragEvent) => {
-    if (!paneDragHasFiles(event)) {
-      return;
-    }
-    event.preventDefault();
-    setPaneDragDepth((depth) => depth + 1);
-  };
-  const onPaneDragOver = (event: DragEvent) => {
-    if (!paneDragHasFiles(event)) {
-      return;
-    }
-    event.preventDefault();
-    event.dataTransfer.dropEffect = "copy";
-  };
-  const onPaneDragLeave = (event: DragEvent) => {
-    if (!paneDragHasFiles(event)) {
-      return;
-    }
-    setPaneDragDepth((depth) => Math.max(0, depth - 1));
-  };
-  const onPaneDrop = (event: DragEvent) => {
-    if (!paneDragHasFiles(event)) {
-      return;
-    }
-    event.preventDefault();
-    setPaneDragDepth(0);
-    void composerRef.current?.addFiles(Array.from(event.dataTransfer.files));
-  };
-
-  const handleCreateProject = (input: Parameters<typeof ws.createProject>[0]) => {
-    try {
-      const created = ws.createProject(input);
-      onNavigate?.({ kind: "project", projectId: created.projectId, conversationId: created.conversationId });
-      setRunKey((k) => k + 1);
-      toast({ message: t("newProjectChatWith", { agent: input.profile.agent, project: input.name }), severity: "info", duration: 2500 });
-    } catch (error) {
-      toast({ message: error instanceof Error ? error.message : String(error), severity: "error", duration: 3000 });
-    }
-  };
-
-  const conversationActions = {
-    onRename: ws.rename,
-    onTogglePin: ws.togglePin,
-    onArchive: (id: string) => {
-      ws.archive(id);
-      toast({ message: t("conversationArchived"), severity: "info", duration: 2500 });
-    },
-    onDelete: (id: string) => {
-      if (ws.settings.general.confirmDestructiveActions) {
-        setConfirmDelete(id);
-        return;
-      }
-      removeConversation(id);
-      toast({ message: t("conversationDeleted"), severity: "warning", duration: 2500 });
-    },
-  };
-
-  const doDelete = () => {
-    if (confirmDelete) {
-      removeConversation(confirmDelete);
-      setConfirmDelete(null);
-      toast({ message: t("conversationDeleted"), severity: "warning", duration: 2500 });
-    }
-  };
-
-  const messageActions = {
-    onCopy: async (message: ChatMessage) => {
-      try {
-        await navigator.clipboard.writeText(messageToPlainText(message));
-        toast({ message: t("messageCopied"), severity: "success", duration: 1800 });
-      } catch {
-        toast({ message: t("clipboardUnavailable"), severity: "error", duration: 2500 });
-      }
-    },
-    // Hide retry while the agent is working (no retrying an in-flight turn);
-    // an undefined handler removes the button in MessageActionBar.
-    onRetry: selectedHasActiveWork
-      ? undefined
-      : (message: ChatMessage) => {
-          notifiableRuns.current.add(ws.selectedId);
-          ws.retryMessage(ws.selectedId, message.id);
-        },
-    onFork: (message: ChatMessage) => {
-      const forkId = ws.forkConversationFromMessage(ws.selectedId, message.id);
-      if (!forkId) {
-        return;
-      }
-      const fork = ws.find(forkId);
-      if (fork) {
-        setProfile(conversationProfile(fork));
-      }
-      setView("chat");
-      ws.setConversationView(forkId, "chat");
-      setRunKey((k) => k + 1);
-      onNavigate?.(routeForConversation(ws, forkId));
-      toast({ message: t("forkedConversationCreated"), severity: "success", duration: 2200 });
-    },
-    onEditAndResend: (message: ChatMessage, text: string) => {
-      notifiableRuns.current.add(ws.selectedId);
-      ws.editAndResendMessage(ws.selectedId, message.id, text);
-    },
-    onApprovalDecision: async (approvalId: string, decision: ApprovalDecision) => {
-      try {
-        const response = await fetch("/api/run-approval", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ id: approvalId, decision }),
-        });
-        if (!response.ok) {
-          const payload = (await response.json().catch(() => ({}))) as { error?: string };
-          throw new Error(payload.error ?? `Approval decision failed (${response.status})`);
-        }
-        ws.decideApproval(ws.selectedId, approvalId, decision);
-      } catch (error) {
-        toast({ message: error instanceof Error ? error.message : String(error), severity: "error", duration: 3000 });
-        throw error;
-      }
-    },
-    onOptionSelection: async (optionBlockId: string, selectedLabels: readonly string[]) => {
-      try {
-        const response = await fetch("/api/run-input", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ id: optionBlockId, selected: selectedLabels }),
-        });
-        if (!response.ok) {
-          const payload = (await response.json().catch(() => ({}))) as { error?: string };
-          throw new Error(payload.error ?? `Option selection failed (${response.status})`);
-        }
-        ws.selectOptions(ws.selectedId, optionBlockId, selectedLabels);
-      } catch (error) {
-        toast({ message: error instanceof Error ? error.message : String(error), severity: "error", duration: 3000 });
-        throw error;
-      }
-    },
-  };
-
-  const commandItems: readonly CommandPaletteItem[] = [
-    {
-      id: "new-conversation",
-      label: t("commandNewConversation"),
-      keywords: [t("newConversation"), t("newChat")],
-      shortcut: ["Ctrl", "N"],
-      action: () => createConversation(),
-    },
-    {
-      id: "search-conversations",
-      label: t("searchConversations"),
-      keywords: [t("chats"), t("projects"), "search"],
-      action: () => {
-        void ws.loadAllThreads();
-        setSearchOpen(true);
-      },
-    },
-    {
-      id: "open-settings",
-      label: t("commandOpenSettings"),
-      keywords: [t("settings"), t("appearance"), t("general")],
-      shortcut: ["Ctrl", ","],
-      action: () => setSettingsOpen(true),
-    },
-    {
-      id: "open-git",
-      label: t("commandOpenGit"),
-      keywords: [t("git"), t("gitStatus")],
-      action: () => showView("git"),
-    },
-    {
-      id: "open-preview",
-      label: t("commandOpenPreview"),
-      keywords: [t("previewTab"), t("browserPreviewTitle")],
-      action: () => showView("preview"),
-    },
-    {
-      id: "toggle-theme",
-      label: t("commandToggleTheme"),
-      keywords: [t("theme"), t("dark"), t("light")],
-      action: () => ws.updateSettings({ appearance: { theme: mode === "dark" ? "light" : "dark" } }),
-    },
-    {
-      id: "open-kit",
-      label: t("commandOpenKit"),
-      keywords: [t("kit")],
-      action: openKit,
-    },
-  ];
+  const commandItems = useWorkspaceCommandItems({
+    t,
+    createConversation: () => createConversation(),
+    openConversationSearch,
+    openSettings,
+    openGit,
+    openPreview,
+    toggleTheme,
+    openKit,
+  });
 
   if (ws.loadError && !ws.loaded) {
     return (
@@ -1170,8 +410,8 @@ export const WorkspacePageView = observer(function WorkspacePageView({
     );
   }
 
-  const primaryCliUpdate = cliUpdateSnapshot.updates[0] ?? null;
-  const extraCliUpdateCount = Math.max(0, cliUpdateSnapshot.updates.length - 1);
+  const primaryCliUpdate = cliUpdates.snapshot.updates[0] ?? null;
+  const extraCliUpdateCount = Math.max(0, cliUpdates.snapshot.updates.length - 1);
   const cliUpdateNotice = primaryCliUpdate ? (
     <Box sx={{ px: 0.75, pb: 1, flex: "0 0 auto" }}>
       <Stack
@@ -1202,8 +442,8 @@ export const WorkspacePageView = observer(function WorkspacePageView({
         <Button
           variant="subtle"
           size="small"
-          disabled={cliUpdateBusyAgent !== null}
-          onClick={() => void handleCliUpdate(primaryCliUpdate)}
+          disabled={cliUpdates.busyAgent !== null}
+          onClick={() => void cliUpdates.updateCli(primaryCliUpdate)}
           sx={{ flex: "0 0 auto", minWidth: 78 }}
         >
           {t("updateCli")}
@@ -1276,7 +516,7 @@ export const WorkspacePageView = observer(function WorkspacePageView({
         </Stack>
       </Stack>
 
-      <ConversationList projects={ws.projects} chats={ws.chats} threads={ws.threads} selectedId={ws.selectedId} onSelect={openConversation} actions={conversationActions} wakeupConversationIds={wakeupConversationIds} />
+      <ConversationList projects={ws.projects} chats={ws.chats} threads={ws.threads} selectedId={ws.selectedId} onSelect={openConversation} actions={conversationActions} wakeupConversationIds={wakeupsController.wakeupConversationIds} />
       {cliUpdateNotice}
     </Stack>
   );
@@ -1320,12 +560,12 @@ export const WorkspacePageView = observer(function WorkspacePageView({
 
       <Box
         sx={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", position: "relative" }}
-        onDragEnter={onPaneDragEnter}
-        onDragOver={onPaneDragOver}
-        onDragLeave={onPaneDragLeave}
-        onDrop={onPaneDrop}
+        onDragEnter={paneFileDrop.onPaneDragEnter}
+        onDragOver={paneFileDrop.onPaneDragOver}
+        onDragLeave={paneFileDrop.onPaneDragLeave}
+        onDrop={paneFileDrop.onPaneDrop}
       >
-        {paneDragging && (
+        {paneFileDrop.paneDragging && (
           <Box
             sx={{
               position: "absolute",
@@ -1609,7 +849,7 @@ export const WorkspacePageView = observer(function WorkspacePageView({
                   initialAttachments={composerDraft.attachments}
                   onDraftChange={(draft) => {
                     if (selected) {
-                      scheduleDraftSave(ws.selectedId, draft);
+                      composerDraftPersistence.scheduleDraft(ws.selectedId, draft);
                     }
                   }}
                   onSend={(text) => {
@@ -1631,11 +871,11 @@ export const WorkspacePageView = observer(function WorkspacePageView({
                   onOverlayLiftChange={setComposerOverlayLift}
                   history={messageHistory}
                   agentId={profile.agent}
-                  agentLimit={agentLimits[profile.agent] ?? null}
-                  agentLimitLoaded={agentLimitsLoaded}
-                  agentLimitRefreshing={agentLimitRefreshing[profile.agent] === true}
-                  agentLimitRefreshError={agentLimitRefreshErrors[profile.agent] ?? null}
-                  onRefreshAgentLimits={(requestRefresh) => refreshAgentLimits(profile.agent, requestRefresh)}
+                  agentLimit={agentLimits.limits[profile.agent] ?? null}
+                  agentLimitLoaded={agentLimits.loaded}
+                  agentLimitRefreshing={agentLimits.refreshing[profile.agent] === true}
+                  agentLimitRefreshError={agentLimits.refreshErrors[profile.agent] ?? null}
+                  onRefreshAgentLimits={(requestRefresh) => agentLimits.refresh(profile.agent, requestRefresh)}
                   contextTokens={selected?.usage?.contextTokens}
                   contextWindow={contextWindowForAgentProfile(profile)}
                   autoCompact={selected?.compaction?.auto ?? true}
@@ -1664,16 +904,11 @@ export const WorkspacePageView = observer(function WorkspacePageView({
                       ws.sendQueuedMessageNow(selected.id);
                     }
                   }}
-                  voiceProvider={composerVoiceProvider}
+                  voiceProvider={voiceProvider}
                   onVoiceError={(message) => toast({ message, severity: "error", duration: 3500 })}
                   browserActivityEvents={view === "preview" ? browserActivityEvents : undefined}
                   registeredPlugins={registeredPlugins}
-                  scheduledWakeups={selectedWakeups.map((wakeup) => ({
-                    id: wakeup.id,
-                    label: wakeupLabel(wakeup, locale),
-                    removeLabel: locale === "ru" ? "Убрать запланированную задачу" : "Remove scheduled wakeup",
-                    onRemove: () => removeWakeup(wakeup.id),
-                  }))}
+                  scheduledWakeups={scheduledWakeups}
                 />
               </Stack>
             )}
@@ -1698,7 +933,7 @@ export const WorkspacePageView = observer(function WorkspacePageView({
         onClose={() => setSettingsOpen(false)}
         settings={ws.settings}
         onSettingsChange={ws.updateSettings}
-        onVoiceConfigChange={refreshVoiceConfig}
+        onVoiceConfigChange={voiceConfig.refresh}
       />
 
       <Dialog open={confirmDelete != null} onClose={() => setConfirmDelete(null)} maxWidth="xs" fullWidth>

@@ -18,6 +18,7 @@ export { KeyHint } from "./KeyHint";
 export { StatusDot, type StatusDotProps } from "./StatusDot";
 export { IconButton, type IconButtonProps, type IconButtonTone } from "./IconButton";
 export { TagSelect, type TagOption } from "./TagSelect";
+export { ImageLightbox } from "./ImageLightbox";
 
 // --- Overlays & notifications ---
 export { Toast, type ToastProps, type ToastSeverity } from "./Toast";

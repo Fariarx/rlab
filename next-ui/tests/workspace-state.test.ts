@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_PROFILE } from "../src/components/agent";
-import { buildInitialWorkspaceState, cloneWorkspaceState } from "../src/components/workspace/workspace-state";
+import { buildInitialWorkspaceState, cloneWorkspaceState } from "../src/lib/workspace-state";
 
 describe("workspace state", () => {
   it("includes serializable seeded threads in the persisted workspace snapshot", () => {

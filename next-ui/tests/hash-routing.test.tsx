@@ -2,7 +2,7 @@
 import { render } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/App";
-import { buildInitialWorkspaceState } from "../src/components/workspace/workspace-state";
+import { buildInitialWorkspaceState } from "../src/lib/workspace-state";
 import { createWorkspaceApiFixture, requestPath, type WorkspaceApiFixture } from "./util/workspace-api";
 import { withVirtuosoMock } from "./util/render-with-virtuoso";
 

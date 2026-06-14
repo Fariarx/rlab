@@ -1,7 +1,7 @@
 import DarkModeIcon from "@mui/icons-material/DarkMode";
 import LightModeIcon from "@mui/icons-material/LightMode";
 import { Box, Container, Divider, Link, Stack, Tooltip, Typography } from "@mui/material";
-import type { ThemeMode } from "../workspace/app-settings";
+import type { ThemeMode } from "../../lib/app-settings";
 import { IconButton, StatusDot } from "../ui";
 import { ButtonsSection } from "./sections/ButtonsSection";
 import { AgentBlocksSection } from "./sections/AgentBlocksSection";
