@@ -9631,9 +9631,14 @@ async function runClaudeSdk(
   }
   const translate = createClaudeStreamTranslator();
   const canUseTool = createRunApprovalHandler(send, binding?.runId, claudePermissionModeForRequest(request) === "bypassPermissions");
+  let stderr = "";
+  const options = buildClaudeSdkOptions(request, cwd, abortController, canUseTool, runEnv);
+  options.stderr = (data: string) => {
+    stderr = appendLimitedText(stderr, data, STDERR_TAIL_LIMIT_CHARS);
+  };
 
   try {
-    for await (const message of query({ prompt: request.prompt, options: buildClaudeSdkOptions(request, cwd, abortController, canUseTool, runEnv) })) {
+    for await (const message of query({ prompt: request.prompt, options })) {
       if (message.type === "rate_limit_event" && isRecord(message.rate_limit_info)) {
         recordClaudeRateLimit(request.agent, message.rate_limit_info);
       }
@@ -9643,7 +9648,8 @@ async function runClaudeSdk(
     }
   } catch (error) {
     if (!abortController.signal.aborted) {
-      send({ type: "error", text: errorMessage(error) });
+      const stderrText = stderr.trim();
+      send({ type: "error", text: stderrText ? `${errorMessage(error)}\n${clip(stderrText, 1_000)}` : errorMessage(error) });
     }
   } finally {
     if (binding && accumulator) {
