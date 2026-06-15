@@ -1548,7 +1548,7 @@ describe("WorkspacePage", () => {
 
     await screen.findByPlaceholderText("Написать: Claude Code");
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
-    fireEvent.click(await screen.findByRole("tab", { name: "Коммит" }));
+    fireEvent.click(await screen.findByRole("tab", { name: /Поставленные/ }));
 
     const messageInput = await screen.findByLabelText("Сообщение коммита");
     expect(screen.getByRole("button", { name: "Создать коммит" })).toBeDisabled();
@@ -1558,8 +1558,11 @@ describe("WorkspacePage", () => {
 
     await waitFor(() => {
       expect(commitRequest).toEqual({ cwd: "/root/workspace/rlab", message: "Fix auth login test" });
-      // A successful commit clears the message field.
-      expect(messageInput).toHaveValue("");
+    });
+    // The commit form lives at the top of the staged tab and only shows while
+    // there are staged files; a successful commit empties staging, so it goes away.
+    await waitFor(() => {
+      expect(screen.queryByLabelText("Сообщение коммита")).not.toBeInTheDocument();
     });
   });
 

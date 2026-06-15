@@ -6,7 +6,7 @@ import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
 import MergeIcon from "@mui/icons-material/Merge";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import RemoveIcon from "@mui/icons-material/Remove";
-import { Alert, Box, Chip, CircularProgress, Collapse, Dialog, DialogActions, DialogContent, DialogContentText, DialogTitle, Stack, Tab, Tabs, type Theme, Tooltip, Typography } from "@mui/material";
+import { Alert, Box, CircularProgress, Collapse, Dialog, DialogActions, DialogContent, DialogContentText, DialogTitle, Divider, Stack, Tab, Tabs, type Theme, Tooltip, Typography } from "@mui/material";
 import { observer } from "mobx-react-lite";
 import { type ReactNode, type RefObject, useRef, useState } from "react";
 import { type I18nApi, useI18n } from "../../../i18n/I18nProvider";
@@ -425,7 +425,6 @@ export const GitView = observer(function GitView({ cwd, lastTurnDiffs = [], revi
             <Tab value="tree" label={tabLabel(t("gitTreeTab"), graphCommits.length)} />
             <Tab value="unstaged" label={tabLabel(t("gitUnstagedTab"), unstagedFiles.length)} />
             <Tab value="staged" label={tabLabel(t("gitStagedTab"), stagedFiles.length)} />
-            <Tab value="commit" label={t("gitCommitTab")} />
             <Tab value="last-turn" label={tabLabel(t("gitLastTurnTab"), lastTurnDiffs.length)} />
           </Tabs>
         )}
@@ -488,6 +487,17 @@ export const GitView = observer(function GitView({ cwd, lastTurnDiffs = [], revi
                   <Alert severity="info">{t("gitNoStagedChanges")}</Alert>
                 ) : (
                   <Stack spacing={1.25}>
+                    <Box sx={{ display: "flex", justifyContent: "center" }}>
+                      <GitCommitForm
+                        actionLoading={actionLoading}
+                        commitMessage={commitMessage}
+                        hasStagedFiles={hasStagedFiles}
+                        onCommit={commitStagedFiles}
+                        onMessageChange={setCommitMessage}
+                        t={t}
+                      />
+                    </Box>
+                    <Divider sx={{ borderColor: (theme) => theme.custom.borders.subtle }} />
                     {stagedFiles.map((file) => (
                       <GitFileDiffCard
                         key={`${cwd}:${statusVersion}:staged:${file.code}:${file.gitPath}`}
@@ -512,18 +522,6 @@ export const GitView = observer(function GitView({ cwd, lastTurnDiffs = [], revi
                     ))}
                   </Stack>
                 ))}
-
-              {activeTab === "commit" && (
-                <GitCommitTab
-                  actionLoading={actionLoading}
-                  commitMessage={commitMessage}
-                  hasStagedFiles={hasStagedFiles}
-                  onCommit={commitStagedFiles}
-                  onMessageChange={setCommitMessage}
-                  stagedFiles={stagedFiles}
-                  t={t}
-                />
-              )}
 
               {activeTab === "last-turn" &&
                 (lastTurnDiffs.length === 0 ? (
@@ -556,13 +554,14 @@ export const GitView = observer(function GitView({ cwd, lastTurnDiffs = [], revi
   );
 });
 
-function GitCommitTab({
+/** Commit message + button, shown centered at the top of the staged tab (only
+ *  when there are staged files). The staged files themselves are listed below. */
+function GitCommitForm({
   actionLoading,
   commitMessage,
   hasStagedFiles,
   onCommit,
   onMessageChange,
-  stagedFiles,
   t,
 }: {
   readonly actionLoading: boolean;
@@ -570,11 +569,10 @@ function GitCommitTab({
   readonly hasStagedFiles: boolean;
   readonly onCommit: () => void;
   readonly onMessageChange: (value: string) => void;
-  readonly stagedFiles: readonly GitFileStatus[];
   readonly t: I18nApi["t"];
 }) {
   return (
-    <Stack spacing={1.25} sx={{ maxWidth: 560 }}>
+    <Stack spacing={1.25} sx={{ width: "100%", maxWidth: 560 }}>
       <Typography variant="microLabel" sx={{ color: "text.secondary" }}>
         {t("gitCommit")}
       </Typography>
@@ -584,7 +582,7 @@ function GitCommitTab({
         placeholder={t("gitCommitMessagePlaceholder")}
         value={commitMessage}
         onChange={(event) => onMessageChange(event.currentTarget.value)}
-        rows={4}
+        rows={3}
         sx={{
           width: "100%",
           resize: "vertical",
@@ -602,13 +600,6 @@ function GitCommitTab({
           },
         }}
       />
-      {stagedFiles.length > 0 && (
-        <Stack direction="row" spacing={0.75} sx={{ flexWrap: "wrap", gap: 0.75 }}>
-          {stagedFiles.map((file) => (
-            <Chip key={file.gitPath} size="small" label={file.path} />
-          ))}
-        </Stack>
-      )}
       <Button variant="contained" size="small" disabled={!hasStagedFiles || actionLoading || commitMessage.trim().length === 0} onClick={onCommit}>
         {t("gitCommit")}
       </Button>

@@ -3,7 +3,7 @@ import type { GitStatusPayload } from "../../../lib/git-status";
 import type { DiffViewerLine } from "./GitDiffViewer";
 import type { GitGraphBranchHead, GitGraphCommit } from "../../../client/api/git-panel-api";
 
-export type GitPanelTab = "tree" | "unstaged" | "staged" | "commit" | "last-turn";
+export type GitPanelTab = "tree" | "unstaged" | "staged" | "last-turn";
 
 type StateUpdater<T> = T | ((current: T) => T);
 
