@@ -11,15 +11,17 @@ export interface BuildIdleConversationInput {
   readonly title: string;
   readonly snippet: string;
   readonly time: string;
+  readonly updatedAtMs: number;
   readonly profile: AgentProfile;
 }
 
-export function buildIdleConversation({ id, title, snippet, time, profile }: BuildIdleConversationInput): ConversationSummary {
+export function buildIdleConversation({ id, title, snippet, time, updatedAtMs, profile }: BuildIdleConversationInput): ConversationSummary {
   return {
     id,
     title,
     snippet,
     time,
+    updatedAtMs,
     status: "idle",
     agent: profile.agent,
     profile,
@@ -65,6 +67,7 @@ export interface CreateConversationStateInput {
   readonly state: WorkspaceState;
   readonly thread: readonly ChatMessage[];
   readonly time: string;
+  readonly updatedAtMs: number;
   readonly title: string;
 }
 
@@ -223,6 +226,7 @@ export interface ForkConversationStateInput {
   readonly nextId: (prefix: string) => string;
   readonly state: WorkspaceState;
   readonly time: string;
+  readonly updatedAtMs?: number;
 }
 
 export interface ForkConversationStateResult {
@@ -241,6 +245,7 @@ export function forkConversationState({
   nextId,
   state,
   time,
+  updatedAtMs,
 }: ForkConversationStateInput): ForkConversationStateResult | null {
   const source = findConversation(state, conversationId);
   const sourceThread = state.threads[conversationId] ?? [];
@@ -257,6 +262,7 @@ export function forkConversationState({
     title: forkTitle,
     snippet: conversationPreviewSnippet([message], 60),
     time,
+    updatedAtMs: updatedAtMs ?? source.updatedAtMs,
     status: "idle",
     agent: profile.agent,
     profile,

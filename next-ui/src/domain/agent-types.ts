@@ -222,6 +222,9 @@ export interface ConversationSummary {
   readonly title: string;
   readonly snippet: string;
   readonly time: string;
+  /** Epoch ms of the last activity (creation, sent message, run update). Drives
+   *  newest→oldest sidebar ordering; `time` is only the display label. */
+  readonly updatedAtMs?: number;
   readonly status: ConversationStatus;
   readonly agent: AgentId;
   readonly profile?: AgentProfile;

@@ -567,6 +567,7 @@ export class WorkspaceStore implements Workspace {
         title: translate(locale, "newChat"),
         snippet: translate(locale, "defaultConversationSnippet"),
         time: nowLabel(),
+        updatedAtMs: Date.now(),
         profile,
         state: current,
         thread,
@@ -605,6 +606,7 @@ export class WorkspaceStore implements Workspace {
         title: translate(current.settings.general.locale, "newChat"),
         snippet: translate(current.settings.general.locale, "defaultProjectConversationSnippet"),
         time: nowLabel(),
+        updatedAtMs: Date.now(),
         profile: input.profile,
         state: current,
         thread,
@@ -640,6 +642,7 @@ export class WorkspaceStore implements Workspace {
         title: translate(locale, "newChat"),
         snippet: translate(locale, "defaultConversationSnippet"),
         time: nowLabel(),
+        updatedAtMs: Date.now(),
         profile,
         state: current,
         thread,
@@ -1063,6 +1066,7 @@ export class WorkspaceStore implements Workspace {
         nextId: nextWorkspaceId,
         state: current,
         time: nowLabel(),
+        updatedAtMs: Date.now(),
       });
       return forkResult.current?.state ?? current;
     });

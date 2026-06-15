@@ -64,6 +64,23 @@ describe("conversation-list-model", () => {
     ]);
   });
 
+  it("orders same-status conversations by recency, newest first", () => {
+    const sections = visibleConversationSections({
+      projects: [],
+      chats: [
+        conversation({ id: "older", updatedAtMs: 1000 }),
+        conversation({ id: "newest", updatedAtMs: 3000 }),
+        conversation({ id: "legacy" }),
+        conversation({ id: "middle", updatedAtMs: 2000 }),
+      ],
+      wakeupConversationIds: new Set(),
+      pinnedLabel: "Pinned",
+      chatsLabel: "Chats",
+    });
+
+    expect(sections[0]?.conversations.map((item) => item.id)).toEqual(["newest", "middle", "older", "legacy"]);
+  });
+
   it("flattens only expanded conversation rows for keyboard navigation", () => {
     const sections = visibleConversationSections({
       projects: [],

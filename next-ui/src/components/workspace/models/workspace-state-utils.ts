@@ -93,12 +93,16 @@ export function conversationCwd(state: WorkspaceState, id: string): string | und
 }
 
 export function patchConversation(state: WorkspaceState, id: string, patch: Partial<ConversationSummary>): WorkspaceState {
+  // Any patch that refreshes the display time is an activity beat, so bump the
+  // recency key that drives newest→oldest sidebar ordering (unless the caller
+  // already set one explicitly).
+  const stamped = patch.time !== undefined && patch.updatedAtMs === undefined ? { ...patch, updatedAtMs: Date.now() } : patch;
   return {
     ...state,
-    chats: state.chats.map((c) => (c.id === id ? { ...c, ...patch } : c)),
+    chats: state.chats.map((c) => (c.id === id ? { ...c, ...stamped } : c)),
     projects: state.projects.map((p) => ({
       ...p,
-      conversations: p.conversations.map((c) => (c.id === id ? { ...c, ...patch } : c)),
+      conversations: p.conversations.map((c) => (c.id === id ? { ...c, ...stamped } : c)),
     })),
   };
 }

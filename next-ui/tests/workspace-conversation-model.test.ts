@@ -79,11 +79,12 @@ function attachment(id: string): ComposerAttachmentDraft {
 
 describe("workspace-conversation-model", () => {
   it("builds idle conversations from an agent profile", () => {
-    expect(buildIdleConversation({ id: "chat-1", title: "New", snippet: "Empty", time: "12:00", profile })).toEqual({
+    expect(buildIdleConversation({ id: "chat-1", title: "New", snippet: "Empty", time: "12:00", updatedAtMs: 1000, profile })).toEqual({
       id: "chat-1",
       title: "New",
       snippet: "Empty",
       time: "12:00",
+      updatedAtMs: 1000,
       status: "idle",
       agent: "codex",
       profile,
@@ -124,6 +125,7 @@ describe("workspace-conversation-model", () => {
       state,
       thread,
       time: "13:00",
+      updatedAtMs: 1300,
       title: "New",
     });
 
@@ -132,6 +134,7 @@ describe("workspace-conversation-model", () => {
       title: "New",
       snippet: "Empty",
       time: "13:00",
+      updatedAtMs: 1300,
       status: "idle",
       agent: "codex",
       profile,
@@ -154,6 +157,7 @@ describe("workspace-conversation-model", () => {
       state,
       thread,
       time: "13:00",
+      updatedAtMs: 1300,
       title: "New",
     });
 
@@ -168,6 +172,7 @@ describe("workspace-conversation-model", () => {
         state,
         thread,
         time: "13:00",
+        updatedAtMs: 1300,
         title: "New",
       }),
     ).toThrow("Project missing was not found.");
@@ -185,6 +190,7 @@ describe("workspace-conversation-model", () => {
       state,
       thread,
       time: "13:00",
+      updatedAtMs: 1300,
       title: "New",
     });
 
@@ -200,6 +206,7 @@ describe("workspace-conversation-model", () => {
         state,
         thread,
         time: "13:00",
+        updatedAtMs: 1300,
         title: "New",
       }),
     ).toThrow("Project existing already exists.");

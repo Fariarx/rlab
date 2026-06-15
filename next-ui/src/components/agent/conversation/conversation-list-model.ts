@@ -64,7 +64,18 @@ export function sortedConversationsByActivity(conversations: readonly Conversati
     .sort((left, right) => {
       const leftRank = VISUAL_STATUS_SORT_RANK[visualStatusKey(left.conversation, wakeupConversationIds.has(left.conversation.id))];
       const rightRank = VISUAL_STATUS_SORT_RANK[visualStatusKey(right.conversation, wakeupConversationIds.has(right.conversation.id))];
-      return leftRank - rightRank || left.index - right.index;
+      if (leftRank !== rightRank) {
+        return leftRank - rightRank;
+      }
+      // Newest activity first. Conversations without a recency stamp (legacy data,
+      // before this field existed) keep their original insertion order and sort
+      // below any stamped conversation.
+      const leftMs = left.conversation.updatedAtMs;
+      const rightMs = right.conversation.updatedAtMs;
+      if (leftMs !== undefined || rightMs !== undefined) {
+        return (rightMs ?? 0) - (leftMs ?? 0) || left.index - right.index;
+      }
+      return left.index - right.index;
     })
     .map((entry) => entry.conversation);
 }
