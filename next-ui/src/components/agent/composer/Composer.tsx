@@ -1,7 +1,6 @@
 import AttachFileIcon from "@mui/icons-material/AttachFile";
 import AccessTimeIcon from "@mui/icons-material/AccessTime";
 import AutoAwesomeRoundedIcon from "@mui/icons-material/AutoAwesomeRounded";
-import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
 import MicRoundedIcon from "@mui/icons-material/MicRounded";
 import OpenInBrowserIcon from "@mui/icons-material/OpenInBrowser";
 import RateReviewOutlinedIcon from "@mui/icons-material/RateReviewOutlined";
@@ -449,61 +448,36 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
           onChange={chooseFiles}
           style={{ position: "absolute", width: 1, height: 1, opacity: 0, pointerEvents: "none" }}
         />
-        <IconButton
-          data-testid="composer-options-button"
-          aria-label={t("composerOptions")}
-          onClick={(event) => openOptionsMenu(event.currentTarget)}
-          sx={{ width: 34, height: 34, flex: "0 0 auto", color: "text.secondary", borderRadius: (theme) => `${theme.custom.radii.md}px` }}
-        >
-          <SettingsRoundedIcon sx={{ fontSize: 20 }} />
-        </IconButton>
-        {activeModeOption && (
-          <Box
-            data-testid="active-mode-chip"
-            sx={{
-              flex: "0 0 auto",
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 0.25,
-              height: 26,
-              pl: 0.75,
-              pr: 0.25,
-              maxWidth: { xs: 116, sm: 180 },
-              borderRadius: 999,
-              border: (theme) => `1px solid ${theme.palette.status.info.border}`,
-              backgroundColor: (theme) => theme.palette.status.info.soft,
-              color: (theme) => theme.palette.status.info.main,
-            }}
-          >
-            <AutoAwesomeRoundedIcon sx={{ fontSize: 14, flex: "0 0 auto" }} />
-            <Typography noWrap sx={{ minWidth: 0, fontSize: "0.72rem", fontWeight: 700 }}>
-              {activeModeOption.label}
-            </Typography>
-            <Box
-              component="button"
-              type="button"
-              aria-label={t("disableMode", { mode: activeModeOption.label })}
-              onClick={() => onModeChange?.("default")}
-              sx={{
-                flex: "0 0 auto",
-                display: "inline-flex",
-                alignItems: "center",
-                justifyContent: "center",
-                width: 18,
-                height: 18,
-                p: 0,
-                border: 0,
-                borderRadius: "50%",
-                cursor: "pointer",
-                color: "inherit",
-                backgroundColor: "transparent",
-                "&:hover": { backgroundColor: "rgba(255, 255, 255, 0.12)" },
-              }}
+        <Tooltip title={activeModeOption ? t("activeModeTooltip", { mode: activeModeOption.label }) : t("composerOptions")}>
+          <Box sx={{ position: "relative", flex: "0 0 auto", display: "inline-flex" }}>
+            <IconButton
+              data-testid="composer-options-button"
+              aria-label={activeModeOption ? t("activeModeTooltip", { mode: activeModeOption.label }) : t("composerOptions")}
+              onClick={(event) => openOptionsMenu(event.currentTarget)}
+              sx={{ width: 34, height: 34, color: (theme) => (activeModeOption ? theme.palette.status.info.main : theme.palette.text.secondary), borderRadius: (theme) => `${theme.custom.radii.md}px` }}
             >
-              <CloseRoundedIcon sx={{ fontSize: 13 }} />
-            </Box>
+              <SettingsRoundedIcon sx={{ fontSize: 20 }} />
+            </IconButton>
+            {activeModeOption && (
+              <Box
+                component="span"
+                data-testid="active-mode-indicator"
+                aria-hidden="true"
+                sx={{
+                  position: "absolute",
+                  top: 4,
+                  right: 4,
+                  width: 8,
+                  height: 8,
+                  borderRadius: "50%",
+                  pointerEvents: "none",
+                  backgroundColor: (theme) => theme.palette.status.info.main,
+                  border: (theme) => `1.5px solid ${theme.custom.surfaces.s2}`,
+                }}
+              />
+            )}
           </Box>
-        )}
+        </Tooltip>
         <Menu
           action={optionsMenuActionRef}
           anchorEl={modeMenuAnchor}

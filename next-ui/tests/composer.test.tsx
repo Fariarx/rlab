@@ -817,9 +817,10 @@ describe("Composer", () => {
     const wakeupTile = screen.getByTestId("scheduled-wakeup-tile-wake-1");
     expect(wakeupTile).toHaveStyle({ width: "76px", height: "76px", boxShadow: "0 1px 3px rgba(0, 0, 0, 0.2)" });
 
-    // The active agent mode is shown as a compact footer chip, not a square tile.
+    // The active agent mode is shown as a small badge on the options (gear)
+    // button — not a square tile and not an inline chip that eats input width.
     expect(screen.queryByTestId("active-mode-tile")).not.toBeInTheDocument();
-    const modeChip = screen.getByTestId("active-mode-chip");
-    expect(modeChip).toHaveTextContent("Review");
+    expect(screen.queryByTestId("active-mode-chip")).not.toBeInTheDocument();
+    expect(screen.getByTestId("active-mode-indicator")).toBeInTheDocument();
   });
 });
