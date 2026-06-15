@@ -1848,6 +1848,25 @@ Built-in agents:
     ).toEqual([{ type: "tool_result", id: "shell-1", ok: true, output: "C:\\Users\\Admin\\Git\\Workspace\\rlab" }]);
   });
 
+  it("schedules a wakeup from a Gemini TaskWakeup tool call", () => {
+    const translate = createGeminiStreamTranslator();
+
+    // Gemini's tool-result event carries no tool name, so the wakeup is scheduled
+    // from the call itself — the rlab MCP server always acks the request.
+    expect(
+      translate(
+        JSON.stringify({
+          type: "tool_use",
+          tool_name: "TaskWakeup",
+          tool_id: "wake-gem",
+          parameters: { prompt: "check later", delaySeconds: 600, reason: "user asked for a reminder" },
+        }),
+      ),
+    ).toEqual([
+      { type: "wakeup", toolId: "wake-gem", prompt: "check later", reason: "user asked for a reminder", delaySeconds: 600 },
+    ]);
+  });
+
   it("translates Codex plan and semantic item events into rich run events", () => {
     const translate = createCodexStreamTranslator();
 

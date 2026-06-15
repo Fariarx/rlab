@@ -6016,6 +6016,65 @@ export function appendRlabChatToolsPrompt(prompt: string): string {
   return prompt.includes("<rlab-chat-tools>") ? prompt : `${prompt}${rlabChatToolsPromptAppendix()}`;
 }
 
+// CLI agents (OpenCode, Gemini) can only load *external* MCP servers, unlike
+// Claude (in-process SDK MCP) and Codex (native dynamic tools). We point them at
+// a tiny stdio MCP server that exposes TaskWakeup so the model can actually call
+// it; the run-stream translator still does the real scheduling.
+const RLAB_MCP_STDIO_SCRIPT = join(PLUGIN_DIR, "bin", "rlab-mcp-stdio.mjs");
+let rlabOpenCodeMcpConfigPath: string | null = null;
+let rlabGeminiMcpMerged = false;
+
+function ensureOpenCodeMcpConfig(): string {
+  if (!rlabOpenCodeMcpConfigPath) {
+    mkdirSync(WORKSPACE_STATE_DIR, { recursive: true });
+    const path = join(WORKSPACE_STATE_DIR, "rlab-opencode-mcp.json");
+    writeFileSync(
+      path,
+      JSON.stringify({ $schema: "https://opencode.ai/config.json", mcp: { rlab: { type: "local", command: ["node", RLAB_MCP_STDIO_SCRIPT], enabled: true } } }, null, 2),
+      "utf8",
+    );
+    rlabOpenCodeMcpConfigPath = path;
+  }
+  return rlabOpenCodeMcpConfigPath;
+}
+
+/** Merge rlab's MCP server into the user's Gemini settings (idempotent). Gemini
+ *  has no clean per-run settings override, so this is the reliable path; it
+ *  preserves any existing settings/servers. */
+function ensureGeminiMcpConfig(): void {
+  if (rlabGeminiMcpMerged) {
+    return;
+  }
+  const settingsPath = join(homedir(), ".gemini", "settings.json");
+  let settings: Record<string, unknown> = {};
+  try {
+    settings = JSON.parse(readFileSync(settingsPath, "utf8")) as Record<string, unknown>;
+  } catch {
+    settings = {};
+  }
+  const servers = isRecord(settings.mcpServers) ? { ...settings.mcpServers } : {};
+  servers.rlab = { command: "node", args: [RLAB_MCP_STDIO_SCRIPT] };
+  const next = { ...settings, mcpServers: servers };
+  try {
+    mkdirSync(dirname(settingsPath), { recursive: true });
+    writeFileSync(settingsPath, JSON.stringify(next, null, 2), "utf8");
+    rlabGeminiMcpMerged = true;
+  } catch {
+    // Best-effort: if we can't write, the tool just stays unavailable for Gemini.
+  }
+}
+
+/** Extra env for CLI agents so they load rlab's external MCP server (TaskWakeup). */
+function rlabAgentMcpRunEnv(agent: string): NodeJS.ProcessEnv {
+  if (agent === "opencode") {
+    return { OPENCODE_CONFIG: ensureOpenCodeMcpConfig() };
+  }
+  if (agent === "gemini") {
+    ensureGeminiMcpConfig();
+  }
+  return {};
+}
+
 function appendBrowserBridgePrompt(prompt: string, binding: BackgroundRunBinding | null, origin: string): string {
   return binding ? `${prompt}${browserBridgePromptAppendix(binding.conversationId, origin)}` : prompt;
 }
@@ -9148,6 +9207,11 @@ function geminiToolUseEvents(msg: Record<string, unknown>, fallbackIndex: number
     const reasoning = geminiUpdateTopicReasoning(input);
     return reasoning ? [reasoning] : [];
   }
+  // The rlab MCP TaskWakeup tool always acks, so schedule from the call itself —
+  // Gemini's tool-result event carries no tool name to key off later.
+  if (isWakeupToolName(name)) {
+    return wakeupFollowupEvents(id, name, input, true);
+  }
   const rich = richToolEvents(id, name, input, "running");
   if (rich.length > 0) {
     return rich;
@@ -10739,6 +10803,7 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
     const runEnv = {
       ...process.env,
       ...config.env,
+      ...rlabAgentMcpRunEnv(agent),
       ...(binding
         ? {
             RLAB_BROWSER_BASE_URL: origin,
