@@ -177,6 +177,30 @@ describe("workspace-db", () => {
     expect(read.threads.c3).toBeUndefined(); // deleted conversation → messages dropped
   });
 
+  it("front-inserts conversations without transient position collisions", () => {
+    initializeWorkspaceStateInDb({ ...buildEmptyWorkspaceState(), selectedId: "" });
+
+    applyWorkspaceDbMutations([
+      { type: "upsertConversation", conversation: conv("c1"), projectId: null, insertAtFront: true },
+      { type: "upsertConversation", conversation: conv("c2"), projectId: null, insertAtFront: true },
+      { type: "upsertConversation", conversation: conv("c3"), projectId: null, insertAtFront: true },
+    ]);
+
+    expect(readWorkspaceStateFromDb().chats.map((conversation) => conversation.id)).toEqual(["c3", "c2", "c1"]);
+  });
+
+  it("front-inserts projects without transient position collisions", () => {
+    initializeWorkspaceStateInDb({ ...buildEmptyWorkspaceState(), selectedId: "" });
+
+    applyWorkspaceDbMutations([
+      { type: "upsertProject", project: { id: "p1", name: "P1", path: "/tmp/p1" }, insertAtFront: true },
+      { type: "upsertProject", project: { id: "p2", name: "P2", path: "/tmp/p2" }, insertAtFront: true },
+      { type: "upsertProject", project: { id: "p3", name: "P3", path: "/tmp/p3" }, insertAtFront: true },
+    ]);
+
+    expect(readWorkspaceStateFromDb().projects.map((project) => project.id)).toEqual(["p3", "p2", "p1"]);
+  });
+
   it("updates a conversation row without rewriting its thread", () => {
     initializeWorkspaceStateInDb({
       ...buildEmptyWorkspaceState(),

@@ -325,7 +325,6 @@ describe("Message", () => {
   });
 
   it("moves resolved option prompts into agent details", () => {
-    vi.useFakeTimers();
     const message: ChatMessage = {
       id: "agent-options",
       role: "agent",
@@ -344,13 +343,6 @@ describe("Message", () => {
     };
 
     renderMessage(message);
-
-    expect(screen.getByText("Как форматировать ответ?")).toBeInTheDocument();
-    expect(screen.getByText("Выбрано: Summary")).toBeInTheDocument();
-
-    act(() => {
-      vi.advanceTimersByTime(3000);
-    });
 
     expect(screen.queryByText("Как форматировать ответ?")).not.toBeInTheDocument();
 

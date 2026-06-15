@@ -44,6 +44,10 @@ export class WorkspaceThreadLoader {
     this.fullyLoadedThreadIds.add(id);
   }
 
+  isLoaded(id: string): boolean {
+    return this.fullyLoadedThreadIds.has(id);
+  }
+
   forget(id: string): void {
     this.fullyLoadedThreadIds.delete(id);
     this.threadLoads.delete(id);

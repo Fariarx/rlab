@@ -59,6 +59,9 @@ describe("WorkspaceThreadLoader", () => {
     });
 
     loader.resetLoadedThreads(["chat-1"]);
+    expect(loader.isLoaded("chat-1")).toBe(true);
+    expect(loader.isLoaded("chat-2")).toBe(false);
+
     await loader.loadThread("chat-1");
 
     expect(loadConversationThread).not.toHaveBeenCalled();

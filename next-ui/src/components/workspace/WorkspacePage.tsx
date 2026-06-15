@@ -45,6 +45,7 @@ import {
   ConversationSearch,
   QueuedMessages,
   DEFAULT_PROFILE,
+  TypingDots,
   type ConversationView,
   useAgentCliInfo,
   useAgentStatus,
@@ -200,6 +201,7 @@ export const WorkspacePageView = observer(function WorkspacePageView({
   const showTerminal = ws.settings.appearance.showTerminal;
   const selected = ws.find(ws.selectedId);
   const messages = ws.threads[ws.selectedId] ?? [];
+  const selectedThreadLoaded = selected ? ws.isThreadLoaded(selected.id) : false;
   const persistConversationView = useCallback((conversationId: string, next: ConversationView) => {
     ws.setConversationView(conversationId, next);
   }, [ws]);
@@ -712,6 +714,10 @@ export const WorkspacePageView = observer(function WorkspacePageView({
                       description={t("pickConversation")}
                       action={<Button variant="contained" onClick={() => createConversation()}>{t("newChat")}</Button>}
                     />
+                  </Stack>
+                ) : !selectedThreadLoaded ? (
+                  <Stack aria-busy="true" data-testid="conversation-thread-loading" sx={{ height: "100%", justifyContent: "center", alignItems: "center", px: THREAD_PADDING_X }}>
+                    <TypingDots />
                   </Stack>
                 ) : messages.length === 0 ? (
                   <Stack sx={{ height: "100%", justifyContent: "center", alignItems: "center", px: THREAD_PADDING_X }}>

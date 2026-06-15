@@ -6,7 +6,7 @@ import SendIcon from "@mui/icons-material/Send";
 import CloseIcon from "@mui/icons-material/Close";
 import { Box, Stack, Typography } from "@mui/material";
 import { observer } from "mobx-react-lite";
-import { type ChangeEvent, type KeyboardEvent, useState } from "react";
+import { type ChangeEvent, type KeyboardEvent, useEffect, useState } from "react";
 import { useI18n } from "../../../i18n/I18nProvider";
 import { localFileUrl } from "../../../lib/external-url";
 import { normalizeClockLabel } from "../../../lib/time-format";
@@ -296,11 +296,9 @@ const AgentMessage = observer(function AgentMessage({
     generation: blockModel.hasCompletedPlan ? blockModel.completedPlanSignature : "",
     setHidden: setHideCompletedPlans,
   });
-  useDelayedHideFlag({
-    delayMs: COMPLETED_PLAN_HIDE_DELAY_MS,
-    generation: blockModel.hasResolvedInput ? blockModel.resolvedInputsSignature : "",
-    setHidden: setHideResolvedInputs,
-  });
+  useEffect(() => {
+    setHideResolvedInputs(blockModel.hasResolvedInput);
+  }, [blockModel.hasResolvedInput, blockModel.resolvedInputsSignature, setHideResolvedInputs]);
   // The live "thinking" dots live in exactly one place. Once the answer text
   // starts streaming (white text appears) it carries its own trailing dots, so
   // the reasoning header dots would otherwise hang awkwardly in the middle.

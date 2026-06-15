@@ -124,6 +124,7 @@ export interface Workspace {
   readonly reloadWorkspace: () => void;
   readonly loadThread: (id: string) => Promise<void>;
   readonly loadAllThreads: () => Promise<void>;
+  readonly isThreadLoaded: (id: string) => boolean;
   readonly find: (id: string) => ConversationSummary | null;
   readonly cwdOf: (id: string) => string | undefined;
   readonly basePathOf: (id: string) => string | undefined;
@@ -288,6 +289,10 @@ export class WorkspaceStore implements Workspace {
    *  but the selected one). No-op once fully held; never triggers a save. */
   loadThread(id: string): Promise<void> {
     return this.threadLoader.loadThread(id);
+  }
+
+  isThreadLoaded(id: string): boolean {
+    return this.threadLoader.isLoaded(id);
   }
 
   private loadThreadFromServer(id: string, force: boolean): Promise<void> {

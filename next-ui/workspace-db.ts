@@ -320,7 +320,17 @@ function nextConversationPosition(handle: DatabaseHandle, projectId: string | nu
 }
 
 function shiftConversationPositionsForFrontInsert(handle: DatabaseHandle, projectId: string | null): void {
-  handle.prepare(`UPDATE conversations SET position = position + 1 WHERE ${projectWhere(projectId)}`).run(...projectParams(projectId));
+  const where = projectWhere(projectId);
+  const params = projectParams(projectId);
+  const offset = (handle.prepare(`SELECT COALESCE(MAX(position), -1) + 2 AS offset FROM conversations WHERE ${where}`).get(...params) as { offset: number }).offset;
+  handle.prepare(`UPDATE conversations SET position = position + ? WHERE ${where}`).run(offset, ...params);
+  handle.prepare(`UPDATE conversations SET position = position - ? + 1 WHERE ${where}`).run(offset, ...params);
+}
+
+function shiftProjectPositionsForFrontInsert(handle: DatabaseHandle): void {
+  const offset = (handle.prepare("SELECT COALESCE(MAX(position), -1) + 2 AS offset FROM projects").get() as { offset: number }).offset;
+  handle.prepare("UPDATE projects SET position = position + ?").run(offset);
+  handle.prepare("UPDATE projects SET position = position - ? + 1").run(offset);
 }
 
 function projectExists(handle: DatabaseHandle, projectId: string): boolean {
@@ -352,7 +362,7 @@ function upsertProjectInTransaction(handle: DatabaseHandle, project: ProjectMeta
     return;
   }
   if (insertAtFront) {
-    handle.prepare("UPDATE projects SET position = position + 1").run();
+    shiftProjectPositionsForFrontInsert(handle);
   }
   const position = insertAtFront ? 0 : (handle.prepare("SELECT COALESCE(MAX(position), -1) + 1 AS next FROM projects").get() as { next: number }).next;
   handle.prepare("INSERT INTO projects(id, position, data) VALUES(?, ?, ?)").run(project.id, position, JSON.stringify(project));
