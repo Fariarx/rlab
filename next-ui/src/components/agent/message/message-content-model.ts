@@ -1,4 +1,4 @@
-import type { AgentBlock } from "../core/types";
+import type { AgentBlock, ComposerAttachmentDraft, ComposerDraft } from "../core/types";
 
 export interface MessageAttachment {
   readonly id: string;
@@ -37,6 +37,54 @@ export function splitUserContent(raw: string): { readonly text: string; readonly
   text = text.replace(/<attachment\s+name="([^"]*)"[^>]*>[\s\S]*?<\/attachment>/g, (_match, name: string) => {
     attachmentId += 1;
     attachments.push({ id: `inline:${attachmentId}:${name}`, name, isImage: false });
+    return "";
+  });
+  return { text: text.trim(), attachments };
+}
+
+function unescapeXml(value: string): string {
+  return value.replaceAll("&quot;", "\"").replaceAll("&gt;", ">").replaceAll("&lt;", "<").replaceAll("&amp;", "&");
+}
+
+function unescapeMarkdownLabel(value: string): string {
+  return value.replace(/\\([[\]\\])/g, "$1");
+}
+
+/** Inverse of the composer's attachment serialization (see `attachmentBlock`):
+ *  turn a stored user message back into an editable `ComposerDraft` so the real
+ *  Composer can re-open it with its attachment tiles intact. The round-trip is
+ *  lossless — re-sending an untouched message reproduces the same content. */
+export function parseUserDraft(raw: string): ComposerDraft {
+  const attachments: ComposerAttachmentDraft[] = [];
+  let seq = 0;
+  let text = raw.replace(/(!?)\[([^\]\n]+)\]\(([^)\s]+)\)/g, (whole: string, bang: string, label: string, target: string) => {
+    if (!isPathAttachmentTarget(target)) {
+      return whole;
+    }
+    seq += 1;
+    const isImage = bang === "!" || isMessageImageTarget(target);
+    attachments.push({
+      id: `edit-att-${seq}`,
+      name: unescapeMarkdownLabel(label),
+      type: isImage ? "image/*" : "application/octet-stream",
+      content: "",
+      size: 0,
+      lastModified: 0,
+      path: target,
+    });
+    return "";
+  });
+  text = text.replace(/<attachment\s+name="([^"]*)"(?:\s+type="([^"]*)")?[^>]*>([\s\S]*?)<\/attachment>/g, (_match, name: string, type: string | undefined, content: string) => {
+    seq += 1;
+    const inner = content.replace(/^\n/, "").replace(/\n$/, "");
+    attachments.push({
+      id: `edit-att-${seq}`,
+      name: unescapeXml(name),
+      type: type ? unescapeXml(type) : "text/plain",
+      content: inner,
+      size: inner.length,
+      lastModified: 0,
+    });
     return "";
   });
   return { text: text.trim(), attachments };

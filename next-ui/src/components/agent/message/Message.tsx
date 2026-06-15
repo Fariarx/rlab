@@ -6,7 +6,7 @@ import SendIcon from "@mui/icons-material/Send";
 import CloseIcon from "@mui/icons-material/Close";
 import { Box, Stack, Typography } from "@mui/material";
 import { observer } from "mobx-react-lite";
-import { type ChangeEvent, type KeyboardEvent, useEffect, useState } from "react";
+import { type ChangeEvent, type KeyboardEvent, useEffect, useMemo, useState } from "react";
 import { useI18n } from "../../../i18n/I18nProvider";
 import { localFileUrl } from "../../../lib/external-url";
 import { normalizeClockLabel } from "../../../lib/time-format";
@@ -14,13 +14,15 @@ import { Button, IconButton, ImageLightbox, Tooltip } from "../../ui";
 import { AgentBlockRenderer } from "../blocks/AgentBlockRenderer";
 import { AgentDetails } from "./AgentDetails";
 import { AttachmentTile } from "../composer/AttachmentTile";
+import { Composer } from "../composer/Composer";
+import { useComposerShared } from "../composer/composer-shared-context";
 import { ChangedFilesAccordion } from "./ChangedFilesAccordion";
 import { AgentMessageStore, MessageShellStore } from "../stores/agent-local-stores";
 import type { AgentProfile } from "../core/agents";
 import { rise } from "../core/anim";
 import { keyedAgentBlocks } from "./message-block-keys";
 import { createAgentMessageBlockModel, isMessageLive } from "./message-block-model";
-import { basename, readOnlyImageToolPath, splitUserContent, type MessageAttachment } from "./message-content-model";
+import { basename, parseUserDraft, readOnlyImageToolPath, splitUserContent, type MessageAttachment } from "./message-content-model";
 import { agentMessageProfileLabel, formatElapsedSeconds } from "./message-display-model";
 import type { MessageActionHandlers } from "./message-actions";
 import { AgentAvatar, MessageText, TypingDots, UserAvatar } from "../blocks/parts";
@@ -142,6 +144,108 @@ function MessageActionBar({
   );
 }
 
+/** Inline editor for a sent user message. When a Composer context is available
+ *  (inside a live conversation) it reuses the real Composer for full parity —
+ *  attachments, file mentions, $-plugin tokens, voice, modes. It falls back to a
+ *  plain textarea in isolated contexts (tests/storybook) that lack the context. */
+const UserMessageEditor = observer(function UserMessageEditor({
+  message,
+  store,
+  onResend,
+  onCancel,
+}: {
+  readonly message: ChatMessage;
+  readonly store: MessageShellStore;
+  readonly onResend: (value: string) => void;
+  readonly onCancel: () => void;
+}) {
+  const { t } = useI18n();
+  const shared = useComposerShared();
+  const editDraft = useMemo(() => parseUserDraft(message.text ?? ""), [message.text]);
+
+  if (shared) {
+    return (
+      <Box sx={{ width: "100%", p: 1.5, borderRadius: (t) => `${t.custom.radii.lg}px`, backgroundColor: (t) => t.custom.surfaces.s2 }}>
+        <Stack spacing={1}>
+          <Stack direction="row" sx={{ justifyContent: "space-between", alignItems: "center" }}>
+            <Typography variant="microLabel" sx={{ color: "text.secondary" }}>
+              {t("editMessage")}
+            </Typography>
+            <Button size="small" variant="text" onClick={onCancel} startIcon={<CloseIcon sx={{ fontSize: 15 }} />}>
+              {t("cancel")}
+            </Button>
+          </Stack>
+          <Composer
+            {...shared}
+            key={message.id}
+            placeholder={t("editMessage")}
+            initialValue={editDraft.text}
+            initialAttachments={editDraft.attachments}
+            onSend={onResend}
+            running={false}
+          />
+        </Stack>
+      </Box>
+    );
+  }
+
+  const submit = () => {
+    const text = store.draft.trim();
+    if (text.length > 0) {
+      onResend(text);
+    }
+  };
+  return (
+    <Box sx={{ width: "100%", p: 1.5, borderRadius: (t) => `${t.custom.radii.lg}px`, backgroundColor: (t) => t.custom.surfaces.s2 }}>
+      <Stack spacing={1.25}>
+        <Typography variant="microLabel" sx={{ color: "text.secondary" }}>
+          {t("editMessage")}
+        </Typography>
+        <Box
+          component="textarea"
+          aria-label={t("editMessage")}
+          autoFocus
+          value={store.draft}
+          onChange={(event: ChangeEvent<HTMLTextAreaElement>) => store.setDraft(event.currentTarget.value)}
+          onKeyDown={(event: KeyboardEvent<HTMLTextAreaElement>) => {
+            if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+              event.preventDefault();
+              submit();
+            } else if (event.key === "Escape") {
+              event.preventDefault();
+              onCancel();
+            }
+          }}
+          rows={5}
+          sx={{
+            width: "100%",
+            minHeight: 120,
+            resize: "vertical",
+            border: 0,
+            borderRadius: (t) => `${t.custom.radii.md}px`,
+            bgcolor: (t) => t.custom.surfaces.s1,
+            color: "text.primary",
+            font: "inherit",
+            fontSize: "0.9rem",
+            lineHeight: 1.6,
+            p: 1.5,
+            outline: 0,
+            "&:focus": { outline: 0 },
+          }}
+        />
+        <Stack direction="row" spacing={1} sx={{ justifyContent: "flex-end", alignItems: "center" }}>
+          <Button size="small" variant="text" onClick={onCancel} startIcon={<CloseIcon sx={{ fontSize: 15 }} />}>
+            {t("cancel")}
+          </Button>
+          <Button size="small" variant="contained" aria-label={t("sendEditedMessage")} onClick={submit} startIcon={<SendIcon sx={{ fontSize: 15 }} />}>
+            {t("send")}
+          </Button>
+        </Stack>
+      </Stack>
+    </Box>
+  );
+});
+
 const UserMessage = observer(function UserMessage({
   message,
   delay,
@@ -154,16 +258,8 @@ const UserMessage = observer(function UserMessage({
   const { text: displayText, attachments } = splitUserContent(message.text ?? "");
   const reviewBlocks = (message.blocks ?? []).filter((block) => block.kind === "review");
   const [store] = useState(() => new MessageShellStore(displayText));
-  const { editing, draft, previewImage, setDraft, setEditing, setPreviewImage } = store;
+  const { editing, previewImage, setEditing, setPreviewImage } = store;
   const { t } = useI18n();
-
-  const submitEdit = () => {
-    const text = draft.trim();
-    if (text.length > 0) {
-      actions?.onEditAndResend?.(message, text);
-      setEditing(false);
-    }
-  };
 
   return (
     <Stack direction="row" spacing={1.25} sx={{ justifyContent: "flex-end", alignItems: "flex-start", width: "100%", minWidth: 0, ...rise(delay), ...revealActionsOnHover }}>
@@ -171,60 +267,15 @@ const UserMessage = observer(function UserMessage({
           rework a longer message comfortably. */}
       <Stack spacing={0.5} sx={{ alignItems: "flex-end", width: editing ? "100%" : "auto", maxWidth: editing ? "100%" : "82%", minWidth: 0 }}>
         {editing ? (
-          <Box
-            sx={{
-              width: "100%",
-              p: 1.5,
-              borderRadius: (t) => `${t.custom.radii.lg}px`,
-              backgroundColor: (t) => t.custom.surfaces.s2,
+          <UserMessageEditor
+            message={message}
+            store={store}
+            onResend={(value) => {
+              actions?.onEditAndResend?.(message, value);
+              setEditing(false);
             }}
-          >
-            <Stack spacing={1.25}>
-              <Typography variant="microLabel" sx={{ color: "text.secondary" }}>
-                {t("editMessage")}
-              </Typography>
-              <Box
-                component="textarea"
-                aria-label={t("editMessage")}
-                autoFocus
-                value={draft}
-                onChange={(event: ChangeEvent<HTMLTextAreaElement>) => setDraft(event.currentTarget.value)}
-                onKeyDown={(event: KeyboardEvent<HTMLTextAreaElement>) => {
-                  if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-                    event.preventDefault();
-                    submitEdit();
-                  } else if (event.key === "Escape") {
-                    event.preventDefault();
-                    setEditing(false);
-                  }
-                }}
-                rows={5}
-                sx={{
-                  width: "100%",
-                  minHeight: 120,
-                  resize: "vertical",
-                  border: 0,
-                  borderRadius: (t) => `${t.custom.radii.md}px`,
-                  bgcolor: (t) => t.custom.surfaces.s1,
-                  color: "text.primary",
-                  font: "inherit",
-                  fontSize: "0.9rem",
-                  lineHeight: 1.6,
-                  p: 1.5,
-                  outline: 0,
-                  "&:focus": { outline: 0 },
-                }}
-              />
-              <Stack direction="row" spacing={1} sx={{ justifyContent: "flex-end", alignItems: "center" }}>
-                <Button size="small" variant="text" onClick={() => setEditing(false)} startIcon={<CloseIcon sx={{ fontSize: 15 }} />}>
-                  {t("cancel")}
-                </Button>
-                <Button size="small" variant="contained" aria-label={t("sendEditedMessage")} onClick={submitEdit} startIcon={<SendIcon sx={{ fontSize: 15 }} />}>
-                  {t("send")}
-                </Button>
-              </Stack>
-            </Stack>
-          </Box>
+            onCancel={() => setEditing(false)}
+          />
         ) : (
           <Stack spacing={0.5} sx={{ alignItems: "flex-end", minWidth: 0, maxWidth: "100%" }}>
             {displayText && (

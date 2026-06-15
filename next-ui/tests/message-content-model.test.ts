@@ -1,8 +1,34 @@
 import { describe, expect, it } from "vitest";
-import { basename, readOnlyImageToolPath, splitUserContent } from "../src/components/agent/message/message-content-model";
-import type { AgentBlock } from "../src/components/agent/core/types";
+import { basename, parseUserDraft, readOnlyImageToolPath, splitUserContent } from "../src/components/agent/message/message-content-model";
+import { attachmentBlock } from "../src/components/agent/composer/composer-utils";
+import type { AgentBlock, ComposerAttachmentDraft } from "../src/components/agent/core/types";
 
 describe("message-content-model", () => {
+  it("parses a sent message back into an editable composer draft (inverse of attachmentBlock)", () => {
+    const draft = parseUserDraft("Review [report](C:\\tmp\\report.txt) and ![shot](C:\\tmp\\shot.png) please\n<attachment name=\"notes.md\" type=\"text/markdown\">\n# Notes\nline two\n</attachment>");
+
+    expect(draft.text).toBe("Review  and  please");
+    expect(draft.attachments).toEqual([
+      { id: "edit-att-1", name: "report", type: "application/octet-stream", content: "", size: 0, lastModified: 0, path: "C:\\tmp\\report.txt" },
+      { id: "edit-att-2", name: "shot", type: "image/*", content: "", size: 0, lastModified: 0, path: "C:\\tmp\\shot.png" },
+      { id: "edit-att-3", name: "notes.md", type: "text/markdown", content: "# Notes\nline two", size: 16, lastModified: 0 },
+    ]);
+  });
+
+  it("round-trips attachments through serialize → parse without loss", () => {
+    const attachments: readonly ComposerAttachmentDraft[] = [
+      { id: "a", name: "image one.png", type: "image/png", content: "", size: 0, lastModified: 0, path: "/abs/image-one.png" },
+      { id: "b", name: "config.json", type: "application/json", content: "{\n  \"a\": 1\n}", size: 12, lastModified: 0 },
+    ];
+    const serialized = ["Take a look", ...attachments.map(attachmentBlock)].join("\n\n");
+    const parsed = parseUserDraft(serialized);
+
+    expect(parsed.text).toBe("Take a look");
+    expect(parsed.attachments.map((a) => ({ name: a.name, type: a.type, content: a.content, path: a.path }))).toEqual([
+      { name: "image one.png", type: "image/*", content: "", path: "/abs/image-one.png" },
+      { name: "config.json", type: "application/json", content: "{\n  \"a\": 1\n}", path: undefined },
+    ]);
+  });
   it("keeps normal markdown links in visible text", () => {
     const result = splitUserContent("Read [docs](https://example.com/docs) first");
 

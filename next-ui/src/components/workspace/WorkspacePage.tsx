@@ -32,6 +32,7 @@ import {
 import { observer } from "mobx-react-lite";
 import { useCallback, useMemo, useRef, useState } from "react";
 import { I18nProvider, useI18n } from "../../i18n/I18nProvider";
+import { ComposerSharedProvider, type ComposerSharedProps } from "../agent/composer/composer-shared-context";
 import { contextWindowForAgentProfile } from "../../lib/model-context";
 import type { HashRoute } from "../../lib/use-hash-route";
 import {
@@ -486,8 +487,55 @@ export const WorkspacePageView = observer(function WorkspacePageView({
     </Stack>
   );
 
+  // Composer props shared by the bottom dock and the in-thread message editor, so
+  // editing a sent message gets the same capabilities (attachments, mentions,
+  // $-plugins, voice, modes, limits) as composing a new one.
+  const composerShared: ComposerSharedProps = {
+    mentionableFiles,
+    modes: supportedModes,
+    activeMode: profile.mode,
+    onModeChange: handleModeChange,
+    autoConfirm: profile.autoConfirm ?? false,
+    supportsAutoConfirm: AGENT_AUTO_CONFIRM_AGENTS.has(profile.agent),
+    onAutoConfirmChange: handleAutoConfirmChange,
+    onAttachmentError: (message) => toast({ message, severity: "error", duration: 3000 }),
+    agentId: profile.agent,
+    agentLimit: agentLimits.limits[profile.agent] ?? null,
+    agentLimitLoaded: agentLimits.loaded,
+    agentLimitRefreshing: agentLimits.refreshing[profile.agent] === true,
+    agentLimitRefreshError: agentLimits.refreshErrors[profile.agent] ?? null,
+    onRefreshAgentLimits: (requestRefresh) => agentLimits.refresh(profile.agent, requestRefresh),
+    contextTokens: selected?.usage?.contextTokens,
+    contextWindow: contextWindowForAgentProfile(profile),
+    autoCompact: selected?.compaction?.auto ?? true,
+    compactWindow: selected?.compaction?.window,
+    onAutoCompactChange: (enabled) => {
+      if (selected) {
+        ws.setCompaction(selected.id, { auto: enabled });
+      }
+    },
+    onCompactWindowChange: (window) => {
+      if (selected) {
+        ws.setCompaction(selected.id, { window });
+      }
+    },
+    onCompactNow: () => {
+      if (!selected) {
+        return;
+      }
+      if (!ws.compactConversation(selected.id)) {
+        toast({ message: t("compactionNoSession"), severity: "info", duration: 3000 });
+      }
+    },
+    voiceProvider,
+    onVoiceError: (message) => toast({ message, severity: "error", duration: 3500 }),
+    browserActivityEvents: view === "preview" ? browserActivityEvents : undefined,
+    registeredPlugins,
+  };
+
   return (
     <WorkspaceUiProvider value={uiApi}>
+    <ComposerSharedProvider value={composerShared}>
     <Box sx={{ height: "100dvh", display: "flex", overflow: "hidden", bgcolor: "background.default" }}>
       <Box
         ref={sidebarShellRef}
@@ -818,6 +866,7 @@ export const WorkspacePageView = observer(function WorkspacePageView({
                   />
                 )}
                 <Composer
+                  {...composerShared}
                   key={ws.selectedId}
                   ref={composerRef}
                   placeholder={selected ? t("messagePlaceholder", { title: buildComposerLabel(profile) }) : t("startPlaceholder")}
@@ -831,53 +880,13 @@ export const WorkspacePageView = observer(function WorkspacePageView({
                   onSend={(text) => {
                     submitComposerText(text);
                   }}
-                  mentionableFiles={mentionableFiles}
-                  modes={supportedModes}
-                  activeMode={profile.mode}
-                  onModeChange={handleModeChange}
-                  autoConfirm={profile.autoConfirm ?? false}
-                  supportsAutoConfirm={AGENT_AUTO_CONFIRM_AGENTS.has(profile.agent)}
-                  onAutoConfirmChange={handleAutoConfirmChange}
                   onStop={() => ws.stopRun(ws.selectedId)}
-                  onAttachmentError={(message) => toast({ message, severity: "error", duration: 3000 })}
                   running={selectedHasActiveWork}
                   reviewCount={reviewComments.length}
                   onSendReview={sendReviewComments}
                   onTagsHeightChange={setComposerTagsHeight}
                   onOverlayLiftChange={setComposerOverlayLift}
                   history={messageHistory}
-                  agentId={profile.agent}
-                  agentLimit={agentLimits.limits[profile.agent] ?? null}
-                  agentLimitLoaded={agentLimits.loaded}
-                  agentLimitRefreshing={agentLimits.refreshing[profile.agent] === true}
-                  agentLimitRefreshError={agentLimits.refreshErrors[profile.agent] ?? null}
-                  onRefreshAgentLimits={(requestRefresh) => agentLimits.refresh(profile.agent, requestRefresh)}
-                  contextTokens={selected?.usage?.contextTokens}
-                  contextWindow={contextWindowForAgentProfile(profile)}
-                  autoCompact={selected?.compaction?.auto ?? true}
-                  compactWindow={selected?.compaction?.window}
-                  onAutoCompactChange={(enabled) => {
-                    if (selected) {
-                      ws.setCompaction(selected.id, { auto: enabled });
-                    }
-                  }}
-                  onCompactWindowChange={(window) => {
-                    if (selected) {
-                      ws.setCompaction(selected.id, { window });
-                    }
-                  }}
-                  onCompactNow={() => {
-                    if (!selected) {
-                      return;
-                    }
-                    if (!ws.compactConversation(selected.id)) {
-                      toast({ message: t("compactionNoSession"), severity: "info", duration: 3000 });
-                    }
-                  }}
-                  voiceProvider={voiceProvider}
-                  onVoiceError={(message) => toast({ message, severity: "error", duration: 3500 })}
-                  browserActivityEvents={view === "preview" ? browserActivityEvents : undefined}
-                  registeredPlugins={registeredPlugins}
                   scheduledWakeups={scheduledWakeups}
                 />
               </Stack>
@@ -922,6 +931,7 @@ export const WorkspacePageView = observer(function WorkspacePageView({
       </Dialog>
 
     </Box>
+    </ComposerSharedProvider>
     </WorkspaceUiProvider>
   );
 });

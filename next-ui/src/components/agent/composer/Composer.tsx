@@ -37,7 +37,7 @@ const LIMIT_UNSUPPORTED_AGENTS = new Set<string>(["opencode"]);
 
 export type { ComposerHandle } from "./use-composer-file-controller";
 
-interface ComposerProps {
+export interface ComposerProps {
   readonly placeholder?: string;
   readonly mentionableFiles?: readonly string[];
   readonly value?: string;
