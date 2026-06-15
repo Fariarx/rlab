@@ -9,83 +9,48 @@ export interface ConversationAutoScrollController {
   readonly followOutput: () => "auto" | false;
 }
 
+/**
+ * Keeps the thread pinned to the newest message while leaving the user free to
+ * scroll up and read history.
+ *
+ * This deliberately leans on Virtuoso's own stick-to-bottom machinery
+ * (`followOutput` + `atBottomStateChange`) instead of fighting it. The previous
+ * implementation ran a 100ms `setInterval` that re-issued `scrollToIndex` plus a
+ * raw `scrollTop = scrollHeight` for up to six seconds per update, layered on a
+ * `requestAnimationFrame` re-pin — three scroll commands racing each other on
+ * every streamed token, which read as the jumpy/glitchy scrolling. Here:
+ *
+ *  - `followOutput` glues the viewport to the bottom as the last message grows
+ *    during streaming (no manual work needed for height changes).
+ *  - One instant `scrollToIndex("LAST")` per *new item* covers the discrete
+ *    append case crisply.
+ *  - A user wheel/key scroll-up unpins immediately; returning to the bottom
+ *    (reported by Virtuoso) re-pins.
+ */
 export function useConversationAutoScroll(items: readonly unknown[]): ConversationAutoScrollController {
   const virtuosoRef = useRef<VirtuosoHandle | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
-  // Whether the viewport is pinned to the latest message. Starts pinned so a
-  // freshly opened conversation lands at the bottom; flips off when the user
-  // scrolls up to read history so streaming updates don't yank them back down.
+  // Whether the viewport tracks the latest message. Starts pinned so a freshly
+  // opened conversation lands at the bottom.
   const pinnedToBottom = useRef(true);
-  // True only while the *user* is actively scrolling. We use it to distinguish a
-  // user scroll-up (which should unpin) from the viewport leaving the bottom
-  // simply because streaming content grew taller.
+  // True only while the *user* is actively scrolling, so we can tell a real
+  // scroll-up from the viewport leaving the bottom because streaming grew taller.
   const userScrolling = useRef(false);
-  const programmaticScrollUntil = useRef(0);
-  const convergenceTimer = useRef<number | null>(null);
-
-  const scrollerEl = useCallback(
-    (): HTMLElement | null => (containerRef.current?.querySelector('[data-testid="virtuoso-scroller"]') as HTMLElement | null),
-    [],
-  );
-
-  const pinToBottom = useCallback(() => {
-    if (!pinnedToBottom.current) {
-      return;
-    }
-    programmaticScrollUntil.current = performance.now() + 300;
-    virtuosoRef.current?.scrollToIndex({ index: "LAST", align: "end", behavior: "auto" });
-    const scroller = scrollerEl();
-    if (scroller) {
-      scroller.scrollTop = scroller.scrollHeight;
-    }
-  }, [scrollerEl]);
+  // Short window after a programmatic snap during which Virtuoso's transient
+  // "left the bottom" reports must not be mistaken for a user scroll.
+  const programmaticUntil = useRef(0);
 
   const releaseToUser = useCallback(() => {
     pinnedToBottom.current = false;
-    if (convergenceTimer.current !== null) {
-      clearInterval(convergenceTimer.current);
-      convergenceTimer.current = null;
-    }
   }, []);
 
   useLayoutEffect(() => {
-    if (items.length === 0) {
+    if (items.length === 0 || !pinnedToBottom.current) {
       return;
     }
-    pinToBottom();
-    const raf = requestAnimationFrame(pinToBottom);
-    return () => cancelAnimationFrame(raf);
-  }, [items, pinToBottom]);
-
-  useLayoutEffect(() => {
-    pinnedToBottom.current = true;
-    let atBottomTicks = 0;
-    let elapsed = 0;
-    let lastHeight = -1;
-    pinToBottom();
-    convergenceTimer.current = window.setInterval(() => {
-      elapsed += 100;
-      pinToBottom();
-      const scroller = scrollerEl();
-      const height = scroller ? scroller.scrollHeight : 0;
-      const distance = scroller ? scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop : 0;
-      const stable = height === lastHeight;
-      lastHeight = height;
-      atBottomTicks = distance <= 4 && stable ? atBottomTicks + 1 : 0;
-      if (convergenceTimer.current === null || elapsed >= 6000 || atBottomTicks >= 3) {
-        if (convergenceTimer.current !== null) {
-          clearInterval(convergenceTimer.current);
-          convergenceTimer.current = null;
-        }
-      }
-    }, 100);
-    return () => {
-      if (convergenceTimer.current !== null) {
-        clearInterval(convergenceTimer.current);
-        convergenceTimer.current = null;
-      }
-    };
-  }, [pinToBottom, scrollerEl]);
+    programmaticUntil.current = performance.now() + 150;
+    virtuosoRef.current?.scrollToIndex({ index: "LAST", align: "end", behavior: "auto" });
+  }, [items]);
 
   useEffect(() => {
     const element = containerRef.current;
@@ -97,30 +62,18 @@ export function useConversationAutoScroll(items: readonly unknown[]): Conversati
         releaseToUser();
       }
     };
-    const onTouchMove = () => {
-      if (convergenceTimer.current !== null) {
-        releaseToUser();
-        return;
-      }
-      const scroller = scrollerEl();
-      if (scroller && scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop > 24) {
-        releaseToUser();
-      }
-    };
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "ArrowUp" || event.key === "PageUp" || event.key === "Home") {
         releaseToUser();
       }
     };
     element.addEventListener("wheel", onWheel, { passive: true });
-    element.addEventListener("touchmove", onTouchMove, { passive: true });
     element.addEventListener("keydown", onKeyDown);
     return () => {
       element.removeEventListener("wheel", onWheel);
-      element.removeEventListener("touchmove", onTouchMove);
       element.removeEventListener("keydown", onKeyDown);
     };
-  }, [releaseToUser, scrollerEl]);
+  }, [releaseToUser]);
 
   const setUserScrolling = useCallback((scrolling: boolean) => {
     userScrolling.current = scrolling;
@@ -129,7 +82,11 @@ export function useConversationAutoScroll(items: readonly unknown[]): Conversati
   const handleAtBottomStateChange = useCallback((atBottom: boolean) => {
     if (atBottom) {
       pinnedToBottom.current = true;
-    } else if (userScrolling.current && performance.now() > programmaticScrollUntil.current) {
+      return;
+    }
+    // Only a user-driven scroll away from the bottom unpins. Streaming growth and
+    // our own programmatic snaps must not.
+    if (userScrolling.current && performance.now() > programmaticUntil.current) {
       pinnedToBottom.current = false;
     }
   }, []);
