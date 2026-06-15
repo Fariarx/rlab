@@ -5,15 +5,6 @@ import ImageOutlinedIcon from "@mui/icons-material/ImageOutlined";
 import InsertDriveFileOutlinedIcon from "@mui/icons-material/InsertDriveFileOutlined";
 import { Box, Typography } from "@mui/material";
 import type { Theme } from "@mui/material/styles";
-import { observer } from "mobx-react-lite";
-import { useState } from "react";
-import { IconButton } from "../../ui";
-import { ImageFailedStore } from "../stores/agent-local-stores";
-
-function extOf(name: string): string {
-  const dot = name.lastIndexOf(".");
-  return dot > 0 && dot < name.length - 1 ? name.slice(dot + 1).toUpperCase() : "";
-}
 
 function formatBytes(bytes?: number): string {
   if (!bytes || bytes <= 0) {
@@ -32,8 +23,8 @@ function formatBytes(bytes?: number): string {
 const CODE_RE = /\.(ts|tsx|js|jsx|mjs|cjs|py|rb|go|rs|java|kt|c|h|cpp|hpp|cc|cs|php|sh|bash|sql|json|ya?ml|toml|xml|html|css|scss)$/i;
 
 function FileGlyph({ name, mime }: { readonly name: string; readonly mime?: string }) {
-  const sx = { fontSize: 26, color: (t: Theme) => t.palette.status.info.main } as const;
-  if (mime?.startsWith("image/")) {
+  const sx = { fontSize: 15, flex: "0 0 auto", color: (t: Theme) => t.palette.status.info.main } as const;
+  if (mime?.startsWith("image/") || /\.(png|jpe?g|gif|webp|svg|avif|bmp)$/i.test(name)) {
     return <ImageOutlinedIcon sx={sx} />;
   }
   if (CODE_RE.test(name)) {
@@ -49,7 +40,7 @@ export interface AttachmentTileProps {
   readonly name: string;
   readonly mime?: string;
   readonly sizeBytes?: number;
-  /** Resolved URL for an image preview; when set the tile shows the picture. */
+  /** Accepted for call-site compatibility; tags show a type icon, not a preview. */
   readonly previewSrc?: string;
   readonly onOpen?: () => void;
   readonly onRemove?: () => void;
@@ -57,29 +48,29 @@ export interface AttachmentTileProps {
 }
 
 /**
- * A compact square tile for a single attachment — image preview or a file glyph
- * with its extension, plus a name + size caption. Shared by the composer (with a
- * remove button) and sent messages (read-only), so both look identical.
+ * A single attachment shown as a compact tag: a file-type icon + name (+ size),
+ * with an optional remove button (composer) — instead of a large square tile.
+ * Shared by the composer and sent messages so both read the same.
  */
-export const AttachmentTile = observer(function AttachmentTile({ name, mime, sizeBytes, previewSrc, onOpen, onRemove, removeLabel }: AttachmentTileProps) {
-  const [store] = useState(() => new ImageFailedStore());
-  const { failed: imgFailed, setFailed: setImgFailed } = store;
-  const ext = extOf(name);
+export function AttachmentTile({ name, mime, sizeBytes, onOpen, onRemove, removeLabel }: AttachmentTileProps) {
   const size = formatBytes(sizeBytes);
-  const showImage = Boolean(previewSrc) && !imgFailed;
   return (
     <Box
+      data-testid="attachment-tag"
       sx={{
         position: "relative",
-        width: 76,
-        height: 76,
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 0.5,
+        maxWidth: 220,
+        height: 28,
+        pl: 0.875,
+        pr: onRemove ? 0.25 : 0.875,
         flex: "0 0 auto",
         pointerEvents: "auto",
         borderRadius: (t) => `${t.custom.radii.md}px`,
-        overflow: "hidden",
         border: (t) => `1px solid ${t.custom.borders.strong}`,
         backgroundColor: (t) => t.custom.surfaces.s2,
-        boxShadow: "0 1px 4px rgba(0, 0, 0, 0.18)",
       }}
     >
       <Box
@@ -88,88 +79,55 @@ export const AttachmentTile = observer(function AttachmentTile({ name, mime, siz
         onClick={onOpen}
         aria-label={onOpen ? name : undefined}
         sx={{
-          display: "grid",
-          gridTemplateRows: "1fr auto",
-          width: "100%",
-          height: "100%",
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 0.5,
+          minWidth: 0,
           p: 0,
           border: 0,
+          backgroundColor: "transparent",
+          color: "inherit",
+          font: "inherit",
           textAlign: "left",
           cursor: onOpen ? "pointer" : "default",
-          backgroundColor: "transparent",
         }}
       >
-        {showImage ? (
-          <>
-            <Box component="img" src={previewSrc} alt={name} loading="lazy" onError={() => setImgFailed(true)} sx={{ gridRow: "1 / -1", width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
-            {(ext || mime) && (
-              <Typography
-                noWrap
-                sx={{
-                  gridRow: "2",
-                  justifySelf: "start",
-                  minWidth: 0,
-                  maxWidth: "calc(100% - 8px)",
-                  ml: 0.375,
-                  mb: 0.375,
-                  px: 0.5,
-                  py: 0.125,
-                  alignSelf: "end",
-                  borderRadius: (t) => `${t.custom.radii.sm}px`,
-                  fontFamily: (t) => t.custom.fonts.mono,
-                  fontSize: "0.56rem",
-                  fontWeight: 800,
-                  color: "text.primary",
-                  backgroundColor: "rgba(0, 0, 0, 0.62)",
-                  backdropFilter: "blur(4px)",
-                }}
-              >
-                {ext || "IMG"}
-              </Typography>
-            )}
-          </>
-        ) : (
-          <>
-            <Box sx={{ minHeight: 0, display: "flex", alignItems: "center", justifyContent: "center", gap: 0.5, backgroundColor: (t) => t.custom.surfaces.s3 }}>
-              <FileGlyph name={name} mime={mime} />
-              {ext && (
-                <Typography sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.58rem", fontWeight: 700, letterSpacing: "0.04em", color: "text.secondary" }}>
-                  {ext}
-                </Typography>
-              )}
-            </Box>
-            <Box sx={{ px: 0.5, py: 0.25, minWidth: 0, backgroundColor: (t) => t.custom.surfaces.s2 }}>
-              <Typography noWrap sx={{ fontSize: "0.6rem", lineHeight: 1.15, fontWeight: 600, color: "text.primary" }}>
-                {name}
-              </Typography>
-              {size && (
-                <Typography noWrap sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.52rem", lineHeight: 1.15, color: "text.secondary" }}>
-                  {size}
-                </Typography>
-              )}
-            </Box>
-          </>
+        <FileGlyph name={name} mime={mime} />
+        <Typography noWrap sx={{ minWidth: 0, fontSize: "0.76rem", fontWeight: 600, color: "text.primary" }}>
+          {name}
+        </Typography>
+        {size && (
+          <Typography component="span" noWrap sx={{ flex: "0 0 auto", fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.64rem", color: "text.secondary" }}>
+            {size}
+          </Typography>
         )}
       </Box>
       {onRemove && (
-        <IconButton
+        <Box
+          component="button"
+          type="button"
           aria-label={removeLabel ?? ""}
           onClick={onRemove}
           sx={{
-            // Subtle by default; a background only appears on hover (no red).
-            position: "absolute",
-            top: 3,
-            right: 3,
-            p: 0.25,
+            flex: "0 0 auto",
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            width: 20,
+            height: 20,
+            p: 0,
+            border: 0,
+            borderRadius: "50%",
+            cursor: "pointer",
             color: "text.secondary",
             backgroundColor: "transparent",
             transition: "background-color 120ms ease, color 120ms ease",
-            "&:hover": { color: "text.primary", backgroundColor: (t) => t.custom.surfaces.s1 },
+            "&:hover": { color: "text.primary", backgroundColor: (t) => t.custom.surfaces.s3 },
           }}
         >
-          <CloseRoundedIcon sx={{ fontSize: 13 }} />
-        </IconButton>
+          <CloseRoundedIcon sx={{ fontSize: 14 }} />
+        </Box>
       )}
     </Box>
   );
-});
+}

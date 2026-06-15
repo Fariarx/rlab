@@ -51,11 +51,40 @@ function MessageAttachments({ attachments, onOpenImage }: { readonly attachments
 }
 
 function AgentImagePreview({ path, onOpen }: { readonly path: string; readonly onOpen: (attachment: MessageAttachment) => void }) {
-  const attachment = { id: `agent-image:${path}`, name: basename(path), target: path, isImage: true };
+  const name = basename(path);
+  const attachment = { id: `agent-image:${path}`, name, target: path, isImage: true };
   return (
-    <Stack direction="row" sx={{ flexWrap: "wrap", gap: 0.75 }}>
-      <AttachmentTile name={attachment.name} mime="image/*" previewSrc={localFileUrl(path)} onOpen={() => onOpen(attachment)} />
-    </Stack>
+    <Box
+      component="button"
+      type="button"
+      onClick={() => onOpen(attachment)}
+      aria-label={name}
+      sx={{
+        display: "inline-block",
+        p: 0,
+        border: 0,
+        backgroundColor: "transparent",
+        cursor: "pointer",
+        maxWidth: "100%",
+        lineHeight: 0,
+      }}
+    >
+      <Box
+        component="img"
+        src={localFileUrl(path)}
+        alt={name}
+        loading="lazy"
+        sx={{
+          display: "block",
+          maxWidth: 320,
+          maxHeight: 320,
+          width: "auto",
+          height: "auto",
+          borderRadius: (t) => `${t.custom.radii.md}px`,
+          border: (t) => `1px solid ${t.custom.borders.subtle}`,
+        }}
+      />
+    </Box>
   );
 }
 
