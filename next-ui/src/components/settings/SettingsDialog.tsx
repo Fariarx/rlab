@@ -43,6 +43,7 @@ import {
   generalVoiceProviderPatch,
   voiceProviderUiState,
 } from "./settings-dialog-model";
+import { ensureBrowserNotificationPermission } from "../workspace/workspace-page-helpers";
 import { useAgentsSectionController } from "./use-agents-section-controller";
 import { useBrowserPreviewSetupController } from "./use-browser-preview-setup-controller";
 import { useVoiceSectionController } from "./use-voice-section-controller";
@@ -463,7 +464,7 @@ function GeneralSection({ settings, onSettingsChange }: Pick<SettingsDialogProps
           </ToggleButtonGroup>
         }
       />
-      <SettingRow title={t("desktopNotifications")} description={t("desktopNotificationsDescription")} control={<Switch checked={settings.general.desktopNotifications} onChange={(e) => onSettingsChange(generalDesktopNotificationsPatch(e.target.checked))} />} />
+      <SettingRow title={t("desktopNotifications")} description={t("desktopNotificationsDescription")} control={<Switch checked={settings.general.desktopNotifications} onChange={(e) => { if (e.target.checked) { ensureBrowserNotificationPermission(true); } onSettingsChange(generalDesktopNotificationsPatch(e.target.checked)); }} />} />
       <SettingRow title={t("confirmDestructive")} description={t("confirmDestructiveDescription")} control={<Switch checked={settings.general.confirmDestructiveActions} onChange={(e) => onSettingsChange(generalConfirmDestructiveActionsPatch(e.target.checked))} />} />
       <SettingRow title={t("telemetry")} description={t("telemetryDescription")} control={<Switch checked={settings.general.telemetry} onChange={(e) => onSettingsChange(generalTelemetryPatch(e.target.checked))} />} />
       <SettingRow

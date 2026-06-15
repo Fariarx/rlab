@@ -53,6 +53,7 @@ import {
   parseGitFilePayload,
   parseGitCommitPayload,
   parseGitCheckoutPayload,
+  parseGitCommitActionPayload,
     gitGraphBranchHeads,
     parseGitGraphLog,
   parseTerminalSessionRequest,
@@ -688,7 +689,7 @@ Built-in agents:
       "--permission-mode",
       "plan",
       "--tools",
-      "Read,Glob,Grep,LS,AskUserQuestion,TaskWakeup,TaskAwait",
+      "Read,Glob,Grep,LS,AskUserQuestion,TaskWakeup",
     ]);
   });
 
@@ -760,8 +761,45 @@ Built-in agents:
     expect(readOnlyOptions).toMatchObject({
       permissionMode: "plan",
       settings: { autoCompactEnabled: false, autoCompactWindow: 120000 },
-      tools: ["Read", "Glob", "Grep", "LS", "AskUserQuestion", "TaskWakeup", "TaskAwait"],
+      tools: ["Read", "Glob", "Grep", "LS", "AskUserQuestion", "TaskWakeup"],
     });
+  });
+
+  it("registers rlab chat tools as MCP tools and aliases the bare names", () => {
+    const abortController = new AbortController();
+    const canUseTool: Parameters<typeof buildClaudeSdkOptions>[3] = async (_toolName, input) => ({ behavior: "allow", updatedInput: input });
+    const options = buildClaudeSdkOptions(
+      { agent: "claude-code", prompt: "hi", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" },
+      "C:/repo",
+      abortController,
+      canUseTool,
+    );
+    // The tools must be registered (so the SDK doesn't reject the call as unknown)
+    // and the model-facing names must resolve to the registered MCP tool names.
+    expect(options.mcpServers).toMatchObject({ rlab: expect.objectContaining({ type: "sdk", name: "rlab" }) });
+    expect(options.toolAliases).toMatchObject({
+      TaskWakeup: "mcp__rlab__TaskWakeup",
+    });
+    expect(options.toolAliases).not.toHaveProperty("TaskAwait");
+  });
+
+  it("schedules a wakeup from an MCP-prefixed TaskWakeup tool call", () => {
+    const translate = createClaudeStreamTranslator();
+    translate(
+      JSON.stringify({
+        type: "assistant",
+        message: { content: [{ type: "tool_use", id: "w1", name: "mcp__rlab__TaskWakeup", input: { prompt: "check later", delaySeconds: 600 } }] },
+      }),
+    );
+    const done = translate(
+      JSON.stringify({
+        type: "user",
+        message: { content: [{ type: "tool_result", tool_use_id: "w1", content: "ok" }] },
+      }),
+    );
+    // The mcp__rlab__ prefix is normalized, so the translator recognizes the tool
+    // and emits a wakeup event instead of leaving the call unhandled.
+    expect(done.some((event) => event.type === "wakeup" && event.prompt === "check later" && event.delaySeconds === 600)).toBe(true);
   });
 
   it("translates Claude text deltas without duplicating the final assistant message", () => {
@@ -1147,7 +1185,7 @@ Built-in agents:
       "--permission-mode",
       "plan",
       "--tools",
-      "Read,Glob,Grep,LS,AskUserQuestion,TaskWakeup,TaskAwait",
+      "Read,Glob,Grep,LS,AskUserQuestion,TaskWakeup",
     ]);
     expect(buildCodexRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" })).toEqual([
       "exec",
@@ -1363,6 +1401,8 @@ Built-in agents:
 
   it("registers rlab dynamic tools for Codex app-server threads", () => {
     const tools = codexRlabDynamicTools();
+    // A single consolidated wakeup tool (schedule/cancel/list); no separate TaskAwait.
+    expect(tools).toHaveLength(1);
     expect(tools).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -1378,17 +1418,9 @@ Built-in agents:
             }),
           }),
         }),
-        expect.objectContaining({
-          name: "TaskAwait",
-          inputSchema: expect.objectContaining({
-            type: "object",
-            properties: expect.objectContaining({
-              action: expect.objectContaining({ enum: ["list"] }),
-            }),
-          }),
-        }),
       ]),
     );
+    expect(tools.some((tool) => tool.name === "TaskAwait")).toBe(false);
 
     expect(
       buildCodexThreadParams({
@@ -1431,7 +1463,7 @@ Built-in agents:
     expect(
       codexDynamicToolCallResponse(
         {
-          tool: "TaskAwait",
+          tool: "TaskWakeup",
           arguments: { action: "list" },
         },
         { conversationId: "chat-empty" },
@@ -1510,23 +1542,6 @@ Built-in agents:
       { type: "tool", id: "wake-1", name: "TaskWakeup", summary: "send OK", args: { prompt: "send OK", delaySeconds: "180" } },
       { type: "tool_result", id: "wake-1", ok: true, output: "accepted" },
       { type: "wakeup", toolId: "wake-1", prompt: "send OK", delaySeconds: 180 },
-    ]);
-    expect(
-      codexAppServerItemEvents(
-        {
-          type: "dynamicToolCall",
-          id: "await-1",
-          tool: "TaskAwait",
-          status: "completed",
-          arguments: { action: "list" },
-          contentItems: [{ type: "inputText", text: "No scheduled TaskWakeup entries for this chat." }],
-          success: true,
-        },
-        true,
-      ),
-    ).toEqual([
-      { type: "tool", id: "await-1", name: "TaskAwait", summary: "TaskAwait", args: { action: "list" } },
-      { type: "tool_result", id: "await-1", ok: true, output: "No scheduled TaskWakeup entries for this chat." },
     ]);
     // webSearch -> search
     expect(codexAppServerItemEvents({ type: "webSearch", id: "w1", query: "rust" }, true)).toEqual([{ type: "search", id: "w1", query: "rust", state: "ok" }]);
@@ -2526,6 +2541,14 @@ Built-in agents:
       cwd: "C:\\repo",
       branch: "feature/ui",
     });
+  });
+
+  it("validates git commit-action payloads (hash + reset mode)", () => {
+    expect(() => parseGitCommitActionPayload(JSON.stringify({ cwd: "", hash: "abc1234" }))).toThrow("Project directory is required.");
+    expect(() => parseGitCommitActionPayload(JSON.stringify({ cwd: "/repo", hash: "nothex!" }))).toThrow("A valid commit hash is required.");
+    expect(parseGitCommitActionPayload(JSON.stringify({ cwd: " /repo ", hash: " AbC1234 " }))).toEqual({ cwd: "/repo", hash: "AbC1234", mode: "mixed" });
+    expect(parseGitCommitActionPayload(JSON.stringify({ cwd: "/repo", hash: "abc1234", mode: "HARD" })).mode).toBe("hard");
+    expect(parseGitCommitActionPayload(JSON.stringify({ cwd: "/repo", hash: "abc1234", mode: "bogus" })).mode).toBe("mixed");
   });
 
   it("parses decorated git graph log rows", () => {

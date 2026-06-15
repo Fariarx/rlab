@@ -1,16 +1,8 @@
-import type { Branch, Commit, GraphStyle } from "commit-graph";
 import type { GitGraphBranchHead, GitGraphCommit } from "../../../client/api/git-panel-api";
 import type { GitFileStatus, GitStatusPayload } from "../../../lib/git-status";
 
 export type GitChangeTab = "unstaged" | "staged";
 export type GitFocusTab = GitChangeTab | "last-turn";
-
-export const GIT_GRAPH_STYLE: GraphStyle = {
-  commitSpacing: 40,
-  branchSpacing: 10,
-  branchColors: ["#F59E0B", "#60A5FA", "#F87171", "#A78BFA", "#34D399", "#FBBF24", "#22D3EE", "#FB7185", "#C084FC", "#2DD4BF"],
-  nodeRadius: 3,
-};
 
 export function changedFilesForTab(status: GitStatusPayload | null, tab: GitChangeTab): readonly GitFileStatus[] {
   const files = status?.files ?? [];
@@ -59,38 +51,6 @@ export function gitGraphBranchHeadsFromCommits(commits: readonly GitGraphCommit[
     }
   }
   return Array.from(branchHeads, ([name, hash]) => ({ name, hash }));
-}
-
-export function gitGraphCommitToLibraryCommit(commit: GitGraphCommit): Commit {
-  return {
-    sha: commit.hash,
-    commit: {
-      author: {
-        name: commit.author,
-        date: commit.date,
-      },
-      message: commit.subject || "-",
-    },
-    parents: commit.parents.map((parent) => ({ sha: parent })),
-  };
-}
-
-export function gitGraphBranchHeadToLibraryBranch(head: GitGraphBranchHead): Branch {
-  return {
-    name: head.name,
-    commit: { sha: head.hash },
-  };
-}
-
-export function gitGraphDateLabel(value: string | number | Date): string {
-  if (typeof value === "string") {
-    return value;
-  }
-  const date = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return "";
-  }
-  return date.toLocaleDateString(undefined, { year: "numeric", month: "2-digit", day: "2-digit" });
 }
 
 export function gitOperationErrorMessage(error: unknown, fallback: string): string {

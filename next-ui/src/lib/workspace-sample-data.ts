@@ -174,7 +174,10 @@ export function buildInitialThreads(): Record<string, ChatMessage[]> {
   const threads: Record<string, ChatMessage[]> = {};
   for (const conv of all) {
     const scripted = scriptedThreads[conv.id];
-    threads[conv.id] = scripted ? [...scripted] : genericThread(conv.title);
+    // Sample threads reuse local message ids ("u1"/"a1"); namespace them per
+    // conversation so they stay globally unique once persisted (messages.id is a
+    // primary key in the SQLite store — colliding ids break demo seeding).
+    threads[conv.id] = (scripted ?? genericThread(conv.title)).map((message) => ({ ...message, id: `${conv.id}-${message.id}` }));
   }
   return threads;
 }

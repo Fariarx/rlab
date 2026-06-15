@@ -284,6 +284,7 @@ export const GitView = observer(function GitView({ cwd, lastTurnDiffs = [], revi
     unstageFile,
     commitStagedFiles,
     checkoutRef,
+    commitAction,
     initRepo,
   } = controller;
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -337,6 +338,13 @@ export const GitView = observer(function GitView({ cwd, lastTurnDiffs = [], revi
                 · {status.commitTitle}
               </Typography>
             )}
+          </Box>
+          <Stack direction="row" spacing={0.75} sx={{ alignItems: "center", flex: "0 0 auto" }}>
+            {/* Fixed-width slot on the left of the right cluster so the refresh
+                button never shifts when the git refresh indicator appears. */}
+            <Box sx={{ width: 16, height: 16, flex: "0 0 auto", display: "flex", alignItems: "center", justifyContent: "center" }}>
+              {(loading || treeLoading) && <CircularProgress size={14} thickness={5} aria-label={t("gitTreeLoading")} sx={{ color: "text.secondary" }} />}
+            </Box>
             {worktree?.active && cwd && (
               <>
                 <Stack
@@ -369,14 +377,14 @@ export const GitView = observer(function GitView({ cwd, lastTurnDiffs = [], revi
                 )}
               </>
             )}
-          </Box>
-          <Tooltip title={t("refresh")}>
-            <span>
-              <IconButton aria-label={t("refresh")} disabled={!cwd || loading} onClick={refreshStatus}>
-                <RefreshIcon sx={{ fontSize: 17 }} />
-              </IconButton>
-            </span>
-          </Tooltip>
+            <Tooltip title={t("refresh")}>
+              <span>
+                <IconButton aria-label={t("refresh")} disabled={!cwd || loading} onClick={refreshStatus}>
+                  <RefreshIcon sx={{ fontSize: 17 }} />
+                </IconButton>
+              </span>
+            </Tooltip>
+          </Stack>
         </Stack>
 
         {status && (
@@ -421,7 +429,7 @@ export const GitView = observer(function GitView({ cwd, lastTurnDiffs = [], revi
           )}
           {status && (
             <Stack spacing={1.5} sx={{ minHeight: 0, pt: 1.5 }}>
-              {activeTab === "tree" && <GitTreeTab commits={graphCommits} branchHeads={graphBranchHeads} currentBranch={status.branch} currentHash={status.commitHash} error={treeError} loading={treeLoading} t={t} />}
+              {activeTab === "tree" && <GitTreeTab commits={graphCommits} branchHeads={graphBranchHeads} currentBranch={status.branch} branches={status.branches} currentHash={status.commitHash} error={treeError} loading={treeLoading} onCheckoutBranch={checkoutRef} onCommitAction={commitAction} actionsDisabled={!cwd || loading || actionLoading} canCheckout={Boolean(cwd) && status.clean && !loading && !actionLoading} t={t} />}
 
               {activeTab === "unstaged" &&
                 cwd &&

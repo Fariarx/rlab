@@ -4,6 +4,7 @@ import DescriptionOutlinedIcon from "@mui/icons-material/DescriptionOutlined";
 import ImageOutlinedIcon from "@mui/icons-material/ImageOutlined";
 import InsertDriveFileOutlinedIcon from "@mui/icons-material/InsertDriveFileOutlined";
 import { Box, Typography } from "@mui/material";
+import type { Theme } from "@mui/material/styles";
 import { observer } from "mobx-react-lite";
 import { useState } from "react";
 import { IconButton } from "../../ui";
@@ -31,16 +32,17 @@ function formatBytes(bytes?: number): string {
 const CODE_RE = /\.(ts|tsx|js|jsx|mjs|cjs|py|rb|go|rs|java|kt|c|h|cpp|hpp|cc|cs|php|sh|bash|sql|json|ya?ml|toml|xml|html|css|scss)$/i;
 
 function FileGlyph({ name, mime }: { readonly name: string; readonly mime?: string }) {
+  const sx = { fontSize: 26, color: (t: Theme) => t.palette.status.info.main } as const;
   if (mime?.startsWith("image/")) {
-    return <ImageOutlinedIcon sx={{ fontSize: 24, color: "text.secondary" }} />;
+    return <ImageOutlinedIcon sx={sx} />;
   }
   if (CODE_RE.test(name)) {
-    return <CodeOutlinedIcon sx={{ fontSize: 24, color: "text.secondary" }} />;
+    return <CodeOutlinedIcon sx={sx} />;
   }
   if (mime?.startsWith("text/") || /\.(txt|md|log|csv)$/i.test(name)) {
-    return <DescriptionOutlinedIcon sx={{ fontSize: 24, color: "text.secondary" }} />;
+    return <DescriptionOutlinedIcon sx={sx} />;
   }
-  return <InsertDriveFileOutlinedIcon sx={{ fontSize: 24, color: "text.secondary" }} />;
+  return <InsertDriveFileOutlinedIcon sx={sx} />;
 }
 
 export interface AttachmentTileProps {

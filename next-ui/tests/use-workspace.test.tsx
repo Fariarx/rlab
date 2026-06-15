@@ -10,6 +10,11 @@ const WORKSPACE_SYNC_TICK_MS = 2_000;
 const Probe = observer(function Probe() {
   const workspace = useWorkspace();
   const selected = workspace.find(workspace.selectedId);
+  // Sample message ids are namespaced per conversation (see buildInitialThreads),
+  // so resolve the first user/agent turn from the thread instead of hardcoding.
+  const selectedThread = workspace.threads[workspace.selectedId] ?? [];
+  const firstUserMessageId = selectedThread.find((message) => message.role === "user")?.id ?? "u1";
+  const firstAgentMessageId = selectedThread.find((message) => message.role === "agent")?.id ?? "a1";
   return (
     <div>
       <div data-testid="selected">{workspace.selectedId}</div>
@@ -66,13 +71,13 @@ const Probe = observer(function Probe() {
       <button type="button" onClick={() => workspace.compactConversation(workspace.selectedId)}>
         compact
       </button>
-      <button type="button" onClick={() => workspace.retryMessage(workspace.selectedId, "u1")}>
+      <button type="button" onClick={() => workspace.retryMessage(workspace.selectedId, firstUserMessageId)}>
         retry
       </button>
-      <button type="button" onClick={() => workspace.forkConversationFromMessage(workspace.selectedId, "a1")}>
+      <button type="button" onClick={() => workspace.forkConversationFromMessage(workspace.selectedId, firstAgentMessageId)}>
         fork-a1
       </button>
-      <button type="button" onClick={() => workspace.editAndResendMessage(workspace.selectedId, "u1", "Edited resend text")}>
+      <button type="button" onClick={() => workspace.editAndResendMessage(workspace.selectedId, firstUserMessageId, "Edited resend text")}>
         edit-resend
       </button>
       <button type="button" onClick={() => workspace.decideApproval(workspace.selectedId, "approval-1", "approved")}>

@@ -119,7 +119,9 @@ export function BrowserPreviewToolbar({
         inputProps={{ "aria-label": t("browserPreviewUrlLabel"), "data-testid": "browser-preview-url-input" }}
         sx={{
           flex: "1 1 auto",
-          minWidth: 0,
+          // Guarantee a usable width on phones; the toolbar scrolls horizontally
+          // for the surrounding controls instead of starving the URL field.
+          minWidth: { xs: 168, sm: 220 },
           height: 30,
           maxHeight: 30,
           px: 1.25,

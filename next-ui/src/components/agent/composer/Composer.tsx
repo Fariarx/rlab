@@ -1,15 +1,14 @@
 import AttachFileIcon from "@mui/icons-material/AttachFile";
 import AccessTimeIcon from "@mui/icons-material/AccessTime";
 import AutoAwesomeRoundedIcon from "@mui/icons-material/AutoAwesomeRounded";
+import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
 import MicRoundedIcon from "@mui/icons-material/MicRounded";
 import OpenInBrowserIcon from "@mui/icons-material/OpenInBrowser";
 import RateReviewOutlinedIcon from "@mui/icons-material/RateReviewOutlined";
 import SendIcon from "@mui/icons-material/Send";
-import SendTimeExtensionIcon from "@mui/icons-material/SendTimeExtension";
 import CompressRoundedIcon from "@mui/icons-material/CompressRounded";
 import SettingsRoundedIcon from "@mui/icons-material/SettingsRounded";
 import StopCircleIcon from "@mui/icons-material/StopCircle";
-import WarningAmberRoundedIcon from "@mui/icons-material/WarningAmberRounded";
 import { Box, Divider, InputBase, Menu, MenuItem, Stack, Switch, type SxProps, TextField, type Theme, Tooltip, Typography } from "@mui/material";
 import { observer } from "mobx-react-lite";
 import { forwardRef, useEffect, useState } from "react";
@@ -24,8 +23,7 @@ import { browserActivityTone, type ComposerBrowserActivityEvent, type ComposerVo
 import type { ComposerAttachmentDraft, ComposerDraft } from "../core/types";
 import { VOICE_IDLE_LEVELS, VoiceRecordingStrip } from "./ComposerVoice";
 import type { AgentRateLimit } from "../../../lib/agent-limits";
-import { displayPluginToken, isImageMime } from "./composer-utils";
-import { applyComposerSuggestion } from "./composer-suggestions-model";
+import { isImageMime } from "./composer-utils";
 import { useComposerViewModel } from "./composer-view-model";
 import { ComposerStore } from "./composer-store";
 import { useComposerLayoutController } from "./use-composer-layout-controller";
@@ -100,9 +98,6 @@ interface ComposerProps {
   readonly registeredPlugins?: readonly ComposerPluginLink[];
   /** Server-side scheduled wakeups for this chat, rendered as first floating tags. */
   readonly scheduledWakeups?: readonly { readonly id: string; readonly label: string; readonly removeLabel: string; readonly onRemove: () => void }[];
-  /** User turns queued behind the current/last run; can be dispatched manually. */
-  readonly queuedMessageCount?: number;
-  readonly onSendQueuedNow?: () => void;
   /** Selected and server-authorized voice dictation provider. Omitted for "none". */
   readonly voiceProvider?: ComposerVoiceProvider;
   readonly onVoiceError?: (message: string) => void;
@@ -150,8 +145,6 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
     browserActivityEvents,
     registeredPlugins = [],
     scheduledWakeups = [],
-    queuedMessageCount = 0,
-    onSendQueuedNow,
     voiceProvider,
     onVoiceError,
   },
@@ -208,13 +201,16 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
     t,
   });
   const { suggestions, open: suggestionsOpen, activeIndex, key: suggestionKey } = viewModel.suggestionsState;
+  // Parsed `$tool` ranges still drive atomic token deletion, but the input shows
+  // them as plain visible text — no transparent-overlay highlight. The overlay
+  // approach desynced the native caret on mobile IMEs (text is transparent and
+  // the caret rides the real textarea glyphs while a separate, non-scrolling
+  // overlay paints the token), so it's gone in favour of a correct caret.
   const composerPluginTokenRanges = viewModel.pluginTokenRanges;
-  const composerPluginPreviewParts = viewModel.pluginPreviewParts;
-  const hasComposerPluginPreview = composerPluginPreviewParts.length > 0;
 
   // Context usage is intentionally not rendered as a composer progress control.
   // Keep only the over-limit warning that offers compaction.
-  const { contextOverLimit, supportsAutoCompact, supportsCompaction } = viewModel.context;
+  const { supportsAutoCompact, supportsCompaction } = viewModel.context;
   const { limitLayoutKey, limitLines } = viewModel;
   const {
     clearComposerBorderHover,
@@ -243,6 +239,7 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
 
   const {
     addFiles,
+    applySuggestion,
     canSend,
     handleBeforeInput,
     handleComposerChange,
@@ -252,7 +249,6 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
     latestDraftRef,
     send,
     setComposerAttachments,
-    setComposerValue,
     updateDraft,
   } = useComposerTextController({
     attachmentsControlled: attachments !== undefined,
@@ -350,8 +346,8 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
           right: 0,
           bottom: `calc(100% + ${8 + overlayLift}px)`,
           // pl aligns the tile row's left edge with the text-input column start:
-          // 1px bar-border + 4px bar-padding + 30px context control + 4px flex-gap = 39px
-          pl: "39px",
+          // 1px bar-border + 4px bar-padding + 34px options control + 4px flex-gap = 43px
+          pl: "43px",
           pr: "5px",
           display: "flex",
           flexWrap: "wrap",
@@ -372,42 +368,11 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
             testId={`scheduled-wakeup-tile-${wakeup.id}`}
           />
         ))}
-        {queuedMessageCount > 0 && (
-          <FloatingTile
-            tone="warn"
-            icon={<SendTimeExtensionIcon sx={{ fontSize: 20 }} />}
-            label={queuedMessageCount > 1 ? t("sendQueuedNowCount", { count: queuedMessageCount }) : t("sendQueuedNow")}
-            onClick={onSendQueuedNow}
-            testId="queued-message-send-now"
-          />
-        )}
-        {contextOverLimit && (
-          <Tooltip title={t("contextOverLimitHint")}>
-            <FloatingTile
-              tone="danger"
-              icon={<WarningAmberRoundedIcon sx={{ fontSize: 20 }} />}
-              label={t("contextOverLimit")}
-              disabled={running}
-              onClick={() => onCompactNow?.()}
-              testId="context-over-limit"
-            />
-          </Tooltip>
-        )}
         {reviewCount > 0 && (
           <FloatingTile
             tone="accent"
             icon={<RateReviewOutlinedIcon sx={{ fontSize: 20 }} />}
             label={t("reviewPending", { count: reviewCount })}
-          />
-        )}
-        {activeModeOption && (
-          <FloatingTile
-            tone="accent"
-            icon={<AutoAwesomeRoundedIcon sx={{ fontSize: 20 }} />}
-            label={activeModeOption.label}
-            removeLabel={t("disableMode", { mode: activeModeOption.label })}
-            onRemove={() => onModeChange?.("default")}
-            testId="active-mode-tile"
           />
         )}
         {composerAttachments.map((attachment) => {
@@ -488,10 +453,57 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
           data-testid="composer-options-button"
           aria-label={t("composerOptions")}
           onClick={(event) => openOptionsMenu(event.currentTarget)}
-          sx={{ width: 34, height: 34, flex: "0 0 auto", color: "text.secondary" }}
+          sx={{ width: 34, height: 34, flex: "0 0 auto", color: "text.secondary", borderRadius: (theme) => `${theme.custom.radii.md}px` }}
         >
           <SettingsRoundedIcon sx={{ fontSize: 20 }} />
         </IconButton>
+        {activeModeOption && (
+          <Box
+            data-testid="active-mode-chip"
+            sx={{
+              flex: "0 0 auto",
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 0.25,
+              height: 26,
+              pl: 0.75,
+              pr: 0.25,
+              maxWidth: { xs: 116, sm: 180 },
+              borderRadius: 999,
+              border: (theme) => `1px solid ${theme.palette.status.info.border}`,
+              backgroundColor: (theme) => theme.palette.status.info.soft,
+              color: (theme) => theme.palette.status.info.main,
+            }}
+          >
+            <AutoAwesomeRoundedIcon sx={{ fontSize: 14, flex: "0 0 auto" }} />
+            <Typography noWrap sx={{ minWidth: 0, fontSize: "0.72rem", fontWeight: 700 }}>
+              {activeModeOption.label}
+            </Typography>
+            <Box
+              component="button"
+              type="button"
+              aria-label={t("disableMode", { mode: activeModeOption.label })}
+              onClick={() => onModeChange?.("default")}
+              sx={{
+                flex: "0 0 auto",
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                width: 18,
+                height: 18,
+                p: 0,
+                border: 0,
+                borderRadius: "50%",
+                cursor: "pointer",
+                color: "inherit",
+                backgroundColor: "transparent",
+                "&:hover": { backgroundColor: "rgba(255, 255, 255, 0.12)" },
+              }}
+            >
+              <CloseRoundedIcon sx={{ fontSize: 13 }} />
+            </Box>
+          </Box>
+        )}
         <Menu
           action={optionsMenuActionRef}
           anchorEl={modeMenuAnchor}
@@ -695,7 +707,7 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
                     size="small"
                     onMouseDown={(event) => event.preventDefault()}
                     onMouseEnter={() => setActiveSuggestion(index)}
-                    onClick={() => setComposerValue(applyComposerSuggestion(composerValue, suggestion))}
+                    onClick={() => applySuggestion(suggestion)}
                     sx={{
                       justifyContent: "flex-start",
                       backgroundColor: (t) => (index === activeIndex ? t.custom.surfaces.s3 : "transparent"),
@@ -714,51 +726,6 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
               </Stack>
             </Box>
           )}
-          {hasComposerPluginPreview && (
-            <Box
-              data-testid="composer-plugin-preview"
-              aria-hidden="true"
-              sx={{
-                position: "absolute",
-                left: expanded ? 8 : 0,
-                right: expanded ? 8 : 0,
-                top: expanded ? 6 : "50%",
-                transform: expanded ? "none" : "translateY(-50%)",
-                zIndex: expanded ? 6 : 1,
-                pointerEvents: "none",
-                display: "block",
-                minWidth: 0,
-                maxHeight: expanded ? "11.6em" : "1.45em",
-                overflow: "hidden",
-                color: "text.primary",
-                fontSize: "0.84rem",
-                lineHeight: 1.45,
-                whiteSpace: "pre-wrap",
-                overflowWrap: "anywhere",
-              }}
-            >
-              {composerPluginPreviewParts.map((part) =>
-                part.type === "plugin" ? (
-                  <Box
-                    key={`${part.type}:${part.start}:${part.end}:${part.token}`}
-                    data-testid="composer-plugin-token"
-                    component="span"
-                    sx={{
-                      display: "inline-block",
-                      minWidth: `${part.token.length}ch`,
-                      color: "primary.main",
-                      fontWeight: 700,
-                      textDecoration: "none",
-                    }}
-                  >
-                    {displayPluginToken(part.token)}
-                  </Box>
-                ) : (
-                  <Box key={`${part.type}:${part.start}:${part.end}`} component="span">{part.text}</Box>
-                ),
-              )}
-            </Box>
-          )}
           <InputBase
             inputRef={textareaRef}
             value={composerValue}
@@ -775,12 +742,6 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
               fontSize: "0.84rem",
               lineHeight: 1.45,
               py: 0.25,
-              ...(hasComposerPluginPreview && {
-                "& .MuiInputBase-input": {
-                  color: "transparent",
-                  caretColor: (theme) => theme.palette.text.primary,
-                },
-              }),
               ...(expanded && {
                 position: "absolute",
                 left: 0,
@@ -793,10 +754,13 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
                 backgroundColor: (t) => t.custom.surfaces.s2,
                 border: (t) => `1px solid ${t.custom.borders.strong}`,
                 boxShadow: "0 -10px 28px rgba(0, 0, 0, 0.45)",
+                // Reserve room for the docked voice strip so the bottom line of
+                // text isn't hidden behind it while recording.
+                ...(voiceState === "recording" && { pb: "48px" }),
               }),
             }}
           />
-          {voiceState === "recording" && <VoiceRecordingStrip label={voiceLabel} duration={voiceDuration} levels={voiceLevels} ambient={voiceAmbient} onLevelCountChange={setVoiceLevelCountForWidth} />}
+          {voiceState === "recording" && <VoiceRecordingStrip label={voiceLabel} duration={voiceDuration} levels={voiceLevels} ambient={voiceAmbient} onLevelCountChange={setVoiceLevelCountForWidth} dockBottom={expanded} />}
         </Box>
         <Stack direction="row" spacing={0.5} sx={{ alignItems: "center", flex: "0 0 auto" }}>
           {!running && !voiceInputActive ? (

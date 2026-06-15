@@ -41,6 +41,7 @@ interface UseComposerTextControllerInput {
 
 interface UseComposerTextControllerResult {
   readonly addFiles: (files: readonly File[]) => Promise<void>;
+  readonly applySuggestion: (suggestion: ComposerSuggestion) => void;
   readonly canSend: boolean;
   readonly handleBeforeInput: (event: FormEvent<HTMLInputElement | HTMLTextAreaElement>) => void;
   readonly handleComposerChange: (event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => void;
@@ -144,6 +145,16 @@ export function useComposerTextController({
     updateDraft({ text: nextValue, attachments: latestDraftRef.current.attachments });
   }, [setSuggestDismissed, updateDraft]);
 
+  // Accepting a mention/plugin suggestion always rewrites the trailing token at
+  // the end of the value, so the caret belongs at the very end afterwards. We
+  // pin it explicitly: a controlled textarea otherwise leaves the native caret
+  // wherever the IME last put it, which on Android desyncs the visible caret
+  // from the real selection once a mention is in the field.
+  const applySuggestion = useCallback((suggestion: ComposerSuggestion) => {
+    pendingCaretToEndRef.current = true;
+    setComposerValue(applyComposerSuggestion(latestDraftRef.current.text, suggestion));
+  }, [setComposerValue]);
+
   const replaceComposerRange = useCallback((start: number, end: number, replacement = "") => {
     const caret = start + replacement.length;
     pendingSelectionRef.current = { start: caret, end: caret };
@@ -236,7 +247,7 @@ export function useComposerTextController({
         event.preventDefault();
         const suggestion = suggestions[suggestionsActiveIndex];
         if (suggestion) {
-          setComposerValue(applyComposerSuggestion(composerValue, suggestion));
+          applySuggestion(suggestion);
         }
         return;
       }
@@ -273,12 +284,12 @@ export function useComposerTextController({
       void send();
     }
   }, [
+    applySuggestion,
     composerValue,
     deleteComposerPluginToken,
     navigateHistory,
     send,
     setActiveSuggestion,
-    setComposerValue,
     setSuggestDismissed,
     suggestions,
     suggestionsActiveIndex,
@@ -327,6 +338,7 @@ export function useComposerTextController({
 
   return {
     addFiles,
+    applySuggestion,
     canSend: (hasComposerPayload || reviewCount > 0) && !sending,
     handleBeforeInput,
     handleComposerChange,

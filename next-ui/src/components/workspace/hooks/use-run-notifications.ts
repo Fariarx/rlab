@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import type { useI18n } from "../../../i18n/I18nProvider";
 import type { ConversationStatus, ConversationSummary } from "../../agent";
 import type { ToastOptions } from "../../ui";
-import { runNotificationForStatus, runToastForStatus, showDesktopNotification } from "../workspace-page-helpers";
+import { ensureBrowserNotificationPermission, runNotificationForStatus, runToastForStatus, showDesktopNotification } from "../workspace-page-helpers";
 
 type Translate = ReturnType<typeof useI18n>["t"];
 
@@ -28,6 +28,13 @@ export function useRunNotifications({
 }: UseRunNotificationsOptions): RunNotificationController {
   const notifiableRuns = useRef(new Set<string>());
   const previousStatuses = useRef(new Map<string, ConversationStatus>());
+
+  // Request browser notification permission when notifications are enabled so the
+  // first run completion/wait can actually surface one (the setting defaults on,
+  // so most users never toggle it manually).
+  useEffect(() => {
+    ensureBrowserNotificationPermission(desktopNotifications);
+  }, [desktopNotifications]);
 
   useEffect(() => {
     const nextStatuses = new Map(conversations.map((conversation) => [conversation.id, conversation.status]));

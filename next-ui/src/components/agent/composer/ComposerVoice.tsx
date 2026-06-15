@@ -133,12 +133,17 @@ export function VoiceRecordingStrip({
   levels,
   ambient,
   onLevelCountChange,
+  dockBottom = false,
 }: {
   readonly label: string;
   readonly duration: string;
   readonly levels: readonly number[];
   readonly ambient: boolean;
   readonly onLevelCountChange: (levelCount: number) => void;
+  /** When the composer is expanded (multiline), dock the strip as a short bar at
+   *  the bottom of the input box instead of covering the whole textarea, so the
+   *  typed text stays visible above the waveform. */
+  readonly dockBottom?: boolean;
 }) {
   const waveformRef = useRef<HTMLDivElement | null>(null);
 
@@ -162,7 +167,9 @@ export function VoiceRecordingStrip({
       aria-label={label}
       sx={{
         position: "absolute",
-        inset: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
         zIndex: 6,
         display: "grid",
         gridTemplateColumns: "minmax(0, 1fr) auto",
@@ -172,6 +179,16 @@ export function VoiceRecordingStrip({
         color: "text.primary",
         pointerEvents: "none",
         backgroundColor: (theme) => theme.custom.surfaces.s2,
+        ...(dockBottom
+          ? {
+              top: "auto",
+              height: 40,
+              px: 1.25,
+              borderTop: (theme) => `1px solid ${theme.custom.borders.subtle}`,
+              borderBottomLeftRadius: (theme) => `${theme.custom.radii.md}px`,
+              borderBottomRightRadius: (theme) => `${theme.custom.radii.md}px`,
+            }
+          : { top: 0 }),
       }}
     >
       <Box

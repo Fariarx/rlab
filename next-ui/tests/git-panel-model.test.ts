@@ -4,9 +4,6 @@ import type { GitFileStatus, GitStatusPayload } from "../src/lib/git-status";
 import {
   changedFilesForTab,
   gitGraphBranchHeadsFromCommits,
-  gitGraphBranchHeadToLibraryBranch,
-  gitGraphCommitToLibraryCommit,
-  gitGraphDateLabel,
   gitOperationErrorMessage,
   gitGraphRefName,
   gitPanelFocusTabForPath,
@@ -101,30 +98,6 @@ describe("git-panel-model", () => {
       { name: "origin/main", hash: "aaa1111" },
       { name: "feature", hash: "bbb2222" },
     ]);
-  });
-
-  it("maps API graph payloads to commit-graph library shapes", () => {
-    expect(gitGraphCommitToLibraryCommit(commit({ hash: "abc1234", parents: ["parent1"], subject: "" }))).toEqual({
-      sha: "abc1234",
-      commit: {
-        author: {
-          name: "Alice",
-          date: "2026-06-14",
-        },
-        message: "-",
-      },
-      parents: [{ sha: "parent1" }],
-    });
-
-    expect(gitGraphBranchHeadToLibraryBranch({ name: "main", hash: "abc1234" })).toEqual({
-      name: "main",
-      commit: { sha: "abc1234" },
-    });
-  });
-
-  it("keeps string graph dates untouched and hides invalid date values", () => {
-    expect(gitGraphDateLabel("2026-06-14")).toBe("2026-06-14");
-    expect(gitGraphDateLabel(Number.NaN)).toBe("");
   });
 
   it("normalizes git operation errors with a fallback", () => {

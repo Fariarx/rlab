@@ -106,6 +106,8 @@ export interface Workspace {
   readonly remove: (id: string) => string;
   readonly sendMessage: (id: string, text: string) => void;
   readonly pendingMessageCount: (id: string) => number;
+  readonly queuedMessages: (id: string) => readonly ChatMessage[];
+  readonly cancelQueuedMessage: (id: string, messageId: string) => void;
   readonly sendQueuedMessageNow: (id: string) => boolean;
   readonly setCompaction: (id: string, patch: Partial<CompactionSettings>) => void;
   readonly setConversationView: (id: string, view: ConversationView) => void;
@@ -216,6 +218,7 @@ export class WorkspaceStore implements Workspace {
       archive: action.bound,
       remove: action.bound,
       sendMessage: action.bound,
+      cancelQueuedMessage: action.bound,
       sendQueuedMessageNow: action.bound,
       setCompaction: action.bound,
       setConversationView: action.bound,
@@ -707,6 +710,21 @@ export class WorkspaceStore implements Workspace {
 
   sendMessage(id: string, text: string): void {
     const userMsg: ChatMessage = { id: nextWorkspaceId("u"), role: "user", text, time: nowLabel() };
+    // If the agent is still working, queue this turn instead of cancelling it. The
+    // queued turn stays out of the thread (shown as a cancellable item under the
+    // conversation) and is appended + dispatched when the current run settles
+    // (see drainPendingMessages) or when the user sends it now.
+    if (this.runs.has(id)) {
+      this.pendingMessages.enqueue(id, userMsg);
+      return;
+    }
+    this.dispatchUserTurn(id, userMsg);
+  }
+
+  /** Append a user turn to the thread and start its run. Shared by immediate
+   *  sends and by draining the pending queue, so a queued turn enters the thread
+   *  exactly when it dispatches — never before. */
+  private dispatchUserTurn(id: string, userMsg: ChatMessage): void {
     const result: { current: AppendUserMessageStateResult | null } = { current: null };
     this.setState((current) => {
       result.current = appendUserMessageTurnState(current, id, userMsg);
@@ -716,13 +734,6 @@ export class WorkspaceStore implements Workspace {
       this.enqueueMutations({ type: "updateConversation", conversation: result.current.conversation });
     }
     this.enqueueMutations({ type: "upsertMessage", conversationId: id, message: userMsg });
-    // If the agent is still working, queue this turn instead of cancelling it —
-    // it dispatches automatically when the current run settles (see drainPendingMessages).
-    if (this.runs.has(id)) {
-      this.pendingMessages.enqueue(id, userMsg);
-      this.persistCurrentStateNow();
-      return;
-    }
     this.runTurn(id, userMsg);
   }
 
@@ -730,12 +741,22 @@ export class WorkspaceStore implements Workspace {
     return this.pendingMessages.count(id);
   }
 
+  /** Queued (not-yet-dispatched) user turns for a conversation, in send order. */
+  queuedMessages(id: string): readonly ChatMessage[] {
+    return this.pendingMessages.list(id);
+  }
+
+  /** Cancel a queued turn before it runs. */
+  cancelQueuedMessage(id: string, messageId: string): void {
+    this.pendingMessages.remove(id, messageId);
+  }
+
   sendQueuedMessageNow(id: string): boolean {
     const next = this.pendingMessages.takeNext(id);
     if (!next) {
       return false;
     }
-    this.runTurn(id, next);
+    this.dispatchUserTurn(id, next);
     return true;
   }
 

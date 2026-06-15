@@ -5,6 +5,7 @@ import { observer } from "mobx-react-lite";
 import { useEffect, useId, useRef, useState } from "react";
 import { useI18n } from "../../../i18n/I18nProvider";
 import { AgentBlockRenderer } from "../blocks/AgentBlockRenderer";
+import { ResolvedOptionSummary } from "../blocks/ResolvedOptionSummary";
 import { AgentDetailsStore } from "../stores/agent-local-stores";
 import { keyedAgentBlocks } from "./message-block-keys";
 import { firstReasoningStartedAtMs, formatElapsedSeconds } from "./message-display-model";
@@ -55,7 +56,11 @@ export const AgentDetails = observer(function AgentDetails({
   }, [hasResultAfter, live, setOpen]);
 
   const liveAnchor = startedAtMs ?? blockStartedAtMs;
-  const liveSeconds = useLiveElapsedSeconds({ active: showSpinner, startedAtMs: liveAnchor });
+  // Tie the timer to the whole live turn, not to the spinner. The spinner toggles
+  // off while the answer text streams (it carries its own dots), and tying the
+  // clock to it made the number flip between the live elapsed and the reasoning
+  // block's recorded duration — a visible jump. Now it ticks continuously.
+  const liveSeconds = useLiveElapsedSeconds({ active: live, startedAtMs: liveAnchor });
   const durationUnits = { minute: t("unitMinShort"), second: t("unitSecShort") };
   const expandable = blocks.some((block) => (block.kind === "reasoning" ? block.text.trim().length > 0 : true));
   const isOpen = expandable && open;
@@ -65,9 +70,9 @@ export const AgentDetails = observer(function AgentDetails({
       <Typography variant="microLabel" sx={{ color: "text.secondary", flex: 1, minWidth: 0 }}>
         {t("reasoning")}
       </Typography>
-      {showSpinner ? (
+      {live ? (
         <Stack direction="row" spacing={0.75} sx={{ alignItems: "center", flex: "0 0 auto" }}>
-          <TypingDots />
+          {showSpinner && <TypingDots />}
           {liveSeconds !== null && <Typography component="span" sx={durationLabelSx}>{formatElapsedSeconds(liveSeconds, durationUnits)}</Typography>}
         </Stack>
       ) : Number.isFinite(doneSeconds) ? (
@@ -118,7 +123,9 @@ export const AgentDetails = observer(function AgentDetails({
           }}
         >
           {keyedAgentBlocks(blocks.filter((block) => !(block.kind === "reasoning" && block.text.trim().length === 0))).map(({ block, key }) =>
-              block.kind === "reasoning" ? (
+              block.kind === "options" && (block.selected?.length ?? 0) > 0 ? (
+                <ResolvedOptionSummary key={key} block={block} />
+              ) : block.kind === "reasoning" ? (
                 <Typography
                   key={key}
                   component="div"

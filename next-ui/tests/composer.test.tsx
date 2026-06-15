@@ -396,15 +396,6 @@ describe("Composer", () => {
     expect(screen.queryByTestId("composer-stop-button")).not.toBeInTheDocument();
   });
 
-  it("shows a manual send-now tile for queued messages", () => {
-    const onSendQueuedNow = vi.fn();
-    renderWithTheme(<Composer placeholder="Написать" queuedMessageCount={2} onSendQueuedNow={onSendQueuedNow} />);
-
-    fireEvent.click(screen.getByRole("button", { name: "Отправить сейчас · 2" }));
-
-    expect(screen.getByTestId("queued-message-send-now")).toHaveStyle({ width: "76px", height: "76px" });
-    expect(onSendQueuedNow).toHaveBeenCalledTimes(1);
-  });
 
   it("sends selected text attachments with the prompt", async () => {
     const onSend = vi.fn();
@@ -469,9 +460,9 @@ describe("Composer", () => {
 
     fireEvent.keyDown(input, { key: "Enter" });
     expect(input).toHaveValue("$TaskWakeup ");
-    expect(screen.getByTestId("composer-plugin-preview")).toHaveTextContent("TaskWakeup");
-    expect(screen.getByTestId("composer-plugin-preview")).not.toHaveTextContent("$TaskWakeup");
-    expect(screen.getByTestId("composer-plugin-token")).toHaveStyle({ textDecoration: "none" });
+    // The token lives as plain visible text in the textarea — no transparent
+    // overlay — so the native caret can never drift on mobile.
+    expect(screen.queryByTestId("composer-plugin-preview")).not.toBeInTheDocument();
   });
 
   it("deletes parsed plugin tool links as atomic composer tokens", () => {
@@ -824,9 +815,11 @@ describe("Composer", () => {
     );
 
     const wakeupTile = screen.getByTestId("scheduled-wakeup-tile-wake-1");
-    const modeTile = screen.getByTestId("active-mode-tile");
+    expect(wakeupTile).toHaveStyle({ width: "76px", height: "76px", boxShadow: "0 1px 3px rgba(0, 0, 0, 0.2)" });
 
-    expect(wakeupTile).toHaveStyle({ width: "76px", height: "76px", boxShadow: "0 1px 4px rgba(0, 0, 0, 0.18)" });
-    expect(modeTile).toHaveStyle({ width: "76px", height: "76px" });
+    // The active agent mode is shown as a compact footer chip, not a square tile.
+    expect(screen.queryByTestId("active-mode-tile")).not.toBeInTheDocument();
+    const modeChip = screen.getByTestId("active-mode-chip");
+    expect(modeChip).toHaveTextContent("Review");
   });
 });

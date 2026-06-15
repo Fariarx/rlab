@@ -61,10 +61,6 @@ export function pluginLinkQuery(value: string): string | null {
   return match ? match[1].toLowerCase() : null;
 }
 
-export function displayPluginToken(token: string): string {
-  return token.replace(/^\$/, "").replace(/^ScheduleWakeup$/, "TaskWakeup");
-}
-
 export function attachmentBlock(attachment: ComposerAttachmentDraft): string {
   // Non-text files are referenced by their on-disk path (vibe-kanban style) so
   // the agent reads them with its own tools instead of receiving garbled bytes.

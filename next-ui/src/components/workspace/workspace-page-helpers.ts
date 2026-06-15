@@ -147,3 +147,13 @@ export function showDesktopNotification(enabled: boolean, notification: { readon
   }
   new Notification(notification.title, { body: notification.body });
 }
+
+/** Ask the browser for notification permission when notifications are enabled but
+ *  the user hasn't decided yet. Best-effort: browsers may require a user gesture,
+ *  so this is also called from the settings toggle. Safe to call repeatedly. */
+export function ensureBrowserNotificationPermission(enabled: boolean): void {
+  if (!enabled || typeof Notification === "undefined" || Notification.permission !== "default") {
+    return;
+  }
+  void Notification.requestPermission().catch(() => undefined);
+}

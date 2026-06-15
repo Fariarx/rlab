@@ -107,6 +107,30 @@ export async function checkoutGitBranch(cwd: string, branch: string): Promise<Gi
   return assertGitApiOk("Git checkout", response, payload);
 }
 
+export type GitResetMode = "soft" | "mixed" | "hard";
+
+async function postGitCommitAction(endpoint: string, label: string, body: Record<string, unknown>): Promise<GitStatusPayload> {
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const payload = await readJsonPayload<GitStatusPayload>(response);
+  return assertGitApiOk(label, response, payload);
+}
+
+export function cherryPickGitCommit(cwd: string, hash: string): Promise<GitStatusPayload> {
+  return postGitCommitAction("/api/git-cherry-pick", "Git cherry-pick", { cwd, hash });
+}
+
+export function revertGitCommit(cwd: string, hash: string): Promise<GitStatusPayload> {
+  return postGitCommitAction("/api/git-revert", "Git revert", { cwd, hash });
+}
+
+export function resetGitTo(cwd: string, hash: string, mode: GitResetMode): Promise<GitStatusPayload> {
+  return postGitCommitAction("/api/git-reset", "Git reset", { cwd, hash, mode });
+}
+
 export function branchOptionsFor(status: GitStatusPayload): readonly string[] {
   return Array.from(new Set([status.branch, ...(status.branches ?? [])].filter((branch) => branch.trim().length > 0)));
 }

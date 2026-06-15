@@ -1,6 +1,10 @@
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import ArrowForwardIcon from "@mui/icons-material/ArrowForward";
+import CheckCircleRoundedIcon from "@mui/icons-material/CheckCircleRounded";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
+import ErrorOutlineRoundedIcon from "@mui/icons-material/ErrorOutlineRounded";
+import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
+import WarningAmberRoundedIcon from "@mui/icons-material/WarningAmberRounded";
 import DescriptionOutlinedIcon from "@mui/icons-material/DescriptionOutlined";
 import ExtensionOutlinedIcon from "@mui/icons-material/ExtensionOutlined";
 import LinkOffIcon from "@mui/icons-material/LinkOff";
@@ -8,7 +12,7 @@ import OpenInNewIcon from "@mui/icons-material/OpenInNew";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import VisibilityOutlinedIcon from "@mui/icons-material/VisibilityOutlined";
 import { Box, Stack, Typography } from "@mui/material";
-import { styled } from "@mui/material/styles";
+import { styled, type Theme } from "@mui/material/styles";
 import { observer } from "mobx-react-lite";
 import { type MouseEvent as ReactMouseEvent, type ReactNode, useState } from "react";
 import Markdown, { type Components } from "react-markdown";
@@ -48,6 +52,9 @@ export function RlabToolLink({ name, children }: { readonly name: string; readon
       onClick={(event: ReactMouseEvent<HTMLAnchorElement>) => event.preventDefault()}
       sx={{
         ...linkSx,
+        // A tool mention is blue text, not a hyperlink — no underline.
+        textDecoration: "none",
+        "&:hover": { color: "primary.light", textDecoration: "none" },
         display: "inline-flex",
         alignItems: "baseline",
         fontFamily: (t) => t.custom.fonts.mono,
@@ -426,6 +433,23 @@ export function MessageText({ text, streaming }: { readonly text: string; readon
 
 /* -------------------------------- Status note ------------------------------- */
 
+function StatusGlyph({ level }: { readonly level: StatusKey }) {
+  const sx = { fontSize: 15, color: (t: Theme) => t.palette.status[level].main, flex: "0 0 auto" } as const;
+  if (level === "ok") {
+    return <CheckCircleRoundedIcon sx={sx} />;
+  }
+  if (level === "error") {
+    return <ErrorOutlineRoundedIcon sx={sx} />;
+  }
+  if (level === "warn") {
+    return <WarningAmberRoundedIcon sx={sx} />;
+  }
+  if (level === "info") {
+    return <InfoOutlinedIcon sx={sx} />;
+  }
+  return <StatusDot status={level} label={level} pulse={false} size="sm" />;
+}
+
 export function StatusNote({ level, children }: { readonly level: StatusKey; readonly children: ReactNode }) {
   return (
     <Stack
@@ -447,7 +471,7 @@ export function StatusNote({ level, children }: { readonly level: StatusKey; rea
       }}
     >
       <Box sx={{ display: "flex" }}>
-        <StatusDot status={level} label={level} pulse={false} size="sm" />
+        <StatusGlyph level={level} />
       </Box>
       <Typography sx={{ minWidth: 0, fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.74rem", color: "text.primary", overflowWrap: "anywhere", wordBreak: "break-word" }}>
         {children}

@@ -2,12 +2,17 @@ import { useEffect, useMemo, useState } from "react";
 import {
   branchOptionsFor,
   checkoutGitBranch,
+  cherryPickGitCommit,
   commitGit,
   fetchGitStatus,
   fetchGitTree,
   initGitRepo,
   mutateGitFile,
+  resetGitTo,
+  revertGitCommit,
 } from "../../../client/api/git-panel-api";
+
+export type GitCommitAction = "cherry-pick" | "revert" | "reset-soft" | "reset-mixed" | "reset-hard";
 import type { I18nApi } from "../../../i18n/I18nProvider";
 import type { GitFileStatus, GitStatusPayload } from "../../../lib/git-status";
 import type { DiffBlock } from "../../agent";
@@ -39,6 +44,7 @@ export interface GitViewController {
   readonly unstageFile: (file: GitFileStatus) => void;
   readonly commitStagedFiles: () => void;
   readonly checkoutRef: (ref: string) => void;
+  readonly commitAction: (action: GitCommitAction, hash: string) => void;
   readonly initRepo: () => void;
 }
 
@@ -208,6 +214,18 @@ export function useGitViewController({
       runGitAction(() => checkoutGitBranch(cwd, ref));
     }
   };
+  const commitAction = (action: GitCommitAction, hash: string) => {
+    if (!cwd) {
+      return;
+    }
+    if (action === "cherry-pick") {
+      runGitAction(() => cherryPickGitCommit(cwd, hash));
+    } else if (action === "revert") {
+      runGitAction(() => revertGitCommit(cwd, hash));
+    } else {
+      runGitAction(() => resetGitTo(cwd, hash, action === "reset-soft" ? "soft" : action === "reset-hard" ? "hard" : "mixed"));
+    }
+  };
   const initRepo = () => {
     if (cwd) {
       runGitAction(() => initGitRepo(cwd));
@@ -229,6 +247,7 @@ export function useGitViewController({
     unstageFile,
     commitStagedFiles,
     checkoutRef,
+    commitAction,
     initRepo,
   };
 }

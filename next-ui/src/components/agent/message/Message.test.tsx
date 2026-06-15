@@ -358,6 +358,9 @@ describe("Message", () => {
 
     expect(screen.getByText("Как форматировать ответ?")).toBeInTheDocument();
     expect(screen.getByText("Выбрано: Summary")).toBeInTheDocument();
+    // Archived prompts collapse to a one-line recap: the chosen label survives
+    // inside the summary, but the unselected options are no longer rendered.
+    expect(screen.queryByText("Detailed")).not.toBeInTheDocument();
   });
 
   it("shows the agent model next to the agent label", () => {

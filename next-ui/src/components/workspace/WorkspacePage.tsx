@@ -11,7 +11,6 @@ import OpenInBrowserIcon from "@mui/icons-material/OpenInBrowser";
 import TerminalIcon from "@mui/icons-material/Terminal";
 import SearchIcon from "@mui/icons-material/Search";
 import SettingsIcon from "@mui/icons-material/Settings";
-import SystemUpdateAltIcon from "@mui/icons-material/SystemUpdateAlt";
 import {
   Alert,
   Box,
@@ -44,6 +43,7 @@ import {
   Conversation,
   ConversationList,
   ConversationSearch,
+  QueuedMessages,
   DEFAULT_PROFILE,
   type ConversationView,
   useAgentCliInfo,
@@ -76,6 +76,7 @@ import { composerMessageHistory, composerVoiceProvider, scheduledWakeupComposerT
 import { WorkspacePageStore } from "./stores/workspace-page-store";
 import { useRunNotifications } from "./hooks/use-run-notifications";
 import { usePaneFileDrop } from "./hooks/use-pane-file-drop";
+import { CliUpdatesAccordion } from "./CliUpdatesAccordion";
 import { useCliUpdates } from "./hooks/use-cli-updates";
 import { useWakeups } from "./hooks/use-wakeups";
 import { useProjectFiles } from "./hooks/use-project-files";
@@ -410,47 +411,9 @@ export const WorkspacePageView = observer(function WorkspacePageView({
     );
   }
 
-  const primaryCliUpdate = cliUpdates.snapshot.updates[0] ?? null;
-  const extraCliUpdateCount = Math.max(0, cliUpdates.snapshot.updates.length - 1);
-  const cliUpdateNotice = primaryCliUpdate ? (
-    <Box sx={{ px: 0.75, pb: 1, flex: "0 0 auto" }}>
-      <Stack
-        direction="row"
-        spacing={1}
-        sx={{
-          alignItems: "center",
-          px: 1.25,
-          py: 1,
-          borderRadius: (theme) => `${theme.custom.radii.md}px`,
-          backgroundColor: (theme) => theme.custom.surfaces.s2,
-          border: (theme) => `1px solid ${theme.palette.status.warn.main}`,
-          boxShadow: (theme) => `inset 3px 0 0 0 ${theme.palette.status.warn.main}`,
-        }}
-      >
-        <Box sx={{ display: "flex", color: (theme) => theme.palette.status.warn.main, flex: "0 0 auto" }}>
-          <SystemUpdateAltIcon sx={{ fontSize: 20 }} />
-        </Box>
-        <Box sx={{ flex: 1, minWidth: 0 }}>
-          <Typography noWrap sx={{ fontSize: "0.8rem", fontWeight: 700, color: "text.primary" }}>
-            {t("cliUpdateRequired")}
-          </Typography>
-          <Typography noWrap sx={{ fontSize: "0.72rem", color: "text.secondary", mt: 0.25 }}>
-            {t("cliUpdateAvailable", { agent: primaryCliUpdate.agentName, current: primaryCliUpdate.currentVersion, latest: primaryCliUpdate.latestVersion })}
-            {extraCliUpdateCount > 0 ? ` · ${t("cliUpdateMore", { count: extraCliUpdateCount })}` : ""}
-          </Typography>
-        </Box>
-        <Button
-          variant="subtle"
-          size="small"
-          disabled={cliUpdates.busyAgent !== null}
-          onClick={() => void cliUpdates.updateCli(primaryCliUpdate)}
-          sx={{ flex: "0 0 auto", minWidth: 78 }}
-        >
-          {t("updateCli")}
-        </Button>
-      </Stack>
-    </Box>
-  ) : null;
+  const cliUpdateNotice = (
+    <CliUpdatesAccordion updates={cliUpdates.snapshot.updates} busyAgent={cliUpdates.busyAgent} onUpdate={(update) => void cliUpdates.updateCli(update)} t={t} />
+  );
 
   const sidebar = (
     <Stack sx={{ height: "100%", minHeight: 0, backgroundColor: (t) => t.custom.surfaces.s1 }}>
@@ -841,6 +804,13 @@ export const WorkspacePageView = observer(function WorkspacePageView({
               <Box aria-busy="true" sx={{ minHeight: 44 }} />
             ) : (
               <Stack spacing={1}>
+                {selected && (
+                  <QueuedMessages
+                    messages={ws.queuedMessages(selected.id)}
+                    onCancel={(messageId) => ws.cancelQueuedMessage(selected.id, messageId)}
+                    onSendNow={() => ws.sendQueuedMessageNow(selected.id)}
+                  />
+                )}
                 <Composer
                   key={ws.selectedId}
                   ref={composerRef}
@@ -896,12 +866,6 @@ export const WorkspacePageView = observer(function WorkspacePageView({
                     }
                     if (!ws.compactConversation(selected.id)) {
                       toast({ message: t("compactionNoSession"), severity: "info", duration: 3000 });
-                    }
-                  }}
-                  queuedMessageCount={selected ? ws.pendingMessageCount(selected.id) : 0}
-                  onSendQueuedNow={() => {
-                    if (selected) {
-                      ws.sendQueuedMessageNow(selected.id);
                     }
                   }}
                   voiceProvider={voiceProvider}

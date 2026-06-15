@@ -9,7 +9,8 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 import Anthropic from "@anthropic-ai/sdk";
 import type { ModelInfo as AnthropicModelInfo } from "@anthropic-ai/sdk/resources/models";
-import { query, type CanUseTool, type EffortLevel, type Options as ClaudeQueryOptions, type PermissionResult } from "@anthropic-ai/claude-agent-sdk";
+import { createSdkMcpServer, query, tool, type CanUseTool, type EffortLevel, type McpSdkServerConfigWithInstance, type Options as ClaudeQueryOptions, type PermissionResult } from "@anthropic-ai/claude-agent-sdk";
+import { z } from "zod";
 import { CronExpressionParser } from "cron-parser";
 import * as pty from "node-pty";
 import { chromium, type Browser, type BrowserContext, type ConsoleMessage, type Frame, type FrameLocator, type Locator, type Page, type Request as PlaywrightRequest } from "playwright";
@@ -4373,6 +4374,23 @@ export function parseGitCheckoutPayload(body: string): { readonly cwd: string; r
   return { cwd, branch };
 }
 
+export type GitResetMode = "soft" | "mixed" | "hard";
+
+export function parseGitCommitActionPayload(body: string): { readonly cwd: string; readonly hash: string; readonly mode: GitResetMode } {
+  const parsed = parseJsonObjectPayload(body, "Invalid git request payload.");
+  const cwd = typeof parsed.cwd === "string" ? parsed.cwd.trim() : "";
+  const hash = typeof parsed.hash === "string" ? parsed.hash.trim() : "";
+  const rawMode = typeof parsed.mode === "string" ? parsed.mode.trim().toLowerCase() : "mixed";
+  if (!cwd) {
+    throw new Error("Project directory is required.");
+  }
+  if (!/^[0-9a-f]{4,40}$/i.test(hash)) {
+    throw new Error("A valid commit hash is required.");
+  }
+  const mode: GitResetMode = rawMode === "soft" || rawMode === "hard" ? rawMode : "mixed";
+  return { cwd, hash, mode };
+}
+
 export function buildGitCommitArgs(message: string): string[] {
   const trimmed = message.trim();
   if (!trimmed) {
@@ -4670,6 +4688,41 @@ function handleGitCheckout(req: IncomingMessage, res: ServerResponse): void {
       }
     })();
   });
+}
+
+function runGitCommitAction(req: IncomingMessage, res: ServerResponse, toArgs: (hash: string, mode: GitResetMode) => readonly string[]): void {
+  readJsonBody(req, res, (body) => {
+    void (async () => {
+      try {
+        const { cwd, hash, mode } = parseGitCommitActionPayload(body);
+        const cwdError = validateGitCwd(cwd);
+        if (cwdError) {
+          sendJson(res, 400, { error: cwdError });
+          return;
+        }
+        const result = await runGitP(cwd, [...toArgs(hash, mode)]);
+        if (!result.ok) {
+          sendJson(res, 500, { error: result.error });
+          return;
+        }
+        sendGitStatusAfterMutation(cwd, res);
+      } catch (error) {
+        sendJson(res, gitErrorStatus(error), { error: errorMessage(error) });
+      }
+    })();
+  });
+}
+
+function handleGitCherryPick(req: IncomingMessage, res: ServerResponse): void {
+  runGitCommitAction(req, res, (hash) => ["cherry-pick", hash]);
+}
+
+function handleGitRevert(req: IncomingMessage, res: ServerResponse): void {
+  runGitCommitAction(req, res, (hash) => ["revert", "--no-edit", hash]);
+}
+
+function handleGitReset(req: IncomingMessage, res: ServerResponse): void {
+  runGitCommitAction(req, res, (hash, mode) => ["reset", `--${mode}`, hash]);
 }
 
 function handleGitDiff(req: IncomingMessage, res: ServerResponse): void {
@@ -5705,9 +5758,53 @@ interface RunSpec {
 }
 
 const TASK_WAKEUP_TOOL_NAME = "TaskWakeup";
-const TASK_AWAIT_TOOL_NAME = "TaskAwait";
 const CLAUDE_SAFE_READ_TOOLS = ["Read", "Glob", "Grep", "LS"] as const;
-const CLAUDE_READ_ONLY_TOOLS = ["Read", "Glob", "Grep", "LS", "AskUserQuestion", TASK_WAKEUP_TOOL_NAME, TASK_AWAIT_TOOL_NAME] as const;
+const CLAUDE_READ_ONLY_TOOLS = ["Read", "Glob", "Grep", "LS", "AskUserQuestion", TASK_WAKEUP_TOOL_NAME] as const;
+// rlab's chat tools are described to the model in RLAB_CHAT_TOOLS_PROMPT and must
+// also be *registered* so the Claude SDK doesn't reject the call with "No such
+// tool available" (which would also stop the stream translator from scheduling
+// the wakeup). They are registered as in-process SDK MCP tools whose handlers are
+// trivial acknowledgements — the real work (scheduling/cancelling/listing) is
+// done by the run stream translator watching the resulting tool calls.
+const RLAB_MCP_SERVER_NAME = "rlab";
+const rlabChatToolInputShape = {
+  action: z.string().optional(),
+  operation: z.string().optional(),
+  mode: z.string().optional(),
+  prompt: z.string().optional(),
+  message: z.string().optional(),
+  task: z.string().optional(),
+  reason: z.string().optional(),
+  description: z.string().optional(),
+  delaySeconds: z.number().optional(),
+  fireAt: z.string().optional(),
+  cron: z.string().optional(),
+  script: z.string().optional(),
+  intervalSeconds: z.number().optional(),
+  wakeupId: z.string().optional(),
+  id: z.string().optional(),
+  all: z.boolean().optional(),
+} as const;
+const rlabChatToolAcknowledgement = "rlab accepted the request and handles it server-side. Finish this turn now; rlab re-runs you when a wakeup fires.";
+let rlabSdkMcpServerInstance: McpSdkServerConfigWithInstance | null = null;
+function rlabSdkMcpServer(): McpSdkServerConfigWithInstance {
+  if (!rlabSdkMcpServerInstance) {
+    rlabSdkMcpServerInstance = createSdkMcpServer({
+      name: RLAB_MCP_SERVER_NAME,
+      version: "1.0.0",
+      tools: [
+        tool(TASK_WAKEUP_TOOL_NAME, "Schedule, cancel, or list an rlab task wakeup for this chat. rlab fires it server-side. Use action='list' to inspect pending wakeups.", rlabChatToolInputShape, async () => ({ content: [{ type: "text", text: rlabChatToolAcknowledgement }] })),
+      ],
+    });
+  }
+  return rlabSdkMcpServerInstance;
+}
+// Model-facing names (per RLAB_CHAT_TOOLS_PROMPT) resolve to the registered MCP
+// tool names so a bare `TaskWakeup` call isn't rejected as unknown.
+const RLAB_CHAT_TOOL_ALIASES: Record<string, string> = {
+  [TASK_WAKEUP_TOOL_NAME]: `mcp__${RLAB_MCP_SERVER_NAME}__${TASK_WAKEUP_TOOL_NAME}`,
+  ScheduleWakeup: `mcp__${RLAB_MCP_SERVER_NAME}__${TASK_WAKEUP_TOOL_NAME}`,
+};
 const CLAUDE_EFFORT_LEVELS: ReadonlySet<EffortLevel> = new Set(["low", "medium", "high", "xhigh", "max"]);
 const RLAB_CHAT_TOOLS_PROMPT = [
   "When you need user input that blocks progress, use the AskUserQuestion tool instead of asking as plain text.",
@@ -5718,7 +5815,7 @@ const RLAB_CHAT_TOOLS_PROMPT = [
   "TaskWakeup supports delaySeconds/fireAt/cron for time wakeups and script plus intervalSeconds or cron for condition wakeups; the script runs server-side in the project cwd, exit code 0 fires the wakeup, and non-zero exit codes keep polling.",
   "For condition wakeups, write a deterministic shell script in the TaskWakeup input: { prompt, script, intervalSeconds, reason } or { prompt, script, cron, reason }. Do not describe the script in prose instead of calling the tool.",
   "To cancel task wakeups in this chat, call TaskWakeup with action=\"cancel\" and either wakeupId/id or all=true.",
-  "To inspect scheduled wakeups in this chat, call TaskWakeup with action=\"list\" or call TaskAwait with action=\"list\". The tool result returns wakeup ids, trigger type, next fire/check time, prompt, and reason.",
+  "To inspect scheduled wakeups in this chat, call TaskWakeup with action=\"list\". The tool result returns wakeup ids, trigger type, next fire/check time, prompt, and reason.",
 ].join("\n");
 const CLAUDE_CHAT_UI_SYSTEM_PROMPT = RLAB_CHAT_TOOLS_PROMPT;
 interface CodexDynamicToolSpec {
@@ -5790,22 +5887,6 @@ const CODEX_RLAB_DYNAMIC_TOOLS: readonly CodexDynamicToolSpec[] = [
         all: {
           type: "boolean",
           description: "Cancel all wakeups for this chat when action is 'cancel'.",
-        },
-      },
-    },
-  },
-  {
-    name: TASK_AWAIT_TOOL_NAME,
-    description:
-      "List scheduled TaskWakeup entries for the current rlab chat. Provide action='list' or omit action. The result includes wakeup ids, trigger type, next fire/check time, prompt, and reason so the agent can decide whether to wait, cancel, or schedule another wakeup.",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        action: {
-          type: "string",
-          enum: ["list"],
-          description: "Use 'list' or omit to list scheduled wakeups for this chat.",
         },
       },
     },
@@ -5902,7 +5983,7 @@ function rlabChatToolsPromptAppendix(): string {
     "<rlab-chat-tools>",
     "This rlab chat has server-side tools that are handled by the application, not by the user's project.",
     RLAB_CHAT_TOOLS_PROMPT,
-    "Tool names accepted by rlab for task wakeups: TaskWakeup, TaskAwait.",
+    "Tool names accepted by rlab for task wakeups: TaskWakeup.",
     "</rlab-chat-tools>",
   ].join("\n");
 }
@@ -6119,6 +6200,13 @@ export function buildClaudeSdkOptions(
     permissionMode,
     systemPrompt: { type: "preset", preset: "claude_code", append: CLAUDE_CHAT_UI_SYSTEM_PROMPT },
     tools: claudeToolsForRequest(request),
+    mcpServers: { [RLAB_MCP_SERVER_NAME]: rlabSdkMcpServer() },
+    toolAliases: RLAB_CHAT_TOOL_ALIASES,
+    // Load the project's own settings (CLAUDE.md/AGENTS.md, hooks) and enable every
+    // discovered skill (~/.claude/skills + the project's .claude/skills) so agents
+    // launched by rlab pick up the user's skills instead of running bare.
+    settingSources: ["user", "project", "local"],
+    skills: "all",
   };
   if (permissionMode === "bypassPermissions") {
     options.allowDangerouslySkipPermissions = true;
@@ -8077,29 +8165,15 @@ function numericWakeupField(value: unknown): number | undefined {
 }
 
 function isWakeupToolName(name: string): boolean {
-  const leaf = name.split("/").at(-1)?.toLowerCase() ?? name.toLowerCase();
-  return (
-    leaf === "taskwakeup" ||
-    leaf === "task_wakeup" ||
-    leaf === "rlab_task_wakeup" ||
-    leaf === "taskawait" ||
-    leaf === "task_await" ||
-    leaf === "rlab_task_await" ||
-    leaf === "schedulewakeup" ||
-    leaf === "schedule_wakeup" ||
-    leaf === "rlab_schedule_wakeup" ||
-    leaf === "wakeup"
-  );
+  // normalizedToolName strips an `mcp__<server>__` prefix and non-alphanumerics,
+  // so this matches both the bare model-facing names and the registered MCP names.
+  const leaf = normalizedToolName(name);
+  return leaf === "taskwakeup" || leaf === "rlabtaskwakeup" || leaf === "schedulewakeup" || leaf === "rlabschedulewakeup" || leaf === "wakeup";
 }
 
-function isTaskAwaitToolName(name: string): boolean {
-  const leaf = name.split("/").at(-1)?.toLowerCase() ?? name.toLowerCase();
-  return leaf === "taskawait" || leaf === "task_await" || leaf === "rlab_task_await";
-}
-
-function isWakeupListRequested(name: string, input: Record<string, unknown> | undefined): boolean {
+function isWakeupListRequested(_name: string, input: Record<string, unknown> | undefined): boolean {
   const action = firstString(input, ["action", "operation", "mode"])?.toLowerCase();
-  return action === "list" || action === "show" || action === "get" || action === "status" || (isTaskAwaitToolName(name) && !action);
+  return action === "list" || action === "show" || action === "get" || action === "status";
 }
 
 function wakeupInputValidationError(name: string, input: Record<string, unknown> | undefined): string | null {
@@ -8107,13 +8181,10 @@ function wakeupInputValidationError(name: string, input: Record<string, unknown>
     return `${name} is not a supported rlab dynamic tool.`;
   }
   if (!input) {
-    return isTaskAwaitToolName(name) ? null : `${name} requires a JSON object input.`;
+    return `${name} requires a JSON object input.`;
   }
   if (isWakeupListRequested(name, input)) {
     return null;
-  }
-  if (isTaskAwaitToolName(name)) {
-    return `${name} only supports action='list'.`;
   }
   const action = firstString(input, ["action", "operation", "mode"])?.toLowerCase();
   const cancelRequested = action === "cancel" || action === "delete" || action === "remove" || input.cancel === true || input.cancelled === true || input.canceled === true;
@@ -8171,7 +8242,7 @@ function wakeupTriggerLabel(trigger: ScheduledWakeupTrigger): string {
 
 function scheduledWakeupListToolText(conversationId: string | undefined): string {
   if (!conversationId) {
-    return "TaskAwait list requires a conversation-bound run.";
+    return "TaskWakeup list requires a conversation-bound run.";
   }
   const wakeups = scheduledWakeupSummaries(conversationId);
   if (wakeups.length === 0) {
@@ -11083,6 +11154,9 @@ function attach(server: ViteDevServer | PreviewServer): void {
     { path: "/api/git-unstage", handler: methodOnly("POST", handleGitUnstage) },
     { path: "/api/git-commit", handler: methodOnly("POST", handleGitCommit) },
     { path: "/api/git-checkout", handler: methodOnly("POST", handleGitCheckout) },
+    { path: "/api/git-cherry-pick", handler: methodOnly("POST", handleGitCherryPick) },
+    { path: "/api/git-revert", handler: methodOnly("POST", handleGitRevert) },
+    { path: "/api/git-reset", handler: methodOnly("POST", handleGitReset) },
     { path: "/api/git-push", handler: methodOnly("POST", handleGitPush) },
     { path: "/api/git-worktree-create", handler: methodOnly("POST", handleGitWorktreeCreate) },
     { path: "/api/git-worktree-merge", handler: methodOnly("POST", handleGitWorktreeMerge) },
