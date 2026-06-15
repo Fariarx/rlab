@@ -3,6 +3,8 @@ import type { GitGraphCommit } from "../src/client/api/git-panel-api";
 import type { GitFileStatus, GitStatusPayload } from "../src/lib/git-status";
 import {
   changedFilesForTab,
+  gitCommitActionConfirmation,
+  gitCommitActionLabelKey,
   gitGraphBranchHeadsFromCommits,
   gitOperationErrorMessage,
   gitGraphRefName,
@@ -104,5 +106,17 @@ describe("git-panel-model", () => {
     expect(gitOperationErrorMessage(new Error("Git status failed"), "fallback")).toBe("Git status failed");
     expect(gitOperationErrorMessage(new Error(""), "fallback")).toBe("fallback");
     expect(gitOperationErrorMessage("plain", "fallback")).toBe("fallback");
+  });
+
+  it("marks reset actions as confirmation-gated and hard reset as dangerous", () => {
+    expect(gitCommitActionLabelKey("reset-hard")).toBe("gitResetHard");
+    expect(gitCommitActionConfirmation("reset-hard")).toEqual({
+      titleKey: "gitConfirmResetHardTitle",
+      bodyKey: "gitConfirmResetHardBody",
+      confirmKey: "gitConfirmResetHardConfirm",
+      danger: true,
+    });
+    expect(gitCommitActionConfirmation("reset-mixed")).toMatchObject({ bodyKey: "gitConfirmResetBody", danger: true });
+    expect(gitCommitActionConfirmation("cherry-pick")).toMatchObject({ bodyKey: "gitConfirmCommitActionBody", danger: false });
   });
 });

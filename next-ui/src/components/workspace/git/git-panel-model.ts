@@ -1,8 +1,17 @@
 import type { GitGraphBranchHead, GitGraphCommit } from "../../../client/api/git-panel-api";
+import type { TranslationKey } from "../../../i18n/i18n-catalog";
 import type { GitFileStatus, GitStatusPayload } from "../../../lib/git-status";
 
 export type GitChangeTab = "unstaged" | "staged";
+export type GitCommitAction = "cherry-pick" | "revert" | "reset-soft" | "reset-mixed" | "reset-hard";
 export type GitFocusTab = GitChangeTab | "last-turn";
+
+export interface GitCommitActionConfirmation {
+  readonly titleKey: TranslationKey;
+  readonly bodyKey: TranslationKey;
+  readonly confirmKey: TranslationKey;
+  readonly danger: boolean;
+}
 
 export function changedFilesForTab(status: GitStatusPayload | null, tab: GitChangeTab): readonly GitFileStatus[] {
   const files = status?.files ?? [];
@@ -55,4 +64,44 @@ export function gitGraphBranchHeadsFromCommits(commits: readonly GitGraphCommit[
 
 export function gitOperationErrorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
+}
+
+export function gitCommitActionLabelKey(action: GitCommitAction): TranslationKey {
+  switch (action) {
+    case "cherry-pick":
+      return "gitCherryPick";
+    case "revert":
+      return "gitRevert";
+    case "reset-soft":
+      return "gitResetSoft";
+    case "reset-mixed":
+      return "gitResetMixed";
+    case "reset-hard":
+      return "gitResetHard";
+  }
+}
+
+export function gitCommitActionConfirmation(action: GitCommitAction): GitCommitActionConfirmation {
+  if (action === "reset-hard") {
+    return {
+      titleKey: "gitConfirmResetHardTitle",
+      bodyKey: "gitConfirmResetHardBody",
+      confirmKey: "gitConfirmResetHardConfirm",
+      danger: true,
+    };
+  }
+  if (action === "reset-soft" || action === "reset-mixed") {
+    return {
+      titleKey: "gitConfirmResetTitle",
+      bodyKey: "gitConfirmResetBody",
+      confirmKey: "gitConfirmResetConfirm",
+      danger: true,
+    };
+  }
+  return {
+    titleKey: "gitConfirmCommitActionTitle",
+    bodyKey: "gitConfirmCommitActionBody",
+    confirmKey: "gitConfirmCommitActionConfirm",
+    danger: false,
+  };
 }

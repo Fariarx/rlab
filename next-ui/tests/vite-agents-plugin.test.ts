@@ -19,6 +19,7 @@ import {
   buildGeminiRunArgs,
   buildGitCommitArgs,
   buildGitPushArgs,
+  gitHardResetDirtyError,
   buildOpenCodeRunArgs,
   createRunApprovalHandler,
   createAmpStreamTranslator,
@@ -2549,6 +2550,13 @@ Built-in agents:
     expect(parseGitCommitActionPayload(JSON.stringify({ cwd: " /repo ", hash: " AbC1234 " }))).toEqual({ cwd: "/repo", hash: "AbC1234", mode: "mixed" });
     expect(parseGitCommitActionPayload(JSON.stringify({ cwd: "/repo", hash: "abc1234", mode: "HARD" })).mode).toBe("hard");
     expect(parseGitCommitActionPayload(JSON.stringify({ cwd: "/repo", hash: "abc1234", mode: "bogus" })).mode).toBe("mixed");
+  });
+
+  it("rejects hard reset when git porcelain status is dirty", () => {
+    expect(gitHardResetDirtyError("hard", "")).toBeNull();
+    expect(gitHardResetDirtyError("hard", " M src/app.ts\n?? scratch.txt\n")).toBe("Hard reset refused: working tree has uncommitted changes. Commit, stash, or discard them first.");
+    expect(gitHardResetDirtyError("mixed", " M src/app.ts\n")).toBeNull();
+    expect(gitHardResetDirtyError("soft", " M src/app.ts\n")).toBeNull();
   });
 
   it("parses decorated git graph log rows", () => {

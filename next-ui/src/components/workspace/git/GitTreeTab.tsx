@@ -4,7 +4,7 @@ import { useState } from "react";
 import type { GitGraphBranchHead, GitGraphCommit } from "../../../client/api/git-panel-api";
 import type { I18nApi } from "../../../i18n/I18nProvider";
 import { GitCommitGraph } from "./GitCommitGraph";
-import type { GitCommitAction } from "./use-git-view-controller";
+import type { GitCommitAction } from "./git-panel-model";
 import { GitTreeTabStore } from "./git-panel-store";
 
 export const GitTreeTab = observer(function GitTreeTab({

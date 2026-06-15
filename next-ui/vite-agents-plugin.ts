@@ -4403,6 +4403,13 @@ export function buildGitPushArgs(): string[] {
   return ["push"];
 }
 
+export function gitHardResetDirtyError(mode: GitResetMode, statusPorcelain: string): string | null {
+  if (mode !== "hard" || statusPorcelain.trim().length === 0) {
+    return null;
+  }
+  return "Hard reset refused: working tree has uncommitted changes. Commit, stash, or discard them first.";
+}
+
 function runGit(cwd: string, args: readonly string[], onDone: (result: GitCommandResult) => void): void {
   const child = spawn("git", ["-C", cwd, ...args], {
     cwd,
@@ -4690,7 +4697,12 @@ function handleGitCheckout(req: IncomingMessage, res: ServerResponse): void {
   });
 }
 
-function runGitCommitAction(req: IncomingMessage, res: ServerResponse, toArgs: (hash: string, mode: GitResetMode) => readonly string[]): void {
+function runGitCommitAction(
+  req: IncomingMessage,
+  res: ServerResponse,
+  toArgs: (hash: string, mode: GitResetMode) => readonly string[],
+  options: { readonly requireCleanTreeForHardReset?: boolean } = {},
+): void {
   readJsonBody(req, res, (body) => {
     void (async () => {
       try {
@@ -4699,6 +4711,18 @@ function runGitCommitAction(req: IncomingMessage, res: ServerResponse, toArgs: (
         if (cwdError) {
           sendJson(res, 400, { error: cwdError });
           return;
+        }
+        if (options.requireCleanTreeForHardReset) {
+          const statusResult = await runGitP(cwd, ["status", "--porcelain=v1"]);
+          if (!statusResult.ok) {
+            sendJson(res, 500, { error: statusResult.error });
+            return;
+          }
+          const dirtyError = gitHardResetDirtyError(mode, statusResult.stdout);
+          if (dirtyError) {
+            sendJson(res, 409, { error: dirtyError });
+            return;
+          }
         }
         const result = await runGitP(cwd, [...toArgs(hash, mode)]);
         if (!result.ok) {
@@ -4722,7 +4746,7 @@ function handleGitRevert(req: IncomingMessage, res: ServerResponse): void {
 }
 
 function handleGitReset(req: IncomingMessage, res: ServerResponse): void {
-  runGitCommitAction(req, res, (hash, mode) => ["reset", `--${mode}`, hash]);
+  runGitCommitAction(req, res, (hash, mode) => ["reset", `--${mode}`, hash], { requireCleanTreeForHardReset: true });
 }
 
 function handleGitDiff(req: IncomingMessage, res: ServerResponse): void {

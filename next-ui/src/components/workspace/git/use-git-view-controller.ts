@@ -11,12 +11,10 @@ import {
   resetGitTo,
   revertGitCommit,
 } from "../../../client/api/git-panel-api";
-
-export type GitCommitAction = "cherry-pick" | "revert" | "reset-soft" | "reset-mixed" | "reset-hard";
 import type { I18nApi } from "../../../i18n/I18nProvider";
 import type { GitFileStatus, GitStatusPayload } from "../../../lib/git-status";
 import type { DiffBlock } from "../../agent";
-import { changedFilesForTab, gitGraphBranchHeadsFromCommits, gitOperationErrorMessage, gitPanelFocusTabForPath } from "./git-panel-model";
+import { changedFilesForTab, gitGraphBranchHeadsFromCommits, gitOperationErrorMessage, gitPanelFocusTabForPath, type GitCommitAction } from "./git-panel-model";
 import { GitViewStore, type GitPanelTab } from "./git-panel-store";
 
 export interface UseGitViewControllerOptions {

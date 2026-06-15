@@ -6,9 +6,9 @@ import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
 import MergeIcon from "@mui/icons-material/Merge";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import RemoveIcon from "@mui/icons-material/Remove";
-import { Alert, Box, Chip, CircularProgress, Collapse, Stack, Tab, Tabs, type Theme, Tooltip, Typography } from "@mui/material";
+import { Alert, Box, Chip, CircularProgress, Collapse, Dialog, DialogActions, DialogContent, DialogContentText, DialogTitle, Stack, Tab, Tabs, type Theme, Tooltip, Typography } from "@mui/material";
 import { observer } from "mobx-react-lite";
-import { type ReactNode, type RefObject, useRef } from "react";
+import { type ReactNode, type RefObject, useRef, useState } from "react";
 import { type I18nApi, useI18n } from "../../../i18n/I18nProvider";
 import type { GitFileStatus } from "../../../lib/git-status";
 import type { DiffBlock, ReviewCommentEntry } from "../../agent";
@@ -17,6 +17,7 @@ import type { GitDiffMode } from "../../../client/api/git-panel-api";
 import { countDiffChanges, type DiffViewerLine, GitDiffLines, gitDiffViewerLinesFromBlock } from "./GitDiffViewer";
 import { GitRefPicker } from "./GitRefPicker";
 import { GitTreeTab } from "./GitTreeTab";
+import { gitCommitActionConfirmation, gitCommitActionLabelKey, type GitCommitAction } from "./git-panel-model";
 import type { GitPanelTab } from "./git-panel-store";
 import { useDiffFileCardController } from "./use-diff-file-card-controller";
 import { useGitFileDiff } from "./use-git-file-diff";
@@ -70,6 +71,11 @@ const GIGANTIC_DIFF_LINES = 2000;
 // With few changed files we load every diff up-front (so small ones open
 // automatically); with many, diffs load lazily on expand to avoid a request flood.
 const EAGER_DIFF_LIMIT = 25;
+
+interface PendingGitCommitAction {
+  readonly action: GitCommitAction;
+  readonly hash: string;
+}
 
 function tabLabel(label: string, count?: number): string {
   return typeof count === "number" ? `${label} ${count}` : label;
@@ -288,6 +294,20 @@ export const GitView = observer(function GitView({ cwd, lastTurnDiffs = [], revi
     initRepo,
   } = controller;
   const scrollRef = useRef<HTMLDivElement>(null);
+  const [pendingCommitAction, setPendingCommitAction] = useState<PendingGitCommitAction | null>(null);
+  const pendingConfirmation = pendingCommitAction ? gitCommitActionConfirmation(pendingCommitAction.action) : null;
+  const pendingActionLabel = pendingCommitAction ? t(gitCommitActionLabelKey(pendingCommitAction.action)) : "";
+  const pendingHashLabel = pendingCommitAction?.hash.slice(0, 12) ?? "";
+  const requestCommitAction = (action: GitCommitAction, hash: string) => {
+    setPendingCommitAction({ action, hash });
+  };
+  const confirmCommitAction = () => {
+    if (!pendingCommitAction) {
+      return;
+    }
+    commitAction(pendingCommitAction.action, pendingCommitAction.hash);
+    setPendingCommitAction(null);
+  };
 
   return (
     <Stack sx={{ height: "100%", minHeight: 0, backgroundColor: (theme) => theme.custom.surfaces.s1 }}>
@@ -429,7 +449,7 @@ export const GitView = observer(function GitView({ cwd, lastTurnDiffs = [], revi
           )}
           {status && (
             <Stack spacing={1.5} sx={{ minHeight: 0, pt: 1.5 }}>
-              {activeTab === "tree" && <GitTreeTab commits={graphCommits} branchHeads={graphBranchHeads} currentBranch={status.branch} branches={status.branches} currentHash={status.commitHash} error={treeError} loading={treeLoading} onCheckoutBranch={checkoutRef} onCommitAction={commitAction} actionsDisabled={!cwd || loading || actionLoading} canCheckout={Boolean(cwd) && status.clean && !loading && !actionLoading} t={t} />}
+              {activeTab === "tree" && <GitTreeTab commits={graphCommits} branchHeads={graphBranchHeads} currentBranch={status.branch} branches={status.branches} currentHash={status.commitHash} error={treeError} loading={treeLoading} onCheckoutBranch={checkoutRef} onCommitAction={requestCommitAction} actionsDisabled={!cwd || loading || actionLoading} canCheckout={Boolean(cwd) && status.clean && !loading && !actionLoading} t={t} />}
 
               {activeTab === "unstaged" &&
                 cwd &&
@@ -518,6 +538,20 @@ export const GitView = observer(function GitView({ cwd, lastTurnDiffs = [], revi
             </Stack>
           )}
         </Stack>
+        <Dialog open={pendingCommitAction !== null} onClose={() => setPendingCommitAction(null)} maxWidth="xs" fullWidth>
+          <DialogTitle>{pendingConfirmation ? t(pendingConfirmation.titleKey) : ""}</DialogTitle>
+          <DialogContent>
+            <DialogContentText>
+              {pendingConfirmation ? t(pendingConfirmation.bodyKey, { action: pendingActionLabel, hash: pendingHashLabel }) : ""}
+            </DialogContentText>
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={() => setPendingCommitAction(null)}>{t("cancel")}</Button>
+            <Button variant="contained" color={pendingConfirmation?.danger ? "error" : "primary"} disabled={actionLoading} onClick={confirmCommitAction} autoFocus>
+              {pendingConfirmation ? t(pendingConfirmation.confirmKey) : ""}
+            </Button>
+          </DialogActions>
+        </Dialog>
     </Stack>
   );
 });

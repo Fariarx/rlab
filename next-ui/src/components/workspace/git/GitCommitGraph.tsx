@@ -7,7 +7,7 @@ import { type ReactNode, useMemo, useState } from "react";
 import type { GitGraphCommit } from "../../../client/api/git-panel-api";
 import type { I18nApi } from "../../../i18n/I18nProvider";
 import { buildGitGraphLayout } from "./git-commit-graph-model";
-import type { GitCommitAction } from "./use-git-view-controller";
+import type { GitCommitAction } from "./git-panel-model";
 
 const ROW_HEIGHT = 30;
 const NODE_RADIUS = 3.5;
