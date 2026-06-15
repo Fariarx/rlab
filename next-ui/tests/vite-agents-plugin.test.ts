@@ -1857,7 +1857,7 @@ Built-in agents:
       translate(
         JSON.stringify({
           type: "tool_use",
-          tool_name: "TaskWakeup",
+          tool_name: "mcp_rlab_TaskWakeup",
           tool_id: "wake-gem",
           parameters: { prompt: "check later", delaySeconds: 600, reason: "user asked for a reminder" },
         }),

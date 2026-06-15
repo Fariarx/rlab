@@ -8248,10 +8248,11 @@ function numericWakeupField(value: unknown): number | undefined {
 }
 
 function isWakeupToolName(name: string): boolean {
-  // normalizedToolName strips an `mcp__<server>__` prefix and non-alphanumerics,
-  // so this matches both the bare model-facing names and the registered MCP names.
+  // Agents prefix MCP tool names differently — Claude `mcp__rlab__TaskWakeup`,
+  // Gemini `mcp_rlab_TaskWakeup`, OpenCode `rlab_TaskWakeup` — and normalizedToolName
+  // only strips the double-underscore form, so match on the trailing tool name.
   const leaf = normalizedToolName(name);
-  return leaf === "taskwakeup" || leaf === "rlabtaskwakeup" || leaf === "schedulewakeup" || leaf === "rlabschedulewakeup" || leaf === "wakeup";
+  return leaf === "wakeup" || leaf.endsWith("taskwakeup") || leaf.endsWith("schedulewakeup");
 }
 
 function isWakeupListRequested(_name: string, input: Record<string, unknown> | undefined): boolean {
@@ -9970,6 +9971,7 @@ async function runOpenCodeServer(
   end: () => void,
   binding: BackgroundRunBinding | null,
   accumulator: BackgroundRunAccumulator | null,
+  runEnv: NodeJS.ProcessEnv,
 ): Promise<void> {
   const abortController = new AbortController();
   res.on("close", () => {
@@ -10007,7 +10009,7 @@ async function runOpenCodeServer(
     const launch = resolveLaunchCommand(resolvedBin, ["serve", "--hostname", "127.0.0.1", "--port", "0"]);
     serverProc = spawn(launch.command, [...launch.args], agentProcessSpawnOptions({
       cwd,
-      env: { ...process.env, ...readAgentSecretConfig().env, OPENCODE_SERVER_USERNAME: "opencode", OPENCODE_SERVER_PASSWORD: password },
+      env: { ...process.env, ...readAgentSecretConfig().env, ...runEnv, OPENCODE_SERVER_USERNAME: "opencode", OPENCODE_SERVER_PASSWORD: password },
       stdio: ["ignore", "pipe", "pipe"],
     }));
     const baseUrl = await waitForOpenCodeServerUrl(serverProc, abortController.signal);
@@ -10962,7 +10964,7 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
     }
 
     if (agent === "opencode") {
-      void runOpenCodeServer(executionRequest, cwd, res, send, sendDone, sender.end, binding, accumulator);
+      void runOpenCodeServer(executionRequest, cwd, res, send, sendDone, sender.end, binding, accumulator, runEnv);
       return;
     }
 
