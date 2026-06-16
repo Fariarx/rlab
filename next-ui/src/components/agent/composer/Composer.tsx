@@ -1,5 +1,4 @@
 import AttachFileIcon from "@mui/icons-material/AttachFile";
-import AccessTimeIcon from "@mui/icons-material/AccessTime";
 import AutoAwesomeRoundedIcon from "@mui/icons-material/AutoAwesomeRounded";
 import MicRoundedIcon from "@mui/icons-material/MicRounded";
 import OpenInBrowserIcon from "@mui/icons-material/OpenInBrowser";
@@ -17,6 +16,7 @@ import type { ComposerPluginLink } from "../../../lib/rlab-plugins";
 import { Button, IconButton, ImageLightbox, KeyHint } from "../../ui";
 import { AttachmentTile } from "./AttachmentTile";
 import { FloatingTile } from "./ComposerFloatingTile";
+import { WakeupTile, type WakeupTileProps } from "./WakeupTile";
 import { ComposerLimitsPanel } from "./ComposerLimitsPanel";
 import { browserActivityTone, type ComposerBrowserActivityEvent, type ComposerVoiceProvider } from "./composer-model";
 import type { ComposerAttachmentDraft, ComposerDraft } from "../core/types";
@@ -96,7 +96,7 @@ export interface ComposerProps {
   /** Server-registered rlab tools that can be referenced in the prompt via `$...`. */
   readonly registeredPlugins?: readonly ComposerPluginLink[];
   /** Server-side scheduled wakeups for this chat, rendered as first floating tags. */
-  readonly scheduledWakeups?: readonly { readonly id: string; readonly label: string; readonly removeLabel: string; readonly onRemove: () => void }[];
+  readonly scheduledWakeups?: readonly WakeupTileProps[];
   /** Selected and server-authorized voice dictation provider. Omitted for "none". */
   readonly voiceProvider?: ComposerVoiceProvider;
   readonly onVoiceError?: (message: string) => void;
@@ -357,14 +357,13 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
         }}
       >
         {scheduledWakeups.map((wakeup) => (
-          <FloatingTile
+          <WakeupTile
             key={wakeup.id}
-            tone="warn"
-            icon={<AccessTimeIcon sx={{ fontSize: 20 }} />}
+            id={wakeup.id}
             label={wakeup.label}
             removeLabel={wakeup.removeLabel}
             onRemove={wakeup.onRemove}
-            testId={`scheduled-wakeup-tile-${wakeup.id}`}
+            detail={wakeup.detail}
           />
         ))}
         {reviewCount > 0 && (

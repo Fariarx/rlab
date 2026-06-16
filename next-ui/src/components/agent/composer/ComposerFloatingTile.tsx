@@ -1,7 +1,7 @@
 import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
 import { Box } from "@mui/material";
 import type { Theme } from "@mui/material/styles";
-import type { ReactNode } from "react";
+import type { MouseEvent, ReactNode } from "react";
 import { IconButton } from "../../ui";
 
 const COMPOSER_TILE_SIZE = 76;
@@ -58,7 +58,7 @@ export function FloatingTile({
   /** When omitted the tile has no close button (e.g. the read-only review tag). */
   readonly onRemove?: () => void;
   readonly removeLabel?: string;
-  readonly onClick?: () => void;
+  readonly onClick?: (event: MouseEvent<HTMLElement>) => void;
   readonly disabled?: boolean;
   readonly tone?: Tone;
   readonly testId?: string;

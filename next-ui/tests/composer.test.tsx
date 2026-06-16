@@ -807,6 +807,15 @@ describe("Composer", () => {
             label: "Wakeup установлен: 10.06.2026, 14:18:00",
             removeLabel: "Убрать запланированную задачу",
             onRemove: vi.fn(),
+            detail: {
+              heading: "TaskWakeup · по времени",
+              rows: [
+                { label: "Сработает", value: "10.06.2026, 14:18:00" },
+                { label: "Агент", value: "claude-code" },
+              ],
+              promptLabel: "Промпт",
+              prompt: "проверь деплой",
+            },
           },
         ]}
         modes={[{ id: "review", label: "Review" }]}
@@ -816,6 +825,13 @@ describe("Composer", () => {
 
     const wakeupTile = screen.getByTestId("scheduled-wakeup-tile-wake-1");
     expect(wakeupTile).toHaveStyle({ width: "76px", height: "76px", boxShadow: "0 1px 3px rgba(0, 0, 0, 0.2)" });
+
+    // Clicking the tile opens a popover with the full wakeup details.
+    fireEvent.click(wakeupTile);
+    const popover = screen.getByTestId("scheduled-wakeup-popover-wake-1");
+    expect(popover).toBeInTheDocument();
+    expect(within(popover).getByText("проверь деплой")).toBeInTheDocument();
+    expect(within(popover).getByText("TaskWakeup · по времени")).toBeInTheDocument();
 
     // The active agent mode is shown as a small badge on the options (gear)
     // button — not a square tile and not an inline chip that eats input width.
