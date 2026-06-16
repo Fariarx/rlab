@@ -11,6 +11,9 @@ import type { ChatMessage } from "../../agent";
  */
 export class WorkspacePendingMessageQueue {
   private readonly messages = new Map<string, ChatMessage[]>();
+  /** Conversations whose queue is paused: turns stay queued instead of draining
+   *  when the active run settles, until the user resumes (or the queue empties). */
+  private readonly paused = new Set<string>();
 
   constructor() {
     makeAutoObservable(this);
@@ -20,6 +23,24 @@ export class WorkspacePendingMessageQueue {
     const queue = this.messages.get(conversationId) ?? [];
     queue.push(message);
     this.messages.set(conversationId, queue);
+  }
+
+  isPaused(conversationId: string): boolean {
+    return this.paused.has(conversationId);
+  }
+
+  setPaused(conversationId: string, paused: boolean): void {
+    if (paused) {
+      this.paused.add(conversationId);
+    } else {
+      this.paused.delete(conversationId);
+    }
+  }
+
+  /** Drop the queue and its paused flag (e.g. conversation deleted or drained). */
+  private clear(conversationId: string): void {
+    this.messages.delete(conversationId);
+    this.paused.delete(conversationId);
   }
 
   count(conversationId: string): number {
@@ -32,7 +53,7 @@ export class WorkspacePendingMessageQueue {
   }
 
   forget(conversationId: string): void {
-    this.messages.delete(conversationId);
+    this.clear(conversationId);
   }
 
   has(conversationId: string): boolean {
@@ -47,7 +68,7 @@ export class WorkspacePendingMessageQueue {
     }
     const next = queue.filter((message) => message.id !== messageId);
     if (next.length === 0) {
-      this.messages.delete(conversationId);
+      this.clear(conversationId);
     } else {
       this.messages.set(conversationId, next);
     }
@@ -60,7 +81,7 @@ export class WorkspacePendingMessageQueue {
     }
     const next = queue.shift() ?? null;
     if (queue.length === 0) {
-      this.messages.delete(conversationId);
+      this.clear(conversationId);
     }
     return next;
   }

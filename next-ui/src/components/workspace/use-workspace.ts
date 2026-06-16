@@ -109,6 +109,8 @@ export interface Workspace {
   readonly queuedMessages: (id: string) => readonly ChatMessage[];
   readonly cancelQueuedMessage: (id: string, messageId: string) => void;
   readonly sendQueuedMessageNow: (id: string) => boolean;
+  readonly isQueuePaused: (id: string) => boolean;
+  readonly setQueuePaused: (id: string, paused: boolean) => void;
   readonly setCompaction: (id: string, patch: Partial<CompactionSettings>) => void;
   readonly setConversationView: (id: string, view: ConversationView) => void;
   readonly compactConversation: (id: string) => boolean;
@@ -221,6 +223,7 @@ export class WorkspaceStore implements Workspace {
       sendMessage: action.bound,
       cancelQueuedMessage: action.bound,
       sendQueuedMessageNow: action.bound,
+      setQueuePaused: action.bound,
       setCompaction: action.bound,
       setConversationView: action.bound,
       compactConversation: action.bound,
@@ -768,10 +771,25 @@ export class WorkspaceStore implements Workspace {
     return true;
   }
 
+  /** Whether the conversation's queue is paused (drains held until resumed). */
+  isQueuePaused(id: string): boolean {
+    return this.pendingMessages.isPaused(id);
+  }
+
+  /** Pause/resume the conversation's queue. Resuming drains the next turn now
+   *  (when no run is active), so the queue picks back up immediately. */
+  setQueuePaused(id: string, paused: boolean): void {
+    this.pendingMessages.setPaused(id, paused);
+    if (!paused) {
+      this.drainPendingMessages(id);
+    }
+  }
+
   /** Dispatch the next queued user message for a conversation, if any. Called
-   *  when a run settles so queued turns run in order without interrupting. */
+   *  when a run settles so queued turns run in order without interrupting.
+   *  Skipped while the queue is paused. */
   private drainPendingMessages(id: string): void {
-    if (this.runs.has(id)) {
+    if (this.runs.has(id) || this.pendingMessages.isPaused(id)) {
       return;
     }
     if (this.pendingMessages.has(id)) {
@@ -1002,6 +1020,12 @@ export class WorkspaceStore implements Workspace {
   }
 
   stopRun(id: string): void {
+    // Stopping the run also pauses the queue (only meaningful when something is
+    // queued) so a pending turn doesn't immediately start the next run — the
+    // user explicitly hit stop. They resume from the queued-messages header.
+    if (this.pendingMessages.has(id)) {
+      this.pendingMessages.setPaused(id, true);
+    }
     const active = this.runs.get(id);
     if (active) {
       active.canceled = true;

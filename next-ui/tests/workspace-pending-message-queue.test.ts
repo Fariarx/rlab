@@ -31,6 +31,26 @@ describe("WorkspacePendingMessageQueue", () => {
     expect(queue.takeNext("chat-1")?.id).toBe("u1");
   });
 
+  it("tracks a paused flag per conversation and resets it once the queue empties", () => {
+    const queue = new WorkspacePendingMessageQueue();
+    queue.enqueue("chat-1", userMessage("u1"));
+    expect(queue.isPaused("chat-1")).toBe(false);
+
+    queue.setPaused("chat-1", true);
+    expect(queue.isPaused("chat-1")).toBe(true);
+    // Pausing does not drain — the turn stays queued.
+    expect(queue.has("chat-1")).toBe(true);
+
+    queue.setPaused("chat-1", false);
+    expect(queue.isPaused("chat-1")).toBe(false);
+
+    // Emptying the queue clears any lingering paused flag.
+    queue.setPaused("chat-1", true);
+    queue.takeNext("chat-1");
+    expect(queue.has("chat-1")).toBe(false);
+    expect(queue.isPaused("chat-1")).toBe(false);
+  });
+
   it("forgets all queued messages for a removed conversation", () => {
     const queue = new WorkspacePendingMessageQueue();
     queue.enqueue("chat-1", userMessage("u1"));

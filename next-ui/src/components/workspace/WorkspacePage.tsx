@@ -861,8 +861,11 @@ export const WorkspacePageView = observer(function WorkspacePageView({
                 {selected && (
                   <QueuedMessages
                     messages={ws.queuedMessages(selected.id)}
+                    paused={ws.isQueuePaused(selected.id)}
                     onCancel={(messageId) => ws.cancelQueuedMessage(selected.id, messageId)}
+                    onCopy={(message) => messageActions.onCopy?.(message)}
                     onSendNow={() => ws.sendQueuedMessageNow(selected.id)}
+                    onTogglePause={() => ws.setQueuePaused(selected.id, !ws.isQueuePaused(selected.id))}
                   />
                 )}
                 <Composer

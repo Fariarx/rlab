@@ -11,24 +11,44 @@ const messages: ChatMessage[] = [
 
 describe("QueuedMessages", () => {
   it("renders nothing when the queue is empty", () => {
-    renderWithTheme(<QueuedMessages messages={[]} onCancel={vi.fn()} onSendNow={vi.fn()} />);
+    renderWithTheme(<QueuedMessages messages={[]} paused={false} onCancel={vi.fn()} onCopy={vi.fn()} onSendNow={vi.fn()} onTogglePause={vi.fn()} />);
     expect(screen.queryByTestId("queued-messages")).not.toBeInTheDocument();
   });
 
-  it("lists queued turns with a count and supports cancel + send now", () => {
+  it("lists queued turns with a count and supports copy, cancel, send now, and pause", () => {
     const onCancel = vi.fn();
+    const onCopy = vi.fn();
     const onSendNow = vi.fn();
-    renderWithTheme(<QueuedMessages messages={messages} onCancel={onCancel} onSendNow={onSendNow} />);
+    const onTogglePause = vi.fn();
+    renderWithTheme(
+      <QueuedMessages messages={messages} paused={false} onCancel={onCancel} onCopy={onCopy} onSendNow={onSendNow} onTogglePause={onTogglePause} />,
+    );
 
     expect(screen.getByText("В очереди · 2")).toBeInTheDocument();
     expect(screen.getByText("First queued turn")).toBeInTheDocument();
     expect(screen.getByText("Second queued turn")).toBeInTheDocument();
 
+    const copyButtons = screen.getAllByRole("button", { name: "Скопировать отложенное сообщение" });
+    fireEvent.click(copyButtons[0]);
+    expect(onCopy).toHaveBeenCalledWith(messages[0]);
+
     const cancelButtons = screen.getAllByRole("button", { name: "Отменить отложенное сообщение" });
     fireEvent.click(cancelButtons[0]);
     expect(onCancel).toHaveBeenCalledWith("q1");
 
+    fireEvent.click(screen.getByRole("button", { name: "Остановить" }));
+    expect(onTogglePause).toHaveBeenCalledTimes(1);
+
     fireEvent.click(screen.getByRole("button", { name: "Отправить сейчас" }));
     expect(onSendNow).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the resume control and paused title when paused", () => {
+    renderWithTheme(
+      <QueuedMessages messages={messages} paused onCancel={vi.fn()} onCopy={vi.fn()} onSendNow={vi.fn()} onTogglePause={vi.fn()} />,
+    );
+
+    expect(screen.getByText("В очереди · 2 · пауза")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Возобновить" })).toBeInTheDocument();
   });
 });
