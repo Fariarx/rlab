@@ -11,7 +11,7 @@ import { type KeyboardEvent, type MouseEvent, type ReactNode, useEffect, useMemo
 import { Virtuoso } from "react-virtuoso";
 import { useI18n } from "../../../i18n/I18nProvider";
 import { conversationPreviewSnippet } from "../../../lib/conversation-preview";
-import { normalizeClockLabel } from "../../../lib/time-format";
+import { formatConversationListTime } from "../../../lib/time-format";
 import { IconButton, StatusDot } from "../../ui";
 import { ConversationListStore, ConversationRowStore } from "../stores/agent-local-stores";
 import { type AgentId, getAgent, withAlpha } from "../core/agents";
@@ -92,8 +92,11 @@ function InitialsAvatar({ title, agent }: { readonly title: string; readonly age
 
 function ConversationAvatar({ conversation, hasWakeup }: { readonly conversation: ConversationSummary; readonly hasWakeup: boolean }) {
   const { t, conversationStatus } = useI18n();
-  const showDot = STATUSES_WITH_DOT.has(conversation.status) || hasWakeup;
-  const label = hasWakeup ? t("wakeupScheduledStatus") : conversationStatus(conversation.status);
+  // A finished run the user hasn't opened yet earns a green status dot, so the
+  // sidebar surfaces "agent done, go look". It clears once the chat is viewed.
+  const finishedUnread = conversation.status === "done" && conversation.unread === true;
+  const showDot = STATUSES_WITH_DOT.has(conversation.status) || hasWakeup || finishedUnread;
+  const label = hasWakeup ? t("wakeupScheduledStatus") : finishedUnread ? t("finishedUnreadStatus") : conversationStatus(conversation.status);
   if (!showDot) {
     return <InitialsAvatar title={conversation.title} agent={conversation.agent} />;
   }
@@ -277,8 +280,12 @@ const ConversationRow = observer(function ConversationRow({
               {conversation.title}
             </Typography>
             <Stack direction="row" spacing={0.75} sx={{ alignItems: "center", flex: "0 0 auto" }}>
-              {conversation.unread && <Box sx={{ width: 6, height: 6, borderRadius: "50%", backgroundColor: (t) => t.palette.status.running.main }} />}
-              <Typography className="row-date" sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.64rem", color: "text.secondary", transition: "opacity 120ms ease" }}>{normalizeClockLabel(conversation.time)}</Typography>
+              {conversation.unread && (
+                <Box sx={{ width: 6, height: 6, borderRadius: "50%", backgroundColor: (t) => (conversation.status === "done" ? t.palette.status.ok.main : t.palette.status.running.main) }} />
+              )}
+              <Typography className="row-date" sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.64rem", color: "text.secondary", transition: "opacity 120ms ease" }}>
+                {formatConversationListTime(conversation.time, conversation.updatedAtMs)}
+              </Typography>
             </Stack>
           </Stack>
         )}
@@ -371,6 +378,7 @@ function ConversationGroupHeader({
   const runningCount = conversations.filter((c) => c.status === "running").length;
   const hasWakeup = conversations.some((c) => wakeupConversationIds.has(c.id));
   const hasUnread = conversations.some((c) => c.unread);
+  const hasFinishedUnread = conversations.some((c) => c.status === "done" && c.unread);
   const panelId = `${idBase}-conversations`;
 
   const toggleOpen = () => onToggle(idBase);
@@ -415,6 +423,8 @@ function ConversationGroupHeader({
             <StatusDot status="running" label={t("runningCount", { count: runningCount })} />
           ) : hasWakeup ? (
             <StatusDot status="warn" label={t("wakeupScheduledStatus")} pulse={false} />
+          ) : hasFinishedUnread ? (
+            <StatusDot status="ok" label={t("finishedUnreadStatus")} pulse={false} />
           ) : hasUnread ? (
             <Box role="img" aria-label={t("unread")} sx={{ width: 6, height: 6, borderRadius: "50%", backgroundColor: (t) => t.palette.status.running.main }} />
           ) : null)}

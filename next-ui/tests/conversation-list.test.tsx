@@ -95,6 +95,20 @@ describe("ConversationList status dots", () => {
     expect(screen.getByRole("img", { name: "В работе" })).toBeInTheDocument();
   });
 
+  it("shows a green status dot for a finished, unviewed conversation and drops it once read", () => {
+    const finished = { ...base, id: "fin", title: "Finished chat", status: "done" as const, unread: true };
+    const actions = noopActions();
+    const rendered = renderWithThemeAndVirtuoso(
+      <ConversationList projects={[]} chats={[finished]} selectedId="" onSelect={vi.fn()} actions={actions} wakeupConversationIds={new Set()} />,
+    );
+    expect(screen.getByRole("img", { name: "Готово · не просмотрено" })).toBeInTheDocument();
+
+    rendered.rerender(
+      <ConversationList projects={[]} chats={[{ ...finished, unread: false }]} selectedId="" onSelect={vi.fn()} actions={actions} wakeupConversationIds={new Set()} />,
+    );
+    expect(screen.queryByRole("img", { name: "Готово · не просмотрено" })).not.toBeInTheDocument();
+  });
+
   it("shows a warning status for idle conversations with an active wakeup", () => {
     render([{ ...base, id: "wakeup", title: "Wakeup chat", status: "idle" }], noopActions(), new Set(["wakeup"]));
 

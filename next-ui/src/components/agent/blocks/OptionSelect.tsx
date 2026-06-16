@@ -1,5 +1,6 @@
 import CheckIcon from "@mui/icons-material/Check";
-import { Box, Stack, Typography } from "@mui/material";
+import SendRoundedIcon from "@mui/icons-material/SendRounded";
+import { Box, InputBase, Stack, Typography } from "@mui/material";
 import { observer } from "mobx-react-lite";
 import { useEffect, useState } from "react";
 import { useI18n } from "../../../i18n/I18nProvider";
@@ -23,6 +24,7 @@ export const OptionSelect = observer(function OptionSelect({
 }) {
   const [store] = useState(() => new OptionSelectStore(block.selected ?? []));
   const { selected, setSelected, confirmed, setConfirmed, pending, setPending, selectionError, setSelectionError } = store;
+  const [customAnswer, setCustomAnswer] = useState("");
   const { t } = useI18n();
 
   useEffect(() => {
@@ -37,6 +39,7 @@ export const OptionSelect = observer(function OptionSelect({
     if (confirmed) {
       return;
     }
+    setCustomAnswer("");
     if (block.multi) {
       setSelected((current) => (current.includes(id) ? current.filter((x) => x !== id) : [...current, id]));
     } else {
@@ -44,21 +47,34 @@ export const OptionSelect = observer(function OptionSelect({
     }
   };
 
-  const chosenLabels = block.options.filter((o) => selected.includes(o.id)).map((o) => o.label);
-  const confirm = () => {
-    if (selected.length === 0) {
+  const optionLabelsById = new Map(block.options.map((option) => [option.id, option.label]));
+  const chosenLabels = selected.map((id) => optionLabelsById.get(id) ?? id);
+  const submitSelection = (labels: readonly string[]) => {
+    if (labels.length === 0) {
       return;
     }
     if (!block.id || !onSelection) {
+      setSelected(labels);
       setConfirmed(true);
       return;
     }
     setPending(true);
     setSelectionError(null);
-    void Promise.resolve(onSelection(block.id, chosenLabels))
-      .then(() => setConfirmed(true))
+    void Promise.resolve(onSelection(block.id, labels))
+      .then(() => {
+        setSelected(labels);
+        setConfirmed(true);
+      })
       .catch((error) => setSelectionError(errorMessage(error)))
       .finally(() => setPending(false));
+  };
+  const confirm = () => submitSelection(chosenLabels);
+  const submitCustomAnswer = () => {
+    const answer = customAnswer.trim();
+    if (!answer) {
+      return;
+    }
+    submitSelection([answer]);
   };
 
   return (
@@ -70,7 +86,26 @@ export const OptionSelect = observer(function OptionSelect({
         p: 1.5,
       }}
     >
-      <Typography sx={{ fontSize: "0.86rem", mb: 1.25, color: "text.primary" }}>{block.prompt}</Typography>
+      <Stack direction="row" spacing={1} sx={{ alignItems: "flex-start", justifyContent: "space-between", mb: 1.25 }}>
+        <Typography sx={{ fontSize: "0.86rem", color: "text.primary", minWidth: 0 }}>{block.prompt}</Typography>
+        <Box
+          sx={{
+            flex: "0 0 auto",
+            px: 0.75,
+            py: 0.25,
+            borderRadius: (t) => `${t.custom.radii.sm}px`,
+            border: (t) => `1px solid ${t.custom.borders.subtle}`,
+            backgroundColor: (t) => t.custom.surfaces.s3,
+            color: "text.secondary",
+            fontSize: "0.66rem",
+            fontWeight: 700,
+            letterSpacing: "0.02em",
+            textTransform: "uppercase",
+          }}
+        >
+          {block.multi ? t("optionModeMultiple") : t("optionModeSingle")}
+        </Box>
+      </Stack>
       <Stack spacing={1}>
         {block.options.map((option) => {
           const isSelected = selected.includes(option.id);
@@ -120,6 +155,40 @@ export const OptionSelect = observer(function OptionSelect({
           );
         })}
       </Stack>
+
+      {!confirmed && (
+        <Stack
+          component="form"
+          direction={{ xs: "column", sm: "row" }}
+          spacing={1}
+          onSubmit={(event) => {
+            event.preventDefault();
+            submitCustomAnswer();
+          }}
+          sx={{ mt: 1, pt: 1, borderTop: (t) => `1px solid ${t.custom.borders.subtle}` }}
+        >
+          <InputBase
+            value={customAnswer}
+            onChange={(event) => setCustomAnswer(event.target.value)}
+            disabled={pending}
+            placeholder={t("customAnswerPlaceholder")}
+            sx={{
+              flex: 1,
+              minWidth: 0,
+              px: 1.1,
+              py: 0.65,
+              borderRadius: (t) => `${t.custom.radii.sm}px`,
+              border: (t) => `1px solid ${t.custom.borders.subtle}`,
+              backgroundColor: (t) => t.custom.surfaces.s1,
+              fontSize: "0.82rem",
+              color: "text.primary",
+            }}
+          />
+          <Button type="submit" variant="outlined" size="small" disabled={customAnswer.trim().length === 0 || pending} startIcon={<SendRoundedIcon sx={{ fontSize: 15 }} />}>
+            {t("sendCustomAnswer")}
+          </Button>
+        </Stack>
+      )}
 
       <Box sx={{ mt: 1.5 }}>
         {confirmed ? (

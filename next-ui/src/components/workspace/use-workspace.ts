@@ -979,7 +979,11 @@ export class WorkspaceStore implements Workspace {
         this.setState((current) => {
           const runState = result.status === "error" ? "error" : "ok";
           const settled = finishThreadLiveBlocks(current, id, runState);
-          const withConversation = patchConversation(settled, id, finalRunPatch(settled, id, aId, result));
+          // Mark the result unread when the user isn't looking at this conversation,
+          // so the sidebar can flag a finished-but-unviewed turn. Opening the
+          // conversation clears it (see setSelectedConversation).
+          const unreadPatch = current.selectedId === id ? {} : { unread: true };
+          const withConversation = patchConversation(settled, id, { ...finalRunPatch(settled, id, aId, result), ...unreadPatch });
           return patchAgentMessageUsage(withConversation, id, aId, result);
         });
         const conversation = this.find(id);
@@ -997,7 +1001,8 @@ export class WorkspaceStore implements Workspace {
           this.setState((current) => {
             const settled = settleThreadLiveBlocks(current, id);
             const snippet = snippetFromStateThread(settled, id);
-            return patchConversation(settled, id, { activeRunId: undefined, status: "error", ...(snippet ? { snippet } : {}) });
+            const unreadPatch = current.selectedId === id ? {} : { unread: true };
+            return patchConversation(settled, id, { activeRunId: undefined, status: "error", ...(snippet ? { snippet } : {}), ...unreadPatch });
           });
           const conversation = this.find(id);
           if (conversation) {

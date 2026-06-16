@@ -929,7 +929,68 @@ describe("WorkspacePage", () => {
           method: "POST",
         }),
       );
-      expect(screen.getByText("Выбрано: Summary")).toBeInTheDocument();
+    });
+  });
+
+  it("posts free-text answers from streamed question cards", async () => {
+    let workspace = {
+      ...buildInitialWorkspaceState(),
+      selectedId: "chat-2",
+      threads: {
+        ...buildInitialWorkspaceState().threads,
+        "chat-2": [
+          {
+            id: "a-options",
+            role: "agent" as const,
+            blocks: [
+              {
+                kind: "options" as const,
+                id: "toolu_question:q0",
+                prompt: "How should I format the output?",
+                options: [
+                  { id: "Summary", label: "Summary", description: "Brief overview" },
+                  { id: "Detailed", label: "Detailed", description: "Full explanation" },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    };
+    let savedWorkspace = workspace;
+    const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+      const activeRuns = activeRunsResponse(path);
+      if (activeRuns) {
+        return activeRuns;
+      }
+      if (path === "/api/workspace" && (!init || init.method === "GET")) {
+        return Response.json(savedWorkspace);
+      }
+      if (isWorkspaceMutationRequest(path, init)) {
+        savedWorkspace = applyWorkspaceMutationRequest(savedWorkspace, init);
+        return Response.json({ ok: true, revision: 1 });
+      }
+      if (path === "/api/run-input") {
+        return Response.json({ id: "toolu_question:q0", selected: ["Use terse bullets"] });
+      }
+      return Response.json({});
+    });
+    vi.stubGlobal("fetch", fetch);
+
+    renderWithThemeAndVirtuoso(<WorkspacePage />);
+
+    fireEvent.change(await screen.findByPlaceholderText("Ответить текстом..."), { target: { value: "Use terse bullets" } });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить текстом" }));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/run-input",
+        expect.objectContaining({
+          body: JSON.stringify({ id: "toolu_question:q0", selected: ["Use terse bullets"] }),
+          method: "POST",
+        }),
+      );
     });
   });
 
@@ -1613,6 +1674,3 @@ describe("WorkspacePage", () => {
   });
 
 });
-
-
-

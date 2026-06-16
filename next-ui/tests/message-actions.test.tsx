@@ -126,6 +126,39 @@ describe("message actions", () => {
     expect(onOptionSelection).toHaveBeenCalledWith("toolu_question:q0", ["Summary"]);
   });
 
+  it("sends a free-text answer from AskUserQuestion option blocks", () => {
+    const onOptionSelection = vi.fn();
+    renderWithThemeAndVirtuoso(
+      <Conversation
+        messages={[
+          {
+            id: "a-options",
+            role: "agent",
+            blocks: [
+              {
+                kind: "options",
+                id: "toolu_question:q0",
+                prompt: "How should I format the output?",
+                multi: true,
+                options: [
+                  { id: "Summary", label: "Summary", description: "Brief overview" },
+                  { id: "Detailed", label: "Detailed", description: "Full explanation" },
+                ],
+              },
+            ],
+          },
+        ]}
+        actions={{ onOptionSelection }}
+      />,
+    );
+
+    expect(screen.getByText("Несколько вариантов")).toBeInTheDocument();
+    fireEvent.change(screen.getByPlaceholderText("Ответить текстом..."), { target: { value: "Use a terse changelog format" } });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить текстом" }));
+
+    expect(onOptionSelection).toHaveBeenCalledWith("toolu_question:q0", ["Use a terse changelog format"]);
+  });
+
   it("keeps an approval pending when the decision handler fails", async () => {
     const onApprovalDecision = vi.fn().mockRejectedValue(new Error("permission bridge is unavailable"));
 

@@ -3104,6 +3104,40 @@ Built-in agents:
     });
   });
 
+  it("accepts a free-text answer for AskUserQuestion when none of the choices fit", async () => {
+    const sentEvents: Array<{ readonly type: string; readonly id?: string }> = [];
+    const handler = createRunApprovalHandler((event) => sentEvents.push(event), "run-free-text");
+    const input = {
+      questions: [
+        {
+          question: "Which deployment window should I use?",
+          options: [{ label: "Morning" }, { label: "Evening" }],
+          multiSelect: false,
+        },
+      ],
+    };
+
+    const resultPromise = handler("AskUserQuestion", input, {
+      signal: new AbortController().signal,
+      toolUseID: "toolu_question",
+    });
+
+    await Promise.resolve();
+    expect(sentEvents).toEqual([expect.objectContaining({ type: "options", id: "run-free-text:toolu_question:q0" })]);
+    expect(resolvePendingRunInput({ id: "run-free-text:toolu_question:q0", selected: ["After the database backup finishes"] })).toEqual({
+      id: "run-free-text:toolu_question:q0",
+      selected: ["After the database backup finishes"],
+    });
+    await expect(resultPromise).resolves.toEqual({
+      behavior: "allow",
+      updatedInput: {
+        questions: input.questions,
+        answers: { "Which deployment window should I use?": "After the database backup finishes" },
+      },
+      toolUseID: "toolu_question",
+    });
+  });
+
   it("scopes simultaneous AskUserQuestion callbacks by run id", async () => {
     const runAEvents: Array<{ readonly type: string; readonly id?: string }> = [];
     const runBEvents: Array<{ readonly type: string; readonly id?: string }> = [];
@@ -3501,6 +3535,7 @@ Built-in agents:
       activeRunId: undefined,
       status: "idle",
       snippet: "partial",
+      updatedAtMs: expect.any(Number),
     });
     expect(blocks).toEqual([
       { kind: "reasoning", text: "Still running", active: false, duration: expect.stringMatching(/s$/) },

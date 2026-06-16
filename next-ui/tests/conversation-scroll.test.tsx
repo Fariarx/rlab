@@ -1,4 +1,4 @@
-import { screen } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { Conversation, type ChatMessage } from "../src/components/agent";
 import { renderWithThemeAndVirtuoso, withVirtuosoMock } from "./util/render-with-virtuoso";
@@ -57,5 +57,22 @@ describe("Conversation auto-scroll", () => {
     expect(thread).toBeInTheDocument();
     expect(thread).toHaveAttribute("data-virtualized", "true");
     expect(screen.getByTestId("virtuoso-scroller")).toBeInTheDocument();
+  });
+
+  it("shows a scroll-to-bottom button after the user scrolls away from the bottom", async () => {
+    renderWithThemeAndVirtuoso(
+      <Conversation
+        messages={Array.from({ length: 20 }, (_, index) => ({
+          id: `m-${index}`,
+          role: "user" as const,
+          text: `Message ${index}`,
+        }))}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "К последнему сообщению" })).not.toBeInTheDocument();
+    fireEvent.wheel(screen.getByTestId("conversation-virtual-list"), { deltaY: -120 });
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "К последнему сообщению" })).toBeInTheDocument());
   });
 });

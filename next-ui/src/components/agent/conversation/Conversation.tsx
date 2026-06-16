@@ -1,4 +1,5 @@
-import { Box, Stack } from "@mui/material";
+import KeyboardArrowDownRoundedIcon from "@mui/icons-material/KeyboardArrowDownRounded";
+import { Box, IconButton, Stack, Tooltip } from "@mui/material";
 import { useMemo } from "react";
 import { Virtuoso } from "react-virtuoso";
 import { useI18n } from "../../../i18n/I18nProvider";
@@ -105,7 +106,7 @@ export function Conversation({
       aria-label={t("conversationThread")}
       aria-live={hasLiveContent ? "polite" : "off"}
       aria-relevant="additions text"
-      sx={{ height: "100%", minHeight: 0, overflow: "hidden" }}
+      sx={{ position: "relative", height: "100%", minHeight: 0, overflow: "hidden" }}
     >
       <Virtuoso
         ref={autoScroll.virtuosoRef}
@@ -133,6 +134,34 @@ export function Conversation({
           ) : null
         }
       />
+      {autoScroll.showScrollToBottom && (
+        <Tooltip title={t("scrollToBottom")}>
+          <IconButton
+            aria-label={t("scrollToBottom")}
+            data-testid="scroll-to-bottom-button"
+            onClick={autoScroll.scrollToBottom}
+            sx={{
+              position: "absolute",
+              left: "50%",
+              bottom: `${bottomInset + 14}px`,
+              transform: "translateX(-50%)",
+              zIndex: 5,
+              width: 34,
+              height: 34,
+              borderRadius: (theme) => `${theme.custom.radii.md}px`,
+              border: (theme) => `1px solid ${theme.custom.borders.strong}`,
+              backgroundColor: (theme) => theme.custom.surfaces.s2,
+              color: (theme) => theme.palette.text.primary,
+              boxShadow: "0 10px 28px rgba(0,0,0,0.28)",
+              "&:hover": {
+                backgroundColor: (theme) => theme.custom.surfaces.s3,
+              },
+            }}
+          >
+            <KeyboardArrowDownRoundedIcon fontSize="small" />
+          </IconButton>
+        </Tooltip>
+      )}
     </Box>
   );
 }

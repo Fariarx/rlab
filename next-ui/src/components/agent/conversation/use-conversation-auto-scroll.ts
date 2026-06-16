@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, type RefObject } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import type { VirtuosoHandle } from "react-virtuoso";
 
 export interface ConversationAutoScrollController {
@@ -7,6 +7,8 @@ export interface ConversationAutoScrollController {
   readonly setUserScrolling: (scrolling: boolean) => void;
   readonly handleAtBottomStateChange: (atBottom: boolean) => void;
   readonly followOutput: () => "auto" | false;
+  readonly showScrollToBottom: boolean;
+  readonly scrollToBottom: () => void;
 }
 
 /**
@@ -39,10 +41,16 @@ export function useConversationAutoScroll(items: readonly unknown[]): Conversati
   // Short window after a programmatic snap during which Virtuoso's transient
   // "left the bottom" reports must not be mistaken for a user scroll.
   const programmaticUntil = useRef(0);
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+
+  const setPinnedToBottom = useCallback((value: boolean) => {
+    pinnedToBottom.current = value;
+    setShowScrollToBottom(!value);
+  }, []);
 
   const releaseToUser = useCallback(() => {
-    pinnedToBottom.current = false;
-  }, []);
+    setPinnedToBottom(false);
+  }, [setPinnedToBottom]);
 
   useLayoutEffect(() => {
     if (items.length === 0 || !pinnedToBottom.current) {
@@ -81,17 +89,26 @@ export function useConversationAutoScroll(items: readonly unknown[]): Conversati
 
   const handleAtBottomStateChange = useCallback((atBottom: boolean) => {
     if (atBottom) {
-      pinnedToBottom.current = true;
+      setPinnedToBottom(true);
       return;
     }
     // Only a user-driven scroll away from the bottom unpins. Streaming growth and
     // our own programmatic snaps must not.
     if (userScrolling.current && performance.now() > programmaticUntil.current) {
-      pinnedToBottom.current = false;
+      setPinnedToBottom(false);
     }
-  }, []);
+  }, [setPinnedToBottom]);
 
   const followOutput = useCallback(() => (pinnedToBottom.current ? "auto" : false), []);
+
+  const scrollToBottom = useCallback(() => {
+    if (items.length === 0) {
+      return;
+    }
+    programmaticUntil.current = performance.now() + 300;
+    setPinnedToBottom(true);
+    virtuosoRef.current?.scrollToIndex({ index: "LAST", align: "end", behavior: "smooth" });
+  }, [items.length, setPinnedToBottom]);
 
   return {
     virtuosoRef,
@@ -99,5 +116,7 @@ export function useConversationAutoScroll(items: readonly unknown[]): Conversati
     setUserScrolling,
     handleAtBottomStateChange,
     followOutput,
+    showScrollToBottom,
+    scrollToBottom,
   };
 }

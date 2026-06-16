@@ -5800,6 +5800,7 @@ const CLAUDE_EFFORT_LEVELS: ReadonlySet<EffortLevel> = new Set(["low", "medium",
 const RLAB_CHAT_TOOLS_PROMPT = [
   "When you need user input that blocks progress, use the AskUserQuestion tool instead of asking as plain text.",
   "Use AskUserQuestion for concrete choices, clarifying questions, or option selection that the chat UI should render as interactive controls.",
+  "AskUserQuestion supports single-select and multi-select choices; the UI also offers a free-text answer field for cases where none of the choices fit.",
   "Do not create a numbered question list in prose when the question can be represented with AskUserQuestion options.",
   "When you need rlab to wake you later in this same chat for an automation task, use TaskWakeup with the exact follow-up prompt; rlab persists and fires that wakeup server-side.",
   "Use TaskWakeup instead of sleeping, polling inside the agent, or keeping the turn open. After TaskWakeup succeeds, finish the current turn and wait for rlab to re-run you.",
@@ -6986,7 +6987,7 @@ export function resolvePendingRunInput(selection: RunInputSelection): RunInputSe
     throw new Error(`No pending input request for ${selection.id}.`);
   }
   const allowedLabels = new Set(question.question.options.map((option) => option.label));
-  const selected = selection.selected.filter((label) => allowedLabels.has(label));
+  const selected = selection.selected.every((label) => allowedLabels.has(label)) ? selection.selected : selection.selected.length === 1 ? selection.selected : [];
   if (selected.length === 0) {
     throw new Error("Selected options do not match the pending question.");
   }
@@ -7595,12 +7596,13 @@ function agentBlocksPreviewSnippet(blocks: readonly AgentBlock[]): string {
 }
 
 function patchWorkspaceConversation(state: WorkspaceState, id: string, patch: Partial<WorkspaceState["chats"][number]>): WorkspaceState {
+  const stamped = patch.time !== undefined && patch.updatedAtMs === undefined ? { ...patch, updatedAtMs: Date.now() } : patch;
   return {
     ...state,
-    chats: state.chats.map((conversation) => (conversation.id === id ? { ...conversation, ...patch } : conversation)),
+    chats: state.chats.map((conversation) => (conversation.id === id ? { ...conversation, ...stamped } : conversation)),
     projects: state.projects.map((project) => ({
       ...project,
-      conversations: project.conversations.map((conversation) => (conversation.id === id ? { ...conversation, ...patch } : conversation)),
+      conversations: project.conversations.map((conversation) => (conversation.id === id ? { ...conversation, ...stamped } : conversation)),
     })),
   };
 }
