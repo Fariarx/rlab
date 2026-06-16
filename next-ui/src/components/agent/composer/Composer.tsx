@@ -15,7 +15,7 @@ import { localFileUrl } from "../../../lib/external-url";
 import type { ComposerPluginLink } from "../../../lib/rlab-plugins";
 import { Button, IconButton, ImageLightbox, KeyHint } from "../../ui";
 import { AttachmentTile } from "./AttachmentTile";
-import { FloatingTile } from "./ComposerFloatingTile";
+import { ComposerTag } from "./ComposerTag";
 import { WakeupTile, type WakeupTileProps } from "./WakeupTile";
 import { ComposerLimitsPanel } from "./ComposerLimitsPanel";
 import { browserActivityTone, type ComposerBrowserActivityEvent, type ComposerVoiceProvider } from "./composer-model";
@@ -39,6 +39,8 @@ export type { ComposerHandle } from "./use-composer-file-controller";
 
 export interface ComposerProps {
   readonly placeholder?: string;
+  /** Minimal in-thread editing chrome: input, attachments, suggestions, and send. */
+  readonly variant?: "default" | "edit";
   readonly mentionableFiles?: readonly string[];
   readonly value?: string;
   readonly attachments?: readonly ComposerAttachmentDraft[];
@@ -107,6 +109,7 @@ export interface ComposerProps {
 const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Composer(
   {
     placeholder = "Message the agent…",
+    variant = "default",
     mentionableFiles = [],
     value,
     attachments,
@@ -149,6 +152,7 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
   },
   ref,
 ) {
+  const editChrome = variant === "edit";
   const [composerStore] = useState(() => new ComposerStore(initialValue, initialAttachments, VOICE_IDLE_LEVELS));
   const {
     internalValue,
@@ -181,7 +185,8 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
   const { t } = useI18n();
   const composerValue = value ?? internalValue;
   const composerAttachments = attachments ?? internalAttachments;
-  const showBrowserActivitySection = browserActivityEvents !== undefined;
+  const showBrowserActivitySection = !editChrome && browserActivityEvents !== undefined;
+  const effectiveReviewCount = editChrome ? 0 : reviewCount;
 
   const viewModel = useComposerViewModel({
     activeSuggestion,
@@ -259,9 +264,9 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
     onAttachmentError,
     onDraftChange,
     onSend,
-    onSendReview,
+    onSendReview: editChrome ? undefined : onSendReview,
     pluginTokenRanges: composerPluginTokenRanges,
-    reviewCount,
+    reviewCount: effectiveReviewCount,
     sending,
     setActiveSuggestion,
     setInternalAttachments,
@@ -292,7 +297,7 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
     store: composerStore,
     textareaRef,
     updateDraft,
-    voiceProvider,
+    voiceProvider: editChrome ? undefined : voiceProvider,
   });
 
   const { chooseFiles, fileInputRef, openFilePicker } = useComposerFileController({ addFiles, forwardedRef: ref, textareaRef });
@@ -301,8 +306,8 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
     setActiveSuggestion(0);
   }, [setActiveSuggestion, suggestionKey]);
 
-  const showAgentStopButton = running && !hasComposerPayload && reviewCount === 0;
-  const sendLabel = reviewCount > 0 ? t("reviewSendComments") : t("send");
+  const showAgentStopButton = !editChrome && running && !hasComposerPayload && effectiveReviewCount === 0;
+  const sendLabel = effectiveReviewCount > 0 ? t("reviewSendComments") : t("send");
 
   const floatingPanelSx: SxProps<Theme> = {
     pointerEvents: "auto",
@@ -346,7 +351,7 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
           bottom: `calc(100% + ${8 + overlayLift}px)`,
           // pl aligns the tile row's left edge with the text-input column start:
           // 1px bar-border + 4px bar-padding + 34px options control + 4px flex-gap = 43px
-          pl: "43px",
+          pl: editChrome ? "39px" : "43px",
           pr: "5px",
           display: "flex",
           flexWrap: "wrap",
@@ -356,7 +361,7 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
           zIndex: 6,
         }}
       >
-        {scheduledWakeups.map((wakeup) => (
+        {!editChrome && scheduledWakeups.map((wakeup) => (
           <WakeupTile
             key={wakeup.id}
             id={wakeup.id}
@@ -366,11 +371,11 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
             detail={wakeup.detail}
           />
         ))}
-        {reviewCount > 0 && (
-          <FloatingTile
-            tone="accent"
-            icon={<RateReviewOutlinedIcon sx={{ fontSize: 20 }} />}
-            label={t("reviewPending", { count: reviewCount })}
+        {!editChrome && effectiveReviewCount > 0 && (
+          <ComposerTag
+            icon={<RateReviewOutlinedIcon sx={{ fontSize: 15, color: (theme) => theme.palette.status.info.main }} />}
+            label={t("reviewPending", { count: effectiveReviewCount })}
+            testId="composer-review-tag"
           />
         )}
         {composerAttachments.map((attachment) => {
@@ -447,64 +452,80 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
           onChange={chooseFiles}
           style={{ position: "absolute", width: 1, height: 1, opacity: 0, pointerEvents: "none" }}
         />
-        <Tooltip title={activeModeOption ? t("activeModeTooltip", { mode: activeModeOption.label }) : t("composerOptions")}>
-          <Box sx={{ position: "relative", flex: "0 0 auto", display: "inline-flex" }}>
-            <IconButton
-              data-testid="composer-options-button"
-              aria-label={activeModeOption ? t("activeModeTooltip", { mode: activeModeOption.label }) : t("composerOptions")}
-              onClick={(event) => openOptionsMenu(event.currentTarget)}
-              sx={{ width: 34, height: 34, color: (theme) => (activeModeOption ? theme.palette.status.info.main : theme.palette.text.secondary), borderRadius: (theme) => `${theme.custom.radii.md}px` }}
+        {editChrome ? (
+          <Tooltip title={t("attach")}>
+            <span style={{ display: "flex" }}>
+              <IconButton
+                data-testid="composer-attach-button"
+                aria-label={t("attach")}
+                tone="subtle"
+                onClick={openFilePicker}
+                sx={{ width: 30, height: 30, borderRadius: (theme) => `${theme.custom.radii.md}px` }}
+              >
+                <AttachFileIcon sx={{ fontSize: 18 }} />
+              </IconButton>
+            </span>
+          </Tooltip>
+        ) : (
+          <>
+            <Tooltip title={activeModeOption ? t("activeModeTooltip", { mode: activeModeOption.label }) : t("composerOptions")}>
+              <Box sx={{ position: "relative", flex: "0 0 auto", display: "inline-flex" }}>
+                <IconButton
+                  data-testid="composer-options-button"
+                  aria-label={activeModeOption ? t("activeModeTooltip", { mode: activeModeOption.label }) : t("composerOptions")}
+                  onClick={(event) => openOptionsMenu(event.currentTarget)}
+                  sx={{ width: 34, height: 34, color: (theme) => (activeModeOption ? theme.palette.status.info.main : theme.palette.text.secondary), borderRadius: (theme) => `${theme.custom.radii.md}px` }}
+                >
+                  <SettingsRoundedIcon sx={{ fontSize: 20 }} />
+                </IconButton>
+                {activeModeOption && (
+                  <Box
+                    component="span"
+                    data-testid="active-mode-indicator"
+                    aria-hidden="true"
+                    sx={{
+                      position: "absolute",
+                      top: 4,
+                      right: 4,
+                      width: 8,
+                      height: 8,
+                      borderRadius: "50%",
+                      pointerEvents: "none",
+                      backgroundColor: (theme) => theme.palette.status.info.main,
+                      border: (theme) => `1.5px solid ${theme.custom.surfaces.s2}`,
+                    }}
+                  />
+                )}
+              </Box>
+            </Tooltip>
+            <Menu
+              action={optionsMenuActionRef}
+              anchorEl={modeMenuAnchor}
+              open={Boolean(modeMenuAnchor)}
+              onClose={() => {
+                setModeMenuAnchor(null);
+              }}
+              anchorOrigin={{ vertical: "top", horizontal: "left" }}
+              transformOrigin={{ vertical: "bottom", horizontal: "left" }}
+              slotProps={{
+                paper: {
+                  sx: {
+                    boxShadow: "0 4px 12px rgba(0, 0, 0, 0.14)",
+                    mt: `${COMPOSER_OPTIONS_MENU_Y_OFFSET_PX}px`,
+                    minWidth: 304,
+                    maxHeight: optionsMenuMaxHeight,
+                    overflowY: "auto",
+                  },
+                },
+                list: {
+                  dense: true,
+                  ref: (node: HTMLUListElement | null) => {
+                    optionsMenuListRef.current = node;
+                  },
+                  sx: { py: 0.5, width: "100%" },
+                },
+              }}
             >
-              <SettingsRoundedIcon sx={{ fontSize: 20 }} />
-            </IconButton>
-            {activeModeOption && (
-              <Box
-                component="span"
-                data-testid="active-mode-indicator"
-                aria-hidden="true"
-                sx={{
-                  position: "absolute",
-                  top: 4,
-                  right: 4,
-                  width: 8,
-                  height: 8,
-                  borderRadius: "50%",
-                  pointerEvents: "none",
-                  backgroundColor: (theme) => theme.palette.status.info.main,
-                  border: (theme) => `1.5px solid ${theme.custom.surfaces.s2}`,
-                }}
-              />
-            )}
-          </Box>
-        </Tooltip>
-        <Menu
-          action={optionsMenuActionRef}
-          anchorEl={modeMenuAnchor}
-          open={Boolean(modeMenuAnchor)}
-          onClose={() => {
-            setModeMenuAnchor(null);
-          }}
-          anchorOrigin={{ vertical: "top", horizontal: "left" }}
-          transformOrigin={{ vertical: "bottom", horizontal: "left" }}
-          slotProps={{
-            paper: {
-              sx: {
-                boxShadow: "0 4px 12px rgba(0, 0, 0, 0.14)",
-                mt: `${COMPOSER_OPTIONS_MENU_Y_OFFSET_PX}px`,
-                minWidth: 304,
-                maxHeight: optionsMenuMaxHeight,
-                overflowY: "auto",
-              },
-            },
-            list: {
-              dense: true,
-              ref: (node: HTMLUListElement | null) => {
-                optionsMenuListRef.current = node;
-              },
-              sx: { py: 0.5, width: "100%" },
-            },
-          }}
-        >
           <MenuItem
             onClick={() => {
               setModeMenuAnchor(null);
@@ -662,7 +683,9 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
             t={t}
             updatePosition={updateOptionsMenuPosition}
           />
-        </Menu>
+            </Menu>
+          </>
+        )}
         <Box
           data-testid="composer-input-area"
           data-expanded={expanded ? "true" : "false"}
@@ -736,12 +759,12 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
           {voiceState === "recording" && <VoiceRecordingStrip label={voiceLabel} duration={voiceDuration} levels={voiceLevels} ambient={voiceAmbient} onLevelCountChange={setVoiceLevelCountForWidth} dockBottom={expanded} />}
         </Box>
         <Stack direction="row" spacing={0.5} sx={{ alignItems: "center", flex: "0 0 auto" }}>
-          {!running && !voiceInputActive ? (
+          {!editChrome && !running && !voiceInputActive ? (
             <Box sx={{ display: { xs: "none", sm: "flex" }, alignItems: "center", gap: 0.5 }}>
               <KeyHint keys="⏎" />
             </Box>
           ) : null}
-          {voiceAvailable && (
+          {!editChrome && voiceAvailable && (
             <Tooltip title={voiceLabel}>
               <span style={{ display: "flex" }}>
                 <IconButton

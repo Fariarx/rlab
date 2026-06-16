@@ -1,7 +1,7 @@
 import AccessTimeIcon from "@mui/icons-material/AccessTime";
 import { Box, Popover, Stack, Typography } from "@mui/material";
 import { type MouseEvent, useState } from "react";
-import { FloatingTile } from "./ComposerFloatingTile";
+import { ComposerTag } from "./ComposerTag";
 
 /** A labelled key/value line shown in the wakeup details popover. */
 export interface WakeupDetailRow {
@@ -42,10 +42,10 @@ export function WakeupTile({ id, label, removeLabel, onRemove, detail }: WakeupT
   const [anchorEl, setAnchorEl] = useState<HTMLElement | null>(null);
   return (
     <>
-      <FloatingTile
-        tone="warn"
-        icon={<AccessTimeIcon sx={{ fontSize: 20 }} />}
+      <ComposerTag
+        icon={<AccessTimeIcon sx={{ fontSize: 15, color: (theme) => theme.palette.status.warn.main }} />}
         label={label}
+        clickAriaLabel={label}
         removeLabel={removeLabel}
         onRemove={onRemove}
         onClick={(event: MouseEvent<HTMLElement>) => setAnchorEl(event.currentTarget)}

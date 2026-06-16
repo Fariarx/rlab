@@ -145,9 +145,10 @@ function MessageActionBar({
 }
 
 /** Inline editor for a sent user message. When a Composer context is available
- *  (inside a live conversation) it reuses the real Composer for full parity —
- *  attachments, file mentions, $-plugin tokens, voice, modes. It falls back to a
- *  plain textarea in isolated contexts (tests/storybook) that lack the context. */
+ *  (inside a live conversation) it reuses the real Composer input stack, but
+ *  with edit-only chrome: text, attachments, mentions, and send. It falls back
+ *  to a plain textarea in isolated contexts (tests/storybook) that lack the
+ *  context. */
 const UserMessageEditor = observer(function UserMessageEditor({
   message,
   store,
@@ -178,6 +179,7 @@ const UserMessageEditor = observer(function UserMessageEditor({
           <Composer
             {...shared}
             key={message.id}
+            variant="edit"
             placeholder={t("editMessage")}
             initialValue={editDraft.text}
             initialAttachments={editDraft.attachments}

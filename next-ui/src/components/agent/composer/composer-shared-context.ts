@@ -8,6 +8,7 @@ import type { ComposerProps } from "./Composer";
 export type ComposerSharedProps = Omit<
   ComposerProps,
   | "placeholder"
+  | "variant"
   | "value"
   | "attachments"
   | "initialValue"
@@ -25,8 +26,8 @@ export type ComposerSharedProps = Omit<
 >;
 
 /** Provided by WorkspacePage so the in-thread message editor can render the real
- *  Composer with full parity instead of a bare textarea. Null outside a
- *  conversation (e.g. isolated tests), where editors fall back to plain text. */
+ *  Composer input stack instead of a bare textarea. Null outside a conversation
+ *  (e.g. isolated tests), where editors fall back to plain text. */
 const ComposerSharedContext = createContext<ComposerSharedProps | null>(null);
 
 export const ComposerSharedProvider = ComposerSharedContext.Provider;

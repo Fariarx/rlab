@@ -65,6 +65,28 @@ describe("Composer", () => {
     expect(screen.getByTestId("composer-send-button")).toBe(screen.getByRole("button", { name: "Отправить" }));
   });
 
+  it("uses minimal chrome for editing a sent message", () => {
+    renderWithTheme(
+      <Composer
+        variant="edit"
+        placeholder="Изменить сообщение"
+        modes={[{ id: "plan", label: "Plan" }]}
+        activeMode="plan"
+        supportsAutoConfirm
+        autoConfirm
+        agentId="claude-code"
+        browserActivityEvents={[]}
+      />,
+    );
+
+    expect(screen.getByTestId("composer-input")).toBe(screen.getByPlaceholderText("Изменить сообщение"));
+    expect(screen.getByTestId("composer-attach-button")).toBe(screen.getByRole("button", { name: "Прикрепить" }));
+    expect(screen.getByTestId("composer-send-button")).toBe(screen.getByRole("button", { name: "Отправить" }));
+    expect(screen.queryByTestId("composer-options-button")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("active-mode-indicator")).not.toBeInTheDocument();
+    expect(screen.queryByText("Plan")).not.toBeInTheDocument();
+  });
+
   it("tracks pointer coordinates for the animated composer border", () => {
     renderWithTheme(<Composer placeholder="Написать" />);
 
@@ -797,7 +819,7 @@ describe("Composer", () => {
     expect(screen.queryByTestId("agent-limit-warning")).not.toBeInTheDocument();
   });
 
-  it("renders composer floating controls as square tiles", () => {
+  it("renders composer floating controls as compact, width-capped tags", () => {
     renderWithTheme(
       <Composer
         placeholder="Написать"
@@ -823,11 +845,13 @@ describe("Composer", () => {
       />,
     );
 
+    // The wakeup is a compact tag (like an attachment), not a 76px square, and
+    // its label is width-capped so a long schedule string can't blow out the row.
     const wakeupTile = screen.getByTestId("scheduled-wakeup-tile-wake-1");
-    expect(wakeupTile).toHaveStyle({ width: "76px", height: "76px", boxShadow: "0 1px 3px rgba(0, 0, 0, 0.2)" });
+    expect(wakeupTile).toHaveStyle({ height: "28px", maxWidth: "220px" });
 
-    // Clicking the tile opens a popover with the full wakeup details.
-    fireEvent.click(wakeupTile);
+    // Clicking the tag opens a popover with the full wakeup details.
+    fireEvent.click(screen.getByRole("button", { name: "Wakeup установлен: 10.06.2026, 14:18:00" }));
     const popover = screen.getByTestId("scheduled-wakeup-popover-wake-1");
     expect(popover).toBeInTheDocument();
     expect(within(popover).getByText("проверь деплой")).toBeInTheDocument();
