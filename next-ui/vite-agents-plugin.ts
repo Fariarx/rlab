@@ -9,8 +9,7 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 import Anthropic from "@anthropic-ai/sdk";
 import type { ModelInfo as AnthropicModelInfo } from "@anthropic-ai/sdk/resources/models";
-import { createSdkMcpServer, query, tool, type CanUseTool, type EffortLevel, type McpSdkServerConfigWithInstance, type Options as ClaudeQueryOptions, type PermissionResult } from "@anthropic-ai/claude-agent-sdk";
-import { z } from "zod";
+import { query, type CanUseTool, type EffortLevel, type Options as ClaudeQueryOptions, type PermissionResult } from "@anthropic-ai/claude-agent-sdk";
 import { CronExpressionParser } from "cron-parser";
 import * as pty from "node-pty";
 import { chromium, type Browser, type BrowserContext, type ConsoleMessage, type Frame, type FrameLocator, type Locator, type Page, type Request as PlaywrightRequest } from "playwright";
@@ -5785,44 +5784,12 @@ const TASK_WAKEUP_TOOL_NAME = "TaskWakeup";
 const CLAUDE_SAFE_READ_TOOLS = ["Read", "Glob", "Grep", "LS"] as const;
 const CLAUDE_READ_ONLY_TOOLS = ["Read", "Glob", "Grep", "LS", "AskUserQuestion", TASK_WAKEUP_TOOL_NAME] as const;
 // rlab's chat tools are described to the model in RLAB_CHAT_TOOLS_PROMPT and must
-// also be *registered* so the Claude SDK doesn't reject the call with "No such
-// tool available" (which would also stop the stream translator from scheduling
-// the wakeup). They are registered as in-process SDK MCP tools whose handlers are
-// trivial acknowledgements — the real work (scheduling/cancelling/listing) is
-// done by the run stream translator watching the resulting tool calls.
+// also be *registered* so agents don't reject the call with "No such tool
+// available" (which would also stop the stream translator from scheduling the
+// wakeup). They are exposed through the same external stdio MCP server for every
+// MCP-capable agent; the real work is still done by the run stream translator
+// watching the resulting tool calls.
 const RLAB_MCP_SERVER_NAME = "rlab";
-const rlabChatToolInputShape = {
-  action: z.string().optional(),
-  operation: z.string().optional(),
-  mode: z.string().optional(),
-  prompt: z.string().optional(),
-  message: z.string().optional(),
-  task: z.string().optional(),
-  reason: z.string().optional(),
-  description: z.string().optional(),
-  delaySeconds: z.number().optional(),
-  fireAt: z.string().optional(),
-  cron: z.string().optional(),
-  script: z.string().optional(),
-  intervalSeconds: z.number().optional(),
-  wakeupId: z.string().optional(),
-  id: z.string().optional(),
-  all: z.boolean().optional(),
-} as const;
-const rlabChatToolAcknowledgement = "rlab accepted the request and handles it server-side. Finish this turn now; rlab re-runs you when a wakeup fires.";
-let rlabSdkMcpServerInstance: McpSdkServerConfigWithInstance | null = null;
-function rlabSdkMcpServer(): McpSdkServerConfigWithInstance {
-  if (!rlabSdkMcpServerInstance) {
-    rlabSdkMcpServerInstance = createSdkMcpServer({
-      name: RLAB_MCP_SERVER_NAME,
-      version: "1.0.0",
-      tools: [
-        tool(TASK_WAKEUP_TOOL_NAME, "Schedule, cancel, or list an rlab task wakeup for this chat. rlab fires it server-side. Use action='list' to inspect pending wakeups.", rlabChatToolInputShape, async () => ({ content: [{ type: "text", text: rlabChatToolAcknowledgement }] })),
-      ],
-    });
-  }
-  return rlabSdkMcpServerInstance;
-}
 // Model-facing names (per RLAB_CHAT_TOOLS_PROMPT) resolve to the registered MCP
 // tool names so a bare `TaskWakeup` call isn't rejected as unknown.
 const RLAB_CHAT_TOOL_ALIASES: Record<string, string> = {
@@ -6016,10 +5983,10 @@ export function appendRlabChatToolsPrompt(prompt: string): string {
   return prompt.includes("<rlab-chat-tools>") ? prompt : `${prompt}${rlabChatToolsPromptAppendix()}`;
 }
 
-// CLI agents (OpenCode, Gemini) can only load *external* MCP servers, unlike
-// Claude (in-process SDK MCP) and Codex (native dynamic tools). We point them at
-// a tiny stdio MCP server that exposes TaskWakeup so the model can actually call
-// it; the run-stream translator still does the real scheduling.
+// MCP-capable agents load a tiny external stdio MCP server that exposes
+// TaskWakeup so the model can actually call it; the run-stream translator still
+// does the real scheduling. Keeping Claude on the same external server avoids
+// in-process SDK MCP stream failures ("Stream closed") during long agent runs.
 const RLAB_MCP_STDIO_SCRIPT = join(PLUGIN_DIR, "bin", "rlab-mcp-stdio.mjs");
 let rlabOpenCodeMcpConfigPath: string | null = null;
 let rlabGeminiMcpMerged = false;
@@ -6283,7 +6250,7 @@ export function buildClaudeSdkOptions(
     permissionMode,
     systemPrompt: { type: "preset", preset: "claude_code", append: CLAUDE_CHAT_UI_SYSTEM_PROMPT },
     tools: claudeToolsForRequest(request),
-    mcpServers: { [RLAB_MCP_SERVER_NAME]: rlabSdkMcpServer() },
+    mcpServers: { [RLAB_MCP_SERVER_NAME]: { type: "stdio", command: "node", args: [RLAB_MCP_STDIO_SCRIPT], alwaysLoad: true } },
     toolAliases: RLAB_CHAT_TOOL_ALIASES,
     // Load the project's own settings (CLAUDE.md/AGENTS.md, hooks) and enable every
     // discovered skill (~/.claude/skills + the project's .claude/skills) so agents
@@ -7111,6 +7078,9 @@ export function createRunApprovalHandler(send: (event: RunEvent) => void, scopeI
       if (inputHandler) {
         return inputHandler;
       }
+    }
+    if (isWakeupToolName(toolName)) {
+      return Promise.resolve<PermissionResult>({ behavior: "allow", updatedInput: input, toolUseID: context.toolUseID });
     }
 
     // Unrestricted "do anything" mode: allow every tool without surfacing an

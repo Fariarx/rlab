@@ -766,7 +766,7 @@ Built-in agents:
     });
   });
 
-  it("registers rlab chat tools as MCP tools and aliases the bare names", () => {
+  it("registers rlab chat tools through the external MCP server and aliases the bare names", () => {
     const abortController = new AbortController();
     const canUseTool: Parameters<typeof buildClaudeSdkOptions>[3] = async (_toolName, input) => ({ behavior: "allow", updatedInput: input });
     const options = buildClaudeSdkOptions(
@@ -777,7 +777,10 @@ Built-in agents:
     );
     // The tools must be registered (so the SDK doesn't reject the call as unknown)
     // and the model-facing names must resolve to the registered MCP tool names.
-    expect(options.mcpServers).toMatchObject({ rlab: expect.objectContaining({ type: "sdk", name: "rlab" }) });
+    expect(options.mcpServers).toMatchObject({
+      rlab: expect.objectContaining({ type: "stdio", command: "node", alwaysLoad: true }),
+    });
+    expect(options.mcpServers?.rlab).toMatchObject({ args: [expect.stringContaining("rlab-mcp-stdio.mjs")] });
     expect(options.toolAliases).toMatchObject({
       TaskWakeup: "mcp__rlab__TaskWakeup",
     });
@@ -2972,6 +2975,21 @@ Built-in agents:
       updatedInput: { command: "npm test" },
       toolUseID: "toolu_1",
     });
+  });
+
+  it("allows rlab TaskWakeup MCP callbacks without a UI approval prompt", async () => {
+    const sentEvents: Array<{ readonly type: string }> = [];
+    const handler = createRunApprovalHandler((event) => sentEvents.push(event));
+    const abort = new AbortController();
+
+    await expect(
+      handler("mcp__rlab__TaskWakeup", { prompt: "check later", delaySeconds: 60 }, { signal: abort.signal, toolUseID: "wake-1" }),
+    ).resolves.toEqual({
+      behavior: "allow",
+      updatedInput: { prompt: "check later", delaySeconds: 60 },
+      toolUseID: "wake-1",
+    });
+    expect(sentEvents).toEqual([]);
   });
 
   it("scopes simultaneous approval callbacks by run id", async () => {
