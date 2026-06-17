@@ -27,13 +27,19 @@ export interface ConversationAutoScrollOptions {
  * scroll up and read history — on a plain native scroll container (no virtual
  * list, so there is no height estimation to land the viewport mid-thread).
  *
- *  - The pin state is derived purely from scroll position: at the bottom → pinned,
- *    scrolled up → released. Programmatic snaps land at the bottom and therefore
- *    keep it pinned, so there is no user-vs-programmatic race to arbitrate.
- *  - A ResizeObserver on the content re-snaps to the bottom whenever it grows
- *    while pinned: streaming tokens, expanding blocks, and images that finish
- *    loading after the initial layout. This is what makes "opens at the bottom"
- *    reliable even for long threads with tall, late-measuring messages.
+ * Smoothness matters here: the earlier version snapped from two places at once
+ * (a per-render layout effect *and* a ResizeObserver) which fought each other and
+ * the browser's scroll anchoring, so streaming looked jittery. Now there is a
+ * single snap path:
+ *
+ *  - One synchronous, pre-paint snap when the conversation opens, so it lands at
+ *    the bottom with no top-then-jump flash.
+ *  - A single ResizeObserver drives every subsequent stick (streaming tokens,
+ *    expanding blocks, late-loading images), coalesced by the browser to one
+ *    callback per frame. The container sets `overflow-anchor: none` so the
+ *    browser doesn't also nudge the scroll position.
+ *  - Pin state is derived purely from scroll position: at the bottom → pinned,
+ *    scrolled up → released, with no user-vs-programmatic race to arbitrate.
  */
 export function useConversationAutoScroll(items: readonly unknown[], options?: ConversationAutoScrollOptions): ConversationAutoScrollController {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -44,39 +50,40 @@ export function useConversationAutoScroll(items: readonly unknown[], options?: C
   // Held in a ref so the scroll listener stays stable across renders.
   const onReachTopRef = useRef(options?.onReachTop);
   onReachTopRef.current = options?.onReachTop;
+  const hasItems = items.length > 0;
 
   const isAtBottom = useCallback((element: HTMLDivElement): boolean => {
     return element.scrollHeight - element.scrollTop - element.clientHeight <= BOTTOM_THRESHOLD;
   }, []);
 
-  const snapToBottom = useCallback((behavior: ScrollBehavior) => {
+  const snapInstant = useCallback(() => {
     const element = containerRef.current;
-    if (!element) {
-      return;
-    }
-    // scrollTo isn't implemented in jsdom and is the only way to get smooth
-    // behavior; fall back to the always-available scrollTop for instant snaps.
-    if (behavior === "smooth" && typeof element.scrollTo === "function") {
-      element.scrollTo({ top: element.scrollHeight, behavior });
-    } else {
+    if (element) {
       element.scrollTop = element.scrollHeight;
     }
   }, []);
 
   const setPinned = useCallback((value: boolean) => {
+    if (pinnedToBottom.current === value) {
+      return; // avoid redundant state churn while snapping
+    }
     pinnedToBottom.current = value;
     setShowScrollToBottom(!value);
   }, []);
 
-  // Re-pin on new items (append/open). Streaming growth within a message is
-  // covered by the ResizeObserver below.
+  // Land at the bottom the moment the thread first has content — synchronously,
+  // before paint, so there's no top-then-jump flash on open. Runs once per mount
+  // (the thread is keyed by conversation id, so it remounts per open).
+  const didInitialSnap = useRef(false);
   useLayoutEffect(() => {
-    if (items.length > 0 && pinnedToBottom.current) {
-      snapToBottom("auto");
+    if (!didInitialSnap.current && hasItems && pinnedToBottom.current) {
+      didInitialSnap.current = true;
+      snapInstant();
     }
-  }, [items, snapToBottom]);
+  }, [hasItems, snapInstant]);
 
-  // Track the user's pin state from raw scroll position.
+  // Track the user's pin state from raw scroll position, and load older messages
+  // as they near the top.
   useEffect(() => {
     const element = containerRef.current;
     if (!element) {
@@ -92,7 +99,9 @@ export function useConversationAutoScroll(items: readonly unknown[], options?: C
     return () => element.removeEventListener("scroll", onScroll);
   }, [isAtBottom, setPinned]);
 
-  // Keep glued to the bottom as content grows while pinned (streaming + images).
+  // The single stick mechanism: keep glued to the bottom as content grows while
+  // pinned (streaming + images). The browser batches resize notifications to once
+  // per frame, so this writes scrollTop at most once per frame — no thrashing.
   useEffect(() => {
     const content = contentRef.current;
     if (!content || typeof ResizeObserver === "undefined") {
@@ -100,17 +109,22 @@ export function useConversationAutoScroll(items: readonly unknown[], options?: C
     }
     const observer = new ResizeObserver(() => {
       if (pinnedToBottom.current) {
-        snapToBottom("auto");
+        snapInstant();
       }
     });
     observer.observe(content);
     return () => observer.disconnect();
-  }, [snapToBottom]);
+  }, [snapInstant]);
 
   const scrollToBottom = useCallback(() => {
     setPinned(true);
-    snapToBottom("smooth");
-  }, [setPinned, snapToBottom]);
+    const element = containerRef.current;
+    if (element?.scrollTo) {
+      element.scrollTo({ top: element.scrollHeight, behavior: "smooth" });
+    } else {
+      snapInstant();
+    }
+  }, [setPinned, snapInstant]);
 
   return { containerRef, contentRef, showScrollToBottom, scrollToBottom };
 }

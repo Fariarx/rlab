@@ -132,7 +132,7 @@ export function Conversation({
         aria-label={t("conversationThread")}
         aria-live={hasLiveContent ? "polite" : "off"}
         aria-relevant="additions text"
-        sx={{ height: "100%", minHeight: 0, overflowY: "auto", overflowX: "hidden", overscrollBehavior: "contain" }}
+        sx={{ height: "100%", minHeight: 0, overflowY: "auto", overflowX: "hidden", overscrollBehavior: "contain", overflowAnchor: "none" }}
       >
         <Box ref={autoScroll.contentRef}>
           {windowed.map((item, index) => (
