@@ -9,13 +9,21 @@ import { buildEmptyWorkspaceState, type WorkspaceState } from "../src/lib/worksp
 import {
   closeWorkspaceDb,
   applyWorkspaceDbMutations,
+  claimNextPendingTurn,
+  deletePendingTurn,
+  enqueuePendingTurn,
   initializeWorkspaceStateInDb,
   initWorkspaceDb,
   readConversation,
   readMessageBlocks,
+  readPendingTurnQueue,
   readThreadFromDb,
   readWorkspaceRevision,
   readWorkspaceStateFromDb,
+  releasePendingTurn,
+  removePendingTurn,
+  resetDispatchingPendingTurns,
+  setPendingTurnQueuePaused,
   updateConversationData,
   upsertAgentMessageForUserTurn,
   upsertMessage,
@@ -84,6 +92,54 @@ describe("workspace-db", () => {
 
     expect(read.chats[0].updatedAtMs).toEqual(expect.any(Number));
     expect(Number.isFinite(read.chats[0].updatedAtMs)).toBe(true);
+  });
+
+  it("persists pending user turns server-side and claims them in FIFO order", () => {
+    initializeWorkspaceStateInDb({ ...buildEmptyWorkspaceState(), chats: [conv("c1")], threads: { c1: [] }, selectedId: "c1" });
+
+    enqueuePendingTurn({ id: "u-pending-1", conversationId: "c1", createdAtMs: 100, message: userMsg("u-pending-1", "first"), origin: "http://127.0.0.1:4280" });
+    enqueuePendingTurn({ id: "u-pending-2", conversationId: "c1", createdAtMs: 200, message: userMsg("u-pending-2", "second"), origin: "http://127.0.0.1:4280" });
+
+    expect(readPendingTurnQueue("c1").messages.map((message) => message.id)).toEqual(["u-pending-1", "u-pending-2"]);
+
+    expect(setPendingTurnQueuePaused("c1", true).paused).toBe(true);
+    expect(claimNextPendingTurn("c1", "run-paused")).toBeNull();
+    expect(setPendingTurnQueuePaused("c1", false).paused).toBe(false);
+
+    const claimed = claimNextPendingTurn("c1", "run-1");
+    expect(claimed?.message.text).toBe("first");
+    expect(readPendingTurnQueue("c1").messages.map((message) => message.id)).toEqual(["u-pending-2"]);
+
+    expect(removePendingTurn("c1", "u-pending-2").messages).toEqual([]);
+    expect(releasePendingTurn("u-pending-1", { pause: true })?.message.id).toBe("u-pending-1");
+    expect(readPendingTurnQueue("c1")).toMatchObject({ paused: true, messages: [expect.objectContaining({ id: "u-pending-1" })] });
+
+    expect(setPendingTurnQueuePaused("c1", false).paused).toBe(false);
+    expect(claimNextPendingTurn("c1", "run-2")?.id).toBe("u-pending-1");
+    deletePendingTurn("u-pending-1");
+    expect(readPendingTurnQueue("c1").messages).toEqual([]);
+  });
+
+  it("requeues dispatching pending turns after a server restart", () => {
+    initializeWorkspaceStateInDb({ ...buildEmptyWorkspaceState(), chats: [conv("c1")], threads: { c1: [] }, selectedId: "c1" });
+    enqueuePendingTurn({ id: "u-pending", conversationId: "c1", createdAtMs: 100, message: userMsg("u-pending", "first"), origin: "http://127.0.0.1:4280" });
+
+    expect(claimNextPendingTurn("c1", "run-1")?.id).toBe("u-pending");
+    expect(readPendingTurnQueue("c1").messages).toEqual([]);
+
+    resetDispatchingPendingTurns();
+
+    expect(readPendingTurnQueue("c1").messages.map((message) => message.id)).toEqual(["u-pending"]);
+  });
+
+  it("cascades pending turn queues when a conversation is deleted", () => {
+    initializeWorkspaceStateInDb({ ...buildEmptyWorkspaceState(), chats: [conv("c1")], threads: { c1: [] }, selectedId: "c1" });
+    enqueuePendingTurn({ id: "u-pending", conversationId: "c1", createdAtMs: 100, message: userMsg("u-pending", "first"), origin: "http://127.0.0.1:4280" });
+    setPendingTurnQueuePaused("c1", true);
+
+    applyWorkspaceDbMutations([{ type: "deleteConversation", conversationId: "c1" }]);
+
+    expect(() => readPendingTurnQueue("c1")).toThrow("Conversation c1 does not exist.");
   });
 
   it("upserts a single message + conversation without rewriting the whole tree (hot path)", () => {

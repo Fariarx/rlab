@@ -38,20 +38,29 @@ import { buildEmptyWorkspaceState, buildInitialWorkspaceState, type WorkspaceSta
 import { parseWorkspaceMutationRequestBody, workspaceMutationBadRequestMessages } from "./src/lib/workspace-mutations";
 import {
   applyWorkspaceDbMutations,
+  claimNextPendingTurn,
+  deletePendingTurn,
+  enqueuePendingTurn,
   initWorkspaceDb,
   initializeWorkspaceStateInDb,
   readConversation,
   readMessage,
   readMessageBlocks,
+  readPendingTurnQueue,
   readSelectedConversationId,
   readThreadFromDb,
   readWorkspaceRevision,
   readWorkspaceStateFromDb,
+  releasePendingTurn,
+  removePendingTurn,
+  resetDispatchingPendingTurns,
+  setPendingTurnQueuePaused,
   updateConversationData,
   upsertAgentMessageForUserTurn,
   upsertMessage,
   workspaceDbHasState,
   WorkspaceRevisionConflictError,
+  type PendingTurnRecord,
   type WorkspaceDbMutation,
 } from "./workspace-db";
 import {
@@ -64,6 +73,7 @@ import {
   isAgentId,
   isAgentAccessMode,
   normalizeAgentProfile,
+  accessModeForAgentProfile,
   resolveAgentModeValue,
   resolveAgentModelValue,
   resolveAgentReasoningValue,
@@ -87,6 +97,7 @@ import {
   type RunUsage,
   type SearchBlock,
 } from "./src/domain/agent-types";
+import { promptForUserTurn } from "./src/components/workspace/models/workspace-thread-actions-model";
 import { pickDirectoryPathFromSystemDialog } from "./src/server/directory-picker";
 export {
   parseAnthropicModelInfos,
@@ -2255,6 +2266,7 @@ function ensureWorkspaceDb(): void {
     return;
   }
   initWorkspaceDb(WORKSPACE_DB_FILE);
+  resetDispatchingPendingTurns();
   workspaceDbReady = true;
 }
 
@@ -7199,6 +7211,155 @@ function scheduledRunId(prefix: "run" | "u" | "a"): string {
   return `${prefix}-${Date.now()}-${randomUUID().slice(0, 8)}`;
 }
 
+const serverQueueDrainInFlight = new Set<string>();
+
+function activeBackgroundRunForConversation(conversationId: string): BackgroundRunHandle | null {
+  for (const handle of backgroundRunHandles.values()) {
+    if (handle.binding.conversationId === conversationId) {
+      return handle;
+    }
+  }
+  return null;
+}
+
+function conversationHasServerActiveWork(conversationId: string): boolean {
+  if (activeBackgroundRunForConversation(conversationId)) {
+    return true;
+  }
+  const conversation = readConversation(conversationId);
+  return Boolean(conversation?.activeRunId && (conversation.status === "running" || conversation.status === "waiting"));
+}
+
+function serverConversationCwd(state: WorkspaceState, conversationId: string): string | undefined {
+  const conversation = workspaceConversationMap(state).get(conversationId);
+  if (conversation?.worktreePath) {
+    return conversation.worktreePath;
+  }
+  return state.projects.find((project) => project.conversations.some((conversation) => conversation.id === conversationId))?.path;
+}
+
+function serverConversationSessionId(conversation: ConversationSummary, agent: AgentId): string | undefined {
+  return conversation.agentSessions?.[agent] ?? (conversation.sessionAgent === agent ? conversation.sessionId : undefined);
+}
+
+export function queuedTurnRunBody(record: PendingTurnRecord, runId: string): Record<string, unknown> {
+  const state = readWorkspaceStateFromDb(new Set([record.conversationId]));
+  const conversation = workspaceConversationMap(state).get(record.conversationId);
+  if (!conversation) {
+    throw new Error(`Conversation ${record.conversationId} does not exist.`);
+  }
+  const profile = normalizeAgentProfile(conversation.profile, conversation.agent ?? "claude-code");
+  const resume = serverConversationSessionId(conversation, profile.agent);
+  const prompt = promptForUserTurn(state.threads[record.conversationId] ?? [], record.message, Boolean(resume), undefined);
+  const agentMessageTime = serverNowLabel();
+  const cwd = serverConversationCwd(state, record.conversationId);
+  return {
+    agent: profile.agent,
+    model: profile.model,
+    reasoning: profile.reasoning,
+    mode: profile.mode,
+    autoConfirm: profile.autoConfirm ?? false,
+    ...(profile.tools !== undefined ? { tools: profile.tools } : {}),
+    prompt,
+    ...(cwd ? { cwd } : {}),
+    accessMode: accessModeForAgentProfile(profile),
+    ...(resume ? { resume } : {}),
+    ...(conversation.compaction?.auto !== undefined ? { autoCompact: conversation.compaction.auto } : {}),
+    ...(typeof conversation.compaction?.window === "number" ? { compactWindow: conversation.compaction.window } : {}),
+    conversationId: record.conversationId,
+    runId,
+    userMessageId: record.message.id,
+    userMessageTime: record.message.time ?? agentMessageTime,
+    agentMessageId: scheduledRunId("a"),
+    agentMessageTime,
+  };
+}
+
+async function startQueuedTurn(record: PendingTurnRecord, runId: string, onAccepted: () => void): Promise<void> {
+  const body = queuedTurnRunBody(record, runId);
+  appendRunAuditEvent(RUN_AUDIT_FILE, {
+    type: "queued_turn_started",
+    runId,
+    conversationId: record.conversationId,
+    userMessageId: record.message.id,
+    agent: body.agent,
+  });
+  const response = await fetch(`${record.origin}/api/run`, {
+    method: "POST",
+    headers: { "Content-Type": JSON_CONTENT_TYPE },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`HTTP ${response.status}${text ? ` ${clip(text, 300)}` : ""}`);
+  }
+  onAccepted();
+  const reader = response.body?.getReader();
+  if (!reader) {
+    return;
+  }
+  for (;;) {
+    const { done } = await reader.read();
+    if (done) {
+      return;
+    }
+  }
+}
+
+function drainServerQueue(conversationId: string): void {
+  if (serverQueueDrainInFlight.has(conversationId)) {
+    return;
+  }
+  serverQueueDrainInFlight.add(conversationId);
+  void (async () => {
+    try {
+      for (;;) {
+        ensureWorkspaceDb();
+        if (conversationHasServerActiveWork(conversationId)) {
+          return;
+        }
+        const runId = scheduledRunId("run");
+        const record = claimNextPendingTurn(conversationId, runId);
+        if (!record) {
+          return;
+        }
+        let accepted = false;
+        try {
+          await startQueuedTurn(record, runId, () => {
+            accepted = true;
+            deletePendingTurn(record.id);
+          });
+        } catch (error) {
+          if (!accepted) {
+            releasePendingTurn(record.id, { pause: true });
+          }
+          appendRunAuditEvent(RUN_AUDIT_FILE, {
+            type: accepted ? "queued_turn_stream_failed" : "queued_turn_failed",
+            runId,
+            conversationId: record.conversationId,
+            userMessageId: record.message.id,
+            error: errorMessage(error),
+          });
+          return;
+        }
+      }
+    } finally {
+      serverQueueDrainInFlight.delete(conversationId);
+    }
+  })();
+}
+
+function pauseQueueIfNotEmpty(conversationId: string): void {
+  try {
+    const snapshot = readPendingTurnQueue(conversationId);
+    if (snapshot.messages.length > 0 && !snapshot.paused) {
+      setPendingTurnQueuePaused(conversationId, true);
+    }
+  } catch {
+    // Missing/deleted conversation: nothing to pause.
+  }
+}
+
 function nextCronMs(expression: string, currentDate: number = Date.now()): number {
   return CronExpressionParser.parse(expression, { currentDate }).next().toDate().getTime();
 }
@@ -7570,6 +7731,13 @@ function notifyBackgroundRunUpdate(binding: BackgroundRunBinding, done: boolean)
   const update = buildActiveRunUpdate(conversation, readMessage(binding.agentMessageId), binding, done);
   for (const subscriber of handle.subscribers) {
     subscriber(update);
+  }
+}
+
+function finishBackgroundHandle(binding: BackgroundRunBinding, canceled: boolean): void {
+  backgroundRunHandles.delete(binding.runId);
+  if (!canceled) {
+    drainServerQueue(binding.conversationId);
   }
 }
 
@@ -9830,7 +9998,7 @@ async function runClaudeSdk(
     if (binding && accumulator) {
       finishPersistedBackgroundRun(binding, accumulator, abortController.signal.aborted);
       notifyBackgroundRunUpdate(binding, true);
-      backgroundRunHandles.delete(binding.runId);
+      finishBackgroundHandle(binding, abortController.signal.aborted);
     }
     sendDone();
     end();
@@ -10119,7 +10287,7 @@ async function runOpenCodeServer(
     if (binding && accumulator) {
       finishPersistedBackgroundRun(binding, accumulator, abortController.signal.aborted);
       notifyBackgroundRunUpdate(binding, true);
-      backgroundRunHandles.delete(binding.runId);
+      finishBackgroundHandle(binding, abortController.signal.aborted);
     }
     sendDone();
     end();
@@ -10625,7 +10793,7 @@ async function runCodexAppServer(
     if (binding && accumulator) {
       finishPersistedBackgroundRun(binding, accumulator, abortController.signal.aborted);
       notifyBackgroundRunUpdate(binding, true);
-      backgroundRunHandles.delete(binding.runId);
+      finishBackgroundHandle(binding, abortController.signal.aborted);
     }
     sendDone();
     end();
@@ -10638,10 +10806,14 @@ function handleRunCancel(req: IncomingMessage, res: ServerResponse): void {
       const request = parseRunCancelPayload(body);
       const handle = backgroundRunHandles.get(request.runId);
       const currentState = readWorkspaceState();
+      const conversationToPause = [...workspaceConversationMap(currentState).values()].find((conversation) => conversation.activeRunId === request.runId);
       const canceled = cancelBackgroundRunRequestState(currentState, request.runId, Boolean(handle));
       if (!handle) {
         if (canceled.canceled) {
           persistWorkspaceDelta(currentState, canceled.state);
+          if (conversationToPause) {
+            pauseQueueIfNotEmpty(conversationToPause.id);
+          }
           sendJson(res, 200, { runId: request.runId, canceled: true, detached: true });
           return;
         }
@@ -10650,6 +10822,7 @@ function handleRunCancel(req: IncomingMessage, res: ServerResponse): void {
       }
       handle.cancel();
       persistWorkspaceDelta(currentState, canceled.state);
+      pauseQueueIfNotEmpty(handle.binding.conversationId);
       sendJson(res, 200, { runId: request.runId, canceled: true });
     } catch (error) {
       sendJson(res, runControlErrorStatus(error), { error: errorMessage(error) });
@@ -10742,6 +10915,113 @@ function handleWakeups(req: IncomingMessage, res: ServerResponse): void {
   } catch (error) {
     sendJson(res, 500, { error: errorMessage(error) });
   }
+}
+
+type PendingQueuePayload =
+  | { readonly action: "enqueue"; readonly conversationId: string; readonly text: string }
+  | { readonly action: "cancel"; readonly conversationId: string; readonly messageId: string }
+  | { readonly action: "setPaused"; readonly conversationId: string; readonly paused: boolean }
+  | { readonly action: "sendNext"; readonly conversationId: string };
+
+function parsePendingQueuePayload(body: string): PendingQueuePayload {
+  const parsed = JSON.parse(body || "{}") as unknown;
+  if (!isRecord(parsed)) {
+    throw new Error("Invalid queue request payload.");
+  }
+  const action = typeof parsed.action === "string" ? parsed.action : "";
+  const conversationId = typeof parsed.conversationId === "string" ? parsed.conversationId.trim() : "";
+  if (!conversationId) {
+    throw new Error("Missing conversationId.");
+  }
+  if (action === "enqueue") {
+    const text = typeof parsed.text === "string" ? parsed.text.trim() : "";
+    if (!text) {
+      throw new Error("Empty queued message.");
+    }
+    return { action, conversationId, text };
+  }
+  if (action === "cancel") {
+    const messageId = typeof parsed.messageId === "string" ? parsed.messageId.trim() : "";
+    if (!messageId) {
+      throw new Error("Missing queued message id.");
+    }
+    return { action, conversationId, messageId };
+  }
+  if (action === "setPaused") {
+    if (typeof parsed.paused !== "boolean") {
+      throw new Error("Missing paused flag.");
+    }
+    return { action, conversationId, paused: parsed.paused };
+  }
+  if (action === "sendNext") {
+    return { action, conversationId };
+  }
+  throw new Error("Unknown queue action.");
+}
+
+function pendingQueueResponse(conversationId: string): { readonly queue: ReturnType<typeof readPendingTurnQueue> } {
+  return { queue: readPendingTurnQueue(conversationId) };
+}
+
+function handlePendingQueue(req: IncomingMessage, res: ServerResponse): void {
+  if (req.method === "GET") {
+    try {
+      const conversationId = new URL(req.url ?? "/", "http://localhost").searchParams.get("conversationId")?.trim() ?? "";
+      if (!conversationId) {
+        sendJson(res, 400, { error: "Missing conversationId." });
+        return;
+      }
+      ensureWorkspaceDb();
+      sendJson(res, 200, pendingQueueResponse(conversationId));
+    } catch (error) {
+      sendJson(res, 500, { error: errorMessage(error) });
+    }
+    return;
+  }
+
+  if (req.method !== "POST") {
+    res.statusCode = 405;
+    res.end();
+    return;
+  }
+
+  readJsonBody(req, res, (body) => {
+    try {
+      ensureWorkspaceDb();
+      const payload = parsePendingQueuePayload(body);
+      if (payload.action === "enqueue") {
+        const now = Date.now();
+        const messageId = scheduledRunId("u");
+        enqueuePendingTurn({
+          id: messageId,
+          conversationId: payload.conversationId,
+          createdAtMs: now,
+          message: { id: messageId, role: "user", text: payload.text, time: serverNowLabel() },
+          origin: browserBridgeOrigin(req),
+        });
+        drainServerQueue(payload.conversationId);
+        sendJson(res, 200, pendingQueueResponse(payload.conversationId));
+        return;
+      }
+      if (payload.action === "cancel") {
+        sendJson(res, 200, { queue: removePendingTurn(payload.conversationId, payload.messageId) });
+        return;
+      }
+      if (payload.action === "setPaused") {
+        const queue = setPendingTurnQueuePaused(payload.conversationId, payload.paused);
+        if (!payload.paused) {
+          drainServerQueue(payload.conversationId);
+        }
+        sendJson(res, 200, { queue });
+        return;
+      }
+      setPendingTurnQueuePaused(payload.conversationId, false);
+      drainServerQueue(payload.conversationId);
+      sendJson(res, 200, pendingQueueResponse(payload.conversationId));
+    } catch (error) {
+      sendJson(res, 400, { error: errorMessage(error) });
+    }
+  });
 }
 
 function handleRun(req: IncomingMessage, res: ServerResponse): void {
@@ -11054,7 +11334,7 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
       if (binding && accumulator) {
         finishPersistedBackgroundRun(binding, accumulator, canceled);
         notifyBackgroundRunUpdate(binding, true);
-        backgroundRunHandles.delete(binding.runId);
+        finishBackgroundHandle(binding, true);
       }
       sendFinalDone();
       sender.end();
@@ -11066,7 +11346,7 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
       if (binding && accumulator) {
         finishPersistedBackgroundRun(binding, accumulator, canceled);
         notifyBackgroundRunUpdate(binding, true);
-        backgroundRunHandles.delete(binding.runId);
+        finishBackgroundHandle(binding, canceled);
       }
       // Flush the buffered terminal `done` (it carries usage/cost) on normal exit;
       // a bare sendDone() here dropped token/cost stats for codex & gemini.
@@ -11270,6 +11550,7 @@ function attach(server: ViteDevServer | PreviewServer): void {
     { path: "/api/git-init", handler: methodOnly("POST", handleGitInit) },
     { path: "/api/terminal", handler: handleTerminalSession },
     { path: "/api/runs", handler: methodOnly("GET", handleActiveRuns) },
+    { path: "/api/queue", handler: handlePendingQueue },
     { path: "/api/wakeups", handler: handleWakeups },
     { path: "/api/run-attach", handler: methodOnly("GET", handleRunAttach) },
     { path: "/api/run", handler: methodOnly("POST", handleRun) },

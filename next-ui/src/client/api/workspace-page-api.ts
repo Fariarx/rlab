@@ -3,6 +3,7 @@ import type { ApprovalDecision } from "../../domain/agent-types";
 import type { AgentRateLimitMap } from "../../lib/agent-limits";
 import type { ComposerPluginLink } from "../../lib/rlab-plugins";
 import type { VoiceProviderId } from "../../lib/voice-providers";
+import type { ChatMessage } from "../../domain/agent-types";
 import { isRecord, payloadErrorMessage, readJsonPayload, responseErrorMessage } from "./http";
 
 export const CLI_UPDATE_POLL_MS = 5 * 60_000;
@@ -19,6 +20,12 @@ export interface WakeupSummary {
   readonly prompt: string;
   readonly reason?: string;
   readonly trigger: WakeupTrigger;
+}
+
+export interface PendingTurnQueueSnapshot {
+  readonly conversationId: string;
+  readonly paused: boolean;
+  readonly messages: readonly ChatMessage[];
 }
 
 export interface CliUpdateInfo {
@@ -93,6 +100,81 @@ export async function submitRunInput(id: string, selected: readonly string[]): P
   if (!response.ok) {
     throw new Error(await responseErrorMessage(response, `Option selection failed (${response.status})`));
   }
+}
+
+function normalizePendingTurnQueue(payload: unknown, conversationId: string): PendingTurnQueueSnapshot {
+  if (!isRecord(payload) || !isRecord(payload.queue)) {
+    return { conversationId, paused: false, messages: [] };
+  }
+  const queue = payload.queue;
+  const rawMessages = Array.isArray(queue.messages) ? queue.messages : [];
+  return {
+    conversationId: typeof queue.conversationId === "string" ? queue.conversationId : conversationId,
+    paused: queue.paused === true,
+    messages: rawMessages.filter(isRecord).map((message) => message as unknown as ChatMessage),
+  };
+}
+
+export async function loadPendingTurnQueue(conversationId: string): Promise<PendingTurnQueueSnapshot> {
+  const query = new URLSearchParams({ conversationId });
+  const response = await fetch(`/api/queue?${query.toString()}`, { method: "GET", cache: "no-store" });
+  const payload = await readJsonPayload(response);
+  if (!response.ok) {
+    throw new Error(payloadErrorMessage(payload, `Queue load failed (${response.status})`));
+  }
+  return normalizePendingTurnQueue(payload, conversationId);
+}
+
+export async function enqueuePendingTurn(conversationId: string, text: string): Promise<PendingTurnQueueSnapshot> {
+  const response = await fetch("/api/queue", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "enqueue", conversationId, text }),
+  });
+  const payload = await readJsonPayload(response);
+  if (!response.ok) {
+    throw new Error(payloadErrorMessage(payload, `Queue enqueue failed (${response.status})`));
+  }
+  return normalizePendingTurnQueue(payload, conversationId);
+}
+
+export async function cancelPendingTurn(conversationId: string, messageId: string): Promise<PendingTurnQueueSnapshot> {
+  const response = await fetch("/api/queue", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "cancel", conversationId, messageId }),
+  });
+  const payload = await readJsonPayload(response);
+  if (!response.ok) {
+    throw new Error(payloadErrorMessage(payload, `Queue cancel failed (${response.status})`));
+  }
+  return normalizePendingTurnQueue(payload, conversationId);
+}
+
+export async function setPendingTurnQueuePaused(conversationId: string, paused: boolean): Promise<PendingTurnQueueSnapshot> {
+  const response = await fetch("/api/queue", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "setPaused", conversationId, paused }),
+  });
+  const payload = await readJsonPayload(response);
+  if (!response.ok) {
+    throw new Error(payloadErrorMessage(payload, `Queue pause failed (${response.status})`));
+  }
+  return normalizePendingTurnQueue(payload, conversationId);
+}
+
+export async function sendNextPendingTurn(conversationId: string): Promise<PendingTurnQueueSnapshot> {
+  const response = await fetch("/api/queue", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "sendNext", conversationId }),
+  });
+  const payload = await readJsonPayload(response);
+  if (!response.ok) {
+    throw new Error(payloadErrorMessage(payload, `Queue dispatch failed (${response.status})`));
+  }
+  return normalizePendingTurnQueue(payload, conversationId);
 }
 
 export async function loadCliUpdates(refresh = false): Promise<CliUpdateSnapshot> {

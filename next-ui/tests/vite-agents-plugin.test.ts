@@ -89,6 +89,7 @@ import {
   parseOpenCodeModelsOutput,
   prepareAgentPrompt,
   prioritizeBrowserPreviewDomTargets,
+  queuedTurnRunBody,
   resolveAgentInstallLaunch,
   resolveBinOnPath,
   resolveLaunchCommand,
@@ -111,8 +112,9 @@ import {
 } from "../vite-agents-plugin";
 import { MAX_AGENT_TOOL_OUTPUT_CHARS } from "../src/lib/agent-output";
 import { accumulateRunEvent, createRunEventAccumulator } from "../src/lib/run-event-accumulator";
-import { buildInitialWorkspaceState } from "../src/lib/workspace-state";
+import { buildEmptyWorkspaceState, buildInitialWorkspaceState } from "../src/lib/workspace-state";
 import { type AgentProfile } from "../src/components/agent";
+import { closeWorkspaceDb, initializeWorkspaceStateInDb, initWorkspaceDb, type PendingTurnRecord } from "../workspace-db";
 
 describe("vite agents plugin", () => {
   it("does not import client UI modules into the dev-server runtime", () => {
@@ -134,6 +136,61 @@ describe("vite agents plugin", () => {
     } as unknown as Parameters<typeof browserBridgeOrigin>[0];
 
     expect(browserBridgeOrigin(req)).toBe("http://127.0.0.1:4280");
+  });
+
+  it("builds queued turn run bodies from the current persisted conversation profile", () => {
+    const dir = mkdtempSync(join(tmpdir(), "rlab-queued-turn-"));
+    try {
+      initWorkspaceDb(join(dir, "workspace.db"));
+      initializeWorkspaceStateInDb({
+        ...buildEmptyWorkspaceState(),
+        chats: [
+          {
+            id: "chat-queued",
+            title: "Queued",
+            snippet: "",
+            time: "12:00",
+            status: "idle",
+            agent: "gemini",
+            profile: { agent: "gemini", model: "default", reasoning: "default", mode: "default" },
+            sessionAgent: "gemini",
+            sessionId: "gemini-session",
+            agentSessions: { gemini: "gemini-session" },
+            worktreePath: "/tmp/queued-worktree",
+          },
+        ],
+        threads: {
+          "chat-queued": [{ id: "u-prev", role: "user", text: "Previous user turn", time: "11:00" }],
+        },
+        selectedId: "chat-queued",
+      });
+      const record: PendingTurnRecord = {
+        id: "u-queued",
+        conversationId: "chat-queued",
+        createdAtMs: 123,
+        message: { id: "u-queued", role: "user", text: "Queued server turn", time: "12:05" },
+        origin: "http://127.0.0.1:4280",
+      };
+
+      const body = queuedTurnRunBody(record, "run-queued");
+
+      expect(body).toMatchObject({
+        agent: "gemini",
+        model: "default",
+        reasoning: "default",
+        mode: "default",
+        conversationId: "chat-queued",
+        runId: "run-queued",
+        userMessageId: "u-queued",
+        userMessageTime: "12:05",
+        resume: "gemini-session",
+        cwd: "/tmp/queued-worktree",
+      });
+      expect(String(body.prompt)).toContain("Queued server turn");
+    } finally {
+      closeWorkspaceDb();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("extracts npm package names from CLI update install specs", () => {

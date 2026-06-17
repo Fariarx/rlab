@@ -3,6 +3,14 @@ import { useEffect, useState } from "react";
 import { accessModeForAgentProfile, compactCommandForAgent, type AgentBlock, type AgentProfile, type ApprovalDecision, type ChatMessage, type CompactionSettings, type ComposerDraft, type ConversationSummary, type ConversationView, type Project, type ReviewCommentEntry } from "../agent";
 import { translate } from "../../i18n/I18nProvider";
 import { cancelRun, loadActiveRuns, runConversation, type ActiveRunSnapshot } from "../../client/api/run-agent";
+import {
+  cancelPendingTurn,
+  enqueuePendingTurn,
+  loadPendingTurnQueue,
+  sendNextPendingTurn,
+  setPendingTurnQueuePaused as setServerPendingTurnQueuePaused,
+  type PendingTurnQueueSnapshot,
+} from "../../client/api/workspace-page-api";
 import { loadConversationThread, loadWorkspaceRevision, loadWorkspaceState } from "../../client/api/workspace-api";
 import { nowLabel, starterThread, truncate } from "./sample-data";
 import { type AppSettings, type AppSettingsPatch, mergeAppSettings } from "../../lib/app-settings";
@@ -12,6 +20,7 @@ import { nextWorkspaceId, syncGeneratedWorkspaceIdSequence } from "../../lib/wor
 import {
   finalRunPatch,
   finishThreadLiveBlocks,
+  isLiveRunStatus,
   isSettledRunConversationResult,
   patchActiveRunUpdate,
   patchAgentMessageUsage,
@@ -69,7 +78,6 @@ import {
   serializableEqual,
 } from "./models/workspace-state-utils";
 import { WorkspaceSaveQueue } from "./runtime/workspace-save-queue";
-import { WorkspacePendingMessageQueue } from "./runtime/workspace-pending-message-queue";
 import { prepareWorkspaceRunTurn } from "./models/workspace-run-turn-model";
 import { applyWorkspaceAgentBlocks } from "./models/workspace-agent-block-update-model";
 export { buildAgentPrompt, conversationProfile } from "./models/workspace-state-utils";
@@ -178,7 +186,9 @@ export class WorkspaceStore implements Workspace {
       this.workspaceRevision = revision;
     },
   });
-  private readonly pendingMessages = new WorkspacePendingMessageQueue();
+  private readonly pendingQueues = observable.map<string, PendingTurnQueueSnapshot>();
+
+  private readonly queueRefreshInFlight = new Set<string>();
 
   private readonly threadLoader = new WorkspaceThreadLoader({
     loadConversationThread,
@@ -302,6 +312,47 @@ export class WorkspaceStore implements Workspace {
     return this.threadLoader.loadThread(id, force);
   }
 
+  private queueSnapshot(id: string): PendingTurnQueueSnapshot {
+    return this.pendingQueues.get(id) ?? { conversationId: id, paused: false, messages: [] };
+  }
+
+  private setQueueSnapshot(snapshot: PendingTurnQueueSnapshot): void {
+    this.pendingQueues.set(snapshot.conversationId, snapshot);
+  }
+
+  private refreshQueue(id: string): void {
+    if (!id || this.queueRefreshInFlight.has(id)) {
+      return;
+    }
+    this.queueRefreshInFlight.add(id);
+    void loadPendingTurnQueue(id)
+      .then((snapshot) => {
+        runInAction(() => this.setQueueSnapshot(snapshot));
+      })
+      .catch((error: unknown) => {
+        runInAction(() => {
+          this.loadError = error instanceof Error ? error.message : String(error);
+        });
+      })
+      .finally(() => {
+        this.queueRefreshInFlight.delete(id);
+      });
+  }
+
+  private refreshSelectedQueue(): void {
+    if (this.state.selectedId) {
+      this.refreshQueue(this.state.selectedId);
+    }
+  }
+
+  private conversationHasActiveWork(id: string): boolean {
+    if (this.runs.has(id)) {
+      return true;
+    }
+    const conversation = this.find(id);
+    return Boolean(conversation?.activeRunId && isLiveRunStatus(conversation.status));
+  }
+
   /** Ensure every conversation's thread is loaded — used before full-text search,
    *  which scans across all threads. */
   async loadAllThreads(): Promise<void> {
@@ -315,6 +366,7 @@ export class WorkspaceStore implements Workspace {
         if (this.hydrated && !this.loading) {
           void this.refreshWorkspaceFromServer();
           void this.refreshBackgroundRuns();
+          this.refreshSelectedQueue();
         }
       }, WORKSPACE_SYNC_POLL_MS);
     }
@@ -371,6 +423,7 @@ export class WorkspaceStore implements Workspace {
           this.hydrated = true;
         });
         void this.refreshBackgroundRuns();
+        this.refreshSelectedQueue();
       })
       .catch((error) => {
         if (seq !== this.loadSeq) {
@@ -421,6 +474,7 @@ export class WorkspaceStore implements Workspace {
       });
       if (selectedId) {
         void this.loadThreadFromServer(selectedId, true);
+        this.refreshQueue(selectedId);
       }
       void this.refreshBackgroundRuns();
     } catch (error) {
@@ -555,6 +609,7 @@ export class WorkspaceStore implements Workspace {
     if (selected) {
       this.enqueueMutations({ type: "setSelectedConversation", conversationId: id });
       void this.loadThread(id);
+      this.refreshQueue(id);
     }
   }
 
@@ -711,7 +766,7 @@ export class WorkspaceStore implements Workspace {
 
   remove(id: string): string {
     this.cancelActiveRun(id);
-    this.pendingMessages.forget(id);
+    this.pendingQueues.delete(id);
     this.threadLoader.forget(id);
     let nextSelectedId = this.state.selectedId;
     this.setState((current) => {
@@ -728,15 +783,23 @@ export class WorkspaceStore implements Workspace {
   }
 
   sendMessage(id: string, text: string): void {
-    const userMsg: ChatMessage = { id: nextWorkspaceId("u"), role: "user", text, time: nowLabel() };
-    // If the agent is still working, queue this turn instead of cancelling it. The
-    // queued turn stays out of the thread (shown as a cancellable item under the
-    // conversation) and is appended + dispatched when the current run settles
-    // (see drainPendingMessages) or when the user sends it now.
-    if (this.runs.has(id)) {
-      this.pendingMessages.enqueue(id, userMsg);
+    // If the agent is still working, queue this turn on the server. The client
+    // only mirrors the server snapshot; dispatching queued turns is owned by the
+    // server so reloads, multiple tabs, and late run-finish events cannot start
+    // duplicate agent runs from stale client state.
+    if (this.conversationHasActiveWork(id)) {
+      void enqueuePendingTurn(id, text)
+        .then((snapshot) => {
+          runInAction(() => this.setQueueSnapshot(snapshot));
+        })
+        .catch((error: unknown) => {
+          runInAction(() => {
+            this.loadError = error instanceof Error ? error.message : String(error);
+          });
+        });
       return;
     }
+    const userMsg: ChatMessage = { id: nextWorkspaceId("u"), role: "user", text, time: nowLabel() };
     this.dispatchUserTurn(id, userMsg);
   }
 
@@ -757,52 +820,64 @@ export class WorkspaceStore implements Workspace {
   }
 
   pendingMessageCount(id: string): number {
-    return this.pendingMessages.count(id);
+    return this.queueSnapshot(id).messages.length;
   }
 
   /** Queued (not-yet-dispatched) user turns for a conversation, in send order. */
   queuedMessages(id: string): readonly ChatMessage[] {
-    return this.pendingMessages.list(id);
+    return this.queueSnapshot(id).messages;
   }
 
   /** Cancel a queued turn before it runs. */
   cancelQueuedMessage(id: string, messageId: string): void {
-    this.pendingMessages.remove(id, messageId);
+    void cancelPendingTurn(id, messageId)
+      .then((snapshot) => {
+        runInAction(() => this.setQueueSnapshot(snapshot));
+      })
+      .catch((error: unknown) => {
+        runInAction(() => {
+          this.loadError = error instanceof Error ? error.message : String(error);
+        });
+      });
   }
 
   sendQueuedMessageNow(id: string): boolean {
-    const next = this.pendingMessages.takeNext(id);
-    if (!next) {
+    if (this.pendingMessageCount(id) === 0) {
       return false;
     }
-    this.dispatchUserTurn(id, next);
+    void sendNextPendingTurn(id)
+      .then((snapshot) => {
+        runInAction(() => this.setQueueSnapshot(snapshot));
+        void this.refreshBackgroundRuns();
+      })
+      .catch((error: unknown) => {
+        runInAction(() => {
+          this.loadError = error instanceof Error ? error.message : String(error);
+        });
+      });
     return true;
   }
 
   /** Whether the conversation's queue is paused (drains held until resumed). */
   isQueuePaused(id: string): boolean {
-    return this.pendingMessages.isPaused(id);
+    return this.queueSnapshot(id).paused;
   }
 
-  /** Pause/resume the conversation's queue. Resuming drains the next turn now
-   *  (when no run is active), so the queue picks back up immediately. */
+  /** Pause/resume the server-owned queue. Resuming asks the server to drain; the
+   *  client never dispatches queued turns itself. */
   setQueuePaused(id: string, paused: boolean): void {
-    this.pendingMessages.setPaused(id, paused);
-    if (!paused) {
-      this.drainPendingMessages(id);
-    }
-  }
-
-  /** Dispatch the next queued user message for a conversation, if any. Called
-   *  when a run settles so queued turns run in order without interrupting.
-   *  Skipped while the queue is paused. */
-  private drainPendingMessages(id: string): void {
-    if (this.runs.has(id) || this.pendingMessages.isPaused(id)) {
-      return;
-    }
-    if (this.pendingMessages.has(id)) {
-      this.sendQueuedMessageNow(id);
-    }
+    void setServerPendingTurnQueuePaused(id, paused)
+      .then((snapshot) => {
+        runInAction(() => this.setQueueSnapshot(snapshot));
+        if (!paused) {
+          void this.refreshBackgroundRuns();
+        }
+      })
+      .catch((error: unknown) => {
+        runInAction(() => {
+          this.loadError = error instanceof Error ? error.message : String(error);
+        });
+      });
   }
 
   /** Update this conversation's compaction preferences (auto on/off + window
@@ -1024,20 +1099,16 @@ export class WorkspaceStore implements Workspace {
         if (this.runs.get(id) === runHandle) {
           this.runs.delete(id);
         }
-        // Dispatch the next queued turn once this run is fully cleared. Skip if
-        // the run was cancelled (the user stopped, or a newer turn took over).
-        if (!runHandle.canceled) {
-          this.drainPendingMessages(id);
-        }
+        this.refreshQueue(id);
       });
   }
 
   stopRun(id: string): void {
-    // Stopping the run also pauses the queue (only meaningful when something is
-    // queued) so a pending turn doesn't immediately start the next run — the
-    // user explicitly hit stop. They resume from the queued-messages header.
-    if (this.pendingMessages.has(id)) {
-      this.pendingMessages.setPaused(id, true);
+    // Stopping the run also pauses the server-owned queue (only meaningful when
+    // something is queued) so a pending turn doesn't immediately start after the
+    // user explicitly hit stop.
+    if (this.pendingMessageCount(id) > 0) {
+      this.setQueuePaused(id, true);
     }
     const active = this.runs.get(id);
     if (active) {

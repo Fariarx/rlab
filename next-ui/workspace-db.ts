@@ -52,6 +52,20 @@ CREATE TABLE IF NOT EXISTS composer_drafts (
   conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
   data TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS pending_queue_state (
+  conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+  paused INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS pending_turns (
+  id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  position INTEGER NOT NULL,
+  created_at_ms INTEGER NOT NULL,
+  state TEXT NOT NULL DEFAULT 'queued',
+  run_id TEXT,
+  data TEXT NOT NULL,
+  CHECK (state IN ('queued', 'dispatching'))
+);
 CREATE TABLE IF NOT EXISTS kv (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -66,6 +80,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_project_position ON conversa
 CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, position);
 CREATE INDEX IF NOT EXISTS idx_messages_conversation_desc ON messages(conversation_id, position DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_conversation_position ON messages(conversation_id, position);
+CREATE INDEX IF NOT EXISTS idx_pending_turns_conversation ON pending_turns(conversation_id, state, position);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_turns_conversation_position ON pending_turns(conversation_id, position);
 `;
 
 function tableExists(handle: DatabaseHandle, name: string): boolean {
@@ -86,12 +102,12 @@ function assertForeignKeyIntegrity(handle: DatabaseHandle): void {
 }
 
 function assertCurrentSchema(handle: DatabaseHandle): void {
-  for (const table of ["projects", "conversations", "messages", "composer_drafts", "kv"]) {
+  for (const table of ["projects", "conversations", "messages", "composer_drafts", "pending_queue_state", "pending_turns", "kv"]) {
     if (!tableExists(handle, table)) {
       throw new Error(`Workspace database schema is incomplete: missing ${table}. Reset the workspace database.`);
     }
   }
-  for (const table of ["conversations", "messages", "composer_drafts"]) {
+  for (const table of ["conversations", "messages", "composer_drafts", "pending_queue_state", "pending_turns"]) {
     if (!tableHasForeignKeys(handle, table)) {
       throw new Error(`Workspace database schema is outdated: ${table} has no declared foreign keys. Reset the workspace database.`);
     }
@@ -179,6 +195,32 @@ type ProjectMeta = Omit<Project, "conversations">;
 type MessageRow = { readonly conversationId: string; readonly data: string };
 
 export type WorkspaceDbMutation = WorkspaceMutation;
+
+export interface PendingTurnRecord {
+  readonly id: string;
+  readonly conversationId: string;
+  readonly createdAtMs: number;
+  readonly message: ChatMessage;
+  readonly origin: string;
+}
+
+export interface PendingTurnQueueSnapshot {
+  readonly conversationId: string;
+  readonly paused: boolean;
+  readonly messages: readonly ChatMessage[];
+}
+
+interface PendingTurnStoredData {
+  readonly message: ChatMessage;
+  readonly origin: string;
+}
+
+type PendingTurnRow = {
+  readonly id: string;
+  readonly conversationId: string;
+  readonly createdAtMs: number;
+  readonly data: string;
+};
 
 export class WorkspaceRevisionConflictError extends Error {
   readonly expectedRevision: number;
@@ -363,6 +405,33 @@ function ensureConversationExists(handle: DatabaseHandle, conversationId: string
   if (!conversationExists(handle, conversationId)) {
     throw new Error(`Conversation ${conversationId} does not exist.`);
   }
+}
+
+function pendingTurnFromRow(row: PendingTurnRow): PendingTurnRecord {
+  const data = JSON.parse(row.data) as PendingTurnStoredData;
+  return {
+    id: row.id,
+    conversationId: row.conversationId,
+    createdAtMs: row.createdAtMs,
+    message: data.message,
+    origin: data.origin,
+  };
+}
+
+function pendingQueuePaused(handle: DatabaseHandle, conversationId: string): boolean {
+  const row = handle.prepare("SELECT paused FROM pending_queue_state WHERE conversation_id = ?").get(conversationId) as { paused: number } | undefined;
+  return row?.paused === 1;
+}
+
+function setPendingTurnQueuePausedInTransaction(handle: DatabaseHandle, conversationId: string, paused: boolean): void {
+  ensureConversationExists(handle, conversationId);
+  handle
+    .prepare("INSERT INTO pending_queue_state(conversation_id, paused) VALUES(?, ?) ON CONFLICT(conversation_id) DO UPDATE SET paused = excluded.paused")
+    .run(conversationId, paused ? 1 : 0);
+}
+
+function nextPendingTurnPosition(handle: DatabaseHandle, conversationId: string): number {
+  return (handle.prepare("SELECT COALESCE(MAX(position), -1) + 1 AS next FROM pending_turns WHERE conversation_id = ?").get(conversationId) as { next: number }).next;
 }
 
 function upsertProjectInTransaction(handle: DatabaseHandle, project: ProjectMeta, insertAtFront = false): void {
@@ -614,6 +683,110 @@ export function updateConversationData(conversation: ConversationSummary): void 
   transaction(() => {
     updateConversationInTransaction(handle, conversation);
     bumpWorkspaceRevisionInTransaction(handle);
+  });
+}
+
+export function readPendingTurnQueue(conversationId: string): PendingTurnQueueSnapshot {
+  const handle = database();
+  ensureConversationExists(handle, conversationId);
+  const rows = handle
+    .prepare("SELECT id, conversation_id AS conversationId, created_at_ms AS createdAtMs, data FROM pending_turns WHERE conversation_id = ? AND state = 'queued' ORDER BY position")
+    .all(conversationId) as PendingTurnRow[];
+  return {
+    conversationId,
+    paused: pendingQueuePaused(handle, conversationId),
+    messages: rows.map((row) => pendingTurnFromRow(row).message),
+  };
+}
+
+export function enqueuePendingTurn(record: PendingTurnRecord): PendingTurnQueueSnapshot {
+  const handle = database();
+  transaction(() => {
+    ensureConversationExists(handle, record.conversationId);
+    const data: PendingTurnStoredData = { message: record.message, origin: record.origin };
+    handle
+      .prepare("INSERT INTO pending_turns(id, conversation_id, position, created_at_ms, state, run_id, data) VALUES(?, ?, ?, ?, 'queued', NULL, ?)")
+      .run(record.id, record.conversationId, nextPendingTurnPosition(handle, record.conversationId), record.createdAtMs, JSON.stringify(data));
+    bumpWorkspaceRevisionInTransaction(handle);
+  });
+  return readPendingTurnQueue(record.conversationId);
+}
+
+export function removePendingTurn(conversationId: string, messageId: string): PendingTurnQueueSnapshot {
+  const handle = database();
+  transaction(() => {
+    ensureConversationExists(handle, conversationId);
+    handle.prepare("DELETE FROM pending_turns WHERE conversation_id = ? AND id = ? AND state = 'queued'").run(conversationId, messageId);
+    bumpWorkspaceRevisionInTransaction(handle);
+  });
+  return readPendingTurnQueue(conversationId);
+}
+
+export function setPendingTurnQueuePaused(conversationId: string, paused: boolean): PendingTurnQueueSnapshot {
+  const handle = database();
+  transaction(() => {
+    setPendingTurnQueuePausedInTransaction(handle, conversationId, paused);
+    bumpWorkspaceRevisionInTransaction(handle);
+  });
+  return readPendingTurnQueue(conversationId);
+}
+
+export function claimNextPendingTurn(conversationId: string, runId: string): PendingTurnRecord | null {
+  const handle = database();
+  let claimed: PendingTurnRecord | null = null;
+  transaction(() => {
+    ensureConversationExists(handle, conversationId);
+    if (pendingQueuePaused(handle, conversationId)) {
+      return;
+    }
+    const row = handle
+      .prepare("SELECT id, conversation_id AS conversationId, created_at_ms AS createdAtMs, data FROM pending_turns WHERE conversation_id = ? AND state = 'queued' ORDER BY position LIMIT 1")
+      .get(conversationId) as PendingTurnRow | undefined;
+    if (!row) {
+      return;
+    }
+    const result = handle.prepare("UPDATE pending_turns SET state = 'dispatching', run_id = ? WHERE id = ? AND state = 'queued'").run(runId, row.id);
+    if (result.changes === 1) {
+      claimed = pendingTurnFromRow(row);
+      bumpWorkspaceRevisionInTransaction(handle);
+    }
+  });
+  return claimed;
+}
+
+export function deletePendingTurn(id: string): void {
+  const handle = database();
+  transaction(() => {
+    handle.prepare("DELETE FROM pending_turns WHERE id = ?").run(id);
+    bumpWorkspaceRevisionInTransaction(handle);
+  });
+}
+
+export function releasePendingTurn(id: string, options: { readonly pause: boolean }): PendingTurnRecord | null {
+  const handle = database();
+  let released: PendingTurnRecord | null = null;
+  transaction(() => {
+    const row = handle.prepare("SELECT id, conversation_id AS conversationId, created_at_ms AS createdAtMs, data FROM pending_turns WHERE id = ?").get(id) as PendingTurnRow | undefined;
+    if (!row) {
+      return;
+    }
+    handle.prepare("UPDATE pending_turns SET state = 'queued', run_id = NULL WHERE id = ?").run(id);
+    if (options.pause) {
+      setPendingTurnQueuePausedInTransaction(handle, row.conversationId, true);
+    }
+    released = pendingTurnFromRow(row);
+    bumpWorkspaceRevisionInTransaction(handle);
+  });
+  return released;
+}
+
+export function resetDispatchingPendingTurns(): void {
+  const handle = database();
+  transaction(() => {
+    const result = handle.prepare("UPDATE pending_turns SET state = 'queued', run_id = NULL WHERE state = 'dispatching'").run();
+    if (result.changes > 0) {
+      bumpWorkspaceRevisionInTransaction(handle);
+    }
   });
 }
 

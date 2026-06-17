@@ -277,7 +277,7 @@ export const AgentPicker = observer(function AgentPicker({
                 <Switch
                   checked={checked}
                   onChange={(event) => setToolEnabled(tool.id, event.target.checked)}
-                  inputProps={{ "aria-label": t("chatToolToggle", { tool: title }) }}
+                  slotProps={{ input: { "aria-label": t("chatToolToggle", { tool: title }) } }}
                 />
               </Stack>
             );

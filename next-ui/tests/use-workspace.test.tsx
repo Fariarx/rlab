@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { observer } from "mobx-react-lite";
 import { useWorkspace } from "../src/components/workspace/use-workspace";
+import type { ChatMessage } from "../src/domain/agent-types";
 import { buildInitialWorkspaceState, type WorkspaceState } from "../src/lib/workspace-state";
 import { applyWorkspaceMutationsToState, type WorkspaceMutation } from "../src/lib/workspace-mutations";
 
@@ -136,6 +137,34 @@ interface RunRequestRecord {
   readonly mode?: string;
 }
 
+interface TestPendingQueue {
+  paused: boolean;
+  messages: ChatMessage[];
+}
+
+interface QueueRequestRecord {
+  readonly action?: string;
+  readonly conversationId?: string;
+  readonly messageId?: string;
+  readonly paused?: boolean;
+  readonly text?: string;
+}
+
+function queueFor(queues: Map<string, TestPendingQueue>, conversationId: string): TestPendingQueue {
+  const existing = queues.get(conversationId);
+  if (existing) {
+    return existing;
+  }
+  const created: TestPendingQueue = { paused: false, messages: [] };
+  queues.set(conversationId, created);
+  return created;
+}
+
+function queuePayload(queues: Map<string, TestPendingQueue>, conversationId: string) {
+  const queue = queueFor(queues, conversationId);
+  return { queue: { conversationId, paused: queue.paused, messages: queue.messages } };
+}
+
 function applyWorkspaceMutationRequest(state: WorkspaceState, init: RequestInit | undefined): WorkspaceState {
   const payload = JSON.parse(String(init?.body ?? "{}")) as { mutations?: WorkspaceMutation[] };
   return applyWorkspaceMutationsToState(state, payload.mutations ?? []);
@@ -152,7 +181,43 @@ describe("useWorkspace", () => {
   let attachRunRequests: string[] = [];
   let runRequests: RunRequestRecord[] = [];
   let runCancelRequests: Array<{ readonly runId?: string }> = [];
+  let pendingQueues: Map<string, TestPendingQueue>;
+  let queueRequests: QueueRequestRecord[] = [];
   let serverRevision = 1;
+
+  async function handleQueueFetch(url: string, init?: RequestInit): Promise<Response | null> {
+    if (!url.startsWith("/api/queue")) {
+      return null;
+    }
+    if ((!init || init.method === "GET") && url.startsWith("/api/queue?")) {
+      const conversationId = new URL(url, "http://localhost").searchParams.get("conversationId") ?? "";
+      return Response.json(queuePayload(pendingQueues, conversationId));
+    }
+    if (url === "/api/queue" && init?.method === "POST") {
+      const request = JSON.parse(String(init.body ?? "{}")) as QueueRequestRecord;
+      queueRequests.push(request);
+      const conversationId = request.conversationId ?? "";
+      const queue = queueFor(pendingQueues, conversationId);
+      if (request.action === "enqueue") {
+        const message: ChatMessage = {
+          id: `queued-${queue.messages.length + 1}`,
+          role: "user",
+          text: request.text ?? "",
+          time: "12:00",
+        };
+        queue.messages = [...queue.messages, message];
+      } else if (request.action === "cancel" && request.messageId) {
+        queue.messages = queue.messages.filter((message) => message.id !== request.messageId);
+      } else if (request.action === "setPaused") {
+        queue.paused = request.paused === true;
+      } else if (request.action === "sendNext") {
+        queue.paused = false;
+        queue.messages = queue.messages.slice(1);
+      }
+      return Response.json(queuePayload(pendingQueues, conversationId));
+    }
+    return new Response("not found", { status: 404 });
+  }
 
   beforeEach(() => {
     state = buildInitialWorkspaceState();
@@ -160,6 +225,8 @@ describe("useWorkspace", () => {
     attachRunRequests = [];
     runRequests = [];
     runCancelRequests = [];
+    pendingQueues = new Map();
+    queueRequests = [];
     originalLocalStorage = Object.getOwnPropertyDescriptor(window, "localStorage");
     localStorageSetItem = vi.fn();
     Object.defineProperty(window, "localStorage", {
@@ -184,6 +251,10 @@ describe("useWorkspace", () => {
           state = applyWorkspaceMutationRequest(state, init);
           serverRevision += 1;
           return Response.json({ ok: true, revision: serverRevision });
+        }
+        const queueResponse = await handleQueueFetch(url, init);
+        if (queueResponse) {
+          return queueResponse;
         }
         if (url.startsWith("/api/thread?")) {
           const conversationId = new URL(url, "http://localhost").searchParams.get("conversationId") ?? "";
@@ -301,6 +372,10 @@ describe("useWorkspace", () => {
       if (url === "/api/workspace/revision" && (!init || init.method === "GET")) {
         return Response.json({ revision: serverRevision });
       }
+      const queueResponse = await handleQueueFetch(url, init);
+      if (queueResponse) {
+        return queueResponse;
+      }
       if (url.startsWith("/api/thread?")) {
         const conversationId = new URL(url, "http://localhost").searchParams.get("conversationId") ?? "";
         return Response.json({ messages: state.threads[conversationId] ?? [] });
@@ -354,6 +429,10 @@ describe("useWorkspace", () => {
       if (url === "/api/workspace/mutations" && init?.method === "POST") {
         state = applyWorkspaceMutationRequest(state, init);
         return Response.json({ ok: true });
+      }
+      const queueResponse = await handleQueueFetch(url, init);
+      if (queueResponse) {
+        return queueResponse;
       }
       return new Response("not found", { status: 404 });
     });
@@ -543,6 +622,10 @@ describe("useWorkspace", () => {
         state = applyWorkspaceMutationRequest(state, init);
         return Response.json({ ok: true });
       }
+      const queueResponse = await handleQueueFetch(url, init);
+      if (queueResponse) {
+        return queueResponse;
+      }
       if (url === "/api/runs") {
         return Response.json(activeRunsPayloadFromState(state));
       }
@@ -615,6 +698,10 @@ describe("useWorkspace", () => {
         state = applyWorkspaceMutationRequest(state, init);
         serverRevision = 9;
         return Response.json({ ok: true, revision: serverRevision });
+      }
+      const queueResponse = await handleQueueFetch(url, init);
+      if (queueResponse) {
+        return queueResponse;
       }
       if (url === "/api/runs") {
         return Response.json(activeRunsPayloadFromState(state));
@@ -699,6 +786,10 @@ describe("useWorkspace", () => {
         state = applyWorkspaceMutationRequest(state, init);
         serverRevision += 1;
         return Response.json({ ok: true, revision: serverRevision });
+      }
+      const queueResponse = await handleQueueFetch(url, init);
+      if (queueResponse) {
+        return queueResponse;
       }
       if (url === "/api/runs") {
         return Response.json(activeRunsPayloadFromState(state));
@@ -870,6 +961,10 @@ describe("useWorkspace", () => {
         state = applyWorkspaceMutationRequest(state, init);
         return Response.json({ ok: true });
       }
+      const queueResponse = await handleQueueFetch(url, init);
+      if (queueResponse) {
+        return queueResponse;
+      }
       if (url === "/api/runs") {
         activeRunReads += 1;
         return Response.json(activeRunsPayloadFromState(state));
@@ -1020,6 +1115,10 @@ describe("useWorkspace", () => {
         state = applyWorkspaceMutationRequest(state, init);
         return Response.json({ ok: true });
       }
+      const queueResponse = await handleQueueFetch(url, init);
+      if (queueResponse) {
+        return queueResponse;
+      }
       if (url === "/api/runs") {
         return Response.json(activeRunsPayloadFromState(state));
       }
@@ -1134,7 +1233,7 @@ describe("useWorkspace", () => {
     });
   });
 
-  it("uses the latest selected agent for queued messages after switching during a run", async () => {
+  it("queues messages on the server after switching agent during a run", async () => {
     state = {
       ...state,
       chats: state.chats.map((chat) =>
@@ -1146,10 +1245,6 @@ describe("useWorkspace", () => {
     const encoder = new TextEncoder();
     const controllers: ReadableStreamDefaultController<Uint8Array>[] = [];
     const encodeEvent = (event: unknown) => encoder.encode(`${JSON.stringify(event)}\n`);
-    const finishRun = (index: number) => {
-      controllers[index]?.enqueue(encodeEvent({ type: "done" }));
-      controllers[index]?.close();
-    };
     vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url === "/api/workspace" && (!init || init.method === "GET")) {
@@ -1158,6 +1253,10 @@ describe("useWorkspace", () => {
       if (url === "/api/workspace/mutations" && init?.method === "POST") {
         state = applyWorkspaceMutationRequest(state, init);
         return Response.json({ ok: true });
+      }
+      const queueResponse = await handleQueueFetch(url, init);
+      if (queueResponse) {
+        return queueResponse;
       }
       if (url === "/api/runs") {
         return Response.json(activeRunsPayloadFromState(state));
@@ -1198,55 +1297,16 @@ describe("useWorkspace", () => {
     screen.getByRole("button", { name: "agent-claude" }).click();
     screen.getByRole("button", { name: "send" }).click();
     await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("running"));
+    await waitFor(() => expect(screen.getByTestId("queued")).toHaveTextContent("1"));
     expect(runRequests).toHaveLength(1);
-
-    await act(async () => {
-      finishRun(0);
+    expect(queueRequests.at(-1)).toMatchObject({
+      action: "enqueue",
+      conversationId: "chat-2",
+      text: "Persist this message",
     });
-
-    await waitFor(() => expect(runRequests).toHaveLength(2));
-    expect(runRequests[1]).toMatchObject({
-      agent: "claude-code",
-      prompt: expect.stringContaining("This is a continuing conversation"),
-    });
-    expect(runRequests[1]?.resume).toBeUndefined();
-    expect(state.chats.find((chat) => chat.id === "chat-2")?.agentSessions).toEqual({
-      "claude-code": "claude-code-session-2",
-      codex: "codex-session-1",
-    });
-
-    await act(async () => {
-      finishRun(1);
-    });
-    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("done"));
-
-    screen.getByRole("button", { name: "agent-codex" }).click();
-    screen.getByRole("button", { name: "send" }).click();
-    await waitFor(() => expect(runRequests).toHaveLength(3));
-    expect(runRequests[2]).toMatchObject({
-      agent: "codex",
-      prompt: "Persist this message",
-      resume: "codex-session-1",
-    });
-
-    await act(async () => {
-      finishRun(2);
-    });
-    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("done"));
-
-    screen.getByRole("button", { name: "agent-claude" }).click();
-    screen.getByRole("button", { name: "send" }).click();
-    await waitFor(() => expect(runRequests).toHaveLength(4));
-    expect(runRequests[3]).toMatchObject({
-      agent: "claude-code",
-      prompt: "Persist this message",
-      resume: "claude-code-session-2",
-    });
-
-    await act(async () => {
-      finishRun(3);
-    });
-    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("done"));
+    expect(state.chats.find((chat) => chat.id === "chat-2")?.profile?.agent).toBe("claude-code");
+    expect(state.threads["chat-2"].filter((message) => message.role === "user" && message.text === "Persist this message")).toHaveLength(1);
+    expect(controllers).toHaveLength(1);
   });
 
   it("keeps queued messages paused after stop until the user sends one now", async () => {
@@ -1267,6 +1327,10 @@ describe("useWorkspace", () => {
       if (url === "/api/workspace/mutations" && init?.method === "POST") {
         state = applyWorkspaceMutationRequest(state, init);
         return Response.json({ ok: true });
+      }
+      const queueResponse = await handleQueueFetch(url, init);
+      if (queueResponse) {
+        return queueResponse;
       }
       if (url === "/api/runs") {
         return Response.json(activeRunsPayloadFromState(state));
@@ -1302,18 +1366,15 @@ describe("useWorkspace", () => {
 
     screen.getByRole("button", { name: "stop" }).click();
     await waitFor(() => expect(runCancelRequests).toHaveLength(1));
+    await waitFor(() => expect(queueRequests).toContainEqual(expect.objectContaining({ action: "setPaused", conversationId: "chat-2", paused: true })));
     expect(screen.getByTestId("queued")).toHaveTextContent("1");
     expect(runRequests).toHaveLength(1);
 
     screen.getByRole("button", { name: "send-queued-now" }).click();
-    await waitFor(() => expect(runRequests).toHaveLength(2));
-    expect(screen.getByTestId("queued")).toHaveTextContent("0");
-    expect(runRequests[1]).toMatchObject({
-      agent: "codex",
-      prompt: "Persist this message",
-      resume: "codex-session-1",
-    });
-    expect((state.threads["chat-2"] ?? []).filter((message) => message.role === "user" && message.text === "Persist this message")).toHaveLength(2);
+    await waitFor(() => expect(queueRequests).toContainEqual(expect.objectContaining({ action: "sendNext", conversationId: "chat-2" })));
+    await waitFor(() => expect(screen.getByTestId("queued")).toHaveTextContent("0"));
+    expect(runRequests).toHaveLength(1);
+    expect((state.threads["chat-2"] ?? []).filter((message) => message.role === "user" && message.text === "Persist this message")).toHaveLength(1);
   });
 
   it("derives unrestricted run access from the default chat agent mode", async () => {
@@ -1443,6 +1504,10 @@ describe("useWorkspace", () => {
       if (url === "/api/workspace/mutations" && init?.method === "POST") {
         state = applyWorkspaceMutationRequest(state, init);
         return Response.json({ ok: true });
+      }
+      const queueResponse = await handleQueueFetch(url, init);
+      if (queueResponse) {
+        return queueResponse;
       }
       if (url === "/api/runs") {
         return Response.json({ runs: [liveRun] });
@@ -1592,6 +1657,10 @@ describe("useWorkspace", () => {
         state = applyWorkspaceMutationRequest(state, init);
         return Response.json({ ok: true });
       }
+      const queueResponse = await handleQueueFetch(url, init);
+      if (queueResponse) {
+        return queueResponse;
+      }
       if (url === "/api/runs") {
         return Response.json(activeRunsPayloadFromState(state));
       }
@@ -1662,6 +1731,10 @@ describe("useWorkspace", () => {
       if (url === "/api/workspace/mutations" && init?.method === "POST") {
         state = applyWorkspaceMutationRequest(state, init);
         return Response.json({ ok: true });
+      }
+      const queueResponse = await handleQueueFetch(url, init);
+      if (queueResponse) {
+        return queueResponse;
       }
       if (url === "/api/runs") {
         activeRunReads += 1;
