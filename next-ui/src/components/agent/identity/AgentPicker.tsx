@@ -146,7 +146,7 @@ export const AgentPicker = observer(function AgentPicker({
 
       <Divider />
 
-      <Box sx={{ px: 2.5, pt: 1.25, pb: 1, maxHeight: 360, overflow: "auto" }}>
+      <Box sx={{ px: 2.5, pt: 1.25, pb: 1, minHeight: 180, maxHeight: 360, overflow: "auto" }}>
         {detectionError && (
           <Alert
             severity="error"
@@ -247,7 +247,17 @@ export const AgentPicker = observer(function AgentPicker({
           <Typography sx={{ fontSize: "0.82rem", fontWeight: 700, color: "text.primary" }}>{t("chatTools")}</Typography>
           <Typography sx={{ fontSize: "0.72rem", color: "text.secondary" }}>{t("chatToolsHint")}</Typography>
         </Box>
-        <Stack spacing={0.75}>
+        <Stack
+          divider={
+            <Divider
+              flexItem
+              sx={{
+                mx: 0,
+                borderColor: (theme) => theme.custom.borders.subtle,
+              }}
+            />
+          }
+        >
           {RLAB_CHAT_TOOLS.map((tool) => {
             const checked = toolEnabled(tool.id);
             const labels = CHAT_TOOL_LABEL_KEYS[tool.id];
@@ -261,11 +271,8 @@ export const AgentPicker = observer(function AgentPicker({
                   alignItems: "center",
                   justifyContent: "space-between",
                   minWidth: 0,
-                  px: 1,
-                  py: 0.75,
-                  borderRadius: (theme) => `${theme.custom.radii.md}px`,
-                  backgroundColor: (theme) => theme.custom.surfaces.s2,
-                  border: (theme) => `1px solid ${theme.custom.borders.subtle}`,
+                  px: 0,
+                  py: 0.9,
                 }}
               >
                 <Box sx={{ minWidth: 0 }}>
@@ -319,7 +326,7 @@ function AgentOptionGroup({
     return null;
   }
   return (
-    <Box sx={{ px: 2.5, pt: 1, pb: 0.5 }}>
+    <Box sx={{ px: 2.5, pt: 1, pb: 1.25 }}>
       <Typography variant="microLabel" sx={{ color: "text.secondary", display: "block", mb: 0.75 }}>
         {label}
       </Typography>

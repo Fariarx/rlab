@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { AgentProfile, ChatMessage, ComposerAttachmentDraft, ConversationSummary, Project } from "../src/components/agent";
 import {
   archiveConversationState,
+  buildForkConversationTitle,
   buildIdleConversation,
   cloneComposerDraft,
   composerDraftMutation,
@@ -78,6 +79,14 @@ function attachment(id: string): ComposerAttachmentDraft {
 }
 
 describe("workspace-conversation-model", () => {
+  it("builds numbered fork titles without nesting legacy prefixes", () => {
+    expect(buildForkConversationTitle("Release notes")).toBe("Fork #1: Release notes");
+    expect(buildForkConversationTitle("Форк: Release notes")).toBe("Fork #1: Release notes");
+    expect(buildForkConversationTitle("Fork: Release notes")).toBe("Fork #1: Release notes");
+    expect(buildForkConversationTitle("Fork #1: Release notes")).toBe("Fork #2: Release notes");
+    expect(buildForkConversationTitle("Fork #12: Release notes")).toBe("Fork #13: Release notes");
+  });
+
   it("builds idle conversations from an agent profile", () => {
     expect(buildIdleConversation({ id: "chat-1", title: "New", snippet: "Empty", time: "12:00", updatedAtMs: 1000, profile })).toEqual({
       id: "chat-1",

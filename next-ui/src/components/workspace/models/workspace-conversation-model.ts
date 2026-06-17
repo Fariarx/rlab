@@ -6,6 +6,19 @@ import { conversationPreviewSnippet } from "../../../lib/conversation-preview";
 import { cloneMessageForFork, settleThreadLiveBlocks, snippetFromStateThread } from "./workspace-run-state";
 import { findConversation, patchConversation, serializableEqual, workspaceConversations } from "./workspace-state-utils";
 
+const FORK_TITLE_PREFIX_PATTERN = /^(?:Fork|Форк)(?:\s*#(\d+))?\s*:\s*(.+)$/i;
+
+export function buildForkConversationTitle(sourceTitle: string): string {
+  const trimmed = sourceTitle.trim();
+  const match = FORK_TITLE_PREFIX_PATTERN.exec(trimmed);
+  if (!match) {
+    return `Fork #1: ${trimmed}`;
+  }
+  const explicitIndex = match[1] ? Number.parseInt(match[1], 10) : null;
+  const nextIndex = explicitIndex && Number.isFinite(explicitIndex) ? explicitIndex + 1 : 1;
+  return `Fork #${nextIndex}: ${match[2].trim()}`;
+}
+
 export interface BuildIdleConversationInput {
   readonly id: string;
   readonly title: string;

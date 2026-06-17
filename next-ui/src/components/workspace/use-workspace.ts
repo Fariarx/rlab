@@ -31,6 +31,7 @@ import {
 import {
   archiveConversationState,
   type ArchiveConversationStateResult,
+  buildForkConversationTitle,
   composerDraftMutation,
   createProjectConversationState,
   createProjectWithConversationState,
@@ -783,10 +784,9 @@ export class WorkspaceStore implements Workspace {
   }
 
   sendMessage(id: string, text: string): void {
-    // If the agent is still working, queue this turn on the server. The client
-    // only mirrors the server snapshot; dispatching queued turns is owned by the
-    // server so reloads, multiple tabs, and late run-finish events cannot start
-    // duplicate agent runs from stale client state.
+    // If the agent is still working, queue this turn on the server. The server
+    // owns queued-turn dispatch: enqueue never starts a run by itself, which keeps
+    // a late queue request from racing ahead of the active /api/run registration.
     if (this.conversationHasActiveWork(id)) {
       void enqueuePendingTurn(id, text)
         .then((snapshot) => {
@@ -800,12 +800,15 @@ export class WorkspaceStore implements Workspace {
       return;
     }
     const userMsg: ChatMessage = { id: nextWorkspaceId("u"), role: "user", text, time: nowLabel() };
+    if (this.isQueuePaused(id) && this.pendingMessageCount(id) === 0) {
+      this.setQueuePaused(id, false);
+    }
     this.dispatchUserTurn(id, userMsg);
   }
 
-  /** Append a user turn to the thread and start its run. Shared by immediate
-   *  sends and by draining the pending queue, so a queued turn enters the thread
-   *  exactly when it dispatches — never before. */
+  /** Append a user turn to the thread and start its run. Immediate sends and
+   *  explicit retry/edit flows use this path. Queued turns do not: they are
+   *  appended by the server only when the queue drain claims them. */
   private dispatchUserTurn(id: string, userMsg: ChatMessage): void {
     const result: { current: AppendUserMessageStateResult | null } = { current: null };
     this.setState((current) => {
@@ -1165,11 +1168,10 @@ export class WorkspaceStore implements Workspace {
       }
 
       const forkId = nextWorkspaceId("chat");
-      const locale = current.settings.general.locale;
       forkResult.current = forkConversationState({
         conversationId: id,
         forkId,
-        forkTitle: truncate(translate(locale, "forkedConversationTitle", { title: source.title }), 80),
+        forkTitle: truncate(buildForkConversationTitle(source.title), 80),
         messageId,
         nextId: nextWorkspaceId,
         state: current,

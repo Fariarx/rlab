@@ -365,7 +365,7 @@ describe("Message", () => {
     renderMessage(message, undefined, { agent: "codex", model: "gpt-5.5", reasoning: "default", mode: "default" });
 
     expect(screen.getByText("Агент")).toBeInTheDocument();
-    expect(screen.getByText("Codex · GPT-5.5")).toBeInTheDocument();
+    expect(screen.getByText("codex/gpt-5.5")).toBeInTheDocument();
   });
 
   it("renders read-only image tool calls as openable images instead of tool cards", () => {

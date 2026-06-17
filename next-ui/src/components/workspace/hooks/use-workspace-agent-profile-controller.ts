@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import {
   DEFAULT_AGENT_OPTION_ID,
+  agentProfileEquals,
   getAgent,
   normalizeAgentProfile,
   type AgentCliInfo,
@@ -66,18 +67,26 @@ export function useWorkspaceAgentProfileController({
   t,
 }: UseWorkspaceAgentProfileControllerInput): UseWorkspaceAgentProfileControllerResult {
   const lastSyncedConversationIdRef = useRef<string | null>(null);
+  const userPickedConversationIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!selected) {
       lastSyncedConversationIdRef.current = null;
+      userPickedConversationIdRef.current = null;
       setProfile(defaultProfile);
       return;
     }
+    const selectedProfile = conversationProfile(selected);
     if (lastSyncedConversationIdRef.current !== selected.id) {
       lastSyncedConversationIdRef.current = selected.id;
-      setProfile(conversationProfile(selected));
+      userPickedConversationIdRef.current = null;
+      setProfile(selectedProfile);
+      return;
     }
-  }, [defaultProfile, selected, setProfile]);
+    if (userPickedConversationIdRef.current !== selected.id && !agentProfileEquals(profile, selectedProfile)) {
+      setProfile(selectedProfile);
+    }
+  }, [defaultProfile, profile, selected, setProfile]);
 
   const supportedModes = useMemo(
     () =>
@@ -92,6 +101,7 @@ export function useWorkspaceAgentProfileController({
   const updateSelectedProfile = useCallback((next: AgentProfile) => {
     setProfile(next);
     if (selectedId) {
+      userPickedConversationIdRef.current = selectedId;
       setConversationProfile(selectedId, next);
     }
   }, [selectedId, setConversationProfile, setProfile]);

@@ -99,6 +99,9 @@ import { useWorkspaceConversationActions } from "./hooks/use-workspace-conversat
 import { useWorkspaceAgentProfileController } from "./hooks/use-workspace-agent-profile-controller";
 import { useWorkspaceLoadErrorToast } from "./hooks/use-workspace-load-error-toast";
 import { useCommandPaletteShortcut } from "./hooks/use-command-palette-shortcut";
+import { useAppStatusFavicon } from "./hooks/use-app-status-favicon";
+import { appendConversationErrorNotice } from "../agent/conversation/conversation-status-notice-model";
+import { workspaceAttentionStatus } from "./models/workspace-attention-status-model";
 
 const AGENT_AUTO_CONFIRM_AGENTS = new Set(["claude-code", "codex", "gemini"]);
 
@@ -203,6 +206,7 @@ export const WorkspacePageView = observer(function WorkspacePageView({
   const showTerminal = ws.settings.appearance.showTerminal;
   const selected = ws.find(ws.selectedId);
   const messages = ws.threads[ws.selectedId] ?? [];
+  const displayedMessages = useMemo(() => appendConversationErrorNotice(selected, messages, t("conversationErrorNotice")), [messages, selected, t]);
   const selectedThreadLoaded = selected ? ws.isThreadLoaded(selected.id) : false;
   const persistConversationView = useCallback((conversationId: string, next: ConversationView) => {
     ws.setConversationView(conversationId, next);
@@ -246,6 +250,8 @@ export const WorkspacePageView = observer(function WorkspacePageView({
     toast,
   });
   const conversations = useMemo(() => workspaceConversations({ chats: ws.chats, projects: ws.projects }), [ws.chats, ws.projects]);
+  const appAttentionStatus = useMemo(() => workspaceAttentionStatus(conversations), [conversations]);
+  useAppStatusFavicon(appAttentionStatus, ws.settings.appearance.reduceMotion);
   const runNotifications = useRunNotifications({
     conversations,
     selectedId: ws.selectedId,
@@ -773,7 +779,7 @@ export const WorkspacePageView = observer(function WorkspacePageView({
                   <Stack aria-busy="true" data-testid="conversation-thread-loading" sx={{ height: "100%", justifyContent: "center", alignItems: "center", px: THREAD_PADDING_X }}>
                     <TypingDots />
                   </Stack>
-                ) : messages.length === 0 ? (
+                ) : displayedMessages.length === 0 ? (
                   <Stack sx={{ height: "100%", justifyContent: "center", alignItems: "center", px: THREAD_PADDING_X }}>
                     <EmptyState
                       icon={<ChatBubbleOutlineIcon />}
@@ -784,7 +790,7 @@ export const WorkspacePageView = observer(function WorkspacePageView({
                 ) : (
                   <Conversation
                     key={`${ws.selectedId}-${runKey}`}
-                    messages={messages}
+                    messages={displayedMessages}
                     typing={selected.status === "running" && messages[messages.length - 1]?.role === "user"}
                     actions={messageActions}
                     agentProfile={conversationProfile(selected)}

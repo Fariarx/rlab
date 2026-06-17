@@ -27,7 +27,10 @@ describe("message-display-model", () => {
 
   it("builds compact agent profile labels", () => {
     expect(agentMessageProfileLabel(undefined)).toBeNull();
-    expect(agentMessageProfileLabel({ agent: "codex", model: "default", reasoning: "default", mode: "default" })).toBe("Codex · Default");
-    expect(agentMessageProfileLabel({ agent: "codex", model: "gpt-5.5", reasoning: "high", mode: "default" })).toBe("Codex · GPT-5.5 · high");
+    expect(agentMessageProfileLabel({ agent: "codex", model: "default", reasoning: "default", mode: "default" })).toBe("codex");
+    expect(agentMessageProfileLabel({ agent: "codex", model: "gpt-5.5", reasoning: "high", mode: "default" })).toBe("codex/gpt-5.5/high");
+    expect(agentMessageProfileLabel({ agent: "opencode", model: "opencode/deepseek-v4-flash-free", reasoning: "medium", mode: "default" })).toBe(
+      "opencode/deepseek-v4-flash-free/medium",
+    );
   });
 });

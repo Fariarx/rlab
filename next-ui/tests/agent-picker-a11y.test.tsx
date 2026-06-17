@@ -146,4 +146,14 @@ describe("AgentPicker a11y", () => {
     expect(screen.getByRole("button", { name: "OpenCode Big Pickle" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Mimo v2.5 Free" })).toBeInTheDocument();
   });
+
+  it("persists per-chat tool switches with the selected agent profile", () => {
+    const onSelect = vi.fn();
+    renderWithTheme(<AgentPicker open value={DEFAULT_PROFILE} onClose={vi.fn()} onSelect={onSelect} />);
+
+    fireEvent.click(screen.getByRole("switch", { name: "TaskWakeup: включён" }));
+    fireEvent.click(screen.getByRole("button", { name: "Применить" }));
+
+    expect(onSelect).toHaveBeenCalledWith(expect.objectContaining({ tools: ["AskUserQuestion", "BrowserPreview"] }));
+  });
 });

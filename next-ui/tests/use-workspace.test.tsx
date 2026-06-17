@@ -1945,7 +1945,7 @@ describe("useWorkspace", () => {
 
     const fork = state.chats.find((chat) => chat.id === state.selectedId);
     expect(fork).toMatchObject({
-      title: "Форк: Release notes для 0.1.69",
+      title: "Fork #1: Release notes для 0.1.69",
       status: "idle",
       agent: "codex",
       profile: { agent: "codex", model: "default", reasoning: "default", mode: "default" },

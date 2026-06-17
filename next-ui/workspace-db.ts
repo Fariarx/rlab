@@ -783,8 +783,12 @@ export function releasePendingTurn(id: string, options: { readonly pause: boolea
 export function resetDispatchingPendingTurns(): void {
   const handle = database();
   transaction(() => {
+    const rows = handle.prepare("SELECT DISTINCT conversation_id AS conversationId FROM pending_turns WHERE state = 'dispatching'").all() as Array<{ conversationId: string }>;
     const result = handle.prepare("UPDATE pending_turns SET state = 'queued', run_id = NULL WHERE state = 'dispatching'").run();
     if (result.changes > 0) {
+      for (const row of rows) {
+        setPendingTurnQueuePausedInTransaction(handle, row.conversationId, true);
+      }
       bumpWorkspaceRevisionInTransaction(handle);
     }
   });

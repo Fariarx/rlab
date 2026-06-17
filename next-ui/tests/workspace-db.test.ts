@@ -129,7 +129,7 @@ describe("workspace-db", () => {
 
     resetDispatchingPendingTurns();
 
-    expect(readPendingTurnQueue("c1").messages.map((message) => message.id)).toEqual(["u-pending"]);
+    expect(readPendingTurnQueue("c1")).toMatchObject({ paused: true, messages: [expect.objectContaining({ id: "u-pending" })] });
   });
 
   it("cascades pending turn queues when a conversation is deleted", () => {

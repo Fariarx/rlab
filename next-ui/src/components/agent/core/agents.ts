@@ -9,6 +9,7 @@ export {
   DEFAULT_PROFILE,
   STATIC_AGENT_CLI_INFO,
   accessModeForAgentProfile,
+  agentProfileCompactLabel,
   agentProfileEquals,
   agentProfileLabels,
   compactCommandForAgent,

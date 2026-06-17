@@ -1,4 +1,4 @@
-import { DEFAULT_AGENT_OPTION_ID, agentProfileLabels, getAgent, resolveAgentReasoningValue, type AgentProfile } from "../core/agents";
+import { agentProfileCompactLabel, type AgentProfile } from "../core/agents";
 import type { AgentBlock } from "../core/types";
 
 export interface DurationUnits {
@@ -25,12 +25,5 @@ export function agentMessageProfileLabel(profile: AgentProfile | undefined): str
   if (!profile) {
     return null;
   }
-  const agent = getAgent(profile.agent);
-  const modelOption = agent.models.find((option) => option.id === profile.model);
-  const modelLabel =
-    profile.model === DEFAULT_AGENT_OPTION_ID
-      ? (modelOption?.value ?? modelOption?.label)
-      : (agentProfileLabels({ ...profile, reasoning: DEFAULT_AGENT_OPTION_ID, mode: "default" })[0] ?? modelOption?.label ?? profile.model);
-  const effort = resolveAgentReasoningValue(profile.agent, profile.reasoning);
-  return [agent.name, modelLabel, effort].filter(Boolean).join(" · ");
+  return agentProfileCompactLabel(profile, "lower");
 }

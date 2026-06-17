@@ -210,6 +210,15 @@ describe("vite agents plugin", () => {
     expect(appendRlabChatToolsPrompt(withTools).match(/<rlab-chat-tools>/g)).toHaveLength(1);
   });
 
+  it("omits disabled rlab chat tools from the agent prompt", () => {
+    const withQuestionOnly = appendRlabChatToolsPrompt("ask before continuing", ["AskUserQuestion"]);
+
+    expect(withQuestionOnly).toContain("<rlab-chat-tools>");
+    expect(withQuestionOnly).toContain("AskUserQuestion supports single-select");
+    expect(withQuestionOnly).not.toContain("TaskWakeup supports delaySeconds/fireAt/cron");
+    expect(withQuestionOnly).not.toContain("BrowserPreview");
+  });
+
   it("keeps browser bridge prompt appended after the rlab chat tool contract", () => {
     const binding: BackgroundRunBinding = {
       conversationId: "chat-browser",
@@ -1460,7 +1469,7 @@ Built-in agents:
     });
   });
 
-  it("registers rlab dynamic tools for Codex app-server threads", () => {
+  it("registers enabled rlab dynamic tools for Codex app-server threads", () => {
     const tools = codexRlabDynamicTools();
     // A single consolidated wakeup tool (schedule/cancel/list); no separate TaskAwait.
     expect(tools).toHaveLength(1);
@@ -1493,6 +1502,19 @@ Built-in agents:
         accessMode: "read-only",
       }).dynamicTools,
     ).toBe(tools);
+
+    expect(codexRlabDynamicTools(["AskUserQuestion"])).toEqual([]);
+    expect(
+      buildCodexThreadParams({
+        agent: "codex",
+        model: "default",
+        reasoning: "default",
+        mode: "default",
+        prompt: "hello",
+        accessMode: "read-only",
+        tools: ["AskUserQuestion"],
+      }).dynamicTools,
+    ).toEqual([]);
   });
 
   it("answers Codex dynamic TaskWakeup calls with tool-call results", () => {
@@ -1509,6 +1531,19 @@ Built-in agents:
         },
       ],
       success: true,
+    });
+
+    expect(
+      codexDynamicToolCallResponse(
+        {
+          tool: "TaskWakeup",
+          arguments: { prompt: "report result", delaySeconds: 60 },
+        },
+        { tools: ["AskUserQuestion"] },
+      ),
+    ).toEqual({
+      contentItems: [{ type: "inputText", text: "TaskWakeup is disabled for this chat." }],
+      success: false,
     });
 
     expect(

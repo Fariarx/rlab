@@ -1,8 +1,7 @@
 import type { HashRoute } from "../../lib/use-hash-route";
 import type { useI18n } from "../../i18n/I18nProvider";
 import {
-  agentProfileLabels,
-  getAgent,
+  agentProfileCompactLabel,
   type AgentProfile,
   type ChatMessage,
   type ConversationStatus,
@@ -34,12 +33,7 @@ export function composerHistoryText(raw: string): string {
 }
 
 export function buildComposerLabel(profile: AgentProfile): string {
-  const agent = getAgent(profile.agent);
-  const labels = agentProfileLabels(profile);
-  if (labels.length === 0) {
-    return agent.name;
-  }
-  return [agent.name, ...labels].join(" · ");
+  return agentProfileCompactLabel(profile, "upper", { includeDefaults: true, includeMode: true });
 }
 
 export function liveModesOrCatalog<T extends { readonly id: string }>(catalogOptions: readonly T[], liveOptions: readonly T[] | undefined): readonly T[] {

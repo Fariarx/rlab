@@ -14,6 +14,8 @@ export interface ComposerTagProps {
   readonly onRemove?: () => void;
   readonly removeLabel?: string;
   readonly testId?: string;
+  /** Attachment chips need the same inner air vertically and horizontally. */
+  readonly equalPadding?: boolean;
 }
 
 /**
@@ -22,7 +24,7 @@ export interface ComposerTagProps {
  * label (width-capped) + an optional accessory and an optional × button, so the
  * floating row reads as a single, consistently styled, wrapping tag strip.
  */
-export function ComposerTag({ icon, label, accessory, onClick, clickAriaLabel, onRemove, removeLabel, testId }: ComposerTagProps) {
+export function ComposerTag({ icon, label, accessory, onClick, clickAriaLabel, onRemove, removeLabel, testId, equalPadding = false }: ComposerTagProps) {
   return (
     <Box
       data-testid={testId}
@@ -32,9 +34,11 @@ export function ComposerTag({ icon, label, accessory, onClick, clickAriaLabel, o
         alignItems: "center",
         gap: 0.5,
         maxWidth: 220,
-        height: 28,
+        height: equalPadding ? "auto" : 28,
+        minHeight: equalPadding ? 32 : undefined,
         pl: 0.875,
         pr: onRemove ? 0.25 : 0.875,
+        py: equalPadding ? 0.875 : 0,
         flex: "0 0 auto",
         pointerEvents: "auto",
         borderRadius: (t) => `${t.custom.radii.md}px`,

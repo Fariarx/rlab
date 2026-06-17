@@ -21,6 +21,7 @@ import {
   buildConversationListItems,
   type ConversationListIconKind,
   type ConversationListItem,
+  unreadAttentionStatus,
   visibleConversationSections,
   visualStatusKey,
 } from "./conversation-list-model";
@@ -45,6 +46,9 @@ function conversationListItemKey(index: number, item: ConversationListItem | und
   }
   if (item?.kind === "conversation") {
     return `conversation:${item.conversation.id}`;
+  }
+  if (item?.kind === "show-more") {
+    return `show-more:${item.idBase}`;
   }
   return `empty:${index}`;
 }
@@ -92,11 +96,19 @@ function InitialsAvatar({ title, agent }: { readonly title: string; readonly age
 
 function ConversationAvatar({ conversation, hasWakeup }: { readonly conversation: ConversationSummary; readonly hasWakeup: boolean }) {
   const { t, conversationStatus } = useI18n();
-  // A finished run the user hasn't opened yet earns a green status dot, so the
-  // sidebar surfaces "agent done, go look". It clears once the chat is viewed.
-  const finishedUnread = conversation.status === "done" && conversation.unread === true;
-  const showDot = STATUSES_WITH_DOT.has(conversation.status) || hasWakeup || finishedUnread;
-  const label = hasWakeup ? t("wakeupScheduledStatus") : finishedUnread ? t("finishedUnreadStatus") : conversationStatus(conversation.status);
+  // Finished/failed runs the user hasn't opened yet earn a larger avatar dot,
+  // and clear through the existing unread flag when the chat is viewed.
+  const unreadAttention = unreadAttentionStatus(conversation);
+  const showDot = STATUSES_WITH_DOT.has(conversation.status) || hasWakeup || unreadAttention != null;
+  const label = hasWakeup
+    ? t("wakeupScheduledStatus")
+    : unreadAttention === "error"
+      ? t("errorUnreadStatus")
+      : unreadAttention === "done"
+        ? t("finishedUnreadStatus")
+        : conversationStatus(conversation.status);
+  const dotStatus = unreadAttention === "error" ? "error" : visualStatusKey(conversation, hasWakeup);
+  const shouldPulse = conversation.status === "running" || conversation.status === "waiting" || unreadAttention === "error";
   if (!showDot) {
     return <InitialsAvatar title={conversation.title} agent={conversation.agent} />;
   }
@@ -105,7 +117,7 @@ function ConversationAvatar({ conversation, hasWakeup }: { readonly conversation
       <InitialsAvatar title={conversation.title} agent={conversation.agent} />
       <Tooltip title={label}>
         <Box sx={{ position: "absolute", right: -3, bottom: -3, borderRadius: "50%", display: "flex", p: "2px", backgroundColor: (t) => t.custom.surfaces.s1 }}>
-          <StatusDot status={visualStatusKey(conversation, hasWakeup)} label={label} pulse={conversation.status === "running"} size="sm" />
+          <StatusDot status={dotStatus} label={label} pulse={shouldPulse} size={unreadAttention != null ? "md" : "sm"} />
         </Box>
       </Tooltip>
     </Box>
@@ -158,6 +170,8 @@ const ConversationRow = observer(function ConversationRow({
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const menuOpen = Boolean(menuAnchor);
   const { t } = useI18n();
+  const unreadAttention = unreadAttentionStatus(conversation);
+  const unreadError = unreadAttention === "error";
 
   // Focus (and select) the rename field once it mounts. Doing it in an effect —
   // rather than relying on `autoFocus` — wins the race against the closing menu
@@ -235,12 +249,17 @@ const ConversationRow = observer(function ConversationRow({
         py: 1,
         borderRadius: (t) => `${t.custom.radii.md}px`,
         cursor: editing ? "default" : "pointer",
-        backgroundColor: (t) => (active ? t.custom.surfaces.s3 : "transparent"),
+        backgroundColor: (t) => (active ? t.custom.surfaces.s3 : unreadError ? t.palette.status.error.soft : "transparent"),
         // Accent rendered as an inset shadow (not an element) so it never shifts
         // the content or collides with the avatar.
-        boxShadow: (t) => (active ? `inset 3px 0 0 0 ${t.palette.status[visualStatusKey(conversation, hasWakeup)].main}` : "none"),
+        boxShadow: (t) =>
+          active
+            ? `inset 3px 0 0 0 ${t.palette.status[visualStatusKey(conversation, hasWakeup)].main}`
+            : unreadError
+              ? `inset 3px 0 0 0 ${t.palette.status.error.main}`
+              : "none",
         transition: "background-color 140ms ease, box-shadow 140ms ease",
-        "&:hover": { backgroundColor: (t) => t.custom.surfaces.s3 },
+        "&:hover": { backgroundColor: (t) => (unreadError && !active ? t.palette.status.error.soft : t.custom.surfaces.s3) },
         "&:hover .row-more": { opacity: 1 },
         // Fade the date out whenever the ⋯ overlay is showing (hover or open
         // menu) so the date never peeks out from under it. The date stays in the
@@ -280,9 +299,6 @@ const ConversationRow = observer(function ConversationRow({
               {conversation.title}
             </Typography>
             <Stack direction="row" spacing={0.75} sx={{ alignItems: "center", flex: "0 0 auto" }}>
-              {conversation.unread && (
-                <Box sx={{ width: 6, height: 6, borderRadius: "50%", backgroundColor: (t) => (conversation.status === "done" ? t.palette.status.ok.main : t.palette.status.running.main) }} />
-              )}
               <Typography className="row-date" sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.64rem", color: "text.secondary", transition: "opacity 120ms ease" }}>
                 {formatConversationListTime(conversation.time, conversation.updatedAtMs)}
               </Typography>
@@ -376,8 +392,10 @@ function ConversationGroupHeader({
 }) {
   const { t } = useI18n();
   const runningCount = conversations.filter((c) => c.status === "running").length;
+  const actionCount = conversations.filter((c) => c.status === "waiting").length;
   const hasWakeup = conversations.some((c) => wakeupConversationIds.has(c.id));
   const hasUnread = conversations.some((c) => c.unread);
+  const hasUnreadError = conversations.some((c) => unreadAttentionStatus(c) === "error");
   const hasFinishedUnread = conversations.some((c) => c.status === "done" && c.unread);
   const panelId = `${idBase}-conversations`;
 
@@ -416,10 +434,14 @@ function ConversationGroupHeader({
         <Typography variant="microLabel" sx={{ color: "text.secondary", flex: 1, minWidth: 0 }} noWrap>
           {label}
         </Typography>
-        {/* Collapsed only: a single indicator — running status takes priority,
-            otherwise the unread marker. Never both, and no count badge. */}
+        {/* Collapsed only: one priority indicator. Error attention wins, then
+            user action, active work, wakeups, and finally unread completion. */}
         {!open &&
-          (runningCount > 0 ? (
+          (hasUnreadError ? (
+            <StatusDot status="error" label={t("errorUnreadStatus")} pulse />
+          ) : actionCount > 0 ? (
+            <StatusDot status="warn" label={t("actionRequiredCount", { count: actionCount })} pulse />
+          ) : runningCount > 0 ? (
             <StatusDot status="running" label={t("runningCount", { count: runningCount })} />
           ) : hasWakeup ? (
             <StatusDot status="warn" label={t("wakeupScheduledStatus")} pulse={false} />
@@ -429,6 +451,51 @@ function ConversationGroupHeader({
             <Box role="img" aria-label={t("unread")} sx={{ width: 6, height: 6, borderRadius: "50%", backgroundColor: (t) => t.palette.status.running.main }} />
           ) : null)}
       </Stack>
+    </Box>
+  );
+}
+
+function ShowMoreConversationsRow({
+  count,
+  delay,
+  onClick,
+}: {
+  readonly count: number;
+  readonly delay: number;
+  readonly onClick: () => void;
+}) {
+  const { t } = useI18n();
+  return (
+    <Box
+      component="button"
+      type="button"
+      onClick={onClick}
+      sx={{
+        width: "100%",
+        display: "flex",
+        justifyContent: "center",
+        px: 1,
+        py: 0.75,
+        border: 0,
+        borderRadius: (theme) => `${theme.custom.radii.md}px`,
+        backgroundColor: "transparent",
+        color: "text.secondary",
+        opacity: 0.62,
+        cursor: "pointer",
+        font: "inherit",
+        "&:hover": {
+          backgroundColor: (theme) => `${theme.custom.surfaces.s2}33`,
+          color: "text.secondary",
+          opacity: 0.86,
+        },
+        "&:focus-visible": {
+          outline: (theme) => `2px solid ${theme.custom.borders.focus}`,
+          outlineOffset: "-2px",
+        },
+        ...rise(delay),
+      }}
+    >
+      <Typography sx={{ fontSize: "0.72rem", fontWeight: 500 }}>{t("showMoreConversations", { count })}</Typography>
     </Box>
   );
 }
@@ -452,6 +519,7 @@ export const ConversationList = observer(function ConversationList({
 }) {
   const [store] = useState(() => new ConversationListStore());
   const { collapsedGroups, setCollapsedGroups } = store;
+  const [expandedGroups, setExpandedGroups] = useState<ReadonlySet<string>>(() => new Set<string>());
   const { t } = useI18n();
 
   const wakeupConversationKey = [...wakeupConversationIds].sort().join("\0");
@@ -470,6 +538,16 @@ export const ConversationList = observer(function ConversationList({
       return next;
     });
   };
+  const expandGroup = (idBase: string) => {
+    setExpandedGroups((current) => {
+      if (current.has(idBase)) {
+        return current;
+      }
+      const next = new Set(current);
+      next.add(idBase);
+      return next;
+    });
+  };
   const listItems = useMemo<readonly ConversationListItem[]>(() => {
     const sections = visibleConversationSections({
       projects,
@@ -478,8 +556,8 @@ export const ConversationList = observer(function ConversationList({
       pinnedLabel: t("pinned"),
       chatsLabel: t("chats"),
     });
-    return buildConversationListItems(sections, collapsedGroups);
-  }, [chats, collapsedGroups, modelWakeupConversationIds, projects, t]);
+    return buildConversationListItems(sections, collapsedGroups, expandedGroups);
+  }, [chats, collapsedGroups, expandedGroups, modelWakeupConversationIds, projects, t]);
   const { moveConversation, registerRowRef, virtuosoRef } = useConversationListNavigation({ listItems, onSelect });
 
   // One unified, full-width scroll list (scrollbar flush at the right edge):
@@ -526,6 +604,13 @@ export const ConversationList = observer(function ConversationList({
                   onToggle={toggleGroup}
                   wakeupConversationIds={modelWakeupConversationIds}
                 />
+              </Box>
+            );
+          }
+          if (item.kind === "show-more") {
+            return (
+              <Box sx={{ px: 0.75, pb: 0.5 }}>
+                <ShowMoreConversationsRow count={item.hiddenCount} delay={item.delay} onClick={() => expandGroup(item.idBase)} />
               </Box>
             );
           }

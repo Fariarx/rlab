@@ -3,6 +3,8 @@ import { messageToPlainText } from "../message/message-actions";
 import { conversationStatusKey as statusToKey, type ChatMessage, type ConversationStatus, type ConversationSummary, type Project } from "../core/types";
 
 const ACTIVE_STATUS_PRIORITY: ReadonlySet<ConversationStatus> = new Set<ConversationStatus>(["running", "waiting", "error"]);
+export const CONVERSATION_SECTION_INITIAL_LIMIT = 4;
+export type ConversationUnreadAttentionStatus = "error" | "done";
 const VISUAL_STATUS_SORT_RANK = {
   ok: 0,
   running: 1,
@@ -37,6 +39,12 @@ export type ConversationListItem =
       readonly delay: number;
     }
   | {
+      readonly kind: "show-more";
+      readonly idBase: string;
+      readonly hiddenCount: number;
+      readonly delay: number;
+    }
+  | {
       readonly kind: "empty";
     };
 
@@ -56,6 +64,19 @@ export function visualStatusKey(conversation: ConversationSummary, hasWakeup: bo
     return statusToKey[conversation.status];
   }
   return statusToKey[conversation.status];
+}
+
+export function unreadAttentionStatus(conversation: ConversationSummary): ConversationUnreadAttentionStatus | null {
+  if (conversation.unread !== true) {
+    return null;
+  }
+  if (conversation.status === "error") {
+    return "error";
+  }
+  if (conversation.status === "done") {
+    return "done";
+  }
+  return null;
 }
 
 export function sortedConversationsByActivity(conversations: readonly ConversationSummary[], wakeupConversationIds: ReadonlySet<string>): readonly ConversationSummary[] {
@@ -130,7 +151,11 @@ export function visibleConversationSections({
   return sections;
 }
 
-export function buildConversationListItems(sections: readonly ConversationListSection[], collapsedGroups: ReadonlySet<string>): readonly ConversationListItem[] {
+export function buildConversationListItems(
+  sections: readonly ConversationListSection[],
+  collapsedGroups: ReadonlySet<string>,
+  expandedGroups: ReadonlySet<string> = new Set<string>(),
+): readonly ConversationListItem[] {
   if (sections.length === 0) {
     return [{ kind: "empty" }];
   }
@@ -146,9 +171,20 @@ export function buildConversationListItems(sections: readonly ConversationListSe
       iconKind: section.iconKind,
     });
     if (!collapsedGroups.has(section.idBase)) {
-      section.conversations.forEach((conversation, index) => {
+      const expanded = expandedGroups.has(section.idBase);
+      const visibleConversations = expanded ? section.conversations : section.conversations.slice(0, CONVERSATION_SECTION_INITIAL_LIMIT);
+      visibleConversations.forEach((conversation, index) => {
         items.push({ kind: "conversation", conversation, delay: section.baseDelay + index * 50 });
       });
+      const hiddenCount = section.conversations.length - visibleConversations.length;
+      if (hiddenCount > 0) {
+        items.push({
+          kind: "show-more",
+          idBase: section.idBase,
+          hiddenCount,
+          delay: section.baseDelay + visibleConversations.length * 50,
+        });
+      }
     }
   }
   return items;

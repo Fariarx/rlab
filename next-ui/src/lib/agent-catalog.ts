@@ -391,6 +391,81 @@ function optionLabel(options: readonly AgentOption[], id: string): string | null
   return options.find((option) => option.id === id)?.label ?? null;
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function compactProfileLabelPart(value: string, textCase: "upper" | "lower"): string {
+  const normalized = value.trim().replace(/[\s/]+/g, "-");
+  return textCase === "lower" ? normalized.toLowerCase() : normalized.toUpperCase();
+}
+
+function prefixPattern(value: string): string {
+  return value
+    .trim()
+    .split(/[\s/._-]+/)
+    .filter(Boolean)
+    .map(escapeRegExp)
+    .join("[\\s/._-]*");
+}
+
+function stripAgentPrefixFromModelLabel(agent: AgentDef, label: string): string {
+  const original = label.trim();
+  let next = original;
+  const prefixes = Array.from(new Set([agent.name, agent.id].map(prefixPattern).filter(Boolean)));
+  for (let pass = 0; pass < 3; pass += 1) {
+    const before = next;
+    for (const prefix of prefixes) {
+      next = next.replace(new RegExp(`^${prefix}(?:[\\s/._-]+|$)`, "i"), "").trim();
+    }
+    if (next === before) {
+      break;
+    }
+  }
+  return next || original;
+}
+
+interface CompactProfileLabelOptions {
+  readonly includeDefaults?: boolean;
+  readonly includeMode?: boolean;
+}
+
+function profileModelLabel(profile: AgentProfile, includeDefault: boolean): string | null {
+  if (profile.model === DEFAULT_AGENT_OPTION_ID) {
+    return includeDefault ? DEFAULT_OPTION.label : null;
+  }
+  const agent = getAgent(profile.agent);
+  const label = agent.models.find((option) => option.id === profile.model)?.label ?? profile.model;
+  return stripAgentPrefixFromModelLabel(agent, label);
+}
+
+function profileReasoningLabel(profile: AgentProfile, includeDefault: boolean): string | null {
+  if (profile.reasoning === DEFAULT_AGENT_OPTION_ID) {
+    return includeDefault ? DEFAULT_OPTION.label : null;
+  }
+  const agent = getAgent(profile.agent);
+  const option = agent.reasoning.find((item) => item.id === profile.reasoning);
+  return option?.value ?? option?.id ?? profile.reasoning;
+}
+
+function profileModeLabel(profile: AgentProfile, includeDefault: boolean): string | null {
+  if (profile.mode === DEFAULT_AGENT_OPTION_ID) {
+    return includeDefault ? DEFAULT_OPTION.label : null;
+  }
+  const agent = getAgent(profile.agent);
+  const option = agent.modes.find((item) => item.id === profile.mode);
+  return option?.value ?? option?.id ?? profile.mode;
+}
+
+export function agentProfileCompactLabel(profile: AgentProfile, textCase: "upper" | "lower" = "upper", options: CompactProfileLabelOptions = {}): string {
+  const agent = getAgent(profile.agent);
+  const { includeDefaults = false, includeMode = false } = options;
+  return [agent.name, profileModelLabel(profile, includeDefaults), profileReasoningLabel(profile, includeDefaults), includeMode ? profileModeLabel(profile, includeDefaults) : null]
+    .filter((label): label is string => Boolean(label?.trim()))
+    .map((label) => compactProfileLabelPart(label, textCase))
+    .join("/");
+}
+
 export function resolveAgentOptionValue(agent: AgentId, kind: "models" | "reasoning", id: string): string | undefined {
   return getAgent(agent)[kind].find((option) => option.id === id)?.value;
 }

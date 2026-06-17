@@ -25,7 +25,7 @@ describe("hash routing", () => {
     renderApp();
 
     expect(screen.getAllByText("Объясни auth flow").length).toBeGreaterThan(0);
-    expect(await screen.findByPlaceholderText("Написать: Claude Code")).toBeInTheDocument();
+    expect(await screen.findByPlaceholderText("CLAUDE-CODE/DEFAULT/DEFAULT/DEFAULT ✍")).toBeInTheDocument();
   });
 
   it("opens a project conversation deep link", async () => {
@@ -34,7 +34,7 @@ describe("hash routing", () => {
     renderApp();
 
     expect((await screen.findAllByText("Ротация JWT-секретов")).length).toBeGreaterThan(0);
-    expect(await screen.findByPlaceholderText(/Написать: Codex/)).toBeInTheDocument();
+    expect(await screen.findByPlaceholderText(/CODEX.*✍$/)).toBeInTheDocument();
   });
 
   it("opens a project deep link at the first project conversation", async () => {
@@ -43,7 +43,7 @@ describe("hash routing", () => {
     renderApp();
 
     expect((await screen.findAllByText("Flaky-тест auth.login")).length).toBeGreaterThan(0);
-    expect(await screen.findByPlaceholderText("Написать: Claude Code")).toBeInTheDocument();
+    expect(await screen.findByPlaceholderText("CLAUDE-CODE/DEFAULT/DEFAULT/DEFAULT ✍")).toBeInTheDocument();
     expect(window.location.hash).toBe("#/project/auth-service");
   });
 
@@ -51,7 +51,7 @@ describe("hash routing", () => {
     window.location.hash = "#/project/auth-service/c-flaky";
 
     renderApp();
-    await screen.findByPlaceholderText("Написать: Claude Code");
+    await screen.findByPlaceholderText("CLAUDE-CODE/DEFAULT/DEFAULT/DEFAULT ✍");
 
     fireEvent.click(screen.getByText("Ротация JWT-секретов"));
 
@@ -62,10 +62,10 @@ describe("hash routing", () => {
     window.location.hash = "#/project/auth-service/c-flaky";
 
     renderApp();
-    await screen.findByPlaceholderText("Написать: Claude Code");
+    await screen.findByPlaceholderText("CLAUDE-CODE/DEFAULT/DEFAULT/DEFAULT ✍");
 
     fireEvent.click(screen.getByRole("button", { name: "Новый диалог" }));
-    const input = await screen.findByPlaceholderText("Написать: Claude Code");
+    const input = await screen.findByPlaceholderText("CLAUDE-CODE/DEFAULT/DEFAULT/DEFAULT ✍");
     fireEvent.change(input, { target: { value: "Project-local follow-up" } });
     fireEvent.keyDown(input, { key: "Enter" });
 

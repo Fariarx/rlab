@@ -113,6 +113,21 @@ describe("ConversationList status dots", () => {
     expect(screen.queryByRole("img", { name: "Готово · не просмотрено" })).not.toBeInTheDocument();
   });
 
+  it("shows a red attention dot for a failed, unviewed conversation and drops the unread label once read", () => {
+    const failed = { ...base, id: "err", title: "Failed chat", status: "error" as const, unread: true };
+    const actions = noopActions();
+    const rendered = renderWithThemeAndVirtuoso(
+      <ConversationList projects={[]} chats={[failed]} selectedId="" onSelect={vi.fn()} actions={actions} wakeupConversationIds={new Set()} />,
+    );
+    expect(screen.getByRole("img", { name: "Ошибка · не просмотрено" })).toBeInTheDocument();
+
+    rendered.rerender(
+      <ConversationList projects={[]} chats={[{ ...failed, unread: false }]} selectedId="" onSelect={vi.fn()} actions={actions} wakeupConversationIds={new Set()} />,
+    );
+    expect(screen.queryByRole("img", { name: "Ошибка · не просмотрено" })).not.toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "Ошибка" })).toBeInTheDocument();
+  });
+
   it("shows a warning status for idle conversations with an active wakeup", () => {
     render([{ ...base, id: "wakeup", title: "Wakeup chat", status: "idle" }], noopActions(), new Set(["wakeup"]));
 
@@ -197,6 +212,17 @@ describe("ConversationList activity ordering", () => {
   });
 });
 
+describe("ConversationList section limits", () => {
+  it("shows four conversations per section until the user expands it", () => {
+    render(["One", "Two", "Three", "Four", "Five", "Six"].map((title, index) => ({ ...base, id: `chat-${index}`, title })));
+
+    expect(screen.getAllByRole("option").map((row) => row.getAttribute("aria-label"))).toEqual(["One", "Two", "Three", "Four"]);
+    fireEvent.click(screen.getByRole("button", { name: "Показать ещё 2" }));
+
+    expect(screen.getAllByRole("option").map((row) => row.getAttribute("aria-label"))).toEqual(["One", "Two", "Three", "Four", "Five", "Six"]);
+  });
+});
+
 describe("ConversationList time labels", () => {
   it("renders persisted AM/PM labels as 24-hour time", () => {
     render([{ ...base, id: "pm", title: "PM chat", time: "03:19 PM" }]);
@@ -260,6 +286,20 @@ describe("ConversationList collapsed group indicators", () => {
     // Status wins; the unread dot is not shown alongside it.
     expect(screen.getByRole("img", { name: "в работе: 1" })).toBeInTheDocument();
     expect(screen.queryByRole("img", { name: "Непрочитанные" })).not.toBeInTheDocument();
+  });
+
+  it("prefers unread errors over other collapsed group indicators", () => {
+    render([
+      { ...base, id: "err", title: "Error chat", status: "error", unread: true },
+      { ...base, id: "run", title: "Running chat", status: "running" },
+      { ...base, id: "done", title: "Done chat", status: "done", unread: true },
+    ]);
+
+    fireEvent.click(screen.getByRole("button", { name: /Чаты/ }));
+
+    expect(screen.getByRole("img", { name: "Ошибка · не просмотрено" })).toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: "в работе: 1" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: "Готово · не просмотрено" })).not.toBeInTheDocument();
   });
 
   it("shows the wakeup status when a collapsed group has scheduled work", () => {

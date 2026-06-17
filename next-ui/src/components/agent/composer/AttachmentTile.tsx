@@ -63,6 +63,7 @@ export function AttachmentTile({ name, mime, sizeBytes, onOpen, onRemove, remove
       onClick={onOpen ? () => onOpen() : undefined}
       onRemove={onRemove}
       removeLabel={removeLabel}
+      equalPadding
       accessory={
         size ? (
           <Typography component="span" noWrap sx={{ flex: "0 0 auto", fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.64rem", color: "text.secondary" }}>

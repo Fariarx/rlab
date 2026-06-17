@@ -5915,8 +5915,8 @@ const CODEX_RLAB_DYNAMIC_TOOLS: readonly CodexDynamicToolSpec[] = [
   },
 ];
 
-export function codexRlabDynamicTools(): readonly CodexDynamicToolSpec[] {
-  return CODEX_RLAB_DYNAMIC_TOOLS;
+export function codexRlabDynamicTools(tools?: readonly RlabChatToolId[]): readonly CodexDynamicToolSpec[] {
+  return rlabChatToolEnabled(tools, "TaskWakeup") ? CODEX_RLAB_DYNAMIC_TOOLS : [];
 }
 
 function registeredRlabPluginLinks(): readonly RlabPluginLink[] {
@@ -7349,12 +7349,9 @@ function drainServerQueue(conversationId: string): void {
   })();
 }
 
-function pauseQueueIfNotEmpty(conversationId: string): void {
+function pauseQueueForStoppedRun(conversationId: string): void {
   try {
-    const snapshot = readPendingTurnQueue(conversationId);
-    if (snapshot.messages.length > 0 && !snapshot.paused) {
-      setPendingTurnQueuePaused(conversationId, true);
-    }
+    setPendingTurnQueuePaused(conversationId, true);
   } catch {
     // Missing/deleted conversation: nothing to pause.
   }
@@ -8493,6 +8490,7 @@ function wakeupInputValidationError(name: string, input: Record<string, unknown>
 
 export interface CodexDynamicToolCallContext {
   readonly conversationId?: string;
+  readonly tools?: readonly RlabChatToolId[];
 }
 
 function wakeupTriggerLabel(trigger: ScheduledWakeupTrigger): string {
@@ -8524,6 +8522,12 @@ function scheduledWakeupListToolText(conversationId: string | undefined): string
 
 export function codexDynamicToolCallResponse(params: Record<string, unknown>, context: CodexDynamicToolCallContext = {}): Record<string, unknown> {
   const tool = firstString(params, ["tool"]) ?? "";
+  if (isWakeupToolName(tool) && !rlabChatToolEnabled(context.tools, "TaskWakeup")) {
+    return {
+      contentItems: [{ type: "inputText", text: "TaskWakeup is disabled for this chat." }],
+      success: false,
+    };
+  }
   const input = isRecord(params.arguments) ? params.arguments : undefined;
   const validationError = wakeupInputValidationError(tool, input);
   if (validationError) {
@@ -10464,7 +10468,7 @@ export function buildCodexThreadParams(request: RunRequest): {
     effort: reasoningForProfile(profile),
     prompt: codexPromptForMode(request.prompt, mode),
     config: codexCompactionConfigForRequest(request),
-    dynamicTools: codexRlabDynamicTools(),
+    dynamicTools: codexRlabDynamicTools(request.tools),
   };
 }
 
@@ -10541,7 +10545,7 @@ async function runCodexAppServer(
     } else if (method === "item/tool/requestUserInput") {
       result = { answers: {} };
     } else if (method === "item/tool/call") {
-      result = codexDynamicToolCallResponse(params, { conversationId: binding?.conversationId });
+      result = codexDynamicToolCallResponse(params, { conversationId: binding?.conversationId, tools: request.tools });
     }
     writeMessage({ jsonrpc: "2.0", id, result });
   };
@@ -10812,7 +10816,7 @@ function handleRunCancel(req: IncomingMessage, res: ServerResponse): void {
         if (canceled.canceled) {
           persistWorkspaceDelta(currentState, canceled.state);
           if (conversationToPause) {
-            pauseQueueIfNotEmpty(conversationToPause.id);
+            pauseQueueForStoppedRun(conversationToPause.id);
           }
           sendJson(res, 200, { runId: request.runId, canceled: true, detached: true });
           return;
@@ -10822,7 +10826,7 @@ function handleRunCancel(req: IncomingMessage, res: ServerResponse): void {
       }
       handle.cancel();
       persistWorkspaceDelta(currentState, canceled.state);
-      pauseQueueIfNotEmpty(handle.binding.conversationId);
+      pauseQueueForStoppedRun(handle.binding.conversationId);
       sendJson(res, 200, { runId: request.runId, canceled: true });
     } catch (error) {
       sendJson(res, runControlErrorStatus(error), { error: errorMessage(error) });
@@ -10963,6 +10967,18 @@ function pendingQueueResponse(conversationId: string): { readonly queue: ReturnT
   return { queue: readPendingTurnQueue(conversationId) };
 }
 
+function pendingTurnRecordFromQueueRequest(conversationId: string, text: string, origin: string): PendingTurnRecord {
+  const now = Date.now();
+  const messageId = scheduledRunId("u");
+  return {
+    id: messageId,
+    conversationId,
+    createdAtMs: now,
+    message: { id: messageId, role: "user", text, time: serverNowLabel() },
+    origin,
+  };
+}
+
 function handlePendingQueue(req: IncomingMessage, res: ServerResponse): void {
   if (req.method === "GET") {
     try {
@@ -10990,16 +11006,7 @@ function handlePendingQueue(req: IncomingMessage, res: ServerResponse): void {
       ensureWorkspaceDb();
       const payload = parsePendingQueuePayload(body);
       if (payload.action === "enqueue") {
-        const now = Date.now();
-        const messageId = scheduledRunId("u");
-        enqueuePendingTurn({
-          id: messageId,
-          conversationId: payload.conversationId,
-          createdAtMs: now,
-          message: { id: messageId, role: "user", text: payload.text, time: serverNowLabel() },
-          origin: browserBridgeOrigin(req),
-        });
-        drainServerQueue(payload.conversationId);
+        enqueuePendingTurn(pendingTurnRecordFromQueueRequest(payload.conversationId, payload.text, browserBridgeOrigin(req)));
         sendJson(res, 200, pendingQueueResponse(payload.conversationId));
         return;
       }

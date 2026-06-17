@@ -96,4 +96,22 @@ describe("conversation-list-model", () => {
     expect(visibleConversationIds(expandedItems)).toEqual(["first", "second"]);
     expect(visibleConversationIds(collapsedItems)).toEqual([]);
   });
+
+  it("limits each open section to four conversations until it is expanded", () => {
+    const sections = visibleConversationSections({
+      projects: [],
+      chats: ["one", "two", "three", "four", "five", "six"].map((id) => conversation({ id })),
+      wakeupConversationIds: new Set(),
+      pinnedLabel: "Pinned",
+      chatsLabel: "Chats",
+    });
+
+    const limitedItems = buildConversationListItems(sections, new Set());
+    expect(visibleConversationIds(limitedItems)).toEqual(["one", "two", "three", "four"]);
+    expect(limitedItems).toContainEqual({ kind: "show-more", idBase: "chats-group", hiddenCount: 2, delay: 320 });
+
+    const expandedItems = buildConversationListItems(sections, new Set(), new Set(["chats-group"]));
+    expect(visibleConversationIds(expandedItems)).toEqual(["one", "two", "three", "four", "five", "six"]);
+    expect(expandedItems.some((item) => item.kind === "show-more")).toBe(false);
+  });
 });

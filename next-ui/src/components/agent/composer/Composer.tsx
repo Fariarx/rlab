@@ -34,6 +34,12 @@ export { voiceLevelCountFromWidth, voiceLevelsFromTimeDomainData } from "./Compo
 const COMPOSER_BORDER_HOVER_RADIUS_PX = 42;
 const COMPOSER_OPTIONS_MENU_Y_OFFSET_PX = -12;
 const LIMIT_UNSUPPORTED_AGENTS = new Set<string>(["opencode"]);
+const WRITE_PLACEHOLDER_PATTERN = /^(?:Написать|Message)\s*:?\s+(.+)$/;
+
+function composerInputPlaceholder(placeholder: string): string {
+  const match = WRITE_PLACEHOLDER_PATTERN.exec(placeholder.trim());
+  return match ? `${match[1].trim()} ✍` : placeholder;
+}
 
 export type { ComposerHandle } from "./use-composer-file-controller";
 
@@ -190,6 +196,7 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
   const { t } = useI18n();
   const composerValue = value ?? internalValue;
   const composerAttachments = attachments ?? internalAttachments;
+  const inputPlaceholder = composerInputPlaceholder(placeholder);
   const showBrowserActivitySection = !editChrome && browserActivityEvents !== undefined;
   const effectiveReviewCount = editChrome ? 0 : reviewCount;
 
@@ -768,8 +775,8 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
                 onChange={handleComposerChange}
                 onKeyDown={handleKeyDown}
                 onPaste={handlePaste}
-                placeholder={placeholder}
-                inputProps={{ "aria-label": placeholder, "data-testid": "composer-input", spellCheck: false, autoCorrect: "off", autoCapitalize: "none", autoComplete: "off", onBeforeInput: handleBeforeInput }}
+                placeholder={inputPlaceholder}
+                inputProps={{ "aria-label": inputPlaceholder, "data-testid": "composer-input", spellCheck: false, autoCorrect: "off", autoCapitalize: "none", autoComplete: "off", onBeforeInput: handleBeforeInput }}
                 multiline
                 minRows={1}
                 maxRows={7}
@@ -789,8 +796,8 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
               onChange={handleComposerChange}
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}
-              placeholder={placeholder}
-              inputProps={{ "aria-label": placeholder, "data-testid": "composer-input", spellCheck: false, autoCorrect: "off", autoCapitalize: "none", autoComplete: "off", onBeforeInput: handleBeforeInput }}
+              placeholder={inputPlaceholder}
+              inputProps={{ "aria-label": inputPlaceholder, "data-testid": "composer-input", spellCheck: false, autoCorrect: "off", autoCapitalize: "none", autoComplete: "off", onBeforeInput: handleBeforeInput }}
               multiline
               minRows={1}
               maxRows={expanded ? 8 : 1}

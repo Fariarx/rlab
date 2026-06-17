@@ -151,6 +151,13 @@ function buildTheme(t: ModeTokens, density: DensityMode): Theme {
             backgroundColor: surfaces.s2,
             border: `1px solid ${borders.subtle}`,
             borderRadius: radii.lg,
+            "@media (max-width: 599.95px)": {
+              margin: 6,
+              maxWidth: "calc(100% - 12px)",
+              "&.MuiDialog-paperFullWidth": {
+                width: "calc(100% - 12px)",
+              },
+            },
           },
         },
       },
@@ -169,6 +176,11 @@ function buildTheme(t: ModeTokens, density: DensityMode): Theme {
             border: `1px solid ${borders.subtle}`,
             borderRadius: radii.md,
           },
+        },
+      },
+      MuiPopover: {
+        defaultProps: {
+          marginThreshold: 8,
         },
       },
       MuiMenuItem: {
