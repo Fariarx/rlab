@@ -149,6 +149,26 @@ describe("Composer", () => {
     expect(onStop).not.toHaveBeenCalled();
   });
 
+  it("ignores stale browser change events that reinsert a sent message tail", async () => {
+    const onSend = vi.fn();
+    renderWithTheme(<Composer placeholder="Написать" onSend={onSend} />);
+    const input = screen.getByPlaceholderText("Написать");
+    const message = "часто, в длинном диалоге, нужно поправить чтобы скрол был всегда внизу";
+    const staleTail = "чтобы скрол был всегда внизу";
+
+    fireEvent.change(input, { target: { value: message } });
+    fireEvent.click(screen.getByTestId("composer-send-button"));
+
+    await waitFor(() => {
+      expect(onSend).toHaveBeenCalledWith(message);
+      expect(input).toHaveValue("");
+    });
+
+    fireEvent.change(input, { target: { value: staleTail } });
+
+    expect(input).toHaveValue("");
+  });
+
   it("calculates live voice levels across the full recording strip width", () => {
     const data = new Uint8Array(76);
     data.fill(148);
@@ -412,10 +432,84 @@ describe("Composer", () => {
     fireEvent.click(await screen.findByTestId("composer-voice-button"));
 
     expect(await screen.findByTestId("composer-voice-recording-strip")).toBeInTheDocument();
+    expect(screen.getByTestId("composer-input-area")).toHaveAttribute("data-expanded", "true");
+    expect(screen.getByTestId("composer-voice-input-panel")).toBeInTheDocument();
+    expect(screen.getByTestId("composer-voice-recording-strip")).toHaveAttribute("data-layout", "inline");
     expect(screen.queryByText("⏎")).not.toBeInTheDocument();
     expect(screen.getByTestId("composer-voice-button")).toHaveStyle({ height: "30px" });
     expect(screen.queryByTestId("composer-send-button")).not.toBeInTheDocument();
     expect(screen.queryByTestId("composer-stop-button")).not.toBeInTheDocument();
+  });
+
+  it("stops browser voice input before sending interim text with Enter", async () => {
+    const onSend = vi.fn();
+    class FakeSpeechRecognition {
+      static current: FakeSpeechRecognition | null = null;
+      lang = "";
+      continuous = false;
+      interimResults = false;
+      onresult: ((event: { readonly resultIndex: number; readonly results: { readonly length: number; readonly 0: { readonly length: number; readonly isFinal: boolean; readonly 0: { readonly transcript: string } } } }) => void) | null = null;
+      onerror: ((event: { readonly error?: string; readonly message?: string }) => void) | null = null;
+      onend: (() => void) | null = null;
+      interim = "";
+      stop = vi.fn(() => {
+        if (this.interim) {
+          this.onresult?.({
+            resultIndex: 0,
+            results: {
+              length: 1,
+              0: { length: 1, isFinal: true, 0: { transcript: this.interim } },
+            },
+          });
+        }
+        this.onend?.();
+      });
+
+      constructor() {
+        FakeSpeechRecognition.current = this;
+      }
+
+      start(): void {}
+
+      emitInterim(text: string): void {
+        this.interim = text;
+        this.onresult?.({
+          resultIndex: 0,
+          results: {
+            length: 1,
+            0: { length: 1, isFinal: false, 0: { transcript: text } },
+          },
+        });
+      }
+    }
+    vi.stubGlobal("SpeechRecognition", FakeSpeechRecognition);
+    installVoiceCaptureMocks();
+
+    renderWithTheme(
+      <Composer
+        placeholder="Написать"
+        onSend={onSend}
+        voiceProvider={{ id: "web-speech", name: "Browser Web Speech", kind: "browser", language: "ru-RU", configured: true }}
+      />,
+    );
+
+    fireEvent.click(await screen.findByTestId("composer-voice-button"));
+    await waitFor(() => {
+      expect(FakeSpeechRecognition.current).not.toBeNull();
+    });
+    act(() => {
+      FakeSpeechRecognition.current?.emitInterim("голосовой текст");
+    });
+
+    expect(screen.getByPlaceholderText("Написать")).toHaveValue("");
+
+    fireEvent.keyDown(screen.getByPlaceholderText("Написать"), { key: "Enter" });
+
+    await waitFor(() => {
+      expect(onSend).toHaveBeenCalledWith("голосовой текст");
+    });
+    expect(FakeSpeechRecognition.current?.stop).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId("composer-voice-recording-strip")).not.toBeInTheDocument();
   });
 
 

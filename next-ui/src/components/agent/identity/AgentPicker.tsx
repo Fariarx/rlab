@@ -1,9 +1,10 @@
 import CheckIcon from "@mui/icons-material/Check";
 import CloseIcon from "@mui/icons-material/Close";
-import { Alert, Box, Dialog, DialogActions, Divider, Stack, Typography } from "@mui/material";
+import { Alert, Box, Dialog, DialogActions, Divider, Stack, Switch, Typography } from "@mui/material";
 import { observer } from "mobx-react-lite";
 import { useEffect, useState } from "react";
 import { useI18n } from "../../../i18n/I18nProvider";
+import { RLAB_CHAT_TOOLS, type RlabChatToolId } from "../../../lib/rlab-tools";
 import { Button, IconButton, StatusDot, TagSelect } from "../../ui";
 import { AgentMonogram } from "./AgentMonogram";
 import { pop } from "../core/anim";
@@ -36,6 +37,15 @@ function liveOptionsOrCatalog(catalogOptions: readonly AgentOption[], liveOption
   return [defaultOption, ...liveOptions];
 }
 
+const CHAT_TOOL_LABEL_KEYS: Record<RlabChatToolId, {
+  readonly title: "chatToolAskUserQuestionTitle" | "chatToolTaskWakeupTitle" | "chatToolBrowserPreviewTitle";
+  readonly description: "chatToolAskUserQuestionDescription" | "chatToolTaskWakeupDescription" | "chatToolBrowserPreviewDescription";
+}> = {
+  AskUserQuestion: { title: "chatToolAskUserQuestionTitle", description: "chatToolAskUserQuestionDescription" },
+  TaskWakeup: { title: "chatToolTaskWakeupTitle", description: "chatToolTaskWakeupDescription" },
+  BrowserPreview: { title: "chatToolBrowserPreviewTitle", description: "chatToolBrowserPreviewDescription" },
+};
+
 /** AgentPicker — a polished dialog for choosing the agent profile, showing
  * each agent's status in the system. */
 export const AgentPicker = observer(function AgentPicker({
@@ -51,7 +61,7 @@ export const AgentPicker = observer(function AgentPicker({
 }) {
   const initialProfile = normalizeAgentProfile(value);
   const [store] = useState(() => new AgentPickerStore(initialProfile));
-  const { agent, setAgent, model, setModel, reasoning, setReasoning, mode, setMode, autoConfirm, setAutoConfirm, setProfile } = store;
+  const { agent, setAgent, model, setModel, reasoning, setReasoning, mode, setMode, autoConfirm, setAutoConfirm, tools, setToolEnabled, setProfile } = store;
   const statusOf = useAgentStatus();
   const cliInfoOf = useAgentCliInfo();
   const liveCliDetection = useAgentStatusLive();
@@ -87,9 +97,11 @@ export const AgentPicker = observer(function AgentPicker({
   };
 
   const confirm = () => {
-    onSelect(normalizeAgentProfile({ agent, model, reasoning, mode, autoConfirm }));
+    onSelect(normalizeAgentProfile({ agent, model, reasoning, mode, autoConfirm, tools: store.persistedTools() }));
     onClose();
   };
+
+  const toolEnabled = (id: RlabChatToolId) => tools.includes(id);
 
   const cliDetailText = (id: AgentId): string => {
     const agentDef = getAgent(id);
@@ -227,6 +239,51 @@ export const AgentPicker = observer(function AgentPicker({
 
       <AgentOptionGroup label={t("agentModel", { agent: def.name })} options={modelOptions} value={model} onSelect={setModel} />
       <AgentOptionGroup label={t("agentReasoning", { agent: def.name })} options={reasoningOptions} value={reasoning} onSelect={setReasoning} />
+
+      <Divider />
+
+      <Stack spacing={1} sx={{ px: 2.5, py: 1.5 }}>
+        <Box>
+          <Typography sx={{ fontSize: "0.82rem", fontWeight: 700, color: "text.primary" }}>{t("chatTools")}</Typography>
+          <Typography sx={{ fontSize: "0.72rem", color: "text.secondary" }}>{t("chatToolsHint")}</Typography>
+        </Box>
+        <Stack spacing={0.75}>
+          {RLAB_CHAT_TOOLS.map((tool) => {
+            const checked = toolEnabled(tool.id);
+            const labels = CHAT_TOOL_LABEL_KEYS[tool.id];
+            const title = t(labels.title);
+            return (
+              <Stack
+                key={tool.id}
+                direction="row"
+                spacing={1.25}
+                sx={{
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  minWidth: 0,
+                  px: 1,
+                  py: 0.75,
+                  borderRadius: (theme) => `${theme.custom.radii.md}px`,
+                  backgroundColor: (theme) => theme.custom.surfaces.s2,
+                  border: (theme) => `1px solid ${theme.custom.borders.subtle}`,
+                }}
+              >
+                <Box sx={{ minWidth: 0 }}>
+                  <Typography sx={{ fontSize: "0.78rem", fontWeight: 650, color: checked ? "text.primary" : "text.secondary" }}>
+                    {title}
+                  </Typography>
+                  <Typography sx={{ fontSize: "0.7rem", color: "text.secondary" }}>{t(labels.description)}</Typography>
+                </Box>
+                <Switch
+                  checked={checked}
+                  onChange={(event) => setToolEnabled(tool.id, event.target.checked)}
+                  inputProps={{ "aria-label": t("chatToolToggle", { tool: title }) }}
+                />
+              </Stack>
+            );
+          })}
+        </Stack>
+      </Stack>
 
       <DialogActions sx={{ px: 2.5, py: 2 }}>
         <Box sx={{ flex: 1 }}>

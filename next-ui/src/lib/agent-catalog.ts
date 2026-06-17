@@ -2,6 +2,8 @@
  * Shared agent catalog. Keep UI labels, persisted profile ids, and CLI values
  * here so the picker and /api/run cannot drift.
  */
+import { activeRlabChatToolIds, persistedRlabChatToolIds, type RlabChatToolId } from "./rlab-tools";
+
 export const PERSISTED_AGENT_IDS = ["claude-code", "codex", "gemini", "opencode", "amp", "cursor", "qwen", "copilot", "droid"] as const;
 export type PersistedAgentId = (typeof PERSISTED_AGENT_IDS)[number];
 export type AgentId = PersistedAgentId;
@@ -249,6 +251,8 @@ export interface AgentProfile {
   readonly reasoning: string;
   readonly mode: AgentWorkMode;
   readonly autoConfirm?: boolean;
+  /** Enabled rlab chat tools for this conversation. Undefined means all tools. */
+  readonly tools?: readonly RlabChatToolId[];
 }
 
 export const DEFAULT_PROFILE: AgentProfile = { agent: "claude-code", model: DEFAULT_AGENT_OPTION_ID, reasoning: DEFAULT_AGENT_OPTION_ID, mode: "default" };
@@ -354,17 +358,29 @@ export function normalizeAgentProfile(value: unknown, fallbackAgent: AgentId = D
   const def = getAgent(agent);
   const rawMode = isAgentWorkMode(value.mode) ? value.mode.trim() : DEFAULT_AGENT_OPTION_ID;
   const autoConfirm = typeof value.autoConfirm === "boolean" ? value.autoConfirm : undefined;
+  const tools = persistedRlabChatToolIds(value.tools);
   return {
     agent,
     model: typeof value.model === "string" ? normalizeOptionId(agent, "models", def.models, value.model) : DEFAULT_AGENT_OPTION_ID,
     reasoning: typeof value.reasoning === "string" ? normalizeOptionId(agent, "reasoning", def.reasoning, value.reasoning) : DEFAULT_AGENT_OPTION_ID,
     mode: normalizeModeId(agent, def.modes, rawMode),
     ...(autoConfirm !== undefined ? { autoConfirm } : {}),
+    ...(tools !== undefined ? { tools } : {}),
   };
 }
 
 export function agentProfileEquals(a: AgentProfile, b: AgentProfile): boolean {
-  return a.agent === b.agent && a.model === b.model && a.reasoning === b.reasoning && a.mode === b.mode && (a.autoConfirm ?? false) === (b.autoConfirm ?? false);
+  const aTools = activeRlabChatToolIds(a.tools);
+  const bTools = activeRlabChatToolIds(b.tools);
+  return (
+    a.agent === b.agent &&
+    a.model === b.model &&
+    a.reasoning === b.reasoning &&
+    a.mode === b.mode &&
+    (a.autoConfirm ?? false) === (b.autoConfirm ?? false) &&
+    aTools.length === bTools.length &&
+    aTools.every((tool, index) => tool === bTools[index])
+  );
 }
 
 export function accessModeForAgentProfile(profile: AgentProfile): AgentAccessMode {

@@ -664,7 +664,15 @@ export class WorkspaceStore implements Workspace {
   }
 
   setConversationProfile(id: string, profile: AgentProfile): void {
-    this.patchConversationMetadata((current) => updateConversationProfileState(current, id, profile));
+    const result: { current: ConversationMetadataStateResult | null } = { current: null };
+    this.setState((current) => {
+      result.current = updateConversationProfileState(current, id, profile);
+      return result.current?.state ?? current;
+    });
+    if (result.current) {
+      this.enqueueMutations({ type: "setConversationProfile", conversationId: id, profile });
+      this.persistCurrentStateNow();
+    }
   }
 
   rename(id: string, title: string): void {

@@ -73,6 +73,42 @@ describe("useWorkspaceRouteSync", () => {
     expect(setProfile).toHaveReturnedWith(target.profile);
   });
 
+  it("does not resync profile when the current route conversation only updates metadata", () => {
+    const target = conversation("chat-2", { agent: "codex", model: "gpt-5", reasoning: "default", mode: "default" });
+    const selectConversation = vi.fn();
+    const setProfile = vi.fn((update: AgentProfile | ((current: AgentProfile) => AgentProfile)) => {
+      return typeof update === "function" ? update(defaultProfile) : update;
+    });
+
+    const { rerender } = render(
+      <Harness
+        route={{ kind: "chat", conversationId: "chat-2" }}
+        chats={[target]}
+        selectedId="chat-2"
+        findConversation={(id) => (id === target.id ? target : null)}
+        selectConversation={selectConversation}
+        setProfile={setProfile}
+      />,
+    );
+
+    expect(setProfile).toHaveReturnedWith(target.profile);
+    setProfile.mockClear();
+
+    const updatedTarget = { ...target, status: "running" as const, snippet: "Agent is working", time: "12:01" };
+    rerender(
+      <Harness
+        route={{ kind: "chat", conversationId: "chat-2" }}
+        chats={[updatedTarget]}
+        selectedId="chat-2"
+        findConversation={(id) => (id === updatedTarget.id ? updatedTarget : null)}
+        selectConversation={selectConversation}
+        setProfile={setProfile}
+      />,
+    );
+
+    expect(setProfile).not.toHaveBeenCalled();
+  });
+
   it("selects the first project conversation for a project route without conversation id", () => {
     const projectConversation = conversation("project-chat");
     const selectConversation = vi.fn();

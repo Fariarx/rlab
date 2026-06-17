@@ -66,6 +66,7 @@ import { ResourcesPanel } from "./ResourcesPanel";
 import { TerminalView } from "./terminal/TerminalView";
 import { WorkspaceUiProvider } from "../../lib/workspace-ui";
 import { DEFAULT_SIDEBAR_WIDTH, normalizeSidebarWidth } from "../../lib/app-settings";
+import { rlabChatToolEnabled } from "../../lib/rlab-tools";
 import { conversationProfile, type Workspace, useWorkspace } from "./use-workspace";
 import { useSidebarResize } from "./hooks/use-sidebar-resize";
 import {
@@ -260,6 +261,10 @@ export const WorkspacePageView = observer(function WorkspacePageView({
   const agentLimits = useAgentLimits({ t, toast });
   const voiceConfig = useVoiceConfig({ toast });
   const registeredPlugins = useRlabPlugins({ toast });
+  const activeRegisteredPlugins = useMemo(
+    () => registeredPlugins.filter((plugin) => rlabChatToolEnabled(profile.tools, plugin.id)),
+    [profile.tools, registeredPlugins],
+  );
   const messageHistory = useMemo(() => composerMessageHistory(messages), [messages]);
   const selectedHasActiveWork = conversationHasActiveWork(selected, messages);
   const lastTurnDiffs = useMemo(() => latestAgentDiffBlocks(messages), [messages]);
@@ -272,6 +277,7 @@ export const WorkspacePageView = observer(function WorkspacePageView({
     () => scheduledWakeupComposerTags({ locale, removeWakeup: wakeupsController.removeWakeup, wakeups: wakeupsController.selectedWakeups }),
     [locale, wakeupsController.removeWakeup, wakeupsController.selectedWakeups],
   );
+  const selectedQueuedMessages = selected ? ws.queuedMessages(selected.id) : [];
   const selectedCwd = ws.cwdOf(ws.selectedId);
   const mentionableFiles = useProjectFiles({ cwd: selectedCwd, toast });
   const terminalCwd = selected ? (selectedCwd ?? ".") : undefined;
@@ -530,7 +536,7 @@ export const WorkspacePageView = observer(function WorkspacePageView({
     voiceProvider,
     onVoiceError: (message) => toast({ message, severity: "error", duration: 3500 }),
     browserActivityEvents: view === "preview" ? browserActivityEvents : undefined,
-    registeredPlugins,
+    registeredPlugins: activeRegisteredPlugins,
   };
 
   return (
@@ -857,42 +863,40 @@ export const WorkspacePageView = observer(function WorkspacePageView({
             {workspaceHydrating ? (
               <Box aria-busy="true" sx={{ minHeight: 44 }} />
             ) : (
-              <Stack spacing={1}>
-                {selected && (
+              <Composer
+                {...composerShared}
+                key={ws.selectedId}
+                ref={composerRef}
+                placeholder={selected ? t("messagePlaceholder", { title: buildComposerLabel(profile) }) : t("startPlaceholder")}
+                initialValue={composerDraft.text}
+                initialAttachments={composerDraft.attachments}
+                onDraftChange={(draft) => {
+                  if (selected) {
+                    composerDraftPersistence.scheduleDraft(ws.selectedId, draft);
+                  }
+                }}
+                onSend={(text) => {
+                  submitComposerText(text);
+                }}
+                onStop={() => ws.stopRun(ws.selectedId)}
+                running={selectedHasActiveWork}
+                reviewCount={reviewComments.length}
+                onSendReview={sendReviewComments}
+                onTagsHeightChange={setComposerTagsHeight}
+                onOverlayLiftChange={setComposerOverlayLift}
+                history={messageHistory}
+                scheduledWakeups={scheduledWakeups}
+                queuedContent={selected && selectedQueuedMessages.length > 0 ? (
                   <QueuedMessages
-                    messages={ws.queuedMessages(selected.id)}
+                    messages={selectedQueuedMessages}
                     paused={ws.isQueuePaused(selected.id)}
                     onCancel={(messageId) => ws.cancelQueuedMessage(selected.id, messageId)}
                     onCopy={(message) => messageActions.onCopy?.(message)}
                     onSendNow={() => ws.sendQueuedMessageNow(selected.id)}
                     onTogglePause={() => ws.setQueuePaused(selected.id, !ws.isQueuePaused(selected.id))}
                   />
-                )}
-                <Composer
-                  {...composerShared}
-                  key={ws.selectedId}
-                  ref={composerRef}
-                  placeholder={selected ? t("messagePlaceholder", { title: buildComposerLabel(profile) }) : t("startPlaceholder")}
-                  initialValue={composerDraft.text}
-                  initialAttachments={composerDraft.attachments}
-                  onDraftChange={(draft) => {
-                    if (selected) {
-                      composerDraftPersistence.scheduleDraft(ws.selectedId, draft);
-                    }
-                  }}
-                  onSend={(text) => {
-                    submitComposerText(text);
-                  }}
-                  onStop={() => ws.stopRun(ws.selectedId)}
-                  running={selectedHasActiveWork}
-                  reviewCount={reviewComments.length}
-                  onSendReview={sendReviewComments}
-                  onTagsHeightChange={setComposerTagsHeight}
-                  onOverlayLiftChange={setComposerOverlayLift}
-                  history={messageHistory}
-                  scheduledWakeups={scheduledWakeups}
-                />
-              </Stack>
+                ) : undefined}
+              />
             )}
           </Box>
         </Box>

@@ -32,7 +32,7 @@ function wakeupTagDetail(wakeup: WakeupSummary, locale: Locale): WakeupTagDetail
     heading = "TaskWakeup · script";
     rows.push({
       label: ru ? "Расписание" : "Schedule",
-      value: wakeup.trigger.cron ? `cron ${wakeup.trigger.cron}` : ru ? `каждые ${wakeup.trigger.intervalSeconds}s` : `every ${wakeup.trigger.intervalSeconds}s`,
+      value: wakeup.trigger.cron ? `cron ${wakeup.trigger.cron}` : ru ? `каждые ${wakeup.trigger.intervalSeconds}с` : `every ${wakeup.trigger.intervalSeconds}s`,
     });
     rows.push({ label: ru ? "Следующая проверка" : "Next check", value: formatDateTime24(new Date(wakeup.trigger.nextCheckMs)) });
     if (wakeup.trigger.lastCheckedAtMs !== undefined) {

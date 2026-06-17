@@ -1,6 +1,7 @@
 import { action, makeObservable, observable } from "mobx";
 import type { AgentId, AgentProfile, AgentWorkMode } from "../core/agents";
 import type { ApprovalDecision } from "../core/types";
+import { activeRlabChatToolIds, persistedRlabChatToolIds, type RlabChatToolId } from "../../../lib/rlab-tools";
 
 export interface MessagePreviewAttachment {
   readonly name: string;
@@ -71,23 +72,28 @@ export class AgentPickerStore {
 
   autoConfirm: boolean;
 
+  tools: readonly RlabChatToolId[];
+
   constructor(initialProfile: AgentProfile) {
     this.agent = initialProfile.agent;
     this.model = initialProfile.model;
     this.reasoning = initialProfile.reasoning;
     this.mode = initialProfile.mode;
     this.autoConfirm = initialProfile.autoConfirm ?? false;
+    this.tools = activeRlabChatToolIds(initialProfile.tools);
     makeObservable(this, {
       agent: observable,
       model: observable,
       reasoning: observable,
       mode: observable,
       autoConfirm: observable,
+      tools: observable.ref,
       setAgent: action.bound,
       setModel: action.bound,
       setReasoning: action.bound,
       setMode: action.bound,
       setAutoConfirm: action.bound,
+      setToolEnabled: action.bound,
       setProfile: action.bound,
     });
   }
@@ -112,12 +118,27 @@ export class AgentPickerStore {
     this.autoConfirm = resolveState(this.autoConfirm, value);
   }
 
+  setToolEnabled(id: RlabChatToolId, enabled: boolean): void {
+    const current = new Set(this.tools);
+    if (enabled) {
+      current.add(id);
+    } else {
+      current.delete(id);
+    }
+    this.tools = activeRlabChatToolIds([...current]);
+  }
+
+  persistedTools(): readonly RlabChatToolId[] | undefined {
+    return persistedRlabChatToolIds(this.tools);
+  }
+
   setProfile(profile: AgentProfile): void {
     this.agent = profile.agent;
     this.model = profile.model;
     this.reasoning = profile.reasoning;
     this.mode = profile.mode;
     this.autoConfirm = profile.autoConfirm ?? false;
+    this.tools = activeRlabChatToolIds(profile.tools);
   }
 }
 

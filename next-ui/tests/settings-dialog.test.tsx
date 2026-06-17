@@ -208,6 +208,37 @@ describe("SettingsDialog agent configuration", () => {
     expect(openAiCard).toHaveTextContent("Альфа-версия");
   });
 
+  it("marks Gemini and OpenCode agents as alpha in general agent settings", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL | Request) => {
+        const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+        if (path === "/api/agent-config") {
+          return Response.json({ agents: {} });
+        }
+        return Response.json({});
+      }),
+    );
+
+    renderWithTheme(
+      <SettingsDialog
+        open
+        onClose={vi.fn()}
+        settings={defaultAppSettings}
+        onSettingsChange={vi.fn()}
+      />,
+    );
+
+    const codexCard = screen.getByText("Codex").closest(".MuiStack-root");
+    const geminiCard = screen.getByText("Gemini").closest(".MuiStack-root");
+    const openCodeCard = screen.getByText("OpenCode").closest(".MuiStack-root");
+
+    expect(screen.getAllByText("Альфа-версия")).toHaveLength(2);
+    expect(codexCard).not.toHaveTextContent("Альфа-версия");
+    expect(geminiCard).toHaveTextContent("Альфа-версия");
+    expect(openCodeCard).toHaveTextContent("Альфа-версия");
+  });
+
   it("reports a completed install request for unavailable agents", async () => {
     const fetch = vi.fn(async (url: string | URL | Request) => {
       const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;

@@ -1,4 +1,5 @@
 const AM_PM_TIME_RE = /^(\d{1,2}):(\d{2})(?::\d{2})?\s*([AP])\.?M\.?$/i;
+const CLOCK_24_RE = /^(\d{1,2}):(\d{2})(?::\d{2})?$/;
 const ISO_LIKE_RE = /^\d{4}-\d{2}-\d{2}T/;
 const WEEKDAY_LABEL_TO_INDEX: Readonly<Record<string, number>> = {
   sun: 0,
@@ -27,7 +28,21 @@ function formatCalendarDateLabel(date: Date, now: Date): string {
   return date.getFullYear() === now.getFullYear() ? dayMonth : `${dayMonth}.${date.getFullYear()}`;
 }
 
-function legacyWeekdayDateLabel(value: string | undefined, now: Date): string | undefined {
+function validTime(date: Date): number | undefined {
+  const time = date.getTime();
+  return Number.isFinite(time) ? time : undefined;
+}
+
+function dateAtClock(now: Date, hour: number, minute: number): number | undefined {
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+    return undefined;
+  }
+  const date = new Date(now);
+  date.setHours(hour, minute, 0, 0);
+  return validTime(date);
+}
+
+function legacyWeekdayDate(value: string | undefined, now: Date): Date | undefined {
   const dayIndex = value ? WEEKDAY_LABEL_TO_INDEX[value.trim().toLowerCase()] : undefined;
   if (dayIndex === undefined) {
     return undefined;
@@ -37,7 +52,42 @@ function legacyWeekdayDateLabel(value: string | undefined, now: Date): string | 
   const date = new Date(now);
   date.setHours(0, 0, 0, 0);
   date.setDate(date.getDate() - daysAgo);
-  return formatCalendarDateLabel(date, now);
+  return date;
+}
+
+function legacyWeekdayDateLabel(value: string | undefined, now: Date): string | undefined {
+  const date = legacyWeekdayDate(value, now);
+  return date ? formatCalendarDateLabel(date, now) : undefined;
+}
+
+export function inferConversationUpdatedAtMs(time: string | undefined, now: Date = new Date()): number | undefined {
+  const text = time?.trim();
+  if (!text) {
+    return undefined;
+  }
+  if (ISO_LIKE_RE.test(text)) {
+    return validTime(new Date(text));
+  }
+  const amPm = AM_PM_TIME_RE.exec(text);
+  if (amPm) {
+    const rawHour = Number(amPm[1]);
+    const minute = Number(amPm[2]);
+    const marker = amPm[3].toUpperCase();
+    if (rawHour >= 1 && rawHour <= 12) {
+      const hour = marker === "A" ? rawHour % 12 : (rawHour % 12) + 12;
+      return dateAtClock(now, hour, minute);
+    }
+  }
+  const clock24 = CLOCK_24_RE.exec(text);
+  if (clock24) {
+    return dateAtClock(now, Number(clock24[1]), Number(clock24[2]));
+  }
+  const weekday = legacyWeekdayDate(text, now);
+  return weekday ? validTime(weekday) : undefined;
+}
+
+export function normalizeConversationUpdatedAtMs(time: string | undefined, updatedAtMs: number | undefined, now: Date = new Date()): number {
+  return updatedAtMs !== undefined && Number.isFinite(updatedAtMs) ? updatedAtMs : (inferConversationUpdatedAtMs(time, now) ?? now.getTime());
 }
 
 export function formatConversationListTime(
@@ -45,10 +95,11 @@ export function formatConversationListTime(
   updatedAtMs: number | undefined,
   now: Date = new Date(),
 ): string | undefined {
-  if (updatedAtMs === undefined || !Number.isFinite(updatedAtMs)) {
+  const activityMs = updatedAtMs !== undefined && Number.isFinite(updatedAtMs) ? updatedAtMs : inferConversationUpdatedAtMs(time, now);
+  if (activityMs === undefined) {
     return legacyWeekdayDateLabel(time, now) ?? normalizeClockLabel(time);
   }
-  const date = new Date(updatedAtMs);
+  const date = new Date(activityMs);
   if (!Number.isFinite(date.getTime())) {
     return legacyWeekdayDateLabel(time, now) ?? normalizeClockLabel(time);
   }

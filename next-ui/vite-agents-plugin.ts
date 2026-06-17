@@ -73,6 +73,7 @@ import {
   type AgentProfile,
   type VisibleAgentId,
 } from "./src/lib/agent-catalog";
+import { activeRlabChatToolIds, rlabChatToolEnabled, type RlabChatToolId } from "./src/lib/rlab-tools";
 import {
   type AgentBlock,
   type ChatMessage,
@@ -4990,6 +4991,8 @@ interface RunRequest {
   /** Compaction window override in tokens (Claude `autoCompactWindow`); unset =
    *  the model's full context window. */
   readonly compactWindow?: number;
+  /** Enabled rlab chat tools. Undefined means all tools. */
+  readonly tools?: readonly RlabChatToolId[];
 }
 
 type ScheduledWakeupTrigger =
@@ -5797,19 +5800,34 @@ const RLAB_CHAT_TOOL_ALIASES: Record<string, string> = {
   ScheduleWakeup: `mcp__${RLAB_MCP_SERVER_NAME}__${TASK_WAKEUP_TOOL_NAME}`,
 };
 const CLAUDE_EFFORT_LEVELS: ReadonlySet<EffortLevel> = new Set(["low", "medium", "high", "xhigh", "max"]);
-const RLAB_CHAT_TOOLS_PROMPT = [
+const ASK_USER_QUESTION_PROMPT_LINES = [
   "When you need user input that blocks progress, use the AskUserQuestion tool instead of asking as plain text.",
   "Use AskUserQuestion for concrete choices, clarifying questions, or option selection that the chat UI should render as interactive controls.",
   "AskUserQuestion supports single-select and multi-select choices; the UI also offers a free-text answer field for cases where none of the choices fit.",
   "Do not create a numbered question list in prose when the question can be represented with AskUserQuestion options.",
+] as const;
+
+const TASK_WAKEUP_PROMPT_LINES = [
   "When you need rlab to wake you later in this same chat for an automation task, use TaskWakeup with the exact follow-up prompt; rlab persists and fires that wakeup server-side.",
   "Use TaskWakeup instead of sleeping, polling inside the agent, or keeping the turn open. After TaskWakeup succeeds, finish the current turn and wait for rlab to re-run you.",
   "TaskWakeup supports delaySeconds/fireAt/cron for time wakeups and script plus intervalSeconds or cron for condition wakeups; the script runs server-side in the project cwd, exit code 0 fires the wakeup, and non-zero exit codes keep polling.",
   "For condition wakeups, write a deterministic shell script in the TaskWakeup input: { prompt, script, intervalSeconds, reason } or { prompt, script, cron, reason }. Do not describe the script in prose instead of calling the tool.",
   "To cancel task wakeups in this chat, call TaskWakeup with action=\"cancel\" and either wakeupId/id or all=true.",
   "To inspect scheduled wakeups in this chat, call TaskWakeup with action=\"list\". The tool result returns wakeup ids, trigger type, next fire/check time, prompt, and reason.",
-].join("\n");
-const CLAUDE_CHAT_UI_SYSTEM_PROMPT = RLAB_CHAT_TOOLS_PROMPT;
+] as const;
+
+function rlabChatToolsPrompt(tools: unknown): string {
+  const lines: string[] = [];
+  if (rlabChatToolEnabled(tools, "AskUserQuestion")) {
+    lines.push(...ASK_USER_QUESTION_PROMPT_LINES);
+  }
+  if (rlabChatToolEnabled(tools, "TaskWakeup")) {
+    lines.push(...TASK_WAKEUP_PROMPT_LINES);
+  }
+  return lines.join("\n");
+}
+
+const CLAUDE_CHAT_UI_SYSTEM_PROMPT = rlabChatToolsPrompt(undefined);
 interface CodexDynamicToolSpec {
   readonly namespace?: string;
   readonly name: string;
@@ -5969,19 +5987,23 @@ function browserBridgePromptAppendix(sessionId: string, origin: string): string 
   ].join("\n");
 }
 
-function rlabChatToolsPromptAppendix(): string {
+function rlabChatToolsPromptAppendix(tools: unknown): string {
+  const prompt = rlabChatToolsPrompt(tools);
+  if (!prompt) {
+    return "";
+  }
   return [
     "",
     "<rlab-chat-tools>",
     "This rlab chat has server-side tools that are handled by the application, not by the user's project.",
-    RLAB_CHAT_TOOLS_PROMPT,
-    "Tool names accepted by rlab for task wakeups: TaskWakeup.",
+    prompt,
+    ...(rlabChatToolEnabled(tools, "TaskWakeup") ? ["Tool names accepted by rlab for task wakeups: TaskWakeup."] : []),
     "</rlab-chat-tools>",
   ].join("\n");
 }
 
-export function appendRlabChatToolsPrompt(prompt: string): string {
-  return prompt.includes("<rlab-chat-tools>") ? prompt : `${prompt}${rlabChatToolsPromptAppendix()}`;
+export function appendRlabChatToolsPrompt(prompt: string, tools?: readonly RlabChatToolId[]): string {
+  return prompt.includes("<rlab-chat-tools>") ? prompt : `${prompt}${rlabChatToolsPromptAppendix(tools)}`;
 }
 
 // MCP-capable agents load a tiny external stdio MCP server that exposes
@@ -6033,7 +6055,10 @@ function ensureGeminiMcpConfig(): void {
 }
 
 /** Extra env for CLI agents so they load rlab's external MCP server (TaskWakeup). */
-function rlabAgentMcpRunEnv(agent: string): NodeJS.ProcessEnv {
+function rlabAgentMcpRunEnv(agent: string, tools?: readonly RlabChatToolId[]): NodeJS.ProcessEnv {
+  if (!rlabChatToolEnabled(tools, "TaskWakeup")) {
+    return {};
+  }
   if (agent === "opencode") {
     return { OPENCODE_CONFIG: ensureOpenCodeMcpConfig() };
   }
@@ -6047,8 +6072,9 @@ function appendBrowserBridgePrompt(prompt: string, binding: BackgroundRunBinding
   return binding ? `${prompt}${browserBridgePromptAppendix(binding.conversationId, origin)}` : prompt;
 }
 
-export function prepareAgentPrompt(prompt: string, binding: BackgroundRunBinding | null, origin: string): string {
-  return appendBrowserBridgePrompt(appendRlabChatToolsPrompt(prompt), binding, origin);
+export function prepareAgentPrompt(prompt: string, binding: BackgroundRunBinding | null, origin: string, tools?: readonly RlabChatToolId[]): string {
+  const withTools = appendRlabChatToolsPrompt(prompt, tools);
+  return rlabChatToolEnabled(tools, "BrowserPreview") ? appendBrowserBridgePrompt(withTools, binding, origin) : withTools;
 }
 
 function profileForArgs(agent: AgentProfile["agent"], request: RunArgsRequest): AgentProfile {
@@ -6127,6 +6153,7 @@ interface ParsedRunRequestSuccess {
   readonly autoConfirm: boolean | undefined;
   readonly autoCompact: boolean | undefined;
   readonly compactWindow: number | undefined;
+  readonly tools: readonly RlabChatToolId[] | undefined;
   readonly accessModeValid: boolean;
   readonly profileValid: boolean;
   readonly profileError: string;
@@ -6176,6 +6203,7 @@ export function parseRunRequestPayload(body: string): ParsedRunRequestPayload {
   const autoCompact = typeof parsed.autoCompact === "boolean" ? parsed.autoCompact : undefined;
   const compactWindow =
     typeof parsed.compactWindow === "number" && Number.isFinite(parsed.compactWindow) && parsed.compactWindow > 0 ? Math.floor(parsed.compactWindow) : undefined;
+  const tools = Array.isArray(parsed.tools) ? activeRlabChatToolIds(parsed.tools) : undefined;
   requestedCwd = typeof parsed.cwd === "string" ? parsed.cwd : "";
   const parsedAccessMode = parseAccessMode(parsed.accessMode);
   if (parsedAccessMode) {
@@ -6200,6 +6228,7 @@ export function parseRunRequestPayload(body: string): ParsedRunRequestPayload {
     autoConfirm,
     autoCompact,
     compactWindow,
+    tools,
     accessModeValid,
     profileValid,
     profileError,
@@ -6224,7 +6253,11 @@ function claudeToolsForRequest(request: RunRequest): ClaudeQueryOptions["tools"]
   const profile = normalizeAgentProfile(request, "claude-code");
   const mode = modeForProfile(profile);
   if (request.accessMode === "read-only" || mode === "plan") {
-    return [...CLAUDE_READ_ONLY_TOOLS];
+    return [
+      ...CLAUDE_SAFE_READ_TOOLS,
+      ...(rlabChatToolEnabled(request.tools, "AskUserQuestion") ? ["AskUserQuestion" as const] : []),
+      ...(rlabChatToolEnabled(request.tools, "TaskWakeup") ? [TASK_WAKEUP_TOOL_NAME] : []),
+    ];
   }
   return { type: "preset", preset: "claude_code" };
 }
@@ -6249,10 +6282,14 @@ export function buildClaudeSdkOptions(
       ...(typeof request.compactWindow === "number" && request.compactWindow > 0 ? { autoCompactWindow: request.compactWindow } : {}),
     },
     permissionMode,
-    systemPrompt: { type: "preset", preset: "claude_code", append: CLAUDE_CHAT_UI_SYSTEM_PROMPT },
+    systemPrompt: { type: "preset", preset: "claude_code", append: rlabChatToolsPrompt(request.tools) },
     tools: claudeToolsForRequest(request),
-    mcpServers: { [RLAB_MCP_SERVER_NAME]: { type: "stdio", command: "node", args: [RLAB_MCP_STDIO_SCRIPT], alwaysLoad: true } },
-    toolAliases: RLAB_CHAT_TOOL_ALIASES,
+    ...(rlabChatToolEnabled(request.tools, "TaskWakeup")
+      ? {
+          mcpServers: { [RLAB_MCP_SERVER_NAME]: { type: "stdio", command: "node", args: [RLAB_MCP_STDIO_SCRIPT], alwaysLoad: true } },
+          toolAliases: RLAB_CHAT_TOOL_ALIASES,
+        }
+      : {}),
     // Load the project's own settings (CLAUDE.md/AGENTS.md, hooks) and enable every
     // discovered skill (~/.claude/skills + the project's .claude/skills) so agents
     // launched by rlab pick up the user's skills instead of running bare.
@@ -7072,8 +7109,14 @@ function createRunInputHandler(input: Record<string, unknown>, context: Paramete
   });
 }
 
-export function createRunApprovalHandler(send: (event: RunEvent) => void, scopeId?: string, autoApprove = false): CanUseTool {
+export function createRunApprovalHandler(send: (event: RunEvent) => void, scopeId?: string, autoApprove = false, tools?: readonly RlabChatToolId[]): CanUseTool {
   return (toolName, input, context) => {
+    if (toolName === "AskUserQuestion" && !rlabChatToolEnabled(tools, "AskUserQuestion")) {
+      return Promise.resolve<PermissionResult>({ behavior: "deny", message: "AskUserQuestion is disabled for this chat.", toolUseID: context.toolUseID });
+    }
+    if (isWakeupToolName(toolName) && !rlabChatToolEnabled(tools, "TaskWakeup")) {
+      return Promise.resolve<PermissionResult>({ behavior: "deny", message: "TaskWakeup is disabled for this chat.", toolUseID: context.toolUseID });
+    }
     if (toolName === "AskUserQuestion") {
       const inputHandler = createRunInputHandler(input, context, send, scopeId);
       if (inputHandler) {
@@ -9762,7 +9805,7 @@ async function runClaudeSdk(
     });
   }
   const translate = createClaudeStreamTranslator();
-  const canUseTool = createRunApprovalHandler(send, binding?.runId, claudePermissionModeForRequest(request) === "bypassPermissions");
+  const canUseTool = createRunApprovalHandler(send, binding?.runId, claudePermissionModeForRequest(request) === "bypassPermissions", request.tools);
   let stderr = "";
   const options = buildClaudeSdkOptions(request, cwd, abortController, canUseTool, runEnv);
   options.stderr = (data: string) => {
@@ -10725,8 +10768,9 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
       sendJson(res, 400, { error: parsedPayload.error });
       return;
     }
-    const { agent, model, reasoning, mode, prompt, requestedCwd, accessMode, resume, autoConfirm, autoCompact, compactWindow, accessModeValid, profileValid, profileError, bindingInvalid } = parsedPayload;
+    const { agent, model, reasoning, mode, prompt, requestedCwd, accessMode, resume, autoConfirm, autoCompact, compactWindow, tools, accessModeValid, profileValid, profileError, bindingInvalid } = parsedPayload;
     let binding: BackgroundRunBinding | null = parsedPayload.binding;
+    const browserPreviewEnabled = rlabChatToolEnabled(tools, "BrowserPreview");
 
     if (!prompt) {
       sendJson(res, 400, { error: "Empty prompt" });
@@ -10777,8 +10821,8 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
     const runEnv = {
       ...process.env,
       ...config.env,
-      ...rlabAgentMcpRunEnv(agent),
-      ...(binding
+      ...rlabAgentMcpRunEnv(agent, tools),
+      ...(binding && browserPreviewEnabled
         ? {
             RLAB_BROWSER_BASE_URL: origin,
             RLAB_BROWSER_SESSION_ID: binding.conversationId,
@@ -10892,14 +10936,14 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
     // can resume it later. Claude/Codex/OpenCode mint their own and report it back
     // via a "session" event from their stream translators.
     const assignedSessionId = !resume && agent === "gemini" ? randomUUID() : undefined;
-    const request: RunRequest = { agent, model, reasoning, mode, prompt, accessMode, resume, sessionId: assignedSessionId, autoConfirm, autoCompact, compactWindow };
+    const request: RunRequest = { agent, model, reasoning, mode, prompt, accessMode, resume, sessionId: assignedSessionId, autoConfirm, autoCompact, compactWindow, ...(tools !== undefined ? { tools } : {}) };
     requestForWakeups = request;
     if (assignedSessionId) {
       send({ type: "session", id: assignedSessionId });
     }
     const executionRequest: RunRequest = {
       ...request,
-      prompt: prepareAgentPrompt(request.prompt, binding, origin),
+      prompt: prepareAgentPrompt(request.prompt, binding, origin, tools),
     };
     if (binding) {
       accumulator = startPersistedBackgroundRun(binding, request);

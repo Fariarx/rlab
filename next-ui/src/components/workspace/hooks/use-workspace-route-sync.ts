@@ -1,4 +1,4 @@
-import { useLayoutEffect } from "react";
+import { useLayoutEffect, useRef } from "react";
 import type { HashRoute } from "../../../lib/use-hash-route";
 import { agentProfileEquals, type AgentProfile, type ConversationSummary, type Project } from "../../agent";
 import { conversationProfile } from "../use-workspace";
@@ -25,6 +25,7 @@ export function useWorkspaceRouteSync({
   setProfile,
   onNavigate,
 }: UseWorkspaceRouteSyncOptions): void {
+  const lastProfileSyncedConversationIdRef = useRef<string | null>(null);
   const routeKind = route?.kind;
   const routeProjectId = route?.kind === "project" ? route.projectId : undefined;
   const routeConversationId = route?.kind === "chat" || route?.kind === "project" ? route.conversationId : undefined;
@@ -54,12 +55,16 @@ export function useWorkspaceRouteSync({
       return;
     }
 
-    if (selectedId !== targetConversationId) {
+    const selectedChanged = selectedId !== targetConversationId;
+    if (selectedChanged) {
       selectConversation(targetConversationId);
     }
-    setProfile((current) => {
-      const nextProfile = conversationProfile(conversation);
-      return agentProfileEquals(current, nextProfile) ? current : nextProfile;
-    });
+    if (selectedChanged || lastProfileSyncedConversationIdRef.current !== targetConversationId) {
+      lastProfileSyncedConversationIdRef.current = targetConversationId;
+      setProfile((current) => {
+        const nextProfile = conversationProfile(conversation);
+        return agentProfileEquals(current, nextProfile) ? current : nextProfile;
+      });
+    }
   }, [chats, findConversation, onNavigate, projects, routeConversationId, routeKind, routeProjectId, selectConversation, selectedId, setProfile]);
 }

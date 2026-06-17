@@ -1,5 +1,5 @@
 import { fireEvent, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ConversationList, type ChatMessage, type ConversationSummary } from "../src/components/agent";
 import { renderWithThemeAndVirtuoso } from "./util/render-with-virtuoso";
 
@@ -11,6 +11,10 @@ const base: ConversationSummary = {
   status: "idle",
   agent: "claude-code",
 };
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 function noopActions() {
   return { onRename: vi.fn(), onTogglePin: vi.fn(), onArchive: vi.fn(), onDelete: vi.fn() };
@@ -199,6 +203,21 @@ describe("ConversationList time labels", () => {
 
     expect(screen.getByText("15:19")).toBeInTheDocument();
     expect(screen.queryByText("03:19 PM")).not.toBeInTheDocument();
+  });
+
+  it("renders today as time, past days as numeric date, and past years with year", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 5, 17, 11, 0));
+
+    render([
+      { ...base, id: "today", title: "Today", time: "legacy", updatedAtMs: new Date(2026, 5, 17, 9, 7).getTime() },
+      { ...base, id: "yesterday", title: "Yesterday", time: "legacy", updatedAtMs: new Date(2026, 5, 16, 23, 59).getTime() },
+      { ...base, id: "last-year", title: "Last year", time: "legacy", updatedAtMs: new Date(2025, 11, 31, 23, 59).getTime() },
+    ]);
+
+    expect(screen.getByText("09:07")).toBeInTheDocument();
+    expect(screen.getByText("16.06")).toBeInTheDocument();
+    expect(screen.getByText("31.12.2025")).toBeInTheDocument();
   });
 });
 

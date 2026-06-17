@@ -9,7 +9,7 @@ import SettingsRoundedIcon from "@mui/icons-material/SettingsRounded";
 import StopCircleIcon from "@mui/icons-material/StopCircle";
 import { Box, Divider, InputBase, Menu, MenuItem, Stack, Switch, type SxProps, TextField, type Theme, Tooltip, Typography } from "@mui/material";
 import { observer } from "mobx-react-lite";
-import { forwardRef, useEffect, useState } from "react";
+import { forwardRef, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { useI18n } from "../../../i18n/I18nProvider";
 import { localFileUrl } from "../../../lib/external-url";
 import type { ComposerPluginLink } from "../../../lib/rlab-plugins";
@@ -99,6 +99,8 @@ export interface ComposerProps {
   readonly registeredPlugins?: readonly ComposerPluginLink[];
   /** Server-side scheduled wakeups for this chat, rendered as first floating tags. */
   readonly scheduledWakeups?: readonly WakeupTileProps[];
+  /** Full-width accessory rendered directly above the input and below floating tags. */
+  readonly queuedContent?: ReactNode;
   /** Selected and server-authorized voice dictation provider. Omitted for "none". */
   readonly voiceProvider?: ComposerVoiceProvider;
   readonly onVoiceError?: (message: string) => void;
@@ -147,6 +149,7 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
     browserActivityEvents,
     registeredPlugins = [],
     scheduledWakeups = [],
+    queuedContent,
     voiceProvider,
     onVoiceError,
   },
@@ -154,6 +157,8 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
 ) {
   const editChrome = variant === "edit";
   const [composerStore] = useState(() => new ComposerStore(initialValue, initialAttachments, VOICE_IDLE_LEVELS));
+  const stopVoiceInputRef = useRef<() => void>(() => undefined);
+  const stopVoiceInputBeforeSend = useCallback(() => stopVoiceInputRef.current(), []);
   const {
     internalValue,
     setInternalValue,
@@ -262,6 +267,7 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
     initialAttachments,
     initialValue,
     onAttachmentError,
+    onBeforeSend: stopVoiceInputBeforeSend,
     onDraftChange,
     onSend,
     onSendReview: editChrome ? undefined : onSendReview,
@@ -283,6 +289,7 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
 
   const {
     setVoiceLevelCountForWidth,
+    stopVoiceInput,
     toggleVoiceInput,
     voiceAmbient,
     voiceAvailable,
@@ -299,6 +306,13 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
     updateDraft,
     voiceProvider: editChrome ? undefined : voiceProvider,
   });
+  stopVoiceInputRef.current = stopVoiceInput;
+  const visualExpanded = expanded || voiceState === "recording";
+  const effectiveOverlayLift = voiceState === "recording" ? Math.max(overlayLift, 48) : overlayLift;
+  const hasFloatingTags = (!editChrome && scheduledWakeups.length > 0) || (!editChrome && effectiveReviewCount > 0) || composerAttachments.length > 0;
+  useEffect(() => {
+    onOverlayLiftChange?.(effectiveOverlayLift);
+  }, [effectiveOverlayLift, onOverlayLiftChange]);
 
   const { chooseFiles, fileInputRef, openFilePicker } = useComposerFileController({ addFiles, forwardedRef: ref, textareaRef });
   useEffect(() => {
@@ -340,59 +354,65 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
     // image thumbnails float above it (absolute, each with its own shadow), and
     // the multiline input lifts into an upward overlay — nothing reflows the thread.
     <Box ref={rootRef} sx={{ position: "relative" }}>
-      {/* Floating row — square tiles (wakeups, mode, review, over-limit) +
-          attachment tiles, always mounted so height can be measured. */}
+      {/* Floating accessories. From bottom to top: queued turns, then tags
+          (wakeups/review/attachments). The wrapper stays mounted so the dock can
+          measure the full floating height. */}
       <Box
         ref={tagsRef}
         sx={{
           position: "absolute",
           left: 0,
           right: 0,
-          bottom: `calc(100% + ${8 + overlayLift}px)`,
-          // pl aligns the tile row's left edge with the text-input column start:
+          bottom: `calc(100% + ${8 + effectiveOverlayLift}px)`,
+          // pl aligns floating accessories with the text-input column start:
           // 1px bar-border + 4px bar-padding + 34px options control + 4px flex-gap = 43px
           pl: editChrome ? "39px" : "43px",
           pr: "5px",
           display: "flex",
-          flexWrap: "wrap",
-          alignItems: "flex-end",
+          flexDirection: "column-reverse",
+          alignItems: "stretch",
           gap: 0.75,
           pointerEvents: "none",
           zIndex: 6,
         }}
       >
-        {!editChrome && scheduledWakeups.map((wakeup) => (
-          <WakeupTile
-            key={wakeup.id}
-            id={wakeup.id}
-            label={wakeup.label}
-            removeLabel={wakeup.removeLabel}
-            onRemove={wakeup.onRemove}
-            detail={wakeup.detail}
-          />
-        ))}
-        {!editChrome && effectiveReviewCount > 0 && (
-          <ComposerTag
-            icon={<RateReviewOutlinedIcon sx={{ fontSize: 15, color: (theme) => theme.palette.status.info.main }} />}
-            label={t("reviewPending", { count: effectiveReviewCount })}
-            testId="composer-review-tag"
-          />
+        {queuedContent ? <Box sx={{ width: "100%", pointerEvents: "auto" }}>{queuedContent}</Box> : null}
+        {hasFloatingTags && (
+          <Box sx={{ display: "flex", flexWrap: "wrap", alignItems: "flex-end", gap: 0.75, pointerEvents: "none" }}>
+            {!editChrome && scheduledWakeups.map((wakeup) => (
+              <WakeupTile
+                key={wakeup.id}
+                id={wakeup.id}
+                label={wakeup.label}
+                removeLabel={wakeup.removeLabel}
+                onRemove={wakeup.onRemove}
+                detail={wakeup.detail}
+              />
+            ))}
+            {!editChrome && effectiveReviewCount > 0 && (
+              <ComposerTag
+                icon={<RateReviewOutlinedIcon sx={{ fontSize: 15, color: (theme) => theme.palette.status.info.main }} />}
+                label={t("reviewPending", { count: effectiveReviewCount })}
+                testId="composer-review-tag"
+              />
+            )}
+            {composerAttachments.map((attachment) => {
+              const isImage = isImageMime(attachment.type) && Boolean(attachment.path);
+              return (
+                <AttachmentTile
+                  key={attachment.id}
+                  name={attachment.name}
+                  mime={attachment.type}
+                  sizeBytes={attachment.size}
+                  previewSrc={isImage ? localFileUrl(attachment.path ?? "") : undefined}
+                  removeLabel={t("removeAttachment", { name: attachment.name })}
+                  onRemove={() => setComposerAttachments(composerAttachments.filter((item) => item.id !== attachment.id))}
+                  onOpen={isImage ? () => setPreviewAttachment(attachment) : undefined}
+                />
+              );
+            })}
+          </Box>
         )}
-        {composerAttachments.map((attachment) => {
-          const isImage = isImageMime(attachment.type) && Boolean(attachment.path);
-          return (
-            <AttachmentTile
-              key={attachment.id}
-              name={attachment.name}
-              mime={attachment.type}
-              sizeBytes={attachment.size}
-              previewSrc={isImage ? localFileUrl(attachment.path ?? "") : undefined}
-              removeLabel={t("removeAttachment", { name: attachment.name })}
-              onRemove={() => setComposerAttachments(composerAttachments.filter((item) => item.id !== attachment.id))}
-              onOpen={isImage ? () => setPreviewAttachment(attachment) : undefined}
-            />
-          );
-        })}
       </Box>
       <Box
         data-testid="composer-bar"
@@ -688,7 +708,7 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
         )}
         <Box
           data-testid="composer-input-area"
-          data-expanded={expanded ? "true" : "false"}
+          data-expanded={visualExpanded ? "true" : "false"}
           sx={{ position: "relative", flex: 1, minWidth: 0, minHeight: 26, display: "flex", alignItems: "center" }}
         >
           {suggestionsOpen && (
@@ -722,41 +742,79 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
               </Stack>
             </Box>
           )}
-          <InputBase
-            inputRef={textareaRef}
-            value={composerValue}
-            onChange={handleComposerChange}
-            onKeyDown={handleKeyDown}
-            onPaste={handlePaste}
-            placeholder={placeholder}
-            inputProps={{ "aria-label": placeholder, "data-testid": "composer-input", spellCheck: false, autoCorrect: "off", autoCapitalize: "none", autoComplete: "off", onBeforeInput: handleBeforeInput }}
-            multiline
-            minRows={1}
-            maxRows={expanded ? 8 : 1}
-            sx={{
-              width: "100%",
-              fontSize: "0.84rem",
-              lineHeight: 1.45,
-              py: 0.25,
-              ...(expanded && {
+          {voiceState === "recording" ? (
+            <Box
+              data-testid="composer-voice-input-panel"
+              sx={{
                 position: "absolute",
                 left: 0,
                 right: 0,
                 bottom: 0,
                 zIndex: 5,
+                display: "flex",
+                flexDirection: "column",
+                gap: 0.75,
                 px: 1,
                 py: 0.75,
                 borderRadius: (t) => `${t.custom.radii.md}px`,
                 backgroundColor: (t) => t.custom.surfaces.s2,
                 border: (t) => `1px solid ${t.custom.borders.strong}`,
                 boxShadow: "0 -10px 28px rgba(0, 0, 0, 0.45)",
-                // Reserve room for the docked voice strip so the bottom line of
-                // text isn't hidden behind it while recording.
-                ...(voiceState === "recording" && { pb: "48px" }),
-              }),
-            }}
-          />
-          {voiceState === "recording" && <VoiceRecordingStrip label={voiceLabel} duration={voiceDuration} levels={voiceLevels} ambient={voiceAmbient} onLevelCountChange={setVoiceLevelCountForWidth} dockBottom={expanded} />}
+              }}
+            >
+              <InputBase
+                inputRef={textareaRef}
+                value={composerValue}
+                onChange={handleComposerChange}
+                onKeyDown={handleKeyDown}
+                onPaste={handlePaste}
+                placeholder={placeholder}
+                inputProps={{ "aria-label": placeholder, "data-testid": "composer-input", spellCheck: false, autoCorrect: "off", autoCapitalize: "none", autoComplete: "off", onBeforeInput: handleBeforeInput }}
+                multiline
+                minRows={1}
+                maxRows={7}
+                sx={{
+                  width: "100%",
+                  fontSize: "0.84rem",
+                  lineHeight: 1.45,
+                  py: 0.25,
+                }}
+              />
+              <VoiceRecordingStrip label={voiceLabel} duration={voiceDuration} levels={voiceLevels} ambient={voiceAmbient} onLevelCountChange={setVoiceLevelCountForWidth} dockBottom />
+            </Box>
+          ) : (
+            <InputBase
+              inputRef={textareaRef}
+              value={composerValue}
+              onChange={handleComposerChange}
+              onKeyDown={handleKeyDown}
+              onPaste={handlePaste}
+              placeholder={placeholder}
+              inputProps={{ "aria-label": placeholder, "data-testid": "composer-input", spellCheck: false, autoCorrect: "off", autoCapitalize: "none", autoComplete: "off", onBeforeInput: handleBeforeInput }}
+              multiline
+              minRows={1}
+              maxRows={expanded ? 8 : 1}
+              sx={{
+                width: "100%",
+                fontSize: "0.84rem",
+                lineHeight: 1.45,
+                py: 0.25,
+                ...(expanded && {
+                  position: "absolute",
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  zIndex: 5,
+                  px: 1,
+                  py: 0.75,
+                  borderRadius: (t) => `${t.custom.radii.md}px`,
+                  backgroundColor: (t) => t.custom.surfaces.s2,
+                  border: (t) => `1px solid ${t.custom.borders.strong}`,
+                  boxShadow: "0 -10px 28px rgba(0, 0, 0, 0.45)",
+                }),
+              }}
+            />
+          )}
         </Box>
         <Stack direction="row" spacing={0.5} sx={{ alignItems: "center", flex: "0 0 auto" }}>
           {!editChrome && !running && !voiceInputActive ? (

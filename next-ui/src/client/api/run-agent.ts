@@ -220,6 +220,7 @@ async function streamRun(
       reasoning: profile.reasoning,
       mode: profile.mode,
       autoConfirm: profile.autoConfirm ?? false,
+      ...(profile.tools !== undefined ? { tools: profile.tools } : {}),
       prompt,
       cwd,
       accessMode,

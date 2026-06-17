@@ -82,4 +82,25 @@ describe("workspace-composer-model", () => {
 
     expect(removeWakeup).toHaveBeenCalledWith("wakeup-1");
   });
+
+  it("labels script wakeups by schedule instead of trigger type", () => {
+    const tags = scheduledWakeupComposerTags({
+      locale: "ru",
+      removeWakeup: vi.fn(),
+      wakeups: [
+        wakeup({
+          trigger: {
+            type: "script",
+            script: "test -f /tmp/ready",
+            intervalSeconds: 15,
+            nextCheckMs: Date.UTC(2026, 0, 2, 3, 4),
+          },
+        }),
+      ],
+    });
+
+    expect(tags[0]?.label).toBe("TaskWakeup: каждые 15с");
+    expect(tags[0]?.label).not.toContain("script");
+    expect(tags[0]?.detail.rows).toContainEqual({ label: "Расписание", value: "каждые 15с" });
+  });
 });

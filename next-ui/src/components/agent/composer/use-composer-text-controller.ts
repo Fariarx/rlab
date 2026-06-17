@@ -12,6 +12,8 @@ import {
 import { composerDraftsEqual, fileToAttachmentDraft } from "./composer-utils";
 import type { ComposerAttachmentDraft, ComposerDraft } from "../core/types";
 
+const STALE_SUBMIT_CHANGE_GUARD_MS = 750;
+
 interface UseComposerTextControllerInput {
   readonly attachmentsControlled: boolean;
   readonly composerAttachments: readonly ComposerAttachmentDraft[];
@@ -20,6 +22,7 @@ interface UseComposerTextControllerInput {
   readonly initialAttachments: readonly ComposerAttachmentDraft[];
   readonly initialValue: string;
   readonly onAttachmentError?: (message: string) => void;
+  readonly onBeforeSend?: () => void;
   readonly onDraftChange?: (draft: ComposerDraft) => void;
   readonly onSend?: (value: string) => void;
   readonly onSendReview?: () => void;
@@ -63,6 +66,7 @@ export function useComposerTextController({
   initialAttachments,
   initialValue,
   onAttachmentError,
+  onBeforeSend,
   onDraftChange,
   onSend,
   onSendReview,
@@ -87,7 +91,29 @@ export function useComposerTextController({
   const initialDraftRef = useRef<ComposerDraft>({ text: initialValue, attachments: initialAttachments });
   const localDraftDirtyRef = useRef(false);
   const latestDraftRef = useRef<ComposerDraft>({ text: composerValue, attachments: composerAttachments });
+  const staleSubmitChangeGuardRef = useRef<string | null>(null);
+  const staleSubmitChangeGuardTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   latestDraftRef.current = { text: composerValue, attachments: composerAttachments };
+
+  const clearStaleSubmitChangeGuard = useCallback(() => {
+    staleSubmitChangeGuardRef.current = null;
+    if (staleSubmitChangeGuardTimerRef.current) {
+      clearTimeout(staleSubmitChangeGuardTimerRef.current);
+      staleSubmitChangeGuardTimerRef.current = null;
+    }
+  }, []);
+
+  const armStaleSubmitChangeGuard = useCallback((submittedText: string) => {
+    clearStaleSubmitChangeGuard();
+    const normalized = submittedText.trim();
+    if (!normalized) {
+      return;
+    }
+    staleSubmitChangeGuardRef.current = normalized;
+    staleSubmitChangeGuardTimerRef.current = setTimeout(clearStaleSubmitChangeGuard, STALE_SUBMIT_CHANGE_GUARD_MS);
+  }, [clearStaleSubmitChangeGuard]);
+
+  useEffect(() => clearStaleSubmitChangeGuard, [clearStaleSubmitChangeGuard]);
 
   const updateDraft = useCallback((draft: ComposerDraft) => {
     localDraftDirtyRef.current = true;
@@ -193,24 +219,36 @@ export function useComposerTextController({
   }, [updateDraft]);
 
   const send = useCallback(async () => {
-    const trimmed = composerValue.trim();
-    const hasInput = trimmed.length > 0 || composerAttachments.length > 0;
+    onBeforeSend?.();
+    const draft = latestDraftRef.current;
+    const trimmed = draft.text.trim();
+    const hasInput = trimmed.length > 0 || draft.attachments.length > 0;
     if (!hasInput && reviewCount === 0) {
       return;
     }
     setSending(true);
     if (hasInput) {
-      onSend?.(composerSendPayload(trimmed, composerAttachments));
+      const payload = composerSendPayload(trimmed, draft.attachments);
+      armStaleSubmitChangeGuard(draft.text);
       updateDraft({ text: "", attachments: [] });
+      onSend?.(payload);
     }
     if (reviewCount > 0) {
       onSendReview?.();
     }
     setSending(false);
-  }, [composerAttachments, composerValue, onSend, onSendReview, reviewCount, setSending, updateDraft]);
+  }, [armStaleSubmitChangeGuard, onBeforeSend, onSend, onSendReview, reviewCount, setSending, updateDraft]);
 
   const handleComposerChange = useCallback((event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     const nextValue = event.target.value;
+    const staleSubmittedText = staleSubmitChangeGuardRef.current;
+    if (staleSubmittedText) {
+      const normalizedNextValue = nextValue.trim();
+      if (normalizedNextValue.length > 0 && staleSubmittedText.includes(normalizedNextValue)) {
+        return;
+      }
+      clearStaleSubmitChangeGuard();
+    }
     const normalized = normalizePluginTokenDeletion(composerValue, nextValue, pluginTokenRanges);
     if (normalized) {
       pendingSelectionRef.current = { start: normalized.caret, end: normalized.caret };
@@ -218,7 +256,7 @@ export function useComposerTextController({
       return;
     }
     setComposerValue(nextValue);
-  }, [composerValue, pluginTokenRanges, setComposerValue]);
+  }, [clearStaleSubmitChangeGuard, composerValue, pluginTokenRanges, setComposerValue]);
 
   const handleBeforeInput = useCallback((event: FormEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     const nativeEvent = event.nativeEvent as InputEvent;

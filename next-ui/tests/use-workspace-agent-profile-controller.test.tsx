@@ -113,6 +113,47 @@ describe("useWorkspaceAgentProfileController", () => {
     expect(setProfile).toHaveBeenCalledWith(selectedProfile);
   });
 
+  it("does not reset a user-picked profile when the same conversation updates", async () => {
+    const setProfile = vi.fn();
+    const setConversationProfile = vi.fn();
+    const captured: { current: UseWorkspaceAgentProfileControllerResult | null } = { current: null };
+    const pickedProfile: AgentProfile = { agent: "gemini", model: "default", reasoning: "default", mode: "default" };
+    const selected = conversation(defaultProfile);
+
+    const { rerender } = render(
+      <Harness
+        profile={defaultProfile}
+        selected={selected}
+        setProfile={setProfile}
+        setConversationProfile={setConversationProfile}
+        capture={(controller) => {
+          captured.current = controller;
+        }}
+      />,
+    );
+
+    await waitFor(() => expect(captured.current).not.toBeNull());
+    setProfile.mockClear();
+    captured.current?.handlePicked(pickedProfile);
+
+    expect(setProfile).toHaveBeenCalledWith(pickedProfile);
+    setProfile.mockClear();
+
+    rerender(
+      <Harness
+        profile={pickedProfile}
+        selected={{ ...selected, status: "running", time: "12:01" }}
+        setProfile={setProfile}
+        setConversationProfile={setConversationProfile}
+        capture={(controller) => {
+          captured.current = controller;
+        }}
+      />,
+    );
+
+    expect(setProfile).not.toHaveBeenCalled();
+  });
+
   it("syncs local profile from defaults when no conversation is selected", () => {
     const setProfile = vi.fn();
     const fallbackProfile: AgentProfile = { agent: "claude-code", model: "default", reasoning: "default", mode: "default" };

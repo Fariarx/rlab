@@ -1,6 +1,7 @@
 import type { AgentBlock, ChatMessage, ComposerDraft, ConversationSummary, Project } from "../domain/agent-types";
 import { isAgentId, normalizeAgentProfile, type AgentId } from "./agent-catalog";
 import { cloneAppSettings, defaultAppSettings, type AppSettings } from "./app-settings";
+import { normalizeConversationUpdatedAtMs } from "./time-format";
 import { buildInitialThreads, initialChats, initialProjects } from "./workspace-sample-data";
 
 export interface WorkspaceState {
@@ -15,7 +16,7 @@ export interface WorkspaceState {
 /** The seeded demo workspace (sample conversations/projects). Only used in
  *  development or behind the demo flag — see {@link isDemoWorkspaceEnabled}. */
 export function buildInitialWorkspaceState(): WorkspaceState {
-  return {
+  return cloneWorkspaceState({
     chats: [...initialChats],
     projects: initialProjects.map((project) => ({
       ...project,
@@ -25,7 +26,7 @@ export function buildInitialWorkspaceState(): WorkspaceState {
     composerDrafts: {},
     selectedId: "chat-2",
     settings: cloneAppSettings(defaultAppSettings),
-  };
+  });
 }
 
 /** A clean, empty workspace — the production default (no demo conversations). */
@@ -69,7 +70,13 @@ export function cloneWorkspaceState(state: WorkspaceState): WorkspaceState {
 
 function cloneConversation(conversation: ConversationSummary): ConversationSummary {
   const profile = normalizeAgentProfile(conversation.profile, conversation.agent);
-  return { ...conversation, agent: profile.agent, profile, agentSessions: cloneAgentSessions(conversation) };
+  return {
+    ...conversation,
+    updatedAtMs: normalizeConversationUpdatedAtMs(conversation.time, conversation.updatedAtMs),
+    agent: profile.agent,
+    profile,
+    agentSessions: cloneAgentSessions(conversation),
+  };
 }
 
 function cloneAgentSessions(conversation: ConversationSummary): Partial<Record<AgentId, string>> | undefined {

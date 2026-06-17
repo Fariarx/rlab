@@ -980,7 +980,7 @@ describe("WorkspacePage", () => {
 
     renderWithThemeAndVirtuoso(<WorkspacePage />);
 
-    fireEvent.change(await screen.findByPlaceholderText("Ответить текстом..."), { target: { value: "Use terse bullets" } });
+    fireEvent.change(await screen.findByPlaceholderText("Или скажите что не так..."), { target: { value: "Use terse bullets" } });
     fireEvent.click(screen.getByRole("button", { name: "Отправить текстом" }));
 
     await waitFor(() => {

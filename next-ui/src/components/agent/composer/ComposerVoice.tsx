@@ -163,13 +163,14 @@ export function VoiceRecordingStrip({
     <Box
       data-testid="composer-voice-recording-strip"
       data-ambient={ambient ? "true" : "false"}
+      data-layout={dockBottom ? "inline" : "overlay"}
       role="status"
       aria-label={label}
       sx={{
-        position: "absolute",
-        left: 0,
-        right: 0,
-        bottom: 0,
+        position: dockBottom ? "relative" : "absolute",
+        left: dockBottom ? "auto" : 0,
+        right: dockBottom ? "auto" : 0,
+        bottom: dockBottom ? "auto" : 0,
         zIndex: 6,
         display: "grid",
         gridTemplateColumns: "minmax(0, 1fr) auto",
@@ -181,12 +182,13 @@ export function VoiceRecordingStrip({
         backgroundColor: (theme) => theme.custom.surfaces.s2,
         ...(dockBottom
           ? {
+              width: "100%",
               top: "auto",
-              height: 40,
+              height: 32,
               px: 1.25,
-              borderTop: (theme) => `1px solid ${theme.custom.borders.subtle}`,
-              borderBottomLeftRadius: (theme) => `${theme.custom.radii.md}px`,
-              borderBottomRightRadius: (theme) => `${theme.custom.radii.md}px`,
+              borderRadius: (theme) => `${theme.custom.radii.md}px`,
+              border: (theme) => `1px solid ${theme.custom.borders.subtle}`,
+              backgroundColor: (theme) => theme.custom.surfaces.s1,
             }
           : { top: 0 }),
       }}
@@ -195,7 +197,7 @@ export function VoiceRecordingStrip({
         ref={waveformRef}
         sx={{
           minWidth: 0,
-          height: 28,
+          height: dockBottom ? 22 : 28,
           position: "relative",
           display: "grid",
           gridTemplateColumns: `repeat(${Math.max(1, levels.length)}, minmax(0, 1fr))`,
@@ -205,7 +207,7 @@ export function VoiceRecordingStrip({
         }}
       >
         {voiceLevelSlots(levels).map(({ key, level, slot }) => {
-          const height = Math.max(3, Math.min(28, 3 + level * 32));
+          const height = Math.max(3, Math.min(dockBottom ? 22 : 28, 3 + level * (dockBottom ? 24 : 32)));
           const ambientDuration = 1300 + (slot % 7) * 95;
           const ambientDelay = -(slot % 13) * 75;
           return (

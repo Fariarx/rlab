@@ -153,7 +153,7 @@ describe("message actions", () => {
     );
 
     expect(screen.getByText("Несколько вариантов")).toBeInTheDocument();
-    fireEvent.change(screen.getByPlaceholderText("Ответить текстом..."), { target: { value: "Use a terse changelog format" } });
+    fireEvent.change(screen.getByPlaceholderText("Или скажите что не так..."), { target: { value: "Use a terse changelog format" } });
     fireEvent.click(screen.getByRole("button", { name: "Отправить текстом" }));
 
     expect(onOptionSelection).toHaveBeenCalledWith("toolu_question:q0", ["Use a terse changelog format"]);

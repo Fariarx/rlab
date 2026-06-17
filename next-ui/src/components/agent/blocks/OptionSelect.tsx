@@ -4,7 +4,7 @@ import { Box, InputBase, Stack, Typography } from "@mui/material";
 import { observer } from "mobx-react-lite";
 import { useEffect, useState } from "react";
 import { useI18n } from "../../../i18n/I18nProvider";
-import { Button } from "../../ui";
+import { Button, IconButton } from "../../ui";
 import { OptionSelectStore } from "../stores/agent-local-stores";
 import { pop } from "../core/anim";
 import { StatusNote } from "./parts";
@@ -159,7 +159,7 @@ export const OptionSelect = observer(function OptionSelect({
       {!confirmed && (
         <Stack
           component="form"
-          direction={{ xs: "column", sm: "row" }}
+          direction="row"
           spacing={1}
           onSubmit={(event) => {
             event.preventDefault();
@@ -184,9 +184,15 @@ export const OptionSelect = observer(function OptionSelect({
               color: "text.primary",
             }}
           />
-          <Button type="submit" variant="outlined" size="small" disabled={customAnswer.trim().length === 0 || pending} startIcon={<SendRoundedIcon sx={{ fontSize: 15 }} />}>
-            {t("sendCustomAnswer")}
-          </Button>
+          <IconButton
+            type="submit"
+            tone="subtle"
+            aria-label={t("sendCustomAnswer")}
+            disabled={customAnswer.trim().length === 0 || pending}
+            sx={{ flex: "0 0 auto", width: 38, height: 38, borderRadius: (t) => `${t.custom.radii.sm}px` }}
+          >
+            <SendRoundedIcon sx={{ fontSize: 18 }} />
+          </IconButton>
         </Stack>
       )}
 

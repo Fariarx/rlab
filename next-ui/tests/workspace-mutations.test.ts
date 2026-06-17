@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ConversationSummary, Project } from "../src/domain/agent-types";
+import type { AgentProfile } from "../src/components/agent";
 import { applyWorkspaceMutationsToState } from "../src/lib/workspace-mutations";
 import { buildEmptyWorkspaceState, type WorkspaceState } from "../src/lib/workspace-state";
 
@@ -11,6 +12,14 @@ function conversation(id: string, title = id): ConversationSummary {
     time: "12:00",
     status: "idle",
     agent: "codex",
+  };
+}
+
+function conversationWithProfile(id: string, profile: AgentProfile): ConversationSummary {
+  return {
+    ...conversation(id),
+    agent: profile.agent,
+    profile,
   };
 }
 
@@ -60,5 +69,67 @@ describe("workspace mutation reducer", () => {
     expect(next.chats[1]?.title).toBe("Root updated");
     expect(next.projects[0]?.conversations.map((item) => item.id)).toEqual(["pc1", "pc2"]);
     expect(next.projects[0]?.conversations[1]?.title).toBe("Project updated");
+  });
+
+  it("preserves a user-picked profile when a stale run metadata update arrives", () => {
+    const codexProfile: AgentProfile = { agent: "codex", model: "default", reasoning: "default", mode: "default" };
+    const geminiProfile: AgentProfile = { agent: "gemini", model: "default", reasoning: "default", mode: "default" };
+    const state = workspace({
+      chats: [conversationWithProfile("c1", geminiProfile)],
+    });
+
+    const next = applyWorkspaceMutationsToState(state, [
+      {
+        type: "updateConversation",
+        conversation: {
+          ...conversationWithProfile("c1", codexProfile),
+          status: "done",
+          snippet: "Finished old run",
+          time: "12:01",
+        },
+      },
+    ]);
+
+    expect(next.chats[0]).toMatchObject({
+      agent: "gemini",
+      profile: geminiProfile,
+      status: "done",
+      snippet: "Finished old run",
+      time: "12:01",
+    });
+  });
+
+  it("backfills absolute activity timestamps for conversation mutations", () => {
+    const state = workspace({
+      chats: [conversation("c1")],
+    });
+
+    const next = applyWorkspaceMutationsToState(state, [
+      {
+        type: "updateConversation",
+        conversation: { ...conversation("c1"), time: "12:34", updatedAtMs: undefined },
+      },
+    ]);
+
+    expect(next.chats[0].updatedAtMs).toEqual(expect.any(Number));
+    expect(Number.isFinite(next.chats[0].updatedAtMs)).toBe(true);
+  });
+
+  it("still applies explicit profile selection mutations", () => {
+    const codexProfile: AgentProfile = { agent: "codex", model: "default", reasoning: "default", mode: "default" };
+    const geminiProfile: AgentProfile = { agent: "gemini", model: "default", reasoning: "default", mode: "default" };
+    const state = workspace({
+      chats: [conversationWithProfile("c1", codexProfile)],
+    });
+
+    const next = applyWorkspaceMutationsToState(state, [
+      {
+        type: "setConversationProfile",
+        conversationId: "c1",
+        profile: geminiProfile,
+      },
+    ]);
+
+    expect(next.chats[0]).toMatchObject({ agent: "gemini", profile: geminiProfile });
   });
 });

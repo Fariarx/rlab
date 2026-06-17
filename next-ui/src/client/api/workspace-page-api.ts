@@ -1,4 +1,4 @@
-import { formatDateTime24 } from "../../lib/time-format";
+import { formatClock24 } from "../../lib/time-format";
 import type { ApprovalDecision } from "../../domain/agent-types";
 import type { AgentRateLimitMap } from "../../lib/agent-limits";
 import type { ComposerPluginLink } from "../../lib/rlab-plugins";
@@ -189,17 +189,50 @@ export async function deleteWakeup(conversationId: string, wakeupId: string): Pr
   }
 }
 
+function twoDigit(value: number): string {
+  return value.toString().padStart(2, "0");
+}
+
+function formatCompactWakeupTime(timestampMs: number, now = new Date()): string {
+  const date = new Date(timestampMs);
+  if (!Number.isFinite(date.getTime())) {
+    return "";
+  }
+  const sameYear = date.getFullYear() === now.getFullYear();
+  const sameDay = sameYear && date.getMonth() === now.getMonth() && date.getDate() === now.getDate();
+  if (sameDay) {
+    return formatClock24(date);
+  }
+  const dayMonth = `${twoDigit(date.getDate())}.${twoDigit(date.getMonth() + 1)}`;
+  return `${sameYear ? dayMonth : `${dayMonth}.${date.getFullYear()}`} ${formatClock24(date)}`;
+}
+
+function formatShortInterval(seconds: number | undefined, locale: "ru" | "en"): string | undefined {
+  if (seconds === undefined || !Number.isFinite(seconds) || seconds <= 0) {
+    return undefined;
+  }
+  if (seconds % 3600 === 0 && seconds >= 3600) {
+    const hours = seconds / 3600;
+    return locale === "ru" ? `каждые ${hours}ч` : `every ${hours}h`;
+  }
+  if (seconds % 60 === 0 && seconds >= 60) {
+    const minutes = seconds / 60;
+    return locale === "ru" ? `каждые ${minutes}м` : `every ${minutes}m`;
+  }
+  return locale === "ru" ? `каждые ${seconds}с` : `every ${seconds}s`;
+}
+
 export function wakeupLabel(wakeup: WakeupSummary, locale: "ru" | "en"): string {
   if (wakeup.trigger.type === "time") {
-    const when = formatDateTime24(new Date(wakeup.trigger.fireAtMs));
+    const when = formatCompactWakeupTime(wakeup.trigger.fireAtMs);
     return locale === "ru" ? `TaskWakeup: ${when}` : `TaskWakeup: ${when}`;
   }
   if (wakeup.trigger.type === "cron") {
-    const when = formatDateTime24(new Date(wakeup.trigger.nextFireMs));
-    return locale === "ru" ? `TaskWakeup cron: ${when}` : `TaskWakeup cron: ${when}`;
+    const when = formatCompactWakeupTime(wakeup.trigger.nextFireMs);
+    return locale === "ru" ? `TaskWakeup: ${when}` : `TaskWakeup: ${when}`;
   }
-  const scriptSchedule = wakeup.trigger.cron ? `cron ${wakeup.trigger.cron}` : locale === "ru" ? `каждые ${wakeup.trigger.intervalSeconds}s` : `every ${wakeup.trigger.intervalSeconds}s`;
-  const base = `TaskWakeup script: ${scriptSchedule}`;
+  const scriptSchedule = wakeup.trigger.cron ? formatCompactWakeupTime(wakeup.trigger.nextCheckMs) : (formatShortInterval(wakeup.trigger.intervalSeconds, locale) ?? formatCompactWakeupTime(wakeup.trigger.nextCheckMs));
+  const base = `TaskWakeup: ${scriptSchedule}`;
   if (wakeup.trigger.lastError) {
     return `${base} · ${wakeup.trigger.lastError}`;
   }

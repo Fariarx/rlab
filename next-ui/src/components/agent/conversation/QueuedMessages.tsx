@@ -39,19 +39,21 @@ export function QueuedMessages({ messages, paused, onCancel, onCopy, onSendNow, 
     <Box
       data-testid="queued-messages"
       sx={{
+        width: "100%",
         borderRadius: (theme) => `${theme.custom.radii.lg}px`,
-        border: (theme) => `1px solid ${theme.palette.status.warn.border}`,
-        backgroundColor: (theme) => theme.palette.status.warn.soft,
+        border: (theme) => `1px solid ${theme.custom.borders.strong}`,
+        backgroundColor: (theme) => theme.custom.surfaces.s2,
+        boxShadow: "0 -10px 28px rgba(0, 0, 0, 0.3)",
         overflow: "hidden",
       }}
     >
       <Stack
         direction="row"
         spacing={0.75}
-        sx={{ alignItems: "center", px: 1.25, py: 0.25, borderBottom: (theme) => `1px solid ${theme.palette.status.warn.border}` }}
+        sx={{ alignItems: "center", px: 1.25, py: 0.35, borderBottom: (theme) => `1px solid ${theme.custom.borders.subtle}` }}
       >
         <ScheduleSendRoundedIcon sx={{ fontSize: 14, color: (theme) => theme.palette.status.warn.main, flex: "0 0 auto" }} />
-        <Typography variant="microLabel" sx={{ color: (theme) => theme.palette.status.warn.main, flex: 1, minWidth: 0 }}>
+        <Typography variant="microLabel" sx={{ color: "text.secondary", flex: 1, minWidth: 0 }}>
           {paused ? t("queuedPausedTitle", { count: messages.length }) : t("queuedTitle", { count: messages.length })}
         </Typography>
         <Button
@@ -59,11 +61,11 @@ export function QueuedMessages({ messages, paused, onCancel, onCopy, onSendNow, 
           size="small"
           onClick={onTogglePause}
           startIcon={paused ? <PlayArrowRoundedIcon sx={{ fontSize: 16 }} /> : <PauseRoundedIcon sx={{ fontSize: 16 }} />}
-          sx={{ minWidth: 0, color: (theme) => theme.palette.status.warn.main }}
+          sx={{ minWidth: 0, color: "text.secondary" }}
         >
           {paused ? t("resumeQueue") : t("pauseQueue")}
         </Button>
-        <Button variant="text" size="small" onClick={onSendNow} sx={{ minWidth: 0, color: (theme) => theme.palette.status.warn.main }}>
+        <Button variant="text" size="small" onClick={onSendNow} sx={{ minWidth: 0, color: "text.secondary" }}>
           {t("sendQueuedNow")}
         </Button>
       </Stack>

@@ -1,12 +1,14 @@
 import type { ChatMessage, ComposerDraft, ConversationSummary, ConversationStatus, Project } from "../domain/agent-types";
-import { isAgentId } from "./agent-catalog";
+import { isAgentId, normalizeAgentProfile, type AgentProfile } from "./agent-catalog";
 import { isAppSettings, type AppSettings } from "./app-settings";
+import { normalizeConversationUpdatedAtMs } from "./time-format";
 import type { WorkspaceState } from "./workspace-state";
 
 export type WorkspaceProjectMutationMeta = Omit<Project, "conversations">;
 
 export type WorkspaceMutation =
   | { readonly type: "setSelectedConversation"; readonly conversationId: string }
+  | { readonly type: "setConversationProfile"; readonly conversationId: string; readonly profile: AgentProfile }
   | { readonly type: "setSettings"; readonly settings: AppSettings }
   | { readonly type: "upsertProject"; readonly project: WorkspaceProjectMutationMeta; readonly insertAtFront?: boolean }
   | { readonly type: "upsertConversation"; readonly conversation: ConversationSummary; readonly projectId: string | null; readonly insertAtFront?: boolean }
@@ -74,6 +76,10 @@ function isComposerDraftMutationValue(value: unknown): value is ComposerDraft {
   return isRecord(value) && typeof value.text === "string" && Array.isArray(value.attachments);
 }
 
+function isAgentProfileMutationValue(value: unknown): value is AgentProfile {
+  return isRecord(value) && isAgentId(value.agent);
+}
+
 function isChatMessageMutationValue(value: unknown): value is ChatMessage {
   if (!isRecord(value) || typeof value.id !== "string" || value.id.length === 0) {
     return false;
@@ -97,6 +103,11 @@ export function parseWorkspaceMutation(mutation: unknown): WorkspaceMutation {
         throw new Error("Invalid workspace selected conversation mutation.");
       }
       return { type: mutation.type, conversationId: mutation.conversationId };
+    case "setConversationProfile":
+      if (typeof mutation.conversationId !== "string" || mutation.conversationId.length === 0 || !isAgentProfileMutationValue(mutation.profile)) {
+        throw new Error("Invalid workspace conversation mutation.");
+      }
+      return { type: mutation.type, conversationId: mutation.conversationId, profile: normalizeAgentProfile(mutation.profile) };
     case "setSettings":
       if (!isAppSettings(mutation.settings)) {
         throw new Error("Invalid workspace settings mutation.");
@@ -179,15 +190,50 @@ function removeConversationFromCollections(state: WorkspaceState, conversationId
   };
 }
 
+function findConversationInState(state: WorkspaceState, conversationId: string): ConversationSummary | undefined {
+  return state.chats.find((conversation) => conversation.id === conversationId) ?? state.projects.flatMap((project) => project.conversations).find((conversation) => conversation.id === conversationId);
+}
+
 function updateConversationInCollections(state: WorkspaceState, conversation: ConversationSummary): WorkspaceState {
+  const existing = findConversationInState(state, conversation.id);
+  const nextConversation = normalizeConversationActivityTimestamp(existing ? mergeConversationUpdate(existing, conversation) : conversation);
   return {
     ...state,
-    chats: state.chats.map((item) => (item.id === conversation.id ? conversation : item)),
+    chats: state.chats.map((item) => (item.id === conversation.id ? nextConversation : item)),
     projects: state.projects.map((project) => ({
       ...project,
-      conversations: project.conversations.map((item) => (item.id === conversation.id ? conversation : item)),
+      conversations: project.conversations.map((item) => (item.id === conversation.id ? nextConversation : item)),
     })),
   };
+}
+
+function normalizeConversationActivityTimestamp(conversation: ConversationSummary): ConversationSummary {
+  return {
+    ...conversation,
+    updatedAtMs: normalizeConversationUpdatedAtMs(conversation.time, conversation.updatedAtMs),
+  };
+}
+
+function profilePayload(conversation: ConversationSummary): Pick<ConversationSummary, "agent" | "profile"> {
+  return { agent: conversation.agent, profile: conversation.profile };
+}
+
+function metadataPayload(conversation: ConversationSummary): Omit<ConversationSummary, "agent" | "profile"> {
+  const { agent: _agent, profile: _profile, ...metadata } = conversation;
+  return metadata;
+}
+
+function sameJson(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+export function mergeConversationUpdate(existing: ConversationSummary, incoming: ConversationSummary): ConversationSummary {
+  const changesProfile = !sameJson(profilePayload(existing), profilePayload(incoming));
+  const changesMetadata = !sameJson(metadataPayload(existing), metadataPayload(incoming));
+  if (changesProfile && changesMetadata) {
+    return { ...incoming, agent: existing.agent, profile: existing.profile };
+  }
+  return incoming;
 }
 
 function findConversationProjectId(state: WorkspaceState, conversationId: string): string | null | undefined {
@@ -202,11 +248,12 @@ function upsertConversationInCollection(
   conversation: ConversationSummary,
   insertAtFront: boolean | undefined,
 ): ConversationSummary[] {
+  const normalizedConversation = normalizeConversationActivityTimestamp(conversation);
   const existingIndex = conversations.findIndex((item) => item.id === conversation.id);
   if (existingIndex >= 0) {
-    return conversations.map((item, index) => (index === existingIndex ? conversation : item));
+    return conversations.map((item, index) => (index === existingIndex ? normalizedConversation : item));
   }
-  return insertAtFront ? [conversation, ...conversations] : [...conversations, conversation];
+  return insertAtFront ? [normalizedConversation, ...conversations] : [...conversations, normalizedConversation];
 }
 
 export function applyWorkspaceMutationToState(state: WorkspaceState, mutation: WorkspaceMutation): WorkspaceState {
@@ -217,6 +264,15 @@ export function applyWorkspaceMutationToState(state: WorkspaceState, mutation: W
         state.projects.flatMap((project) => project.conversations).find((conversation) => conversation.id === mutation.conversationId);
       const selectedState = { ...state, selectedId: mutation.conversationId };
       return selected ? updateConversationInCollections(selectedState, { ...selected, unread: false }) : selectedState;
+    }
+    case "setConversationProfile": {
+      const conversation =
+        state.chats.find((item) => item.id === mutation.conversationId) ??
+        state.projects.flatMap((project) => project.conversations).find((item) => item.id === mutation.conversationId);
+      if (!conversation) {
+        return state;
+      }
+      return updateConversationInCollections(state, { ...conversation, agent: mutation.profile.agent, profile: mutation.profile });
     }
     case "setSettings":
       return { ...state, settings: mutation.settings };

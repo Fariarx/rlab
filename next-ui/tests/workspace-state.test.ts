@@ -91,6 +91,25 @@ describe("workspace state", () => {
     expect(restored.chats[0].profile).toEqual(DEFAULT_PROFILE);
   });
 
+  it("backfills absolute activity timestamps for legacy conversations", () => {
+    const state = buildInitialWorkspaceState();
+    const staleState = {
+      ...state,
+      chats: [
+        {
+          ...state.chats[0],
+          time: "Mon",
+          updatedAtMs: undefined,
+        },
+      ],
+    } as unknown as typeof state;
+
+    const restored = cloneWorkspaceState(staleState);
+
+    expect(restored.chats[0].updatedAtMs).toEqual(expect.any(Number));
+    expect(Number.isFinite(restored.chats[0].updatedAtMs)).toBe(true);
+  });
+
   it("deduplicates persisted message ids inside a thread", () => {
     const state = {
       ...buildInitialWorkspaceState(),

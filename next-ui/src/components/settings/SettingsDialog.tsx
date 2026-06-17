@@ -124,6 +124,28 @@ const AGENT_API_KEY_LABELS: Partial<Record<AgentId, string>> = {
   droid: "Factory API key",
 };
 
+const ALPHA_AGENT_IDS = new Set<AgentId>(["gemini", "opencode"]);
+
+function AlphaVersionChip({ label }: { readonly label: string }) {
+  return (
+    <Chip
+      label={label}
+      size="small"
+      sx={{
+        flex: "0 0 auto",
+        height: 20,
+        borderRadius: (theme) => `${theme.custom.radii.pill}px`,
+        border: (theme) => `1px solid ${theme.palette.status.warn.border}`,
+        backgroundColor: (theme) => theme.palette.status.warn.soft,
+        color: (theme) => theme.palette.status.warn.main,
+        fontSize: "0.64rem",
+        fontWeight: 700,
+        "& .MuiChip-label": { px: 0.75 },
+      }}
+    />
+  );
+}
+
 /** Install/repair the Playwright Chromium that powers the in-app Preview tab. */
 const BrowserPreviewSetupRow = observer(function BrowserPreviewSetupRow() {
   const { t } = useI18n();
@@ -247,9 +269,12 @@ const AgentsSection = observer(function AgentsSection({
             <Stack direction="row" spacing={1.5} sx={{ alignItems: "center" }}>
               <AgentGlyph agent={a.id} size={30} />
               <Box sx={{ flex: 1, minWidth: 0 }}>
-                <Typography noWrap sx={{ fontSize: "0.85rem", fontWeight: 600, color: "text.primary" }}>
-                  {a.name}
-                </Typography>
+                <Stack direction="row" spacing={0.75} sx={{ alignItems: "center", minWidth: 0 }}>
+                  <Typography noWrap sx={{ fontSize: "0.85rem", fontWeight: 600, color: "text.primary" }}>
+                    {a.name}
+                  </Typography>
+                  {ALPHA_AGENT_IDS.has(a.id) && <AlphaVersionChip label={t("alphaVersion")} />}
+                </Stack>
                 <Stack direction="row" spacing={0.75} sx={{ alignItems: "center" }}>
                   <StatusDot status={agentStatusKey[sys]} label={agentStatus(sys)} size="sm" pulse={sys === "running"} />
                   <Typography noWrap sx={{ fontFamily: (t) => t.custom.fonts.mono, fontSize: "0.7rem", color: "text.secondary" }}>
@@ -563,23 +588,7 @@ const VoiceSection = observer(function VoiceSection({ settings, onSettingsChange
                 <Typography noWrap sx={{ fontSize: "0.85rem", fontWeight: 600, color: "text.primary" }}>
                   {provider.name}
                 </Typography>
-                {providerState.showAlpha && (
-                  <Chip
-                    label={t("alphaVersion")}
-                    size="small"
-                    sx={{
-                      flex: "0 0 auto",
-                      height: 20,
-                      borderRadius: (theme) => `${theme.custom.radii.pill}px`,
-                      border: (theme) => `1px solid ${theme.palette.status.warn.border}`,
-                      backgroundColor: (theme) => theme.palette.status.warn.soft,
-                      color: (theme) => theme.palette.status.warn.main,
-                      fontSize: "0.64rem",
-                      fontWeight: 700,
-                      "& .MuiChip-label": { px: 0.75 },
-                    }}
-                  />
-                )}
+                {providerState.showAlpha && <AlphaVersionChip label={t("alphaVersion")} />}
               </Stack>
               <Stack direction="row" spacing={0.75} sx={{ alignItems: "center" }}>
                 <StatusDot status={providerState.status} label={providerState.statusLabel} size="sm" pulse={false} />

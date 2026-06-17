@@ -4,6 +4,7 @@ import { join } from "node:path";
 import process from "node:process";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ChatMessage, ConversationSummary } from "../src/domain/agent-types";
+import type { AgentProfile } from "../src/components/agent";
 import { buildEmptyWorkspaceState, type WorkspaceState } from "../src/lib/workspace-state";
 import {
   closeWorkspaceDb,
@@ -35,6 +36,8 @@ const conv = (id: string, extra: Partial<ConversationSummary> = {}): Conversatio
 });
 const msg = (id: string, text: string): ChatMessage => ({ id, role: "agent", blocks: [{ kind: "text", text }] });
 const userMsg = (id: string, text: string): ChatMessage => ({ id, role: "user", text, time: "12:00" });
+const codexProfile: AgentProfile = { agent: "codex", model: "default", reasoning: "default", mode: "default" };
+const geminiProfile: AgentProfile = { agent: "gemini", model: "default", reasoning: "default", mode: "default" };
 
 let dir: string;
 beforeEach(() => {
@@ -67,6 +70,20 @@ describe("workspace-db", () => {
     expect(read.threads.pm1).toBeUndefined();
     expect(read.composerDrafts.c1.text).toBe("draft");
     expect(read.selectedId).toBe("c1");
+  });
+
+  it("backfills absolute conversation activity timestamps when reading legacy rows", () => {
+    initializeWorkspaceStateInDb({
+      ...buildEmptyWorkspaceState(),
+      chats: [conv("c1", { time: "12:00", updatedAtMs: undefined })],
+      threads: { c1: [] },
+      selectedId: "c1",
+    });
+
+    const read = readWorkspaceStateFromDb();
+
+    expect(read.chats[0].updatedAtMs).toEqual(expect.any(Number));
+    expect(Number.isFinite(read.chats[0].updatedAtMs)).toBe(true);
   });
 
   it("upserts a single message + conversation without rewriting the whole tree (hot path)", () => {
@@ -214,6 +231,74 @@ describe("workspace-db", () => {
     const read = readWorkspaceStateFromDb();
     expect(read.chats.find((conversation) => conversation.id === "c1")?.title).toBe("renamed");
     expect(read.threads.c1.map((message) => message.id)).toEqual(["m1"]);
+  });
+
+  it("preserves a user-picked profile when a stale row-level run update arrives", () => {
+    initializeWorkspaceStateInDb({
+      ...buildEmptyWorkspaceState(),
+      chats: [conv("c1", { agent: "gemini", profile: geminiProfile })],
+      threads: { c1: [] },
+      selectedId: "c1",
+    });
+
+    applyWorkspaceDbMutations([
+      {
+        type: "updateConversation",
+        conversation: conv("c1", {
+          agent: "codex",
+          profile: codexProfile,
+          status: "done",
+          snippet: "Old Codex run finished",
+          time: "12:01",
+        }),
+      },
+    ]);
+
+    expect(readWorkspaceStateFromDb().chats[0]).toMatchObject({
+      agent: "gemini",
+      profile: geminiProfile,
+      status: "done",
+      snippet: "Old Codex run finished",
+      time: "12:01",
+    });
+  });
+
+  it("applies explicit row-level profile selection mutations", () => {
+    initializeWorkspaceStateInDb({
+      ...buildEmptyWorkspaceState(),
+      chats: [conv("c1", { agent: "codex", profile: codexProfile })],
+      threads: { c1: [] },
+      selectedId: "c1",
+    });
+
+    applyWorkspaceDbMutations([{ type: "setConversationProfile", conversationId: "c1", profile: geminiProfile }]);
+
+    expect(readWorkspaceStateFromDb().chats[0]).toMatchObject({ agent: "gemini", profile: geminiProfile });
+  });
+
+  it("preserves a user-picked profile when a stale hot-path conversation update arrives", () => {
+    initializeWorkspaceStateInDb({
+      ...buildEmptyWorkspaceState(),
+      chats: [conv("c1", { agent: "gemini", profile: geminiProfile })],
+      threads: { c1: [] },
+      selectedId: "c1",
+    });
+
+    updateConversationData(conv("c1", {
+      agent: "codex",
+      profile: codexProfile,
+      status: "done",
+      snippet: "Old Codex hot path finished",
+      time: "12:02",
+    }));
+
+    expect(readWorkspaceStateFromDb().chats[0]).toMatchObject({
+      agent: "gemini",
+      profile: geminiProfile,
+      status: "done",
+      snippet: "Old Codex hot path finished",
+      time: "12:02",
+    });
   });
 
   it("rejects mutation batches with a stale expected revision", () => {

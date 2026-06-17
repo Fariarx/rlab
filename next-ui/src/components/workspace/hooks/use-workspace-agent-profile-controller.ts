@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import {
   DEFAULT_AGENT_OPTION_ID,
   getAgent,
@@ -65,11 +65,17 @@ export function useWorkspaceAgentProfileController({
   cliInfoOf,
   t,
 }: UseWorkspaceAgentProfileControllerInput): UseWorkspaceAgentProfileControllerResult {
+  const lastSyncedConversationIdRef = useRef<string | null>(null);
+
   useEffect(() => {
-    if (selected) {
-      setProfile(conversationProfile(selected));
-    } else {
+    if (!selected) {
+      lastSyncedConversationIdRef.current = null;
       setProfile(defaultProfile);
+      return;
+    }
+    if (lastSyncedConversationIdRef.current !== selected.id) {
+      lastSyncedConversationIdRef.current = selected.id;
+      setProfile(conversationProfile(selected));
     }
   }, [defaultProfile, selected, setProfile]);
 
@@ -85,10 +91,10 @@ export function useWorkspaceAgentProfileController({
 
   const updateSelectedProfile = useCallback((next: AgentProfile) => {
     setProfile(next);
-    if (selected) {
+    if (selectedId) {
       setConversationProfile(selectedId, next);
     }
-  }, [selected, selectedId, setConversationProfile, setProfile]);
+  }, [selectedId, setConversationProfile, setProfile]);
 
   const handlePicked = useCallback((picked: AgentProfile) => {
     updateSelectedProfile(picked);

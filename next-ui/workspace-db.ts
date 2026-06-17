@@ -2,8 +2,10 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import process from "node:process";
 import type { AgentBlock, ChatMessage, ComposerDraft, ConversationSummary, Project } from "./src/domain/agent-types";
+import type { AgentProfile } from "./src/lib/agent-catalog";
 import { conversationPreviewSnippet, messagePreviewText, previewSnippet } from "./src/lib/conversation-preview";
-import type { WorkspaceMutation } from "./src/lib/workspace-mutations";
+import { normalizeConversationUpdatedAtMs } from "./src/lib/time-format";
+import { mergeConversationUpdate, type WorkspaceMutation } from "./src/lib/workspace-mutations";
 import type { WorkspaceState } from "./src/lib/workspace-state";
 
 // `node:sqlite` is an experimental built-in that bundlers (vite/vitest) refuse to
@@ -226,7 +228,15 @@ function readConversationPreviewSnippets(handle: DatabaseHandle): ReadonlyMap<st
 
 function withConversationPreview(conversation: ConversationSummary, snippets: ReadonlyMap<string, string>): ConversationSummary {
   const snippet = snippets.get(conversation.id);
-  return snippet === undefined || snippet === conversation.snippet ? conversation : { ...conversation, snippet };
+  const normalized = normalizeConversationActivityTimestamp(conversation);
+  return snippet === undefined || snippet === normalized.snippet ? normalized : { ...normalized, snippet };
+}
+
+function normalizeConversationActivityTimestamp(conversation: ConversationSummary): ConversationSummary {
+  return {
+    ...conversation,
+    updatedAtMs: normalizeConversationUpdatedAtMs(conversation.time, conversation.updatedAtMs),
+  };
 }
 
 /** True once a workspace has been persisted — used to gate one-time import/seed. */
@@ -288,11 +298,11 @@ export function initializeWorkspaceStateInDb(state: WorkspaceState): number {
     const insMsg = handle.prepare("INSERT INTO messages(id, conversation_id, position, data) VALUES(?, ?, ?, ?)");
     const insDraft = handle.prepare("INSERT INTO composer_drafts(conversation_id, data) VALUES(?, ?)");
     const insKv = handle.prepare("INSERT INTO kv(key, value) VALUES(?, ?)");
-    state.chats.forEach((conversation, index) => insConv.run(conversation.id, null, index, JSON.stringify(conversation)));
+    state.chats.forEach((conversation, index) => insConv.run(conversation.id, null, index, JSON.stringify(normalizeConversationActivityTimestamp(conversation))));
     state.projects.forEach((project, projectIndex) => {
       const { conversations, ...meta } = project;
       insProject.run(project.id, projectIndex, JSON.stringify(meta));
-      conversations.forEach((conversation, index) => insConv.run(conversation.id, project.id, index, JSON.stringify(conversation)));
+      conversations.forEach((conversation, index) => insConv.run(conversation.id, project.id, index, JSON.stringify(normalizeConversationActivityTimestamp(conversation))));
     });
     for (const [conversationId, messages] of Object.entries(state.threads)) {
       messages.forEach((message, index) => insMsg.run(message.id, conversationId, index, JSON.stringify(message)));
@@ -369,28 +379,48 @@ function upsertProjectInTransaction(handle: DatabaseHandle, project: ProjectMeta
 }
 
 function upsertConversationInTransaction(handle: DatabaseHandle, conversation: ConversationSummary, projectId: string | null, insertAtFront = false): void {
+  const normalizedConversation = normalizeConversationActivityTimestamp(conversation);
   if (projectId !== null) {
     ensureProjectExists(handle, projectId);
   }
-  const existing = handle.prepare("SELECT project_id AS projectId, position FROM conversations WHERE id = ?").get(conversation.id) as { projectId: string | null; position: number } | undefined;
+  const existing = handle.prepare("SELECT project_id AS projectId, position FROM conversations WHERE id = ?").get(normalizedConversation.id) as { projectId: string | null; position: number } | undefined;
   if (existing && existing.projectId === projectId) {
-    handle.prepare("UPDATE conversations SET data = ? WHERE id = ?").run(JSON.stringify(conversation), conversation.id);
+    handle.prepare("UPDATE conversations SET data = ? WHERE id = ?").run(JSON.stringify(normalizedConversation), normalizedConversation.id);
     return;
   }
   if (existing) {
-    handle.prepare("DELETE FROM conversations WHERE id = ?").run(conversation.id);
+    handle.prepare("DELETE FROM conversations WHERE id = ?").run(normalizedConversation.id);
   }
   if (insertAtFront) {
     shiftConversationPositionsForFrontInsert(handle, projectId);
   }
   const position = insertAtFront ? 0 : nextConversationPosition(handle, projectId);
-  handle.prepare("INSERT INTO conversations(id, project_id, position, data) VALUES(?, ?, ?, ?)").run(conversation.id, projectId, position, JSON.stringify(conversation));
+  handle.prepare("INSERT INTO conversations(id, project_id, position, data) VALUES(?, ?, ?, ?)").run(normalizedConversation.id, projectId, position, JSON.stringify(normalizedConversation));
 }
 
 function updateConversationInTransaction(handle: DatabaseHandle, conversation: ConversationSummary): void {
-  const result = handle.prepare("UPDATE conversations SET data = ? WHERE id = ?").run(JSON.stringify(conversation), conversation.id);
+  const row = handle.prepare("SELECT data FROM conversations WHERE id = ?").get(conversation.id) as { data: string } | undefined;
+  if (!row) {
+    throw new Error(`Conversation ${conversation.id} does not exist.`);
+  }
+  const existing = JSON.parse(row.data) as ConversationSummary;
+  const next = normalizeConversationActivityTimestamp(mergeConversationUpdate(existing, conversation));
+  const result = handle.prepare("UPDATE conversations SET data = ? WHERE id = ?").run(JSON.stringify(next), conversation.id);
   if (result.changes === 0) {
     throw new Error(`Conversation ${conversation.id} does not exist.`);
+  }
+}
+
+function updateConversationProfileInTransaction(handle: DatabaseHandle, conversationId: string, profile: AgentProfile): void {
+  const row = handle.prepare("SELECT data FROM conversations WHERE id = ?").get(conversationId) as { data: string } | undefined;
+  if (!row) {
+    throw new Error(`Conversation ${conversationId} does not exist.`);
+  }
+  const existing = JSON.parse(row.data) as ConversationSummary;
+  const next = normalizeConversationActivityTimestamp({ ...existing, agent: profile.agent, profile });
+  const result = handle.prepare("UPDATE conversations SET data = ? WHERE id = ?").run(JSON.stringify(next), conversationId);
+  if (result.changes === 0) {
+    throw new Error(`Conversation ${conversationId} does not exist.`);
   }
 }
 
@@ -457,6 +487,9 @@ export function applyWorkspaceDbMutations(
               updateConversationInTransaction(handle, { ...conversation, unread: false });
             }
           }
+          break;
+        case "setConversationProfile":
+          updateConversationProfileInTransaction(handle, mutation.conversationId, mutation.profile);
           break;
         case "setSettings":
           handle.prepare("INSERT INTO kv(key, value) VALUES('settings', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(JSON.stringify(mutation.settings));
