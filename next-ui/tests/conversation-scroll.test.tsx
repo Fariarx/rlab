@@ -98,7 +98,10 @@ describe("Conversation auto-scroll", () => {
     const thread = screen.getByTestId("conversation-virtual-list");
     Object.defineProperty(thread, "scrollHeight", { value: 2000, configurable: true });
     Object.defineProperty(thread, "clientHeight", { value: 400, configurable: true });
-    thread.scrollTop = 300; // scrolled up, far from the bottom
+    // Start at the bottom, then scroll up — only an upward user scroll releases the pin.
+    thread.scrollTop = 1600;
+    fireEvent.scroll(thread);
+    thread.scrollTop = 600;
     fireEvent.scroll(thread);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "К последнему сообщению" })).toBeInTheDocument());

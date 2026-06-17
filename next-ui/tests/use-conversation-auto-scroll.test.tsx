@@ -30,12 +30,43 @@ describe("useConversationAutoScroll", () => {
     expect(captured.current?.showScrollToBottom).toBe(false);
 
     const element = captured.current?.containerRef.current as HTMLElement;
-    sizeContainer(element, { scrollHeight: 1000, clientHeight: 300, scrollTop: 120 });
+    // Start at the bottom, then scroll up (scrollTop decreases) — only an upward
+    // user scroll should release the pin.
+    sizeContainer(element, { scrollHeight: 1000, clientHeight: 300, scrollTop: 700 });
+    await act(async () => {
+      element.dispatchEvent(new Event("scroll"));
+    });
+    expect(captured.current?.showScrollToBottom).toBe(false);
+
+    element.scrollTop = 300;
+    await act(async () => {
+      element.dispatchEvent(new Event("scroll"));
+    });
+    expect(captured.current?.showScrollToBottom).toBe(true);
+  });
+
+  it("does not detach when content grows below the viewport without a user scroll", async () => {
+    const captured: { current: ConversationAutoScrollController | null } = { current: null };
+    render(<Harness capture={(controller) => { captured.current = controller; }} />);
+
+    await waitFor(() => expect(captured.current).not.toBeNull());
+    const element = captured.current?.containerRef.current as HTMLElement;
+    // Pinned at the bottom.
+    sizeContainer(element, { scrollHeight: 1000, clientHeight: 300, scrollTop: 700 });
     await act(async () => {
       element.dispatchEvent(new Event("scroll"));
     });
 
-    expect(captured.current?.showScrollToBottom).toBe(true);
+    // The agent appends a tall tool block: the content grows below and our snap
+    // moves scrollTop down, but by the time the scroll event fires the content
+    // has grown again so the bottom is "far" — this must NOT release the pin.
+    Object.defineProperty(element, "scrollHeight", { value: 1600, configurable: true });
+    element.scrollTop = 1000; // snapped down, yet not at the (new) bottom
+    await act(async () => {
+      element.dispatchEvent(new Event("scroll"));
+    });
+
+    expect(captured.current?.showScrollToBottom).toBe(false);
   });
 
   it("snaps back to the bottom and hides the affordance", async () => {
@@ -44,7 +75,11 @@ describe("useConversationAutoScroll", () => {
 
     await waitFor(() => expect(captured.current).not.toBeNull());
     const element = captured.current?.containerRef.current as HTMLElement;
-    sizeContainer(element, { scrollHeight: 1000, clientHeight: 300, scrollTop: 120 });
+    sizeContainer(element, { scrollHeight: 1000, clientHeight: 300, scrollTop: 700 });
+    await act(async () => {
+      element.dispatchEvent(new Event("scroll"));
+    });
+    element.scrollTop = 300;
     await act(async () => {
       element.dispatchEvent(new Event("scroll"));
     });

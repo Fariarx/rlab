@@ -82,16 +82,30 @@ export function useConversationAutoScroll(items: readonly unknown[], options?: C
     }
   }, [hasItems, snapInstant]);
 
-  // Track the user's pin state from raw scroll position, and load older messages
-  // as they near the top.
+  // Release the pin only on a genuine upward user scroll, and re-pin once the
+  // user returns to the bottom. Deriving release from `isAtBottom` alone is
+  // fragile: when the agent appends tool blocks faster than we re-snap, the
+  // bottom distance momentarily exceeds the threshold between our snap and the
+  // (async) scroll event, which would falsely unpin. A growing thread only ever
+  // moves scrollTop *down* via our own snap, so a scrollTop *decrease* is the
+  // unambiguous signal that the user scrolled up themselves.
+  const lastScrollTop = useRef(0);
   useEffect(() => {
     const element = containerRef.current;
     if (!element) {
       return;
     }
+    lastScrollTop.current = element.scrollTop;
     const onScroll = () => {
-      setPinned(isAtBottom(element));
-      if (element.scrollTop <= TOP_THRESHOLD) {
+      const top = element.scrollTop;
+      const scrolledUp = top < lastScrollTop.current - 2;
+      lastScrollTop.current = top;
+      if (scrolledUp && !isAtBottom(element)) {
+        setPinned(false);
+      } else if (isAtBottom(element)) {
+        setPinned(true);
+      }
+      if (top <= TOP_THRESHOLD) {
         onReachTopRef.current?.(element);
       }
     };
@@ -114,6 +128,29 @@ export function useConversationAutoScroll(items: readonly unknown[], options?: C
     });
     observer.observe(content);
     return () => observer.disconnect();
+  }, [snapInstant]);
+
+  // Background tabs throttle the ResizeObserver, so a thread that grew while
+  // hidden comes back scrolled away from the bottom. Re-stick on return.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState !== "visible" || !pinnedToBottom.current) {
+        return;
+      }
+      snapInstant();
+      // Layout may not be settled the instant the tab is shown; snap again next frame.
+      requestAnimationFrame(() => {
+        if (pinnedToBottom.current) {
+          snapInstant();
+        }
+      });
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onVisible);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onVisible);
+    };
   }, [snapInstant]);
 
   const scrollToBottom = useCallback(() => {
