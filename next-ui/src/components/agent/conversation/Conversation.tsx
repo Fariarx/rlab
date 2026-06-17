@@ -1,10 +1,9 @@
 import KeyboardArrowDownRoundedIcon from "@mui/icons-material/KeyboardArrowDownRounded";
 import { Box, IconButton, Stack, Tooltip } from "@mui/material";
-import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "../../../i18n/I18nProvider";
 import { type MessageDisplayPrefs, Message } from "../message/Message";
 import { rise } from "../core/anim";
-import { Button } from "../../ui";
 import type { MessageActionHandlers } from "../message/message-actions";
 import { AgentAvatar, TypingDots } from "../blocks/parts";
 import type { ChatMessage } from "../core/types";
@@ -100,16 +99,20 @@ export function Conversation({
   const hiddenCount = Math.max(0, items.length - windowSize);
   const windowed = useMemo(() => items.slice(hiddenCount), [items, hiddenCount]);
 
-  const autoScroll = useConversationAutoScroll(windowed);
-
-  // Reveal older turns without the viewport jumping: remember the distance from
-  // the bottom before the prepend and restore it after the taller content lays out.
+  // Reveal older turns as the user scrolls up, without the viewport jumping:
+  // remember the distance from the bottom before the prepend and restore it once
+  // the taller content lays out. A ref guards against re-triggering mid-prepend.
   const pendingPrepend = useRef<number | null>(null);
-  const showEarlier = () => {
-    const element = autoScroll.containerRef.current;
-    pendingPrepend.current = element ? element.scrollHeight - element.scrollTop : null;
-    setWindowSize((size) => size + WINDOW_STEP);
-  };
+  const loadEarlier = useCallback((element: HTMLDivElement) => {
+    if (pendingPrepend.current != null) {
+      return;
+    }
+    pendingPrepend.current = element.scrollHeight - element.scrollTop;
+    setWindowSize((size) => (size >= items.length ? size : size + WINDOW_STEP));
+  }, [items.length]);
+
+  const autoScroll = useConversationAutoScroll(windowed, { onReachTop: hiddenCount > 0 ? loadEarlier : undefined });
+
   useLayoutEffect(() => {
     const offset = pendingPrepend.current;
     pendingPrepend.current = null;
@@ -117,7 +120,7 @@ export function Conversation({
     if (offset != null && element) {
       element.scrollTop = element.scrollHeight - offset;
     }
-  }, [windowSize]);
+  }, [windowSize, autoScroll.containerRef]);
 
   return (
     <Box sx={{ position: "relative", height: "100%", minHeight: 0 }}>
@@ -132,13 +135,6 @@ export function Conversation({
         sx={{ height: "100%", minHeight: 0, overflowY: "auto", overflowX: "hidden", overscrollBehavior: "contain" }}
       >
         <Box ref={autoScroll.contentRef}>
-          {hiddenCount > 0 && (
-            <Box sx={{ width: "100%", maxWidth: contentMaxWidth, mx: "auto", px: contentPaddingX, pt: { xs: 2.5, sm: 4 }, pb: 1, display: "flex", justifyContent: "center" }}>
-              <Button variant="text" size="small" onClick={showEarlier}>
-                {t("showEarlierMessages", { count: hiddenCount })}
-              </Button>
-            </Box>
-          )}
           {windowed.map((item, index) => (
             <Box
               key={itemKey(index, item)}

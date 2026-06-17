@@ -42,7 +42,7 @@ describe("Conversation auto-scroll", () => {
     expect(screen.getByTestId("conversation-virtual-list")).toHaveAttribute("aria-live", "polite");
   });
 
-  it("windows very long threads to the most recent messages with a reveal control", () => {
+  it("windows very long threads to the most recent messages", () => {
     renderWithThemeAndVirtuoso(
       <Conversation
         messages={Array.from({ length: 200 }, (_, index) => ({
@@ -58,10 +58,9 @@ describe("Conversation auto-scroll", () => {
     // The newest message is rendered; an old one (outside the window) is not.
     expect(screen.getByText("Message 199")).toBeInTheDocument();
     expect(screen.queryByText("Message 0")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Показать ещё/ })).toBeInTheDocument();
   });
 
-  it("reveals earlier messages when the window is expanded", () => {
+  it("loads earlier messages when the user scrolls near the top", async () => {
     renderWithThemeAndVirtuoso(
       <Conversation
         messages={Array.from({ length: 200 }, (_, index) => ({
@@ -73,8 +72,14 @@ describe("Conversation auto-scroll", () => {
     );
 
     expect(screen.queryByText("Message 100")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /Показать ещё/ }));
-    expect(screen.getByText("Message 100")).toBeInTheDocument();
+
+    const thread = screen.getByTestId("conversation-virtual-list");
+    Object.defineProperty(thread, "scrollHeight", { value: 4000, configurable: true });
+    Object.defineProperty(thread, "clientHeight", { value: 400, configurable: true });
+    thread.scrollTop = 0; // scrolled to the very top
+    fireEvent.scroll(thread);
+
+    await waitFor(() => expect(screen.getByText("Message 100")).toBeInTheDocument());
   });
 
   it("shows a scroll-to-bottom button after the user scrolls away from the bottom", async () => {

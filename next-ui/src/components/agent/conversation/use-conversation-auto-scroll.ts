@@ -12,6 +12,15 @@ export interface ConversationAutoScrollController {
 
 /** A finished thread is "at the bottom" within this many pixels of the end. */
 const BOTTOM_THRESHOLD = 96;
+/** Load older messages once the user scrolls within this many pixels of the top,
+ *  a touch early so the next batch is ready before they hit the very edge. */
+const TOP_THRESHOLD = 240;
+
+export interface ConversationAutoScrollOptions {
+  /** Called while scrolling near the top, to load/reveal older messages. The
+   *  scroll container is passed so the caller can preserve its scroll position. */
+  readonly onReachTop?: (container: HTMLDivElement) => void;
+}
 
 /**
  * Keeps the thread pinned to the newest message while leaving the user free to
@@ -26,12 +35,15 @@ const BOTTOM_THRESHOLD = 96;
  *    loading after the initial layout. This is what makes "opens at the bottom"
  *    reliable even for long threads with tall, late-measuring messages.
  */
-export function useConversationAutoScroll(items: readonly unknown[]): ConversationAutoScrollController {
+export function useConversationAutoScroll(items: readonly unknown[], options?: ConversationAutoScrollOptions): ConversationAutoScrollController {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
   // Starts pinned so a freshly opened conversation lands at the bottom.
   const pinnedToBottom = useRef(true);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  // Held in a ref so the scroll listener stays stable across renders.
+  const onReachTopRef = useRef(options?.onReachTop);
+  onReachTopRef.current = options?.onReachTop;
 
   const isAtBottom = useCallback((element: HTMLDivElement): boolean => {
     return element.scrollHeight - element.scrollTop - element.clientHeight <= BOTTOM_THRESHOLD;
@@ -70,7 +82,12 @@ export function useConversationAutoScroll(items: readonly unknown[]): Conversati
     if (!element) {
       return;
     }
-    const onScroll = () => setPinned(isAtBottom(element));
+    const onScroll = () => {
+      setPinned(isAtBottom(element));
+      if (element.scrollTop <= TOP_THRESHOLD) {
+        onReachTopRef.current?.(element);
+      }
+    };
     element.addEventListener("scroll", onScroll, { passive: true });
     return () => element.removeEventListener("scroll", onScroll);
   }, [isAtBottom, setPinned]);
