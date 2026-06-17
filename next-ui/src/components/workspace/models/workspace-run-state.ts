@@ -12,8 +12,23 @@ export interface RunMessageHandle {
   readonly serverOwned: boolean;
 }
 
+function shouldKeepLongerLiveText(previousText: string, nextText: string): boolean {
+  const normalizedNext = nextText.trim();
+  return previousText.length > nextText.length && (normalizedNext.length === 0 || previousText.includes(normalizedNext));
+}
+
+function mergeLiveBlockText(block: AgentBlock, previous: AgentBlock | undefined): AgentBlock {
+  if (block.kind === "reasoning" && block.active && previous?.kind === "reasoning" && previous.text && shouldKeepLongerLiveText(previous.text, block.text)) {
+    return { ...block, text: previous.text };
+  }
+  if (block.kind === "text" && block.streaming && previous?.kind === "text" && previous.text && shouldKeepLongerLiveText(previous.text, block.text)) {
+    return { ...block, text: previous.text };
+  }
+  return block;
+}
+
 export function mergeInputBlockState(blocks: readonly AgentBlock[], previousBlocks: readonly AgentBlock[] | undefined): AgentBlock[] {
-  return blocks.map((block) => {
+  return blocks.map((block, index) => {
     if (block.kind === "approval" && block.id) {
       const previous = previousBlocks?.find((item) => item.kind === "approval" && item.id === block.id);
       return previous?.kind === "approval" && previous.decision ? { ...block, decision: previous.decision } : block;
@@ -22,7 +37,7 @@ export function mergeInputBlockState(blocks: readonly AgentBlock[], previousBloc
       const previous = previousBlocks?.find((item) => item.kind === "options" && item.id === block.id);
       return previous?.kind === "options" && previous.selected ? { ...block, selected: [...previous.selected] } : block;
     }
-    return block;
+    return mergeLiveBlockText(block, previousBlocks?.[index]);
   });
 }
 

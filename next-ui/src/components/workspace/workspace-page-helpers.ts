@@ -33,7 +33,7 @@ export function composerHistoryText(raw: string): string {
 }
 
 export function buildComposerLabel(profile: AgentProfile): string {
-  return agentProfileCompactLabel(profile, "upper", { includeDefaults: true, includeMode: true });
+  return agentProfileCompactLabel(profile, "upper", { includeDefaults: true });
 }
 
 export function liveModesOrCatalog<T extends { readonly id: string }>(catalogOptions: readonly T[], liveOptions: readonly T[] | undefined): readonly T[] {

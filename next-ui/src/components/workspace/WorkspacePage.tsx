@@ -208,6 +208,13 @@ export const WorkspacePageView = observer(function WorkspacePageView({
   const messages = ws.threads[ws.selectedId] ?? [];
   const displayedMessages = useMemo(() => appendConversationErrorNotice(selected, messages, t("conversationErrorNotice")), [messages, selected, t]);
   const selectedThreadLoaded = selected ? ws.isThreadLoaded(selected.id) : false;
+  const selectedHasOlderMessages = selected ? ws.hasOlderThreadMessages(selected.id) : false;
+  const loadOlderSelectedThread = useCallback(() => {
+    if (selected) {
+      return ws.loadOlderThread(selected.id);
+    }
+    return Promise.resolve();
+  }, [selected, ws]);
   const persistConversationView = useCallback((conversationId: string, next: ConversationView) => {
     ws.setConversationView(conversationId, next);
   }, [ws]);
@@ -341,9 +348,8 @@ export const WorkspacePageView = observer(function WorkspacePageView({
     window.location.hash = "#/kit";
   };
   const openConversationSearch = useCallback(() => {
-    void ws.loadAllThreads();
     setSearchOpen(true);
-  }, [setSearchOpen, ws]);
+  }, [setSearchOpen]);
   const openSettings = useCallback(() => {
     setSettingsOpen(true);
   }, [setSettingsOpen]);
@@ -448,10 +454,7 @@ export const WorkspacePageView = observer(function WorkspacePageView({
           <Tooltip title={t("searchConversations")}>
             <IconButton
               aria-label={t("searchConversations")}
-              onClick={() => {
-                void ws.loadAllThreads();
-                setSearchOpen(true);
-              }}
+              onClick={openConversationSearch}
             >
               <SearchIcon sx={{ fontSize: 18 }} />
             </IconButton>
@@ -798,6 +801,8 @@ export const WorkspacePageView = observer(function WorkspacePageView({
                     contentMaxWidth={THREAD_MAX_WIDTH}
                     contentPaddingX={THREAD_PADDING_X}
                     bottomInset={contentBottomInset}
+                    hasMoreBefore={selectedHasOlderMessages}
+                    onLoadEarlier={loadOlderSelectedThread}
                   />
                 )}
               </Box>
@@ -914,7 +919,6 @@ export const WorkspacePageView = observer(function WorkspacePageView({
         open={searchOpen}
         projects={ws.projects}
         chats={ws.chats}
-        threads={ws.threads}
         onClose={() => setSearchOpen(false)}
         onSelect={openConversation}
       />

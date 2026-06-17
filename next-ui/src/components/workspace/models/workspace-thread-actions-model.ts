@@ -2,7 +2,6 @@ import type { ApprovalDecision, ChatMessage, CompactionSettings, ConversationSum
 import type { WorkspaceState } from "../../../lib/workspace-state";
 import {
   buildAgentPrompt,
-  extractAttachmentBlocks,
   findConversation,
   patchApprovalDecision,
   patchConversation,
@@ -171,9 +170,7 @@ export function editUserTurn(thread: readonly ChatMessage[], messageId: string, 
   if (previous?.role !== "user") {
     return null;
   }
-  const attachmentBlocks = extractAttachmentBlocks(previous.text ?? "");
-  const nextText = attachmentBlocks ? `${trimmed}\n\n${attachmentBlocks}` : trimmed;
-  const userMsg: ChatMessage = { ...previous, text: nextText, time };
+  const userMsg: ChatMessage = { ...previous, text: trimmed, time };
   return {
     userMsg,
     thread: [...thread.slice(0, index), userMsg],

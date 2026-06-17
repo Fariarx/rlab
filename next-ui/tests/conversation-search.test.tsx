@@ -1,7 +1,7 @@
 import { fireEvent, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { useState } from "react";
-import { ConversationList, ConversationSearch, type ChatMessage, type ConversationSummary } from "../src/components/agent";
+import { ConversationList, ConversationSearch, type ConversationSummary } from "../src/components/agent";
 import { renderWithTheme } from "./util/render-with-theme";
 import { renderWithThemeAndVirtuoso } from "./util/render-with-virtuoso";
 
@@ -14,8 +14,9 @@ const baseConversation: ConversationSummary = {
   agent: "claude-code",
 };
 
-function renderSearch(chats: readonly ConversationSummary[], threads: Record<string, ChatMessage[]> = {}) {
-  renderWithTheme(<ConversationSearch open projects={[]} chats={chats} threads={threads} onClose={vi.fn()} onSelect={vi.fn()} />);
+function renderSearch(chats: readonly ConversationSummary[], matchedIds: readonly string[] = chats.map((chat) => chat.id)) {
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json({ ids: matchedIds })));
+  renderWithTheme(<ConversationSearch open projects={[]} chats={chats} onClose={vi.fn()} onSelect={vi.fn()} />);
 }
 
 function KeyboardProbe() {
@@ -77,6 +78,10 @@ describe("conversation list", () => {
 });
 
 describe("conversation search popup", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it("matches chat snippets", () => {
     renderSearch([{ ...baseConversation, snippet: "Contains deploy needle" }]);
 
@@ -86,31 +91,33 @@ describe("conversation search popup", () => {
   });
 
   it("matches persisted thread message content", () => {
-    renderSearch([baseConversation], {
-      "search-chat": [{ id: "m1", role: "user", text: "Needle appears only in the saved thread" }],
-    });
+    renderSearch([baseConversation], ["search-chat"]);
 
     fireEvent.change(screen.getByPlaceholderText("Поиск по названию или сообщению..."), { target: { value: "needle" } });
 
-    expect(screen.getByRole("button", { name: "Release work" })).toBeInTheDocument();
+    return waitFor(() => {
+      expect(screen.getByRole("button", { name: "Release work" })).toBeInTheDocument();
+    });
   });
 
-  it("always includes archived conversations and marks them in the title", () => {
+  it("always includes archived conversations and marks them in the title", async () => {
     renderSearch([{ ...baseConversation, archived: true, snippet: "Hidden from the sidebar" }]);
 
     fireEvent.change(screen.getByPlaceholderText("Поиск по названию или сообщению..."), { target: { value: "archive" } });
 
-    const archived = screen.getByRole("button", { name: "(архив) Release work" });
+    const archived = await screen.findByRole("button", { name: "(архив) Release work" });
     expect(archived).toBeInTheDocument();
     expect(archived).toHaveStyle({ opacity: "0.58" });
   });
 
   it("reports when nothing matches the query", () => {
-    renderSearch([{ ...baseConversation, snippet: "No direct match" }]);
+    renderSearch([{ ...baseConversation, snippet: "No direct match" }], []);
 
     fireEvent.change(screen.getByPlaceholderText("Поиск по названию или сообщению..."), { target: { value: "zzz-nothing" } });
 
-    expect(screen.getByText("Ничего не найдено")).toBeInTheDocument();
+    return waitFor(() => {
+      expect(screen.getByText("Ничего не найдено")).toBeInTheDocument();
+    });
   });
 
   it("states when there are no conversations at all", () => {

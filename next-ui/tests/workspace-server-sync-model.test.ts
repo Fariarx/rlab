@@ -114,4 +114,23 @@ describe("workspace-server-sync-model", () => {
     expect(next.threads["chat-1"]?.map((message) => message.id)).toEqual(["u1", "u2", "a1"]);
     expect(next.threads["chat-1"]?.[0]?.text).toBe("loaded from server");
   });
+
+  it("keeps previously prepended older pages before a refreshed tail page", () => {
+    const current = workspace({
+      threads: {
+        "chat-1": [
+          userMessage("m1", "older"),
+          userMessage("m2", "older"),
+          userMessage("m3", "tail old"),
+          userMessage("m4", "tail old"),
+          agentMessage("local-live", [{ kind: "text", text: "local live", streaming: true }]),
+        ],
+      },
+    });
+
+    const next = mergeLoadedThread(current, "chat-1", [userMessage("m3", "tail refreshed"), userMessage("m4", "tail refreshed")]);
+
+    expect(next.threads["chat-1"]?.map((message) => message.id)).toEqual(["m1", "m2", "m3", "m4", "local-live"]);
+    expect(next.threads["chat-1"]?.[2]?.text).toBe("tail refreshed");
+  });
 });

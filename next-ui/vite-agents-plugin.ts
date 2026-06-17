@@ -43,17 +43,20 @@ import {
   enqueuePendingTurn,
   initWorkspaceDb,
   initializeWorkspaceStateInDb,
+  patchMessageBlockById,
   readConversation,
   readMessage,
   readMessageBlocks,
   readPendingTurnQueue,
   readSelectedConversationId,
+  readThreadPageFromDb,
   readThreadFromDb,
   readWorkspaceRevision,
   readWorkspaceStateFromDb,
   releasePendingTurn,
   removePendingTurn,
   resetDispatchingPendingTurns,
+  searchConversationIds,
   setPendingTurnQueuePaused,
   updateConversationData,
   upsertAgentMessageForUserTurn,
@@ -1231,11 +1234,30 @@ const BROWSER_PREVIEW_VIEWPORT = { width: 1280, height: 720 } as const;
 const BROWSER_PREVIEW_EVENT_LIMIT = 80;
 const BROWSER_PREVIEW_SESSION_ID_PATTERN = /^[a-zA-Z0-9_.:-]{1,160}$/;
 // A session with no connected viewers (SSE clients) is closed after this idle
-// window so headless Chromium processes don't leak. Swept lazily on each
-// ensureBrowserPreviewSession() — no module-level timer (that would keep the
-// test process alive and hang CI; see AGENTS.md).
+// window so headless Chromium processes don't leak. The timer is unref'ed so it
+// does not keep the Node process alive in tests/CLI runs.
 const BROWSER_PREVIEW_IDLE_MS = 5 * 60_000;
 let browserPreviewSessions = new Map<string, BrowserPreviewSession>();
+let browserPreviewIdleSweepTimer: ReturnType<typeof setTimeout> | null = null;
+
+function unrefBrowserPreviewTimer(timer: ReturnType<typeof setTimeout>): void {
+  const maybeUnref = (timer as ReturnType<typeof setTimeout> & { readonly unref?: () => void }).unref;
+  maybeUnref?.call(timer);
+}
+
+function scheduleBrowserPreviewIdleSweep(): void {
+  if (browserPreviewIdleSweepTimer !== null || browserPreviewSessions.size === 0) {
+    return;
+  }
+  browserPreviewIdleSweepTimer = setTimeout(() => {
+    browserPreviewIdleSweepTimer = null;
+    sweepIdleBrowserPreviewSessions(Date.now());
+    if (browserPreviewSessions.size > 0) {
+      scheduleBrowserPreviewIdleSweep();
+    }
+  }, BROWSER_PREVIEW_IDLE_MS);
+  unrefBrowserPreviewTimer(browserPreviewIdleSweepTimer);
+}
 
 function sweepIdleBrowserPreviewSessions(now: number): void {
   for (const [id, session] of browserPreviewSessions) {
@@ -1701,6 +1723,7 @@ async function ensureBrowserPreviewSession(sessionId: string): Promise<BrowserPr
   sweepIdleBrowserPreviewSessions(Date.now());
   const current = currentBrowserPreviewSession(sessionId);
   if (current) {
+    scheduleBrowserPreviewIdleSweep();
     return current;
   }
   const browser = await chromium.launch({ headless: true });
@@ -1727,6 +1750,7 @@ async function ensureBrowserPreviewSession(sessionId: string): Promise<BrowserPr
   const tabId = registerBrowserPreviewPage(session, page);
   session.activeTabId = tabId;
   browserPreviewSessions.set(sessionId, session);
+  scheduleBrowserPreviewIdleSweep();
   emitBrowserPreviewEvent(session, { tabId, type: "session.created", label: "Browser session created" });
   return session;
 }
@@ -2287,34 +2311,64 @@ function readWorkspaceState(): WorkspaceState {
   return reconciled;
 }
 
-/** The lightweight state the client `GET /api/workspace` returns: the full shell
- *  (conversation summaries, projects, drafts, settings) but only the SELECTED
- *  conversation's message thread. Other threads load lazily via GET /api/thread,
- *  so a giant history is no longer a giant initial payload. */
+/** The lightweight state the client `GET /api/workspace` returns: conversation
+ *  summaries, projects, drafts, and settings only. Threads — including the
+ *  selected one — load separately via GET /api/thread, so a giant current chat
+ *  never turns the shell into a multi-MB payload. */
 function readWorkspaceShellForClient(): WorkspaceState {
   ensureWorkspaceDb();
   if (!workspaceDbHasState()) {
     const initial = normalizeSeedProjectPaths(isDemoWorkspaceEnabled() ? buildInitialWorkspaceState() : buildEmptyWorkspaceState());
     initializeWorkspaceState(initial);
-    return initial;
+    return { ...initial, threads: {} };
   }
-  const selectedId = readSelectedConversationId();
-  const includeThreadIds = selectedId ? new Set([selectedId]) : new Set<string>();
   const activeRunIds = new Set(backgroundRunHandles.keys());
-  const shell = readWorkspaceStateFromDb(includeThreadIds);
+  const shell = readWorkspaceStateFromDb(new Set<string>());
   cachedWorkspaceLocale = shell.settings?.general?.locale ?? cachedWorkspaceLocale;
   const normalizedShell = normalizeSeedProjectPaths(shell);
   if (stateHasStaleBackgroundRun(normalizedShell, activeRunIds)) {
     readWorkspaceState();
-    return normalizeSeedProjectPaths(readWorkspaceStateFromDb(includeThreadIds));
+    return normalizeSeedProjectPaths(readWorkspaceStateFromDb(new Set<string>()));
   }
   return reconcileStaleBackgroundRuns(normalizedShell, activeRunIds);
 }
 
-/** A single conversation's full message thread, for lazy loading on open. */
-function readClientThread(conversationId: string): { readonly messages: ChatMessage[] } {
+const DEFAULT_THREAD_PAGE_LIMIT = 15;
+
+function parsedThreadPageLimit(value: string | null): number {
+  if (!value) {
+    return DEFAULT_THREAD_PAGE_LIMIT;
+  }
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? Math.max(1, Math.min(parsed, 100)) : DEFAULT_THREAD_PAGE_LIMIT;
+}
+
+function parsedThreadBefore(value: string | null): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+/** A single conversation's thread page, for lazy loading on open/scroll. */
+function readClientThread(
+  conversationId: string,
+  options: { readonly before?: number; readonly limit: number; readonly full?: boolean },
+): { readonly messages: readonly ChatMessage[]; readonly hasMoreBefore: boolean; readonly nextBefore?: number } {
   ensureWorkspaceDb();
-  return { messages: readThreadFromDb(conversationId) };
+  if (options.full) {
+    return { messages: readThreadFromDb(conversationId), hasMoreBefore: false };
+  }
+  return readThreadPageFromDb(conversationId, options);
+}
+
+function promptFromPersistedThread(binding: BackgroundRunBinding, userMessage: ChatMessage, resume: string | undefined): string {
+  ensureWorkspaceDb();
+  const persistedThread = readThreadFromDb(binding.conversationId);
+  const persistedUserMessage = persistedThread.find((message) => message.id === userMessage.id);
+  const thread = persistedUserMessage ? persistedThread : [...persistedThread, userMessage];
+  return promptForUserTurn(thread, persistedUserMessage ?? userMessage, Boolean(resume), undefined);
 }
 
 let atomicJsonWriteSeq = 0;
@@ -3496,6 +3550,8 @@ function handleBrowserEvents(req: IncomingMessage, res: ServerResponse): void {
       req.on("close", () => {
         clearInterval(heartbeat);
         session.clients.delete(res);
+        session.lastActiveAt = Date.now();
+        scheduleBrowserPreviewIdleSweep();
         res.end();
       });
     } catch (error) {
@@ -3546,13 +3602,26 @@ function handleWorkspaceMutations(req: IncomingMessage, res: ServerResponse): vo
           code: "workspace_revision_conflict",
           expectedRevision: error.expectedRevision,
           revision: error.currentRevision,
-          workspace: readWorkspaceState(),
+          workspace: readWorkspaceShellForClient(),
         });
         return;
       }
       sendJson(res, workspacePutErrorStatus(error), { error: errorMessage(error) });
     }
   });
+}
+
+function handleConversationSearch(req: IncomingMessage, res: ServerResponse): void {
+  try {
+    ensureWorkspaceDb();
+    const url = new URL(req.url ?? "/", "http://localhost");
+    const query = url.searchParams.get("q") ?? "";
+    const rawLimit = Number.parseInt(url.searchParams.get("limit") ?? "100", 10);
+    const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(rawLimit, 1), 200) : 100;
+    sendJson(res, 200, { ids: searchConversationIds(query, limit) });
+  } catch (error) {
+    sendJson(res, 500, { error: errorMessage(error) });
+  }
 }
 
 function handleFolderPicker(_req: IncomingMessage, res: ServerResponse): void {
@@ -4209,8 +4278,12 @@ function handleRunApproval(req: IncomingMessage, res: ServerResponse): void {
       const decision = parseRunApprovalPayload(body);
       const resolved = resolvePendingRunApproval(decision);
       appendRunAuditEvent(RUN_AUDIT_FILE, { type: "approval_decision", id: resolved.id, decision: resolved.decision });
-      const before = readWorkspaceState();
-      persistWorkspaceDelta(before, applyRunApprovalDecisionState(before, resolved));
+      patchMessageBlockById(resolved.id, (block) => {
+        if (block.kind !== "approval" || block.id !== resolved.id || block.decision === resolved.decision) {
+          return block;
+        }
+        return { ...block, decision: resolved.decision };
+      });
       sendJson(res, 200, resolved);
     } catch (error) {
       sendJson(res, runControlErrorStatus(error), { error: errorMessage(error) });
@@ -4223,8 +4296,12 @@ function handleRunInput(req: IncomingMessage, res: ServerResponse): void {
     try {
       const selection = parseRunInputPayload(body);
       const resolved = resolvePendingRunInput(selection);
-      const before = readWorkspaceState();
-      persistWorkspaceDelta(before, applyRunInputSelectionState(before, resolved));
+      patchMessageBlockById(resolved.id, (block) => {
+        if (block.kind !== "options" || block.id !== resolved.id || JSON.stringify(block.selected ?? []) === JSON.stringify(resolved.selected)) {
+          return block;
+        }
+        return { ...block, selected: [...resolved.selected] };
+      });
       sendJson(res, 200, resolved);
     } catch (error) {
       sendJson(res, runControlErrorStatus(error), { error: errorMessage(error) });
@@ -5005,6 +5082,10 @@ interface RunRequest {
   readonly compactWindow?: number;
   /** Enabled rlab chat tools. Undefined means all tools. */
   readonly tools?: readonly RlabChatToolId[];
+}
+
+interface RunServerPromptRequest {
+  readonly userMessage: ChatMessage;
 }
 
 type ScheduledWakeupTrigger =
@@ -6166,6 +6247,7 @@ interface ParsedRunRequestSuccess {
   readonly autoCompact: boolean | undefined;
   readonly compactWindow: number | undefined;
   readonly tools: readonly RlabChatToolId[] | undefined;
+  readonly serverPrompt: RunServerPromptRequest | undefined;
   readonly accessModeValid: boolean;
   readonly profileValid: boolean;
   readonly profileError: string;
@@ -6174,6 +6256,21 @@ interface ParsedRunRequestSuccess {
 }
 
 export type ParsedRunRequestPayload = ParsedRunRequestError | ParsedRunRequestSuccess;
+
+function chatMessageFromRunPayload(value: unknown): ChatMessage | undefined {
+  if (!isRecord(value) || typeof value.id !== "string" || (value.role !== "user" && value.role !== "agent")) {
+    return undefined;
+  }
+  return value as unknown as ChatMessage;
+}
+
+function serverPromptFromRunPayload(value: unknown): RunServerPromptRequest | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const userMessage = chatMessageFromRunPayload(value.userMessage);
+  return userMessage && userMessage.role === "user" ? { userMessage } : undefined;
+}
 
 export function parseRunRequestPayload(body: string): ParsedRunRequestPayload {
   let agent = "";
@@ -6189,6 +6286,7 @@ export function parseRunRequestPayload(body: string): ParsedRunRequestPayload {
   let binding: BackgroundRunBinding | null = null;
   let bindingInvalid = false;
   let autoConfirm: boolean | undefined;
+  let serverPrompt: RunServerPromptRequest | undefined;
   let parsed: unknown;
   try {
     parsed = JSON.parse(body || "{}") as unknown;
@@ -6216,6 +6314,7 @@ export function parseRunRequestPayload(body: string): ParsedRunRequestPayload {
   const compactWindow =
     typeof parsed.compactWindow === "number" && Number.isFinite(parsed.compactWindow) && parsed.compactWindow > 0 ? Math.floor(parsed.compactWindow) : undefined;
   const tools = Array.isArray(parsed.tools) ? activeRlabChatToolIds(parsed.tools) : undefined;
+  serverPrompt = serverPromptFromRunPayload(parsed.serverPrompt);
   requestedCwd = typeof parsed.cwd === "string" ? parsed.cwd : "";
   const parsedAccessMode = parseAccessMode(parsed.accessMode);
   if (parsedAccessMode) {
@@ -6241,6 +6340,7 @@ export function parseRunRequestPayload(body: string): ParsedRunRequestPayload {
     autoCompact,
     compactWindow,
     tools,
+    serverPrompt,
     accessModeValid,
     profileValid,
     profileError,
@@ -11055,9 +11155,41 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
       sendJson(res, 400, { error: parsedPayload.error });
       return;
     }
-    const { agent, model, reasoning, mode, prompt, requestedCwd, accessMode, resume, autoConfirm, autoCompact, compactWindow, tools, accessModeValid, profileValid, profileError, bindingInvalid } = parsedPayload;
+    const {
+      agent,
+      model,
+      reasoning,
+      mode,
+      prompt: parsedPrompt,
+      requestedCwd,
+      accessMode,
+      resume,
+      autoConfirm,
+      autoCompact,
+      compactWindow,
+      tools,
+      serverPrompt,
+      accessModeValid,
+      profileValid,
+      profileError,
+      bindingInvalid,
+    } = parsedPayload;
     let binding: BackgroundRunBinding | null = parsedPayload.binding;
+    let prompt = parsedPrompt;
     const browserPreviewEnabled = rlabChatToolEnabled(tools, "BrowserPreview");
+
+    if (serverPrompt) {
+      if (!binding) {
+        sendJson(res, 400, { error: "Server prompt mode requires a background run binding." });
+        return;
+      }
+      try {
+        prompt = promptFromPersistedThread(binding, serverPrompt.userMessage, resume);
+      } catch (error) {
+        sendJson(res, 500, { error: `Failed to build server prompt: ${errorMessage(error)}` });
+        return;
+      }
+    }
 
     if (!prompt) {
       sendJson(res, 400, { error: "Empty prompt" });
@@ -11494,16 +11626,22 @@ function attach(server: ViteDevServer | PreviewServer): void {
     { path: "/api/workspace/revision", handler: methodOnly("GET", handleWorkspaceRevision) },
     { path: "/api/workspace/mutations", handler: methodOnly("POST", handleWorkspaceMutations) },
     { path: "/api/workspace", handler: handleWorkspace },
+    { path: "/api/conversations/search", handler: methodOnly("GET", handleConversationSearch) },
     {
       path: "/api/thread",
       handler: methodOnly("GET", (req, res) => {
         try {
-          const conversationId = new URL(req.url ?? "/", "http://localhost").searchParams.get("conversationId") ?? "";
+          const params = new URL(req.url ?? "/", "http://localhost").searchParams;
+          const conversationId = params.get("conversationId") ?? "";
           if (!conversationId) {
             sendJson(res, 400, { error: "Missing conversationId." });
             return;
           }
-          sendJson(res, 200, readClientThread(conversationId));
+          sendJson(res, 200, readClientThread(conversationId, {
+            before: parsedThreadBefore(params.get("before")),
+            full: params.get("full") === "1",
+            limit: parsedThreadPageLimit(params.get("limit")),
+          }));
         } catch (error) {
           sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) });
         }

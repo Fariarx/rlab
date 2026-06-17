@@ -306,15 +306,13 @@ function formatShortInterval(seconds: number | undefined, locale: "ru" | "en"): 
 
 export function wakeupLabel(wakeup: WakeupSummary, locale: "ru" | "en"): string {
   if (wakeup.trigger.type === "time") {
-    const when = formatCompactWakeupTime(wakeup.trigger.fireAtMs);
-    return locale === "ru" ? `TaskWakeup: ${when}` : `TaskWakeup: ${when}`;
+    return formatCompactWakeupTime(wakeup.trigger.fireAtMs);
   }
   if (wakeup.trigger.type === "cron") {
-    const when = formatCompactWakeupTime(wakeup.trigger.nextFireMs);
-    return locale === "ru" ? `TaskWakeup: ${when}` : `TaskWakeup: ${when}`;
+    return formatCompactWakeupTime(wakeup.trigger.nextFireMs);
   }
   const scriptSchedule = wakeup.trigger.cron ? formatCompactWakeupTime(wakeup.trigger.nextCheckMs) : (formatShortInterval(wakeup.trigger.intervalSeconds, locale) ?? formatCompactWakeupTime(wakeup.trigger.nextCheckMs));
-  const base = `TaskWakeup: ${scriptSchedule}`;
+  const base = scriptSchedule || (locale === "ru" ? "по расписанию" : "scheduled");
   if (wakeup.trigger.lastError) {
     return `${base} · ${wakeup.trigger.lastError}`;
   }

@@ -165,19 +165,23 @@ describe("workspace-thread-actions-model", () => {
     expect(result.state.threads["chat-1"]).toBe(result.thread);
   });
 
-  it("edits a user turn, keeps attachment blocks, and truncates later messages", () => {
+  it("edits a user turn from the submitted payload without duplicating old attachments", () => {
     const originalText = 'Old text\n\n<attachment name="note.txt">hello</attachment>\n\n![image](C:/tmp/shot.png)';
     const thread = [userMessage("u1", originalText), agentMessage("a1")];
+    const editedText = 'New text\n\n<attachment name="note.txt">hello</attachment>\n\n![image](C:/tmp/shot.png)';
 
-    const selection = editUserTurn(thread, "u1", "  New text  ", "13:00");
+    const selection = editUserTurn(thread, "u1", `  ${editedText}  `, "13:00");
 
     expect(selection?.thread.map((message) => message.id)).toEqual(["u1"]);
     expect(selection?.userMsg).toMatchObject({
       id: "u1",
       role: "user",
       time: "13:00",
-      text: 'New text\n\n<attachment name="note.txt">hello</attachment>\n\n![image](C:/tmp/shot.png)',
+      text: editedText,
     });
+    expect(selection?.userMsg.text?.match(/<attachment name="note\.txt">/g)).toHaveLength(1);
+    expect(selection?.userMsg.text?.match(/!\[image\]\(C:\/tmp\/shot\.png\)/g)).toHaveLength(1);
+    expect(editUserTurn(thread, "u1", "New text without attachments", "13:00")?.userMsg.text).toBe("New text without attachments");
     expect(editUserTurn(thread, "u1", "   ", "13:00")).toBeNull();
     expect(editUserTurn(thread, "missing", "New", "13:00")).toBeNull();
   });

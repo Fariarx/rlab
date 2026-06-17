@@ -2,12 +2,12 @@ import SearchIcon from "@mui/icons-material/Search";
 import { Box, Dialog, DialogContent, DialogTitle, InputAdornment, InputBase, Stack, Typography } from "@mui/material";
 import { observer } from "mobx-react-lite";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { searchConversationIds } from "../../../client/api/workspace-api";
 import { useI18n } from "../../../i18n/I18nProvider";
 import { StatusDot } from "../../ui";
 import { AgentMonogram } from "../identity/AgentMonogram";
 import { ConversationSearchStore } from "../stores/agent-local-stores";
-import { conversationMatches } from "./ConversationList";
-import { type ChatMessage, conversationStatusKey, type ConversationSummary, type Project } from "../core/types";
+import { conversationStatusKey, type ConversationSummary, type Project } from "../core/types";
 
 interface SearchEntry {
   readonly conversation: ConversationSummary;
@@ -23,14 +23,12 @@ export const ConversationSearch = observer(function ConversationSearch({
   open,
   projects,
   chats,
-  threads,
   onClose,
   onSelect,
 }: {
   readonly open: boolean;
   readonly projects: readonly Project[];
   readonly chats: readonly ConversationSummary[];
-  readonly threads: Readonly<Record<string, readonly ChatMessage[]>>;
   readonly onClose: () => void;
   readonly onSelect: (id: string) => void;
 }) {
@@ -38,6 +36,7 @@ export const ConversationSearch = observer(function ConversationSearch({
   const [store] = useState(() => new ConversationSearchStore());
   const { query, setQuery } = store;
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const [serverMatchIds, setServerMatchIds] = useState<ReadonlySet<string> | null>(null);
 
   useEffect(() => {
     if (open) {
@@ -58,7 +57,39 @@ export const ConversationSearch = observer(function ConversationSearch({
     [projects, chats],
   );
   const q = query.trim().toLowerCase();
-  const results = useMemo(() => (q === "" ? entries : entries.filter((entry) => conversationMatches(entry.conversation, q, threads))), [entries, q, threads]);
+  useEffect(() => {
+    if (!open || q === "") {
+      setServerMatchIds(null);
+      return;
+    }
+    let canceled = false;
+    const timer = window.setTimeout(() => {
+      void searchConversationIds(q)
+        .then((ids) => {
+          if (!canceled) {
+            setServerMatchIds(new Set(ids));
+          }
+        })
+        .catch(() => {
+          if (!canceled) {
+            setServerMatchIds(new Set<string>());
+          }
+        });
+    }, 120);
+    return () => {
+      canceled = true;
+      window.clearTimeout(timer);
+    };
+  }, [open, q]);
+  const results = useMemo(() => {
+    if (q === "") {
+      return entries;
+    }
+    if (serverMatchIds) {
+      return entries.filter((entry) => serverMatchIds.has(entry.conversation.id));
+    }
+    return entries.filter((entry) => `${entry.conversation.title}\n${entry.conversation.snippet}`.toLowerCase().includes(q));
+  }, [entries, q, serverMatchIds]);
 
   const choose = (id: string) => {
     onSelect(id);

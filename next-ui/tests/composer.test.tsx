@@ -87,6 +87,32 @@ describe("Composer", () => {
     expect(screen.queryByText("Plan")).not.toBeInTheDocument();
   });
 
+  it("renders edit attachments below the input and sends them once", async () => {
+    const onSend = vi.fn();
+    renderWithTheme(
+      <Composer
+        variant="edit"
+        placeholder="Изменить сообщение"
+        initialValue="Review this"
+        initialAttachments={[
+          { id: "edit-att-1", name: "notes.txt", type: "text/plain", content: "hello", size: 5, lastModified: 0 },
+        ]}
+        onSend={onSend}
+      />,
+    );
+
+    const inlineAttachments = screen.getByTestId("composer-inline-attachments");
+    const attachmentTag = within(inlineAttachments).getByTestId("attachment-tag");
+    expect(attachmentTag).toHaveStyle({ height: "28px" });
+    expect(attachmentTag).toHaveTextContent("notes.txt");
+
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+
+    await waitFor(() => expect(onSend).toHaveBeenCalledTimes(1));
+    const payload = onSend.mock.calls[0]?.[0] as string;
+    expect(payload.match(/<attachment name="notes\.txt"/g)).toHaveLength(1);
+  });
+
   it("tracks pointer coordinates for the animated composer border", () => {
     renderWithTheme(<Composer placeholder="Написать" />);
 
@@ -942,7 +968,7 @@ describe("Composer", () => {
     // The wakeup is a compact tag (like an attachment), not a 76px square, and
     // its label is width-capped so a long schedule string can't blow out the row.
     const wakeupTile = screen.getByTestId("scheduled-wakeup-tile-wake-1");
-    expect(wakeupTile).toHaveStyle({ height: "28px", maxWidth: "220px" });
+    expect(wakeupTile).toHaveStyle({ height: "28px", maxWidth: "220px", borderRadius: "999px" });
 
     // Clicking the tag opens a popover with the full wakeup details.
     fireEvent.click(screen.getByRole("button", { name: "Wakeup установлен: 10.06.2026, 14:18:00" }));

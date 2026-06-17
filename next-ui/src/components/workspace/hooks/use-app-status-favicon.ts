@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { workspaceAttentionFaviconHref, type WorkspaceAttentionStatus } from "../models/workspace-attention-status-model";
+import { workspaceAttentionFaviconHref, workspaceAttentionStatusAnimates, type WorkspaceAttentionStatus } from "../models/workspace-attention-status-model";
 
 interface FaviconSnapshot {
   readonly link: HTMLLinkElement | null;
@@ -69,7 +69,20 @@ export function useAppStatusFavicon(status: WorkspaceAttentionStatus | null, red
 
     const link = ensureFaviconLink();
     link.setAttribute("type", "image/svg+xml");
-    link.setAttribute("href", workspaceAttentionFaviconHref(status, !reduceMotion));
+    const animated = !reduceMotion && workspaceAttentionStatusAnimates(status);
+    if (!animated) {
+      link.setAttribute("href", workspaceAttentionFaviconHref(status, false));
+      return;
+    }
+
+    let frame = 0;
+    const updateFrame = () => {
+      link.setAttribute("href", workspaceAttentionFaviconHref(status, true, frame));
+      frame = (frame + 1) % 12;
+    };
+    updateFrame();
+    const timer = window.setInterval(updateFrame, 130);
+    return () => window.clearInterval(timer);
   }, [reduceMotion, status]);
 
   useEffect(() => {

@@ -9,7 +9,7 @@ import SettingsRoundedIcon from "@mui/icons-material/SettingsRounded";
 import StopCircleIcon from "@mui/icons-material/StopCircle";
 import { Box, Divider, InputBase, Menu, MenuItem, Stack, Switch, type SxProps, TextField, type Theme, Tooltip, Typography } from "@mui/material";
 import { observer } from "mobx-react-lite";
-import { forwardRef, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import { forwardRef, type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useI18n } from "../../../i18n/I18nProvider";
 import { localFileUrl } from "../../../lib/external-url";
 import type { ComposerPluginLink } from "../../../lib/rlab-plugins";
@@ -199,6 +199,8 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
   const inputPlaceholder = composerInputPlaceholder(placeholder);
   const showBrowserActivitySection = !editChrome && browserActivityEvents !== undefined;
   const effectiveReviewCount = editChrome ? 0 : reviewCount;
+  const inputAreaRef = useRef<HTMLDivElement | null>(null);
+  const [floatingInsets, setFloatingInsets] = useState(() => ({ left: editChrome ? 39 : 43, right: 0 }));
 
   const viewModel = useComposerViewModel({
     activeSuggestion,
@@ -316,10 +318,49 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
   stopVoiceInputRef.current = stopVoiceInput;
   const visualExpanded = expanded || voiceState === "recording";
   const effectiveOverlayLift = voiceState === "recording" ? Math.max(overlayLift, 48) : overlayLift;
-  const hasFloatingTags = (!editChrome && scheduledWakeups.length > 0) || (!editChrome && effectiveReviewCount > 0) || composerAttachments.length > 0;
+  const floatingAttachments = editChrome ? [] : composerAttachments;
+  const hasInlineAttachments = editChrome && composerAttachments.length > 0;
+  const hasFloatingTags = (!editChrome && scheduledWakeups.length > 0) || (!editChrome && effectiveReviewCount > 0) || floatingAttachments.length > 0;
   useEffect(() => {
     onOverlayLiftChange?.(effectiveOverlayLift);
   }, [effectiveOverlayLift, onOverlayLiftChange]);
+
+  useLayoutEffect(() => {
+    const root = rootRef.current;
+    const inputArea = inputAreaRef.current;
+    if (!root || !inputArea) {
+      return;
+    }
+    let frame = 0;
+    const measureFloatingInsets = () => {
+      const rootRect = root.getBoundingClientRect();
+      const inputRect = inputArea.getBoundingClientRect();
+      const left = Math.max(0, Math.round(inputRect.left - rootRect.left));
+      const right = Math.max(0, Math.round(rootRect.right - inputRect.right));
+      setFloatingInsets((current) => (current.left === left && current.right === right ? current : { left, right }));
+    };
+    const scheduleMeasure = () => {
+      if (frame) {
+        cancelAnimationFrame(frame);
+      }
+      frame = requestAnimationFrame(measureFloatingInsets);
+    };
+    measureFloatingInsets();
+    const resizeObserver = typeof ResizeObserver !== "undefined" ? new ResizeObserver(scheduleMeasure) : null;
+    resizeObserver?.observe(root);
+    resizeObserver?.observe(inputArea);
+    if (composerBarRef.current) {
+      resizeObserver?.observe(composerBarRef.current);
+    }
+    window.addEventListener("resize", scheduleMeasure);
+    return () => {
+      if (frame) {
+        cancelAnimationFrame(frame);
+      }
+      resizeObserver?.disconnect();
+      window.removeEventListener("resize", scheduleMeasure);
+    };
+  }, [composerBarRef, rootRef]);
 
   const { chooseFiles, fileInputRef, openFilePicker } = useComposerFileController({ addFiles, forwardedRef: ref, textareaRef });
   useEffect(() => {
@@ -329,6 +370,21 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
 
   const showAgentStopButton = !editChrome && running && !hasComposerPayload && effectiveReviewCount === 0;
   const sendLabel = effectiveReviewCount > 0 ? t("reviewSendComments") : t("send");
+  const renderAttachmentTag = (attachment: ComposerAttachmentDraft) => {
+    const isImage = isImageMime(attachment.type) && Boolean(attachment.path);
+    return (
+      <AttachmentTile
+        key={attachment.id}
+        name={attachment.name}
+        mime={attachment.type}
+        sizeBytes={attachment.size}
+        previewSrc={isImage ? localFileUrl(attachment.path ?? "") : undefined}
+        removeLabel={t("removeAttachment", { name: attachment.name })}
+        onRemove={() => setComposerAttachments(composerAttachments.filter((item) => item.id !== attachment.id))}
+        onOpen={isImage ? () => setPreviewAttachment(attachment) : undefined}
+      />
+    );
+  };
 
   const floatingPanelSx: SxProps<Theme> = {
     pointerEvents: "auto",
@@ -371,10 +427,8 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
           left: 0,
           right: 0,
           bottom: `calc(100% + ${8 + effectiveOverlayLift}px)`,
-          // pl aligns floating accessories with the text-input column start:
-          // 1px bar-border + 4px bar-padding + 34px options control + 4px flex-gap = 43px
-          pl: editChrome ? "39px" : "43px",
-          pr: "5px",
+          pl: `${floatingInsets.left}px`,
+          pr: `${floatingInsets.right}px`,
           display: "flex",
           flexDirection: "column-reverse",
           alignItems: "stretch",
@@ -403,21 +457,7 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
                 testId="composer-review-tag"
               />
             )}
-            {composerAttachments.map((attachment) => {
-              const isImage = isImageMime(attachment.type) && Boolean(attachment.path);
-              return (
-                <AttachmentTile
-                  key={attachment.id}
-                  name={attachment.name}
-                  mime={attachment.type}
-                  sizeBytes={attachment.size}
-                  previewSrc={isImage ? localFileUrl(attachment.path ?? "") : undefined}
-                  removeLabel={t("removeAttachment", { name: attachment.name })}
-                  onRemove={() => setComposerAttachments(composerAttachments.filter((item) => item.id !== attachment.id))}
-                  onOpen={isImage ? () => setPreviewAttachment(attachment) : undefined}
-                />
-              );
-            })}
+            {floatingAttachments.map(renderAttachmentTag)}
           </Box>
         )}
       </Box>
@@ -714,6 +754,7 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
           </>
         )}
         <Box
+          ref={inputAreaRef}
           data-testid="composer-input-area"
           data-expanded={visualExpanded ? "true" : "false"}
           sx={{ position: "relative", flex: 1, minWidth: 0, minHeight: 26, display: "flex", alignItems: "center" }}
@@ -888,6 +929,22 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
           )}
         </Stack>
       </Box>
+      {hasInlineAttachments && (
+        <Box
+          data-testid="composer-inline-attachments"
+          sx={{
+            mt: 0.75,
+            ml: `${floatingInsets.left}px`,
+            mr: `${floatingInsets.right}px`,
+            display: "flex",
+            flexWrap: "wrap",
+            alignItems: "center",
+            gap: 0.75,
+          }}
+        >
+          {composerAttachments.map(renderAttachmentTag)}
+        </Box>
+      )}
       {/* Full-screen preview of a clicked image attachment; closes on the X or a
           backdrop click (ImageLightbox's Backdrop handles both). */}
       <ImageLightbox

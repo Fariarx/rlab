@@ -193,6 +193,8 @@ export function readWorkspaceRevision(): number {
 
 type ProjectMeta = Omit<Project, "conversations">;
 type MessageRow = { readonly conversationId: string; readonly data: string };
+type MessagePageRow = { readonly position: number; readonly data: string };
+type MessageWithIdRow = { readonly id: string; readonly conversationId: string; readonly data: string };
 
 export type WorkspaceDbMutation = WorkspaceMutation;
 
@@ -208,6 +210,12 @@ export interface PendingTurnQueueSnapshot {
   readonly conversationId: string;
   readonly paused: boolean;
   readonly messages: readonly ChatMessage[];
+}
+
+export interface ConversationThreadPage {
+  readonly messages: readonly ChatMessage[];
+  readonly hasMoreBefore: boolean;
+  readonly nextBefore?: number;
 }
 
 interface PendingTurnStoredData {
@@ -243,29 +251,21 @@ function messageFromRow(row: MessageRow): ChatMessage {
   return JSON.parse(row.data) as ChatMessage;
 }
 
+function escapeSqlLike(value: string): string {
+  return value.replace(/[\\%_]/g, (match) => `\\${match}`);
+}
+
+function blockId(block: AgentBlock): string | undefined {
+  const maybeBlock = block as AgentBlock & { readonly id?: unknown };
+  return typeof maybeBlock.id === "string" ? maybeBlock.id : undefined;
+}
+
 function previewSnippetsFromLoadedThreads(threads: Readonly<Record<string, readonly ChatMessage[]>>): ReadonlyMap<string, string> {
   return new Map(
     Object.entries(threads)
       .map(([conversationId, messages]) => [conversationId, conversationPreviewSnippet(messages, 60)] as const)
       .filter(([, snippet]) => snippet.length > 0),
   );
-}
-
-function readConversationPreviewSnippets(handle: DatabaseHandle): ReadonlyMap<string, string> {
-  const conversations = handle.prepare("SELECT id FROM conversations ORDER BY id").all() as Array<{ id: string }>;
-  const recentMessages = handle.prepare("SELECT conversation_id AS conversationId, data FROM messages WHERE conversation_id = ? ORDER BY position DESC LIMIT ?");
-  const snippets = new Map<string, string>();
-  for (const conversation of conversations) {
-    const rows = recentMessages.all(conversation.id, PREVIEW_SNIPPET_LOOKBACK_MESSAGES) as MessageRow[];
-    for (const row of rows) {
-      const text = messagePreviewText(messageFromRow(row));
-      if (text.length > 0) {
-        snippets.set(row.conversationId, previewSnippet(text, 60));
-        break;
-      }
-    }
-  }
-  return snippets;
 }
 
 function withConversationPreview(conversation: ConversationSummary, snippets: ReadonlyMap<string, string>): ConversationSummary {
@@ -310,7 +310,7 @@ export function readWorkspaceStateFromDb(includeThreadIds?: ReadonlySet<string>)
   for (const row of msgRows) {
     (threads[row.conversationId] ??= []).push(messageFromRow(row));
   }
-  const snippets = includeThreadIds ? readConversationPreviewSnippets(handle) : previewSnippetsFromLoadedThreads(threads);
+  const snippets = includeThreadIds ? new Map<string, string>() : previewSnippetsFromLoadedThreads(threads);
   const conversationsForProject = (projectId: string | null): ConversationSummary[] => (convsByProject.get(projectId) ?? []).map((conversation) => withConversationPreview(conversation, snippets));
   const projects: Project[] = projectRows.map((row) => ({
     ...(JSON.parse(row.data) as Omit<Project, "conversations">),
@@ -627,6 +627,49 @@ export function upsertMessage(conversationId: string, message: ChatMessage): voi
   });
 }
 
+/** Patch the single message block with this id. This is intentionally narrower
+ * than loading a WorkspaceState: run approvals/options only need to update one
+ * interactive block, not scan every loaded thread in the workspace tree. */
+export function patchMessageBlockById(blockIdToPatch: string, updateBlock: (block: AgentBlock) => AgentBlock): readonly string[] {
+  const handle = database();
+  const rows = handle
+    .prepare("SELECT id, conversation_id AS conversationId, data FROM messages WHERE data LIKE ? ESCAPE '\\'")
+    .all(`%${escapeSqlLike(blockIdToPatch)}%`) as MessageWithIdRow[];
+  const changedConversationIds = new Set<string>();
+  transaction(() => {
+    for (const row of rows) {
+      const message = JSON.parse(row.data) as ChatMessage;
+      if (!message.blocks?.some((block) => blockId(block) === blockIdToPatch)) {
+        continue;
+      }
+      let changed = false;
+      const blocks = message.blocks.map((block) => {
+        if (blockId(block) !== blockIdToPatch) {
+          return block;
+        }
+        const next = updateBlock(block);
+        changed ||= next !== block;
+        return next;
+      });
+      if (!changed) {
+        continue;
+      }
+      handle.prepare("UPDATE messages SET data = ? WHERE id = ?").run(JSON.stringify({ ...message, blocks }), row.id);
+      changedConversationIds.add(row.conversationId);
+    }
+    for (const conversationId of changedConversationIds) {
+      const conversation = readConversation(conversationId);
+      if (conversation) {
+        updateConversationInTransaction(handle, { ...conversation, status: "running" });
+      }
+    }
+    if (changedConversationIds.size > 0) {
+      bumpWorkspaceRevisionInTransaction(handle);
+    }
+  });
+  return [...changedConversationIds];
+}
+
 /** Upsert a bound agent reply immediately after its user message. Any stale
  *  non-user messages between that user turn and the next user turn are removed,
  *  which makes retries/reattached background runs converge in SQLite exactly the
@@ -806,6 +849,68 @@ export function readThreadFromDb(conversationId: string): ChatMessage[] {
   return (database().prepare("SELECT data FROM messages WHERE conversation_id = ? ORDER BY position").all(conversationId) as Array<{ data: string }>).map(
     (row) => JSON.parse(row.data) as ChatMessage,
   );
+}
+
+export function readThreadPageFromDb(conversationId: string, options: { readonly before?: number; readonly limit: number }): ConversationThreadPage {
+  const limit = Math.max(1, Math.min(Math.trunc(options.limit), 100));
+  const before = typeof options.before === "number" && Number.isFinite(options.before) ? Math.trunc(options.before) : undefined;
+  const rows = (before === undefined
+    ? database().prepare("SELECT position, data FROM messages WHERE conversation_id = ? ORDER BY position DESC LIMIT ?").all(conversationId, limit + 1)
+    : database().prepare("SELECT position, data FROM messages WHERE conversation_id = ? AND position < ? ORDER BY position DESC LIMIT ?").all(conversationId, before, limit + 1)) as MessagePageRow[];
+  const pageRows = rows.slice(0, limit).reverse();
+  const messages = pageRows.map((row) => JSON.parse(row.data) as ChatMessage);
+  const first = pageRows[0];
+  return {
+    messages,
+    hasMoreBefore: rows.length > limit,
+    nextBefore: first ? first.position : undefined,
+  };
+}
+
+function searchableConversationText(conversation: ConversationSummary): string {
+  return [conversation.title, conversation.snippet, conversation.agent, conversation.time].join("\n").toLowerCase();
+}
+
+function searchableMessageText(message: ChatMessage): string {
+  return messagePreviewText(message).toLowerCase();
+}
+
+/** Server-side conversation search. It intentionally returns ids only: the
+ * client already has ordered summaries from the lightweight workspace shell, and
+ * keeping message bodies server-side avoids the old load-all-threads path. */
+export function searchConversationIds(query: string, limit = 100): string[] {
+  const normalized = query.trim().toLowerCase();
+  if (!normalized) {
+    return [];
+  }
+  const handle = database();
+  const found = new Set<string>();
+  const conversationRows = handle.prepare("SELECT id, data FROM conversations ORDER BY position").all() as Array<{ id: string; data: string }>;
+  for (const row of conversationRows) {
+    if (found.size >= limit) {
+      break;
+    }
+    const conversation = JSON.parse(row.data) as ConversationSummary;
+    if (searchableConversationText(conversation).includes(normalized)) {
+      found.add(row.id);
+    }
+  }
+  if (found.size >= limit) {
+    return [...found];
+  }
+  const messageRows = handle.prepare("SELECT conversation_id AS conversationId, data FROM messages ORDER BY conversation_id, position").all() as MessageRow[];
+  for (const row of messageRows) {
+    if (found.size >= limit) {
+      break;
+    }
+    if (found.has(row.conversationId)) {
+      continue;
+    }
+    if (searchableMessageText(messageFromRow(row)).includes(normalized)) {
+      found.add(row.conversationId);
+    }
+  }
+  return [...found];
 }
 
 export function closeWorkspaceDb(): void {

@@ -6,6 +6,12 @@ import { isRecord, responseErrorMessage } from "./http";
 export type WorkspaceStatePayload = WorkspaceState & { readonly revision?: number };
 export type WorkspaceRevisionPayload = { readonly revision?: number };
 
+export interface ConversationThreadPagePayload {
+  readonly messages: readonly ChatMessage[];
+  readonly hasMoreBefore: boolean;
+  readonly nextBefore?: number;
+}
+
 export class WorkspaceMutationConflictError extends Error {
   readonly revision: number;
   readonly workspace: WorkspaceState;
@@ -61,14 +67,51 @@ export async function saveWorkspaceMutations(mutations: readonly WorkspaceMutati
   return isRecord(payload) && typeof payload.revision === "number" ? payload.revision : undefined;
 }
 
-export async function loadConversationThread(conversationId: string): Promise<readonly ChatMessage[]> {
-  const response = await fetch(`/api/thread?conversationId=${encodeURIComponent(conversationId)}`, { cache: "no-store" });
+function validateConversationThreadPage(payload: unknown): ConversationThreadPagePayload {
+  const page = payload as { readonly messages?: unknown; readonly hasMoreBefore?: unknown; readonly nextBefore?: unknown };
+  if (!Array.isArray(page.messages)) {
+    throw new Error("Thread response is missing messages.");
+  }
+  return {
+    messages: page.messages as readonly ChatMessage[],
+    hasMoreBefore: page.hasMoreBefore === true,
+    nextBefore: typeof page.nextBefore === "number" && Number.isFinite(page.nextBefore) ? page.nextBefore : undefined,
+  };
+}
+
+export async function loadConversationThreadPage(
+  conversationId: string,
+  options: { readonly before?: number; readonly limit?: number } = {},
+): Promise<ConversationThreadPagePayload> {
+  const params = new URLSearchParams({ conversationId });
+  if (typeof options.before === "number" && Number.isFinite(options.before)) {
+    params.set("before", String(Math.trunc(options.before)));
+  }
+  if (typeof options.limit === "number" && Number.isFinite(options.limit)) {
+    params.set("limit", String(Math.trunc(options.limit)));
+  }
+  const response = await fetch(`/api/thread?${params.toString()}`, { cache: "no-store" });
   if (!response.ok) {
     throw new Error(await responseErrorMessage(response, `Thread load failed (${response.status})`));
   }
-  const payload = (await response.json()) as { readonly messages?: readonly ChatMessage[] };
-  if (!Array.isArray(payload.messages)) {
-    throw new Error("Thread response is missing messages.");
+  return validateConversationThreadPage(await response.json());
+}
+
+export async function loadConversationThread(conversationId: string): Promise<readonly ChatMessage[]> {
+  const params = new URLSearchParams({ conversationId, full: "1" });
+  const response = await fetch(`/api/thread?${params.toString()}`, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(await responseErrorMessage(response, `Thread load failed (${response.status})`));
   }
-  return payload.messages;
+  return validateConversationThreadPage(await response.json()).messages;
+}
+
+export async function searchConversationIds(query: string): Promise<readonly string[]> {
+  const params = new URLSearchParams({ q: query });
+  const response = await fetch(`/api/conversations/search?${params.toString()}`, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(await responseErrorMessage(response, `Conversation search failed (${response.status})`));
+  }
+  const payload = (await response.json()) as { readonly ids?: readonly unknown[] };
+  return Array.isArray(payload.ids) ? payload.ids.filter((id): id is string => typeof id === "string") : [];
 }

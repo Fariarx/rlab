@@ -3023,6 +3023,26 @@ Built-in agents:
       mode: "review",
       profileValid: true,
     });
+    expect(
+      parseRunRequestPayload(
+        JSON.stringify({
+          agent: "codex",
+          accessMode: "unrestricted",
+          conversationId: "chat-1",
+          runId: "run-1",
+          userMessageId: "u1",
+          userMessageTime: "12:00",
+          agentMessageId: "a1",
+          agentMessageTime: "12:01",
+          prompt: "hello",
+          serverPrompt: { userMessage: { id: "u1", role: "user", text: "hello", time: "12:00" } },
+        }),
+      ),
+    ).toMatchObject({
+      ok: true,
+      binding: expect.objectContaining({ conversationId: "chat-1", userMessageId: "u1" }),
+      serverPrompt: { userMessage: expect.objectContaining({ id: "u1", text: "hello" }) },
+    });
   });
 
   it("rejects removed read-write run requests", () => {

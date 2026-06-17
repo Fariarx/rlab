@@ -45,8 +45,12 @@ describe("workspaceAttentionStatus", () => {
     expect(workspaceAttentionStatus([conversation({ id: "read-error", status: "error", unread: false })])).toBeNull();
   });
 
-  it("builds an animated SVG favicon for attention states and a static one for done", () => {
-    expect(decodeURIComponent(workspaceAttentionFaviconHref("error", true))).toContain("repeatCount=\"indefinite\"");
-    expect(decodeURIComponent(workspaceAttentionFaviconHref("done", true))).not.toContain("repeatCount=\"indefinite\"");
+  it("builds changing wave frames for attention states and a static one for done", () => {
+    expect(workspaceAttentionFaviconHref("action", true, 0)).not.toBe(workspaceAttentionFaviconHref("action", true, 3));
+    expect(workspaceAttentionFaviconHref("working", true, 0)).not.toBe(workspaceAttentionFaviconHref("working", true, 3));
+    expect(workspaceAttentionFaviconHref("error", true, 0)).not.toBe(workspaceAttentionFaviconHref("error", true, 3));
+    expect(workspaceAttentionFaviconHref("done", true, 0)).toBe(workspaceAttentionFaviconHref("done", true, 3));
+    expect(decodeURIComponent(workspaceAttentionFaviconHref("working", true, 0))).toContain("stroke-width=\"2.4\"");
+    expect(decodeURIComponent(workspaceAttentionFaviconHref("working", true, 3))).toContain("r=\"7.95\"");
   });
 });

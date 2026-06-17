@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { AgentBlock, ChatMessage, ConversationSummary } from "../src/components/agent";
 import { applyWorkspaceAgentBlocks } from "../src/components/workspace/models/workspace-agent-block-update-model";
+import { patchActiveRunUpdate } from "../src/components/workspace/models/workspace-run-state";
 import { buildEmptyWorkspaceState, type WorkspaceState } from "../src/lib/workspace-state";
 
 function conversation(patch: Partial<ConversationSummary> = {}): ConversationSummary {
@@ -94,5 +95,43 @@ describe("applyWorkspaceAgentBlocks", () => {
     expect(update.shouldFlush).toBe(true);
     expect(update.state.chats[0]).toMatchObject({ status: "idle", time: "11:00" });
     expect(update.state.threads["chat-1"]?.find((message) => message.id === "a1")?.blocks).toEqual([approvalBlock]);
+  });
+
+  it("does not shrink live reasoning when a stale shorter snapshot arrives", () => {
+    const previous: AgentBlock = { kind: "reasoning", text: "Inspecting the workspace and checking the route.", active: true };
+
+    const update = applyWorkspaceAgentBlocks({
+      agentMessage: agentMessage(),
+      blocks: [{ kind: "reasoning", text: "Inspecting", active: true }],
+      canceled: false,
+      conversationId: "chat-1",
+      serverOwned: true,
+      state: workspace({ threads: { "chat-1": [userMessage("u1"), agentMessage({ blocks: [previous] })] } }),
+      userMessageId: "u1",
+    });
+
+    expect(update.state.threads["chat-1"]?.find((message) => message.id === "a1")?.blocks?.[0]).toEqual(previous);
+  });
+
+  it("does not shrink live reasoning from background run updates", () => {
+    const previous: AgentBlock = { kind: "reasoning", text: "Inspecting the workspace and checking the route.", active: true };
+    const next = patchActiveRunUpdate(
+      workspace({
+        chats: [conversation({ activeRunId: "run-1", status: "running" })],
+        threads: { "chat-1": [userMessage("u1"), agentMessage({ blocks: [previous] })] },
+      }),
+      {
+        runId: "run-1",
+        conversationId: "chat-1",
+        userMessageId: "u1",
+        agentMessageId: "a1",
+        status: "running",
+        time: "12:02",
+        done: false,
+        blocks: [{ kind: "reasoning", text: "Inspecting", active: true }],
+      },
+    );
+
+    expect(next.threads["chat-1"]?.find((message) => message.id === "a1")?.blocks?.[0]).toEqual(previous);
   });
 });

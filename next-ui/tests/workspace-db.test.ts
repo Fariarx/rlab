@@ -14,15 +14,18 @@ import {
   enqueuePendingTurn,
   initializeWorkspaceStateInDb,
   initWorkspaceDb,
+  patchMessageBlockById,
   readConversation,
   readMessageBlocks,
   readPendingTurnQueue,
+  readThreadPageFromDb,
   readThreadFromDb,
   readWorkspaceRevision,
   readWorkspaceStateFromDb,
   releasePendingTurn,
   removePendingTurn,
   resetDispatchingPendingTurns,
+  searchConversationIds,
   setPendingTurnQueuePaused,
   updateConversationData,
   upsertAgentMessageForUserTurn,
@@ -208,7 +211,21 @@ describe("workspace-db", () => {
     expect(readThreadFromDb("c2").map((m) => m.id)).toEqual(["m2"]);
   });
 
-  it("derives shell conversation snippets from user/model text without loading every thread", () => {
+  it("reads conversation threads by pages from the newest messages backward", () => {
+    const messages = Array.from({ length: 25 }, (_, index) => msg(`m${index + 1}`, `message ${index + 1}`));
+    initializeWorkspaceStateInDb({ ...buildEmptyWorkspaceState(), chats: [conv("c1")], threads: { c1: messages }, selectedId: "c1" });
+
+    const latest = readThreadPageFromDb("c1", { limit: 15 });
+    expect(latest.messages.map((message) => message.id)).toEqual(messages.slice(10).map((message) => message.id));
+    expect(latest.hasMoreBefore).toBe(true);
+    expect(latest.nextBefore).toBe(10);
+
+    const older = readThreadPageFromDb("c1", { limit: 15, before: latest.nextBefore });
+    expect(older.messages.map((message) => message.id)).toEqual(messages.slice(0, 10).map((message) => message.id));
+    expect(older.hasMoreBefore).toBe(false);
+  });
+
+  it("keeps shell reads on persisted snippets without loading every thread", () => {
     initializeWorkspaceStateInDb({
       ...buildEmptyWorkspaceState(),
       chats: [conv("c1", { snippet: "Run failed" }), conv("c2", { snippet: "Needs input" })],
@@ -225,8 +242,53 @@ describe("workspace-db", () => {
     const shell = readWorkspaceStateFromDb(new Set(["c1"]));
 
     expect(shell.threads.c2).toBeUndefined();
-    expect(shell.chats.find((conversation) => conversation.id === "c1")?.snippet).toBe("selected answer");
-    expect(shell.chats.find((conversation) => conversation.id === "c2")?.snippet).toBe("Unloaded user prompt");
+    expect(shell.chats.find((conversation) => conversation.id === "c1")?.snippet).toBe("Run failed");
+    expect(shell.chats.find((conversation) => conversation.id === "c2")?.snippet).toBe("Needs input");
+  });
+
+  it("patches a single interactive message block without loading workspace state", () => {
+    initializeWorkspaceStateInDb({
+      ...buildEmptyWorkspaceState(),
+      chats: [conv("c1", { status: "waiting" }), conv("c2", { status: "idle" })],
+      threads: {
+        c1: [
+          {
+            id: "a1",
+            role: "agent",
+            blocks: [
+              { kind: "approval", id: "approval-1", title: "Approve?", decision: undefined },
+              { kind: "options", id: "question-1", prompt: "Pick", options: [{ id: "A", label: "A" }] },
+            ],
+          },
+        ],
+        c2: [msg("a2", "other")],
+      },
+      selectedId: "c1",
+    });
+
+    expect(
+      patchMessageBlockById("question-1", (block) => (block.kind === "options" && block.id === "question-1" ? { ...block, selected: ["A"] } : block)),
+    ).toEqual(["c1"]);
+
+    const c1 = readWorkspaceStateFromDb().threads.c1[0];
+    expect(c1.blocks).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "options", id: "question-1", selected: ["A"] })]));
+    expect(readConversation("c1")?.status).toBe("running");
+    expect(readThreadFromDb("c2").map((message) => message.id)).toEqual(["a2"]);
+  });
+
+  it("searches conversations server-side and returns ids only", () => {
+    initializeWorkspaceStateInDb({
+      ...buildEmptyWorkspaceState(),
+      chats: [conv("c1", { title: "Deploy notes" }), conv("c2", { title: "Other" })],
+      threads: {
+        c1: [userMsg("u1", "hello")],
+        c2: [userMsg("u2", "needle appears only in the message body")],
+      },
+      selectedId: "c1",
+    });
+
+    expect(searchConversationIds("deploy")).toEqual(["c1"]);
+    expect(searchConversationIds("needle")).toEqual(["c2"]);
   });
 
   it("applies row-level conversation mutations without touching unrelated threads", () => {

@@ -33,16 +33,32 @@ const STATUS_RING: Record<WorkspaceAttentionStatus, string> = {
   done: dark.status.ok.border,
 };
 
-export function workspaceAttentionFaviconHref(status: WorkspaceAttentionStatus, animated: boolean): string {
+export function workspaceAttentionStatusAnimates(status: WorkspaceAttentionStatus): boolean {
+  return status !== "done";
+}
+
+function wave(progress: number): { readonly radius: string; readonly opacity: string } {
+  const radius = 8.25 + progress * 6.75;
+  const opacity = Math.max(0, 0.58 * (1 - progress));
+  return { radius: radius.toFixed(2), opacity: opacity.toFixed(2) };
+}
+
+export function workspaceAttentionFaviconHref(status: WorkspaceAttentionStatus, animated: boolean, frame = 0): string {
   const color = STATUS_COLOR[status];
   const ring = STATUS_RING[status];
-  const shouldAnimate = animated && status !== "done";
-  const pulse = shouldAnimate
-    ? '<animate attributeName="r" values="8;9.5;8" dur="1.4s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.95;0.72;0.95" dur="1.4s" repeatCount="indefinite"/>'
+  const shouldAnimate = animated && workspaceAttentionStatusAnimates(status);
+  const normalizedFrame = ((frame % 12) + 12) % 12;
+  const progressA = normalizedFrame / 12;
+  const progressB = (progressA + 0.5) % 1;
+  const firstWave = wave(progressA);
+  const secondWave = wave(progressB);
+  const dotPulse = shouldAnimate ? 0.5 + Math.sin(progressA * Math.PI * 2) * 0.5 : 0;
+  const dotRadius = (7.35 + dotPulse * 0.6).toFixed(2);
+  const dotOpacity = (0.92 + dotPulse * 0.08).toFixed(2);
+  const waves = shouldAnimate
+    ? `<circle cx="16" cy="16" r="${firstWave.radius}" fill="none" stroke="${color}" stroke-width="2.4" opacity="${firstWave.opacity}"/><circle cx="16" cy="16" r="${secondWave.radius}" fill="none" stroke="${color}" stroke-width="2.4" opacity="${secondWave.opacity}"/>`
     : "";
-  const ringPulse = shouldAnimate
-    ? '<animate attributeName="r" values="10;13;10" dur="1.4s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.55;0;0.55" dur="1.4s" repeatCount="indefinite"/>'
-    : "";
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" fill="transparent"/><circle cx="16" cy="16" r="10" fill="none" stroke="${ring}" stroke-width="2" opacity="${shouldAnimate ? "0.55" : "0"}">${ringPulse}</circle><circle cx="16" cy="16" r="8" fill="${color}" opacity="0.95">${pulse}</circle></svg>`;
+  const staticRing = shouldAnimate ? "" : `<circle cx="16" cy="16" r="9.75" fill="none" stroke="${ring}" stroke-width="2" opacity="${status === "done" ? "0.5" : "0.35"}"/>`;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" fill="transparent"/>${waves}${staticRing}<circle cx="16" cy="16" r="${shouldAnimate ? dotRadius : "7.5"}" fill="${color}" opacity="${shouldAnimate ? dotOpacity : "0.96"}"/></svg>`;
   return `data:image/svg+xml,${encodeURIComponent(svg)}`;
 }

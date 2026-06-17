@@ -50,6 +50,7 @@ export function WakeupTile({ id, label, removeLabel, onRemove, detail }: WakeupT
         onRemove={onRemove}
         onClick={(event: MouseEvent<HTMLElement>) => setAnchorEl(event.currentTarget)}
         testId={`scheduled-wakeup-tile-${id}`}
+        pill
       />
       <Popover
         open={Boolean(anchorEl)}

@@ -75,6 +75,8 @@ export function Conversation({
   contentMaxWidth,
   contentPaddingX,
   bottomInset = 0,
+  hasMoreBefore = false,
+  onLoadEarlier,
 }: {
   readonly messages: readonly ChatMessage[];
   readonly typing?: boolean;
@@ -87,6 +89,8 @@ export function Conversation({
   readonly contentPaddingX?: { readonly xs: number; readonly sm: number };
   /** Extra bottom space (px) reserved for the composer's floating tags row. */
   readonly bottomInset?: number;
+  readonly hasMoreBefore?: boolean;
+  readonly onLoadEarlier?: () => void | Promise<void>;
 }) {
   const { t } = useI18n();
   const hasLiveContent = typing === true || messages.some(hasLiveAgentBlock);
@@ -103,15 +107,26 @@ export function Conversation({
   // remember the distance from the bottom before the prepend and restore it once
   // the taller content lays out. A ref guards against re-triggering mid-prepend.
   const pendingPrepend = useRef<number | null>(null);
-  const loadEarlier = useCallback((element: HTMLDivElement) => {
-    if (pendingPrepend.current != null) {
-      return;
-    }
-    pendingPrepend.current = element.scrollHeight - element.scrollTop;
-    setWindowSize((size) => (size >= items.length ? size : size + WINDOW_STEP));
-  }, [items.length]);
+  const loadEarlier = useCallback(
+    (element: HTMLDivElement) => {
+      if (pendingPrepend.current != null) {
+        return;
+      }
+      pendingPrepend.current = element.scrollHeight - element.scrollTop;
+      if (hiddenCount > 0) {
+        setWindowSize((size) => (size >= items.length ? size : size + WINDOW_STEP));
+        return;
+      }
+      if (hasMoreBefore) {
+        void onLoadEarlier?.();
+        return;
+      }
+      pendingPrepend.current = null;
+    },
+    [hasMoreBefore, hiddenCount, items.length, onLoadEarlier],
+  );
 
-  const autoScroll = useConversationAutoScroll(windowed, { onReachTop: hiddenCount > 0 ? loadEarlier : undefined });
+  const autoScroll = useConversationAutoScroll(windowed, { onReachTop: hiddenCount > 0 || hasMoreBefore ? loadEarlier : undefined });
 
   useLayoutEffect(() => {
     const offset = pendingPrepend.current;
@@ -120,7 +135,7 @@ export function Conversation({
     if (offset != null && element) {
       element.scrollTop = element.scrollHeight - offset;
     }
-  }, [windowSize, autoScroll.containerRef]);
+  });
 
   return (
     <Box sx={{ position: "relative", height: "100%", minHeight: 0 }}>

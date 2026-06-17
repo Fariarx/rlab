@@ -24,6 +24,9 @@ const queuedActionButtonSx = {
   color: "text.secondary",
 } as const;
 
+const QUEUED_VISIBLE_ROW_COUNT = 5;
+const QUEUED_ROW_HEIGHT_PX = 30;
+
 /**
  * The list of user turns waiting for the active run to finish, docked just above
  * the composer. Each turn can be copied or cancelled in place; the first can be
@@ -35,6 +38,7 @@ export function QueuedMessages({ messages, paused, onCancel, onCopy, onSendNow, 
   if (messages.length === 0) {
     return null;
   }
+  const scrollable = messages.length > QUEUED_VISIBLE_ROW_COUNT;
   return (
     <Box
       data-testid="queued-messages"
@@ -69,7 +73,18 @@ export function QueuedMessages({ messages, paused, onCancel, onCopy, onSendNow, 
           {t("sendQueuedNow")}
         </Button>
       </Stack>
-      <Stack sx={{ px: 0.5, py: 0.25 }}>
+      <Stack
+        data-testid="queued-messages-list"
+        data-scrollable={scrollable ? "true" : undefined}
+        sx={{
+          px: 0.5,
+          py: 0.25,
+          maxHeight: scrollable ? QUEUED_VISIBLE_ROW_COUNT * QUEUED_ROW_HEIGHT_PX : "none",
+          overflowY: scrollable ? "auto" : "visible",
+          overscrollBehavior: "contain",
+          scrollbarGutter: scrollable ? "stable" : "auto",
+        }}
+      >
         {messages.map((message, index) => (
           <Stack
             key={message.id}
@@ -77,6 +92,7 @@ export function QueuedMessages({ messages, paused, onCancel, onCopy, onSendNow, 
             spacing={0.75}
             sx={{
               alignItems: "center",
+              minHeight: QUEUED_ROW_HEIGHT_PX,
               px: 0.75,
               py: 0.25,
               borderRadius: (theme) => `${theme.custom.radii.md}px`,

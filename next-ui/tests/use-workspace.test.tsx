@@ -135,6 +135,7 @@ interface RunRequestRecord {
   readonly runId?: string;
   readonly userMessageId?: string;
   readonly mode?: string;
+  readonly serverPrompt?: { readonly userMessage?: ChatMessage };
 }
 
 interface TestPendingQueue {
@@ -414,6 +415,77 @@ describe("useWorkspace", () => {
     expect(screen.getByTestId("thread-ids")).toHaveTextContent("a-remote-sync");
   });
 
+  it("waits for a shell-omitted selected thread before sending a turn", async () => {
+    let resolveThreadLoad: ((messages: readonly ChatMessage[]) => void) | null = null;
+    const threadRequests: string[] = [];
+    const selectedId = state.selectedId;
+    const selectedThread = state.threads[selectedId] ?? [];
+    vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/workspace" && (!init || init.method === "GET")) {
+        return Response.json({ ...state, threads: {}, revision: serverRevision });
+      }
+      if (url === "/api/workspace/mutations" && init?.method === "POST") {
+        state = applyWorkspaceMutationRequest(state, init);
+        serverRevision += 1;
+        return Response.json({ ok: true, revision: serverRevision });
+      }
+      const queueResponse = await handleQueueFetch(url, init);
+      if (queueResponse) {
+        return queueResponse;
+      }
+      if (url.startsWith("/api/thread?")) {
+        threadRequests.push(url);
+        return new Promise<Response>((resolve) => {
+          resolveThreadLoad = (messages) => resolve(Response.json({ messages, hasMoreBefore: false }));
+        });
+      }
+      if (url === "/api/runs") {
+        return Response.json(activeRunsPayloadFromState(state));
+      }
+      if (url === "/api/run") {
+        runRequests.push(JSON.parse(String(init?.body ?? "{}")) as RunRequestRecord);
+        return new Response(new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.close();
+          },
+        }), {
+          headers: { "Content-Type": "application/x-ndjson" },
+        });
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    render(<Probe />);
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.getByTestId("thread-ids")).toHaveTextContent("");
+
+    await act(async () => {
+      screen.getByRole("button", { name: "send" }).click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(runRequests).toHaveLength(0);
+
+    await act(async () => {
+      resolveThreadLoad?.(selectedThread);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(runRequests).toHaveLength(1);
+    expect(threadRequests).toEqual([`/api/thread?conversationId=${encodeURIComponent(selectedId)}`]);
+    expect(runRequests[0].serverPrompt?.userMessage?.role).toBe("user");
+    expect(runRequests[0].serverPrompt?.userMessage?.text).toBe("Persist this message");
+    expect(screen.getByTestId("thread-ids")).toHaveTextContent(selectedThread[0]?.id ?? "");
+    expect(screen.getByTestId("thread-ids")).toHaveTextContent("u");
+  });
+
   it("retries failed initial workspace loads every 15 seconds", async () => {
     vi.useFakeTimers();
     let workspaceReads = 0;
@@ -433,6 +505,10 @@ describe("useWorkspace", () => {
       const queueResponse = await handleQueueFetch(url, init);
       if (queueResponse) {
         return queueResponse;
+      }
+      if (url.startsWith("/api/thread?")) {
+        const conversationId = new URL(url, "http://localhost").searchParams.get("conversationId") ?? "";
+        return Response.json({ messages: state.threads[conversationId] ?? [] });
       }
       return new Response("not found", { status: 404 });
     });
@@ -1153,7 +1229,7 @@ describe("useWorkspace", () => {
     screen.getByRole("button", { name: "send" }).click();
     await waitFor(() => expect(runRequests).toHaveLength(1));
     await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("done"));
-    expect(runRequests[0]).toMatchObject({ agent: "codex", prompt: expect.stringContaining("Persist this message") });
+    expect(runRequests[0]).toMatchObject({ agent: "codex", prompt: "Persist this message", serverPrompt: { userMessage: expect.objectContaining({ text: "Persist this message" }) } });
     expect(runRequests[0]?.resume).toBeUndefined();
     expect(state.chats.find((chat) => chat.id === "chat-2")?.agentSessions).toEqual({ codex: "codex-session-1" });
 
@@ -1161,7 +1237,7 @@ describe("useWorkspace", () => {
     screen.getByRole("button", { name: "send" }).click();
     await waitFor(() => expect(runRequests).toHaveLength(2));
     await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("done"));
-    expect(runRequests[1]).toMatchObject({ agent: "claude-code", prompt: expect.stringContaining("This is a continuing conversation") });
+    expect(runRequests[1]).toMatchObject({ agent: "claude-code", prompt: "Persist this message", serverPrompt: { userMessage: expect.objectContaining({ text: "Persist this message" }) } });
     expect(runRequests[1]?.resume).toBeUndefined();
     expect(state.chats.find((chat) => chat.id === "chat-2")?.agentSessions).toEqual({
       "claude-code": "claude-code-session-2",
@@ -1172,7 +1248,7 @@ describe("useWorkspace", () => {
     screen.getByRole("button", { name: "send" }).click();
     await waitFor(() => expect(runRequests).toHaveLength(3));
     await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("done"));
-    expect(runRequests[2]).toMatchObject({ agent: "gemini", prompt: expect.stringContaining("This is a continuing conversation") });
+    expect(runRequests[2]).toMatchObject({ agent: "gemini", prompt: "Persist this message", serverPrompt: { userMessage: expect.objectContaining({ text: "Persist this message" }) } });
     expect(runRequests[2]?.resume).toBeUndefined();
     expect(state.chats.find((chat) => chat.id === "chat-2")?.agentSessions).toEqual({
       "claude-code": "claude-code-session-2",
@@ -1184,7 +1260,7 @@ describe("useWorkspace", () => {
     screen.getByRole("button", { name: "send" }).click();
     await waitFor(() => expect(runRequests).toHaveLength(4));
     await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("done"));
-    expect(runRequests[3]).toMatchObject({ agent: "opencode", prompt: expect.stringContaining("This is a continuing conversation") });
+    expect(runRequests[3]).toMatchObject({ agent: "opencode", prompt: "Persist this message", serverPrompt: { userMessage: expect.objectContaining({ text: "Persist this message" }) } });
     expect(runRequests[3]?.resume).toBeUndefined();
     expect(state.chats.find((chat) => chat.id === "chat-2")?.agentSessions).toEqual({
       "claude-code": "claude-code-session-2",

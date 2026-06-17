@@ -279,7 +279,7 @@ const UserMessage = observer(function UserMessage({
             onCancel={() => setEditing(false)}
           />
         ) : (
-          <Stack spacing={0.5} sx={{ alignItems: "flex-end", minWidth: 0, maxWidth: "100%" }}>
+          <Stack spacing={0.75} sx={{ alignItems: "flex-end", minWidth: 0, maxWidth: "100%" }}>
             {displayText && (
               <Box
                 sx={{

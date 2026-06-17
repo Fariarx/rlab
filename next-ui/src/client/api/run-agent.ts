@@ -1,5 +1,6 @@
 import type {
   AgentBlock,
+  ChatMessage,
   CompactionSettings,
   ConversationStatus,
   RunUsage,
@@ -45,6 +46,10 @@ interface RunPersistenceBinding {
   readonly userMessageTime: string;
   readonly agentMessageId: string;
   readonly agentMessageTime: string;
+}
+
+interface RunServerPromptRequest {
+  readonly userMessage: ChatMessage;
 }
 
 export interface ActiveRunSnapshot {
@@ -207,6 +212,7 @@ async function streamRun(
   binding: RunPersistenceBinding | undefined,
   resume: string | undefined,
   compaction: CompactionSettings | undefined,
+  serverPrompt: RunServerPromptRequest | undefined,
   onEvent: (e: RunEvent) => void,
   onAccepted: () => void,
   signal?: AbortSignal,
@@ -227,6 +233,7 @@ async function streamRun(
       ...(resume ? { resume } : {}),
       ...(compaction?.auto !== undefined ? { autoCompact: compaction.auto } : {}),
       ...(typeof compaction?.window === "number" ? { compactWindow: compaction.window } : {}),
+      ...(serverPrompt ? { serverPrompt } : {}),
       ...binding,
     }),
     signal,
@@ -274,6 +281,7 @@ export async function runConversation(opts: {
   /** Per-conversation compaction preferences (auto on/off + window override),
    *  forwarded to the backend so the agent compacts to the user's settings. */
   readonly compaction?: CompactionSettings;
+  readonly serverPrompt?: RunServerPromptRequest;
   readonly onAccepted?: () => void;
   /** Fires as soon as the agent reports its session id, so it can be persisted
    *  immediately (even if the run later detaches or errors). */
@@ -351,6 +359,7 @@ export async function runConversation(opts: {
       opts.binding,
       opts.resume,
       opts.compaction,
+      opts.serverPrompt,
       onEvent,
       () => {
         accepted = true;

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ChatMessage } from "../src/components/agent";
-import { WorkspaceThreadLoader } from "../src/components/workspace/runtime/workspace-thread-loader";
+import { WorkspaceThreadLoader, type WorkspaceThreadPage } from "../src/components/workspace/runtime/workspace-thread-loader";
 import type { RemoteWorkspaceShellMerge } from "../src/components/workspace/models/workspace-server-sync-model";
 import { buildEmptyWorkspaceState } from "../src/lib/workspace-state";
 
@@ -8,10 +8,14 @@ function userMessage(id: string): ChatMessage {
   return { id, role: "user", text: id, time: "12:00" };
 }
 
-function deferredMessages() {
-  let resolve!: (messages: readonly ChatMessage[]) => void;
+function page(messages: readonly ChatMessage[], hasMoreBefore = false, nextBefore?: number): WorkspaceThreadPage {
+  return { messages, hasMoreBefore, nextBefore };
+}
+
+function deferredPage() {
+  let resolve!: (messages: WorkspaceThreadPage) => void;
   let reject!: (error: Error) => void;
-  const promise = new Promise<readonly ChatMessage[]>((resolvePromise, rejectPromise) => {
+  const promise = new Promise<WorkspaceThreadPage>((resolvePromise, rejectPromise) => {
     resolve = resolvePromise;
     reject = rejectPromise;
   });
@@ -29,11 +33,13 @@ function remoteMerge(knownConversationIds: readonly string[], shellThreadIds: re
 
 describe("WorkspaceThreadLoader", () => {
   it("dedupes concurrent loads for the same conversation", async () => {
-    const pending = deferredMessages();
-    const loadConversationThread = vi.fn(() => pending.promise);
+    const pending = deferredPage();
+    const loadConversationThreadPage = vi.fn(() => pending.promise);
     const onLoadedThread = vi.fn();
     const loader = new WorkspaceThreadLoader({
-      loadConversationThread,
+      loadConversationThreadFull: vi.fn(),
+      loadConversationThreadPage,
+      onLoadedOlderThread: vi.fn(),
       onLoadedThread,
       onLoadError: vi.fn(),
     });
@@ -41,8 +47,8 @@ describe("WorkspaceThreadLoader", () => {
     const first = loader.loadThread("chat-1");
     const second = loader.loadThread("chat-1");
 
-    expect(loadConversationThread).toHaveBeenCalledTimes(1);
-    pending.resolve([userMessage("u1")]);
+    expect(loadConversationThreadPage).toHaveBeenCalledTimes(1);
+    pending.resolve(page([userMessage("u1")]));
     await Promise.all([first, second]);
 
     expect(onLoadedThread).toHaveBeenCalledTimes(1);
@@ -50,10 +56,13 @@ describe("WorkspaceThreadLoader", () => {
   });
 
   it("skips already loaded shell threads unless a force load is requested", async () => {
-    const loadConversationThread = vi.fn(async (id: string) => [userMessage(`${id}-loaded`)]);
+    const loadConversationThreadPage = vi.fn(async (id: string) => page([userMessage(`${id}-loaded`)]));
+    const loadConversationThreadFull = vi.fn(async (id: string) => [userMessage(`${id}-full`)]);
     const onLoadedThread = vi.fn();
     const loader = new WorkspaceThreadLoader({
-      loadConversationThread,
+      loadConversationThreadFull,
+      loadConversationThreadPage,
+      onLoadedOlderThread: vi.fn(),
       onLoadedThread,
       onLoadError: vi.fn(),
     });
@@ -64,18 +73,22 @@ describe("WorkspaceThreadLoader", () => {
 
     await loader.loadThread("chat-1");
 
-    expect(loadConversationThread).not.toHaveBeenCalled();
+    expect(loadConversationThreadPage).not.toHaveBeenCalled();
+    expect(loadConversationThreadFull).not.toHaveBeenCalled();
 
     await loader.loadThread("chat-1", true);
 
-    expect(loadConversationThread).toHaveBeenCalledTimes(1);
-    expect(onLoadedThread).toHaveBeenCalledWith("chat-1", [userMessage("chat-1-loaded")]);
+    expect(loadConversationThreadPage).not.toHaveBeenCalled();
+    expect(loadConversationThreadFull).toHaveBeenCalledTimes(1);
+    expect(onLoadedThread).toHaveBeenCalledWith("chat-1", [userMessage("chat-1-full")]);
   });
 
   it("reconciles loaded and in-flight tracking after a remote shell merge", async () => {
-    const loadConversationThread = vi.fn(async (id: string) => [userMessage(`${id}-loaded`)]);
+    const loadConversationThreadPage = vi.fn(async (id: string) => page([userMessage(`${id}-loaded`)]));
     const loader = new WorkspaceThreadLoader({
-      loadConversationThread,
+      loadConversationThreadFull: vi.fn(),
+      loadConversationThreadPage,
+      onLoadedOlderThread: vi.fn(),
       onLoadedThread: vi.fn(),
       onLoadError: vi.fn(),
     });
@@ -86,19 +99,21 @@ describe("WorkspaceThreadLoader", () => {
     await loader.loadThread("chat-2");
     await loader.loadThread("removed");
 
-    expect(loadConversationThread).toHaveBeenCalledTimes(1);
-    expect(loadConversationThread).toHaveBeenCalledWith("removed");
+    expect(loadConversationThreadPage).toHaveBeenCalledTimes(1);
+    expect(loadConversationThreadPage).toHaveBeenCalledWith("removed");
   });
 
   it("reports load errors and allows a later retry", async () => {
-    const loadConversationThread = vi
-      .fn<(id: string) => Promise<readonly ChatMessage[]>>()
+    const loadConversationThreadPage = vi
+      .fn<(id: string) => Promise<WorkspaceThreadPage>>()
       .mockRejectedValueOnce(new Error("thread unavailable"))
-      .mockResolvedValueOnce([userMessage("u1")]);
+      .mockResolvedValueOnce(page([userMessage("u1")]));
     const onLoadError = vi.fn();
     const onLoadedThread = vi.fn();
     const loader = new WorkspaceThreadLoader({
-      loadConversationThread,
+      loadConversationThreadFull: vi.fn(),
+      loadConversationThreadPage,
+      onLoadedOlderThread: vi.fn(),
       onLoadedThread,
       onLoadError,
     });
@@ -107,7 +122,55 @@ describe("WorkspaceThreadLoader", () => {
     await loader.loadThread("chat-1");
 
     expect(onLoadError).toHaveBeenCalledWith("thread unavailable");
-    expect(loadConversationThread).toHaveBeenCalledTimes(2);
+    expect(loadConversationThreadPage).toHaveBeenCalledTimes(2);
     expect(onLoadedThread).toHaveBeenCalledWith("chat-1", [userMessage("u1")]);
+  });
+
+  it("loads older pages using the server cursor", async () => {
+    const loadConversationThreadPage = vi
+      .fn<(id: string, before?: number) => Promise<WorkspaceThreadPage>>()
+      .mockResolvedValueOnce(page([userMessage("new")], true, 10))
+      .mockResolvedValueOnce(page([userMessage("old")], false, 5));
+    const onLoadedThread = vi.fn();
+    const onLoadedOlderThread = vi.fn();
+    const loader = new WorkspaceThreadLoader({
+      loadConversationThreadFull: vi.fn(),
+      loadConversationThreadPage,
+      onLoadedOlderThread,
+      onLoadedThread,
+      onLoadError: vi.fn(),
+    });
+
+    await loader.loadThread("chat-1");
+    expect(loader.hasOlderMessages("chat-1")).toBe(true);
+
+    await loader.loadOlderThread("chat-1");
+
+    expect(loadConversationThreadPage).toHaveBeenNthCalledWith(2, "chat-1", 10);
+    expect(onLoadedOlderThread).toHaveBeenCalledWith("chat-1", [userMessage("old")]);
+    expect(loader.hasOlderMessages("chat-1")).toBe(false);
+    expect(loader.isFullyLoaded("chat-1")).toBe(true);
+  });
+
+  it("loads full threads separately from the visible page", async () => {
+    const loadConversationThreadFull = vi.fn(async (id: string) => [userMessage(`${id}-full`)]);
+    const onLoadedThread = vi.fn();
+    const loader = new WorkspaceThreadLoader({
+      loadConversationThreadFull,
+      loadConversationThreadPage: vi.fn(async (id: string) => page([userMessage(`${id}-page`)], true, 1)),
+      onLoadedOlderThread: vi.fn(),
+      onLoadedThread,
+      onLoadError: vi.fn(),
+    });
+
+    await loader.loadThread("chat-1");
+    expect(loader.isLoaded("chat-1")).toBe(true);
+    expect(loader.isFullyLoaded("chat-1")).toBe(false);
+
+    await loader.loadFullThread("chat-1");
+
+    expect(loadConversationThreadFull).toHaveBeenCalledWith("chat-1");
+    expect(onLoadedThread).toHaveBeenLastCalledWith("chat-1", [userMessage("chat-1-full")]);
+    expect(loader.isFullyLoaded("chat-1")).toBe(true);
   });
 });

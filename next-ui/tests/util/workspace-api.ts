@@ -49,8 +49,20 @@ export function createWorkspaceApiFixture<T extends WorkspaceState>(initialState
         return Response.json({ revision });
       }
       if (path.startsWith("/api/thread?") && method === "GET") {
-        const conversationId = new URL(path, "http://localhost").searchParams.get("conversationId") ?? "";
-        return Response.json({ messages: state.threads[conversationId] ?? [] });
+        const params = new URL(path, "http://localhost").searchParams;
+        const conversationId = params.get("conversationId") ?? "";
+        const full = params.get("full") === "1";
+        const limit = Math.max(1, Math.min(Number.parseInt(params.get("limit") ?? "15", 10), 100));
+        const beforeParam = params.get("before");
+        const before = beforeParam ? Number.parseInt(beforeParam, 10) : undefined;
+        const thread = state.threads[conversationId] ?? [];
+        if (full) {
+          return Response.json({ messages: thread, hasMoreBefore: false });
+        }
+        const end = before === undefined || !Number.isFinite(before) ? thread.length : Math.max(0, Math.min(thread.length, before));
+        const start = Math.max(0, end - limit);
+        const messages = thread.slice(start, end);
+        return Response.json({ messages, hasMoreBefore: start > 0, nextBefore: messages.length > 0 ? start : undefined });
       }
       if (isWorkspaceMutationRequest(path, init)) {
         state = applyWorkspaceMutationRequest(state, init);

@@ -1,5 +1,5 @@
 import { fireEvent, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { Conversation, type ChatMessage } from "../src/components/agent";
 import { renderWithThemeAndVirtuoso, withVirtuosoMock } from "./util/render-with-virtuoso";
 
@@ -80,6 +80,29 @@ describe("Conversation auto-scroll", () => {
     fireEvent.scroll(thread);
 
     await waitFor(() => expect(screen.getByText("Message 100")).toBeInTheDocument());
+  });
+
+  it("requests an older server page when the loaded page has more history", async () => {
+    const onLoadEarlier = vi.fn();
+    renderWithThemeAndVirtuoso(
+      <Conversation
+        hasMoreBefore
+        onLoadEarlier={onLoadEarlier}
+        messages={Array.from({ length: 15 }, (_, index) => ({
+          id: `m-${index}`,
+          role: "user" as const,
+          text: `Message ${index}`,
+        }))}
+      />,
+    );
+
+    const thread = screen.getByTestId("conversation-virtual-list");
+    Object.defineProperty(thread, "scrollHeight", { value: 1200, configurable: true });
+    Object.defineProperty(thread, "clientHeight", { value: 400, configurable: true });
+    thread.scrollTop = 0;
+    fireEvent.scroll(thread);
+
+    await waitFor(() => expect(onLoadEarlier).toHaveBeenCalledTimes(1));
   });
 
   it("shows a scroll-to-bottom button after the user scrolls away from the bottom", async () => {

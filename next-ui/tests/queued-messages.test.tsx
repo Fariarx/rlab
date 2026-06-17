@@ -9,6 +9,10 @@ const messages: ChatMessage[] = [
   { id: "q2", role: "user", text: "Second queued turn" },
 ];
 
+function queuedMessages(count: number): ChatMessage[] {
+  return Array.from({ length: count }, (_, index) => ({ id: `q${index + 1}`, role: "user", text: `Queued turn ${index + 1}` }));
+}
+
 describe("QueuedMessages", () => {
   it("renders nothing when the queue is empty", () => {
     renderWithTheme(<QueuedMessages messages={[]} paused={false} onCancel={vi.fn()} onCopy={vi.fn()} onSendNow={vi.fn()} onTogglePause={vi.fn()} />);
@@ -50,5 +54,19 @@ describe("QueuedMessages", () => {
 
     expect(screen.getByText("В очереди · 2 · пауза")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Возобновить" })).toBeInTheDocument();
+  });
+
+  it("scrolls the queued turn list only after five messages", () => {
+    const { rerender } = renderWithTheme(
+      <QueuedMessages messages={queuedMessages(5)} paused={false} onCancel={vi.fn()} onCopy={vi.fn()} onSendNow={vi.fn()} onTogglePause={vi.fn()} />,
+    );
+
+    expect(screen.getByTestId("queued-messages-list")).not.toHaveAttribute("data-scrollable");
+
+    rerender(
+      <QueuedMessages messages={queuedMessages(6)} paused={false} onCancel={vi.fn()} onCopy={vi.fn()} onSendNow={vi.fn()} onTogglePause={vi.fn()} />,
+    );
+
+    expect(screen.getByTestId("queued-messages-list")).toHaveAttribute("data-scrollable", "true");
   });
 });

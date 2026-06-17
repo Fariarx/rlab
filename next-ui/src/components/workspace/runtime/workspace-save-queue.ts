@@ -1,6 +1,7 @@
 import { applyWorkspaceMutationsToState, type WorkspaceMutation } from "../../../lib/workspace-mutations";
 import { cloneWorkspaceState, type WorkspaceState } from "../../../lib/workspace-state";
 import { saveWorkspaceMutations, WorkspaceMutationConflictError } from "../../../client/api/workspace-api";
+import { mergeRemoteWorkspaceShell } from "../models/workspace-server-sync-model";
 import type { RunMessageHandle } from "../models/workspace-run-state";
 import { preserveLiveActiveRunMessages, withoutStaleActiveRunMessageMutations } from "../models/workspace-run-state";
 
@@ -82,7 +83,13 @@ export class WorkspaceSaveQueue {
   private rebaseAfterConflict(error: WorkspaceMutationConflictError, mutations: readonly WorkspaceMutation[]): void {
     const localState = this.host.getState();
     const unsavedMutations = withoutStaleActiveRunMessageMutations(localState, this.host.activeRuns, [...mutations, ...this.pendingMutations]);
-    const rebasedState = preserveLiveActiveRunMessages(applyWorkspaceMutationsToState(cloneWorkspaceState(error.workspace), unsavedMutations), localState, this.host.activeRuns);
+    const conflictBase = mergeRemoteWorkspaceShell({
+      current: localState,
+      serverState: cloneWorkspaceState(error.workspace),
+      preferredSelectedId: localState.selectedId,
+      activeRuns: this.host.activeRuns,
+    }).state;
+    const rebasedState = preserveLiveActiveRunMessages(applyWorkspaceMutationsToState(conflictBase, unsavedMutations), localState, this.host.activeRuns);
     this.host.setRevision(error.revision);
     this.host.applyServerState(rebasedState);
     this.pendingMutations = unsavedMutations;

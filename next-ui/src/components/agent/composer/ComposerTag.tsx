@@ -14,8 +14,8 @@ export interface ComposerTagProps {
   readonly onRemove?: () => void;
   readonly removeLabel?: string;
   readonly testId?: string;
-  /** Attachment chips need the same inner air vertically and horizontally. */
-  readonly equalPadding?: boolean;
+  /** Compact scheduled wakeups read better as true pill tags. */
+  readonly pill?: boolean;
 }
 
 /**
@@ -24,7 +24,7 @@ export interface ComposerTagProps {
  * label (width-capped) + an optional accessory and an optional × button, so the
  * floating row reads as a single, consistently styled, wrapping tag strip.
  */
-export function ComposerTag({ icon, label, accessory, onClick, clickAriaLabel, onRemove, removeLabel, testId, equalPadding = false }: ComposerTagProps) {
+export function ComposerTag({ icon, label, accessory, onClick, clickAriaLabel, onRemove, removeLabel, testId, pill = false }: ComposerTagProps) {
   return (
     <Box
       data-testid={testId}
@@ -34,14 +34,13 @@ export function ComposerTag({ icon, label, accessory, onClick, clickAriaLabel, o
         alignItems: "center",
         gap: 0.5,
         maxWidth: 220,
-        height: equalPadding ? "auto" : 28,
-        minHeight: equalPadding ? 32 : undefined,
+        height: 28,
         pl: 0.875,
         pr: onRemove ? 0.25 : 0.875,
-        py: equalPadding ? 0.875 : 0,
+        py: 0,
         flex: "0 0 auto",
         pointerEvents: "auto",
-        borderRadius: (t) => `${t.custom.radii.md}px`,
+        borderRadius: (t) => (pill ? `${t.custom.radii.pill}px` : `${t.custom.radii.md}px`),
         border: (t) => `1px solid ${t.custom.borders.strong}`,
         backgroundColor: (t) => t.custom.surfaces.s2,
       }}

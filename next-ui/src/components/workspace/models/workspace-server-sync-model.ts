@@ -56,13 +56,37 @@ export function mergeRemoteWorkspaceShell({ current, serverState, preferredSelec
 }
 
 export function mergeLoadedThread(current: WorkspaceState, conversationId: string, loadedMessages: readonly ChatMessage[]): WorkspaceState {
+  const existing = current.threads[conversationId] ?? [];
   const fetchedIds = new Set(loadedMessages.map((message) => message.id));
-  const inFlight = (current.threads[conversationId] ?? []).filter((message) => !fetchedIds.has(message.id));
+  const firstLoadedId = loadedMessages[0]?.id;
+  const firstLoadedIndex = firstLoadedId ? existing.findIndex((message) => message.id === firstLoadedId) : -1;
+  const prefix = firstLoadedIndex > 0 ? existing.slice(0, firstLoadedIndex).filter((message) => !fetchedIds.has(message.id)) : [];
+  const suffixSource = firstLoadedIndex >= 0 ? existing.slice(firstLoadedIndex) : existing;
+  const suffix = suffixSource.filter((message) => !fetchedIds.has(message.id));
   return {
     ...current,
     threads: {
       ...current.threads,
-      [conversationId]: [...loadedMessages, ...inFlight],
+      [conversationId]: [...prefix, ...loadedMessages, ...suffix],
+    },
+  };
+}
+
+export function prependLoadedThreadPage(current: WorkspaceState, conversationId: string, olderMessages: readonly ChatMessage[]): WorkspaceState {
+  if (olderMessages.length === 0) {
+    return current;
+  }
+  const existing = current.threads[conversationId] ?? [];
+  const existingIds = new Set(existing.map((message) => message.id));
+  const prepend = olderMessages.filter((message) => !existingIds.has(message.id));
+  if (prepend.length === 0) {
+    return current;
+  }
+  return {
+    ...current,
+    threads: {
+      ...current.threads,
+      [conversationId]: [...prepend, ...existing],
     },
   };
 }

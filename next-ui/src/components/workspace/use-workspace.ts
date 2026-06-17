@@ -11,7 +11,7 @@ import {
   setPendingTurnQueuePaused as setServerPendingTurnQueuePaused,
   type PendingTurnQueueSnapshot,
 } from "../../client/api/workspace-page-api";
-import { loadConversationThread, loadWorkspaceRevision, loadWorkspaceState } from "../../client/api/workspace-api";
+import { loadConversationThread, loadConversationThreadPage, loadWorkspaceRevision, loadWorkspaceState } from "../../client/api/workspace-api";
 import { nowLabel, starterThread, truncate } from "./sample-data";
 import { type AppSettings, type AppSettingsPatch, mergeAppSettings } from "../../lib/app-settings";
 import type { WorkspaceMutation } from "../../lib/workspace-mutations";
@@ -51,7 +51,7 @@ import {
 } from "./models/workspace-conversation-model";
 import { hasUntrackedPersistedActiveRuns, mergeBackgroundRunState } from "./models/workspace-background-runs-model";
 import { attachWorkspaceBackgroundRun, type RunHandle } from "./runtime/workspace-background-run-attachment";
-import { mergeLoadedThread, mergeRemoteWorkspaceShell } from "./models/workspace-server-sync-model";
+import { mergeLoadedThread, mergeRemoteWorkspaceShell, prependLoadedThreadPage } from "./models/workspace-server-sync-model";
 import { WorkspaceThreadLoader } from "./runtime/workspace-thread-loader";
 import {
   appendCompactionRequestState,
@@ -118,6 +118,8 @@ export interface Workspace {
   readonly queuedMessages: (id: string) => readonly ChatMessage[];
   readonly cancelQueuedMessage: (id: string, messageId: string) => void;
   readonly sendQueuedMessageNow: (id: string) => boolean;
+  readonly hasOlderThreadMessages: (id: string) => boolean;
+  readonly loadOlderThread: (id: string) => Promise<void>;
   readonly isQueuePaused: (id: string) => boolean;
   readonly setQueuePaused: (id: string, paused: boolean) => void;
   readonly setCompaction: (id: string, patch: Partial<CompactionSettings>) => void;
@@ -134,7 +136,6 @@ export interface Workspace {
   readonly updateSettings: (patch: AppSettingsPatch) => void;
   readonly reloadWorkspace: () => void;
   readonly loadThread: (id: string) => Promise<void>;
-  readonly loadAllThreads: () => Promise<void>;
   readonly isThreadLoaded: (id: string) => boolean;
   readonly find: (id: string) => ConversationSummary | null;
   readonly cwdOf: (id: string) => string | undefined;
@@ -192,10 +193,16 @@ export class WorkspaceStore implements Workspace {
   private readonly queueRefreshInFlight = new Set<string>();
 
   private readonly threadLoader = new WorkspaceThreadLoader({
-    loadConversationThread,
+    loadConversationThreadFull: loadConversationThread,
+    loadConversationThreadPage: (id, before) => loadConversationThreadPage(id, { before }),
     onLoadedThread: (id, messages) => {
       runInAction(() => {
         this.state = mergeLoadedThread(this.state, id, messages);
+      });
+    },
+    onLoadedOlderThread: (id, messages) => {
+      runInAction(() => {
+        this.state = prependLoadedThreadPage(this.state, id, messages);
       });
     },
     onLoadError: (message) => {
@@ -218,7 +225,7 @@ export class WorkspaceStore implements Workspace {
       selectedId: computed,
       settings: computed,
       loadThread: action.bound,
-      loadAllThreads: action.bound,
+      loadOlderThread: action.bound,
       mount: action.bound,
       unmount: action.bound,
       reloadWorkspace: action.bound,
@@ -305,8 +312,16 @@ export class WorkspaceStore implements Workspace {
     return this.threadLoader.loadThread(id);
   }
 
+  loadOlderThread(id: string): Promise<void> {
+    return this.threadLoader.loadOlderThread(id);
+  }
+
   isThreadLoaded(id: string): boolean {
     return this.threadLoader.isLoaded(id);
+  }
+
+  hasOlderThreadMessages(id: string): boolean {
+    return this.threadLoader.hasOlderMessages(id);
   }
 
   private loadThreadFromServer(id: string, force: boolean): Promise<void> {
@@ -352,13 +367,6 @@ export class WorkspaceStore implements Workspace {
     }
     const conversation = this.find(id);
     return Boolean(conversation?.activeRunId && isLiveRunStatus(conversation.status));
-  }
-
-  /** Ensure every conversation's thread is loaded — used before full-text search,
-   *  which scans across all threads. */
-  async loadAllThreads(): Promise<void> {
-    const ids = [...this.state.chats, ...this.state.projects.flatMap((project) => project.conversations)].map((conversation) => conversation.id);
-    await this.threadLoader.loadAllThreads(ids);
   }
 
   mount(): void {
@@ -416,13 +424,18 @@ export class WorkspaceStore implements Workspace {
         if (seq !== this.loadSeq) {
           return;
         }
+        let selectedId = "";
         runInAction(() => {
           this.workspaceRevision = typeof loadedState.revision === "number" ? loadedState.revision : 0;
           this.applyServerState(cloneWorkspaceState(loadedState));
+          selectedId = this.state.selectedId;
           this.loadError = null;
           this.loaded = true;
           this.hydrated = true;
         });
+        if (selectedId) {
+          void this.loadThreadFromServer(selectedId, true);
+        }
         void this.refreshBackgroundRuns();
         this.refreshSelectedQueue();
       })
@@ -784,6 +797,16 @@ export class WorkspaceStore implements Workspace {
   }
 
   sendMessage(id: string, text: string): void {
+    if (!this.threadLoader.isLoaded(id)) {
+      void this.loadThreadFromServer(id, false).then(() => {
+        runInAction(() => {
+          if (this.threadLoader.isLoaded(id)) {
+            this.sendMessage(id, text);
+          }
+        });
+      });
+      return;
+    }
     // If the agent is still working, queue this turn on the server. The server
     // owns queued-turn dispatch: enqueue never starts a run by itself, which keeps
     // a late queue request from racing ahead of the active /api/run registration.
@@ -819,7 +842,7 @@ export class WorkspaceStore implements Workspace {
       this.enqueueMutations({ type: "updateConversation", conversation: result.current.conversation });
     }
     this.enqueueMutations({ type: "upsertMessage", conversationId: id, message: userMsg });
-    this.runTurn(id, userMsg);
+    this.runTurn(id, userMsg, { serverPrompt: true });
   }
 
   pendingMessageCount(id: string): number {
@@ -942,7 +965,11 @@ export class WorkspaceStore implements Workspace {
    *  `promptOverride` sends a different prompt to the agent than the message text
    *  shows (used by manual compaction, where the bubble reads "Compact context"
    *  but the agent receives its `/compact` command). */
-  private runTurn(id: string, userMsg: ChatMessage, options?: { readonly promptOverride?: string; readonly initialContextTokens?: number }): void {
+  private runTurn(
+    id: string,
+    userMsg: ChatMessage,
+    options?: { readonly promptOverride?: string; readonly initialContextTokens?: number; readonly serverPrompt?: boolean },
+  ): void {
     const conv = this.find(id);
     const runId = nextWorkspaceId("run");
     const aId = nextWorkspaceId("a");
@@ -959,6 +986,8 @@ export class WorkspaceStore implements Workspace {
       options,
     });
     const { agentMessage, conversationPatch, profile, prompt, resume } = preparedRun;
+    const serverPrompt = options?.serverPrompt === true && !resume && options.promptOverride === undefined ? { userMessage: userMsg } : undefined;
+    const promptForRequest = serverPrompt ? (userMsg.text ?? "") : prompt;
 
     // Cancel any run still in flight for this conversation BEFORE persisting the
     // (re-truncated) thread. Otherwise a server-owned background run can write the
@@ -1028,7 +1057,7 @@ export class WorkspaceStore implements Workspace {
 
     runConversation({
       profile,
-      prompt,
+      prompt: promptForRequest,
       resume,
       compaction: conv?.compaction,
       cwd: this.cwdOf(id),
@@ -1042,6 +1071,7 @@ export class WorkspaceStore implements Workspace {
         agentMessageId: aId,
         agentMessageTime: agentTime,
       },
+      serverPrompt,
       signal: controller.signal,
       onAccepted: () => {
         runHandle.serverOwned = true;
