@@ -9,49 +9,54 @@ function Harness({ capture }: { readonly capture: (controller: ConversationAutoS
     capture(controller);
   }, [capture, controller]);
   return (
-    <div ref={controller.containerRef}>
-      <div data-testid="virtuoso-scroller" />
+    <div ref={controller.containerRef} data-testid="scroller">
+      <div ref={controller.contentRef} />
     </div>
   );
 }
 
-describe("useConversationAutoScroll", () => {
-  it("releases follow output after a deliberate user scroll up", async () => {
-    const captured: { current: ConversationAutoScrollController | null } = { current: null };
+function sizeContainer(element: HTMLElement, { scrollHeight, clientHeight, scrollTop }: { scrollHeight: number; clientHeight: number; scrollTop: number }) {
+  Object.defineProperty(element, "scrollHeight", { value: scrollHeight, configurable: true });
+  Object.defineProperty(element, "clientHeight", { value: clientHeight, configurable: true });
+  element.scrollTop = scrollTop;
+}
 
+describe("useConversationAutoScroll", () => {
+  it("reveals the scroll-to-bottom affordance once the user scrolls up", async () => {
+    const captured: { current: ConversationAutoScrollController | null } = { current: null };
     render(<Harness capture={(controller) => { captured.current = controller; }} />);
 
     await waitFor(() => expect(captured.current).not.toBeNull());
-    expect(captured.current?.followOutput()).toBe("auto");
+    expect(captured.current?.showScrollToBottom).toBe(false);
 
+    const element = captured.current?.containerRef.current as HTMLElement;
+    sizeContainer(element, { scrollHeight: 1000, clientHeight: 300, scrollTop: 120 });
     await act(async () => {
-      captured.current?.containerRef.current?.dispatchEvent(new WheelEvent("wheel", { deltaY: -1, bubbles: true }));
+      element.dispatchEvent(new Event("scroll"));
     });
 
-    expect(captured.current?.followOutput()).toBe(false);
-    await waitFor(() => expect(captured.current?.showScrollToBottom).toBe(true));
+    expect(captured.current?.showScrollToBottom).toBe(true);
   });
 
-  it("scrolls back to the latest item and hides the affordance", async () => {
+  it("snaps back to the bottom and hides the affordance", async () => {
     const captured: { current: ConversationAutoScrollController | null } = { current: null };
-    const scrollToIndex = vi.fn();
-
     render(<Harness capture={(controller) => { captured.current = controller; }} />);
 
     await waitFor(() => expect(captured.current).not.toBeNull());
+    const element = captured.current?.containerRef.current as HTMLElement;
+    sizeContainer(element, { scrollHeight: 1000, clientHeight: 300, scrollTop: 120 });
     await act(async () => {
-      captured.current?.containerRef.current?.dispatchEvent(new WheelEvent("wheel", { deltaY: -1, bubbles: true }));
+      element.dispatchEvent(new Event("scroll"));
     });
     await waitFor(() => expect(captured.current?.showScrollToBottom).toBe(true));
 
-    if (captured.current) {
-      captured.current.virtuosoRef.current = { scrollToIndex } as never;
-    }
+    const scrollTo = vi.fn();
+    element.scrollTo = scrollTo as unknown as HTMLElement["scrollTo"];
     await act(async () => {
       captured.current?.scrollToBottom();
     });
 
-    expect(scrollToIndex).toHaveBeenCalledWith({ index: "LAST", align: "end", behavior: "smooth" });
+    expect(scrollTo).toHaveBeenCalledWith({ top: 1000, behavior: "smooth" });
     await waitFor(() => expect(captured.current?.showScrollToBottom).toBe(false));
   });
 });

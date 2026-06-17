@@ -42,10 +42,10 @@ describe("Conversation auto-scroll", () => {
     expect(screen.getByTestId("conversation-virtual-list")).toHaveAttribute("aria-live", "polite");
   });
 
-  it("renders long threads in a virtualized scroll container", () => {
+  it("windows very long threads to the most recent messages with a reveal control", () => {
     renderWithThemeAndVirtuoso(
       <Conversation
-        messages={Array.from({ length: 50 }, (_, index) => ({
+        messages={Array.from({ length: 200 }, (_, index) => ({
           id: `m-${index}`,
           role: "user" as const,
           text: `Message ${index}`,
@@ -54,9 +54,27 @@ describe("Conversation auto-scroll", () => {
     );
 
     const thread = screen.getByTestId("conversation-virtual-list");
-    expect(thread).toBeInTheDocument();
-    expect(thread).toHaveAttribute("data-virtualized", "true");
-    expect(screen.getByTestId("virtuoso-scroller")).toBeInTheDocument();
+    expect(thread).toHaveAttribute("data-windowed", "true");
+    // The newest message is rendered; an old one (outside the window) is not.
+    expect(screen.getByText("Message 199")).toBeInTheDocument();
+    expect(screen.queryByText("Message 0")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Показать ещё/ })).toBeInTheDocument();
+  });
+
+  it("reveals earlier messages when the window is expanded", () => {
+    renderWithThemeAndVirtuoso(
+      <Conversation
+        messages={Array.from({ length: 200 }, (_, index) => ({
+          id: `m-${index}`,
+          role: "user" as const,
+          text: `Message ${index}`,
+        }))}
+      />,
+    );
+
+    expect(screen.queryByText("Message 100")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Показать ещё/ }));
+    expect(screen.getByText("Message 100")).toBeInTheDocument();
   });
 
   it("shows a scroll-to-bottom button after the user scrolls away from the bottom", async () => {
@@ -71,7 +89,12 @@ describe("Conversation auto-scroll", () => {
     );
 
     expect(screen.queryByRole("button", { name: "К последнему сообщению" })).not.toBeInTheDocument();
-    fireEvent.wheel(screen.getByTestId("conversation-virtual-list"), { deltaY: -120 });
+
+    const thread = screen.getByTestId("conversation-virtual-list");
+    Object.defineProperty(thread, "scrollHeight", { value: 2000, configurable: true });
+    Object.defineProperty(thread, "clientHeight", { value: 400, configurable: true });
+    thread.scrollTop = 300; // scrolled up, far from the bottom
+    fireEvent.scroll(thread);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "К последнему сообщению" })).toBeInTheDocument());
   });

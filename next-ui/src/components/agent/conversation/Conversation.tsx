@@ -1,10 +1,10 @@
 import KeyboardArrowDownRoundedIcon from "@mui/icons-material/KeyboardArrowDownRounded";
 import { Box, IconButton, Stack, Tooltip } from "@mui/material";
-import { useMemo } from "react";
-import { Virtuoso } from "react-virtuoso";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "../../../i18n/I18nProvider";
 import { type MessageDisplayPrefs, Message } from "../message/Message";
 import { rise } from "../core/anim";
+import { Button } from "../../ui";
 import type { MessageActionHandlers } from "../message/message-actions";
 import { AgentAvatar, TypingDots } from "../blocks/parts";
 import type { ChatMessage } from "../core/types";
@@ -34,16 +34,16 @@ function hasLiveAgentBlock(message: ChatMessage): boolean {
   );
 }
 
-const BOTTOM_PIN_THRESHOLD = 96;
+// Long threads render only the most recent slice so a freshly opened
+// conversation lands at the bottom instantly (no virtual-list height estimation
+// to drift mid-thread) and the DOM stays bounded. Older turns load on demand.
+const INITIAL_WINDOW = 60;
+const WINDOW_STEP = 60;
 
 type ConversationItem = { readonly kind: "message"; readonly message: ChatMessage } | { readonly kind: "typing" };
 
-// react-virtuoso can invoke computeItemKey/itemContent with an out-of-range
-// (undefined) item during a data transition — e.g. when the messages array
-// changes from a background-run update. Guard the deref so a stale index can't
-// throw and white-screen the entire thread.
-function itemKey(index: number, item: ConversationItem | undefined): string {
-  return item?.kind === "message" ? item.message.id : `typing-${index}`;
+function itemKey(index: number, item: ConversationItem): string {
+  return item.kind === "message" ? item.message.id : `typing-${index}`;
 }
 
 function TypingRow({ delay }: { readonly delay: number }) {
@@ -95,45 +95,65 @@ export function Conversation({
     () => (typing ? [...messages.map((message) => ({ kind: "message" as const, message })), { kind: "typing" as const }] : messages.map((message) => ({ kind: "message" as const, message }))),
     [messages, typing],
   );
-  const autoScroll = useConversationAutoScroll(items);
+
+  const [windowSize, setWindowSize] = useState(INITIAL_WINDOW);
+  const hiddenCount = Math.max(0, items.length - windowSize);
+  const windowed = useMemo(() => items.slice(hiddenCount), [items, hiddenCount]);
+
+  const autoScroll = useConversationAutoScroll(windowed);
+
+  // Reveal older turns without the viewport jumping: remember the distance from
+  // the bottom before the prepend and restore it after the taller content lays out.
+  const pendingPrepend = useRef<number | null>(null);
+  const showEarlier = () => {
+    const element = autoScroll.containerRef.current;
+    pendingPrepend.current = element ? element.scrollHeight - element.scrollTop : null;
+    setWindowSize((size) => size + WINDOW_STEP);
+  };
+  useLayoutEffect(() => {
+    const offset = pendingPrepend.current;
+    pendingPrepend.current = null;
+    const element = autoScroll.containerRef.current;
+    if (offset != null && element) {
+      element.scrollTop = element.scrollHeight - offset;
+    }
+  }, [windowSize]);
 
   return (
-    <Box
-      ref={autoScroll.containerRef}
-      data-testid="conversation-virtual-list"
-      data-virtualized="true"
-      role="log"
-      aria-label={t("conversationThread")}
-      aria-live={hasLiveContent ? "polite" : "off"}
-      aria-relevant="additions text"
-      sx={{ position: "relative", height: "100%", minHeight: 0, overflow: "hidden" }}
-    >
-      <Virtuoso
-        ref={autoScroll.virtuosoRef}
-        data={items}
-        alignToBottom
-        atBottomThreshold={BOTTOM_PIN_THRESHOLD}
-        isScrolling={autoScroll.setUserScrolling}
-        atBottomStateChange={autoScroll.handleAtBottomStateChange}
-        computeItemKey={itemKey}
-        defaultItemHeight={96}
-        followOutput={autoScroll.followOutput}
-        increaseViewportBy={{ bottom: 640, top: 320 }}
-        initialItemCount={Math.min(items.length, 20)}
-        {...(import.meta.env.MODE !== "test" && items.length > 0
-          ? { initialTopMostItemIndex: { index: items.length - 1, align: "end" as const } }
-          : {})}
-        minOverscanItemCount={{ bottom: 8, top: 4 }}
-        style={{ height: "100%" }}
-        components={{ Footer: bottomInset > 0 ? () => <Box sx={{ height: bottomInset }} /> : undefined }}
-        itemContent={(index, item) =>
-          item ? (
-            <Box sx={{ width: "100%", minWidth: 0, maxWidth: contentMaxWidth, mx: "auto", px: contentPaddingX, pt: index === 0 ? { xs: 2.5, sm: 4 } : 0, pb: 3, overflowX: "clip" }}>
-              {item.kind === "message" ? <Message actions={actions} displayPrefs={displayPrefs} agentProfile={agentProfile} message={item.message} index={index} /> : <TypingRow delay={messages.length * 120} />}
+    <Box sx={{ position: "relative", height: "100%", minHeight: 0 }}>
+      <Box
+        ref={autoScroll.containerRef}
+        data-testid="conversation-virtual-list"
+        data-windowed={hiddenCount > 0 ? "true" : "false"}
+        role="log"
+        aria-label={t("conversationThread")}
+        aria-live={hasLiveContent ? "polite" : "off"}
+        aria-relevant="additions text"
+        sx={{ height: "100%", minHeight: 0, overflowY: "auto", overflowX: "hidden", overscrollBehavior: "contain" }}
+      >
+        <Box ref={autoScroll.contentRef}>
+          {hiddenCount > 0 && (
+            <Box sx={{ width: "100%", maxWidth: contentMaxWidth, mx: "auto", px: contentPaddingX, pt: { xs: 2.5, sm: 4 }, pb: 1, display: "flex", justifyContent: "center" }}>
+              <Button variant="text" size="small" onClick={showEarlier}>
+                {t("showEarlierMessages", { count: hiddenCount })}
+              </Button>
             </Box>
-          ) : null
-        }
-      />
+          )}
+          {windowed.map((item, index) => (
+            <Box
+              key={itemKey(index, item)}
+              sx={{ width: "100%", minWidth: 0, maxWidth: contentMaxWidth, mx: "auto", px: contentPaddingX, pt: index === 0 && hiddenCount === 0 ? { xs: 2.5, sm: 4 } : 0, pb: 3, overflowX: "clip" }}
+            >
+              {item.kind === "message" ? (
+                <Message actions={actions} displayPrefs={displayPrefs} agentProfile={agentProfile} message={item.message} index={hiddenCount + index} />
+              ) : (
+                <TypingRow delay={messages.length * 120} />
+              )}
+            </Box>
+          ))}
+          {bottomInset > 0 && <Box sx={{ height: bottomInset }} />}
+        </Box>
+      </Box>
       {autoScroll.showScrollToBottom && (
         <Tooltip title={t("scrollToBottom")}>
           <IconButton
