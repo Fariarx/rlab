@@ -4,8 +4,7 @@ import process from "node:process";
 import type { AgentBlock, ChatMessage, ComposerDraft, ConversationSummary, Project } from "./src/domain/agent-types";
 import type { AgentProfile } from "./src/lib/agent-catalog";
 import { conversationPreviewSnippet, messagePreviewText, previewSnippet } from "./src/lib/conversation-preview";
-import { sortConversationsNewestFirst } from "./src/lib/conversation-order";
-import { normalizeConversationUpdatedAtMs } from "./src/lib/time-format";
+import { inferConversationUpdatedAtMs, normalizeConversationUpdatedAtMs } from "./src/lib/time-format";
 import { mergeConversationUpdate, type WorkspaceMutation } from "./src/lib/workspace-mutations";
 import type { WorkspaceState } from "./src/lib/workspace-state";
 
@@ -196,6 +195,7 @@ type ProjectMeta = Omit<Project, "conversations">;
 type MessageRow = { readonly conversationId: string; readonly data: string };
 type MessagePageRow = { readonly position: number; readonly data: string };
 type MessageWithIdRow = { readonly id: string; readonly conversationId: string; readonly data: string };
+type LatestUserMessageRow = { readonly conversationId: string; readonly data: string };
 
 export type WorkspaceDbMutation = WorkspaceMutation;
 
@@ -252,6 +252,39 @@ function messageFromRow(row: MessageRow): ChatMessage {
   return JSON.parse(row.data) as ChatMessage;
 }
 
+function messageCreatedAtMs(message: ChatMessage): number | undefined {
+  if (typeof message.createdAtMs === "number" && Number.isFinite(message.createdAtMs)) {
+    return message.createdAtMs;
+  }
+  return inferConversationUpdatedAtMs(message.time);
+}
+
+function messageThreadUpdatedAtMs(message: ChatMessage): number | undefined {
+  let latest: number | undefined;
+  const candidates = [message.createdAtMs, message.startedAtMs, inferConversationUpdatedAtMs(message.time)];
+  for (const candidate of candidates) {
+    if (typeof candidate === "number" && Number.isFinite(candidate)) {
+      latest = latest === undefined ? candidate : Math.max(latest, candidate);
+    }
+  }
+  return latest;
+}
+
+function normalizeThreadUpdatedAtMs(value: number | undefined): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function latestThreadUpdatedAtMs(messages: readonly ChatMessage[]): number | undefined {
+  let latest: number | undefined;
+  for (const message of messages) {
+    const next = messageThreadUpdatedAtMs(message);
+    if (next !== undefined) {
+      latest = latest === undefined ? next : Math.max(latest, next);
+    }
+  }
+  return latest;
+}
+
 function escapeSqlLike(value: string): string {
   return value.replace(/[\\%_]/g, (match) => `\\${match}`);
 }
@@ -269,10 +302,16 @@ function previewSnippetsFromLoadedThreads(threads: Readonly<Record<string, reado
   );
 }
 
-function withConversationPreview(conversation: ConversationSummary, snippets: ReadonlyMap<string, string>): ConversationSummary {
+function withConversationPreview(
+  conversation: ConversationSummary,
+  snippets: ReadonlyMap<string, string>,
+  latestThreadUpdatedAtMsByConversation: ReadonlyMap<string, number>,
+): ConversationSummary {
   const snippet = snippets.get(conversation.id);
   const normalized = normalizeConversationActivityTimestamp(conversation);
-  return snippet === undefined || snippet === normalized.snippet ? normalized : { ...normalized, snippet };
+  const threadUpdatedAtMs = normalizeThreadUpdatedAtMs(normalized.threadUpdatedAtMs) ?? latestThreadUpdatedAtMsByConversation.get(conversation.id);
+  const withThreadMarker = threadUpdatedAtMs === undefined || threadUpdatedAtMs === normalized.threadUpdatedAtMs ? normalized : { ...normalized, threadUpdatedAtMs };
+  return snippet === undefined || snippet === withThreadMarker.snippet ? withThreadMarker : { ...withThreadMarker, snippet };
 }
 
 function normalizeConversationActivityTimestamp(conversation: ConversationSummary): ConversationSummary {
@@ -280,6 +319,75 @@ function normalizeConversationActivityTimestamp(conversation: ConversationSummar
     ...conversation,
     updatedAtMs: normalizeConversationUpdatedAtMs(conversation.time, conversation.updatedAtMs),
   };
+}
+
+function withInitialThreadUpdatedAt(conversation: ConversationSummary, messages: readonly ChatMessage[]): ConversationSummary {
+  const normalized = normalizeConversationActivityTimestamp(conversation);
+  const threadUpdatedAtMs = normalizeThreadUpdatedAtMs(normalized.threadUpdatedAtMs) ?? latestThreadUpdatedAtMs(messages);
+  return threadUpdatedAtMs === undefined ? normalized : { ...normalized, threadUpdatedAtMs };
+}
+
+function readLatestUserMessageCreatedAtMsByConversation(handle: DatabaseHandle): ReadonlyMap<string, number> {
+  const rows = handle
+    .prepare(
+      `
+SELECT m.conversation_id AS conversationId, m.data
+FROM messages m
+JOIN (
+  SELECT conversation_id, MAX(position) AS position
+  FROM messages
+  WHERE json_extract(data, '$.role') = 'user'
+  GROUP BY conversation_id
+) latest ON latest.conversation_id = m.conversation_id AND latest.position = m.position
+`,
+    )
+    .all() as LatestUserMessageRow[];
+  const byConversation = new Map<string, number>();
+  for (const row of rows) {
+    const createdAtMs = messageCreatedAtMs(messageFromRow(row));
+    if (createdAtMs !== undefined) {
+      byConversation.set(row.conversationId, createdAtMs);
+    }
+  }
+  return byConversation;
+}
+
+function readLatestThreadUpdatedAtMsByConversation(handle: DatabaseHandle): ReadonlyMap<string, number> {
+  const rows = handle
+    .prepare(
+      `
+SELECT m.conversation_id AS conversationId, m.data
+FROM messages m
+JOIN (
+  SELECT conversation_id, MAX(position) AS position
+  FROM messages
+  GROUP BY conversation_id
+) latest ON latest.conversation_id = m.conversation_id AND latest.position = m.position
+`,
+    )
+    .all() as MessageRow[];
+  const byConversation = new Map<string, number>();
+  for (const row of rows) {
+    const updatedAtMs = messageThreadUpdatedAtMs(messageFromRow(row));
+    if (updatedAtMs !== undefined) {
+      byConversation.set(row.conversationId, updatedAtMs);
+    }
+  }
+  return byConversation;
+}
+
+function sortConversationsByLatestUserMessage<T extends ConversationSummary>(
+  conversations: readonly T[],
+  latestUserMessageCreatedAtMs: ReadonlyMap<string, number>,
+): T[] {
+  return conversations
+    .map((conversation, index) => ({
+      conversation,
+      index,
+      activityAtMs: latestUserMessageCreatedAtMs.get(conversation.id) ?? normalizeConversationUpdatedAtMs(conversation.time, conversation.updatedAtMs),
+    }))
+    .sort((left, right) => right.activityAtMs - left.activityAtMs || left.index - right.index)
+    .map((entry) => entry.conversation);
 }
 
 /** True once a workspace has been persisted — used to gate one-time import/seed. */
@@ -295,6 +403,8 @@ export function readWorkspaceStateFromDb(includeThreadIds?: ReadonlySet<string>)
   const handle = database();
   const projectRows = handle.prepare("SELECT id, data FROM projects ORDER BY position").all() as Array<{ id: string; data: string }>;
   const convRows = handle.prepare("SELECT project_id AS projectId, data FROM conversations ORDER BY position").all() as Array<{ projectId: string | null; data: string }>;
+  const latestUserMessageCreatedAtMs = readLatestUserMessageCreatedAtMsByConversation(handle);
+  const latestThreadUpdatedAtMsByConversation: ReadonlyMap<string, number> = includeThreadIds === undefined ? readLatestThreadUpdatedAtMsByConversation(handle) : new Map();
   const msgRows = (includeThreadIds
     ? [...includeThreadIds].flatMap((id) => handle.prepare("SELECT conversation_id AS conversationId, data FROM messages WHERE conversation_id = ? ORDER BY position").all(id))
     : handle.prepare("SELECT conversation_id AS conversationId, data FROM messages ORDER BY conversation_id, position").all()) as MessageRow[];
@@ -313,7 +423,10 @@ export function readWorkspaceStateFromDb(includeThreadIds?: ReadonlySet<string>)
   }
   const snippets = includeThreadIds ? new Map<string, string>() : previewSnippetsFromLoadedThreads(threads);
   const conversationsForProject = (projectId: string | null): ConversationSummary[] =>
-    sortConversationsNewestFirst((convsByProject.get(projectId) ?? []).map((conversation) => withConversationPreview(conversation, snippets)));
+    sortConversationsByLatestUserMessage(
+      (convsByProject.get(projectId) ?? []).map((conversation) => withConversationPreview(conversation, snippets, latestThreadUpdatedAtMsByConversation)),
+      latestUserMessageCreatedAtMs,
+    );
   const projects: Project[] = projectRows.map((row) => ({
     ...(JSON.parse(row.data) as Omit<Project, "conversations">),
     conversations: conversationsForProject(row.id),
@@ -342,11 +455,15 @@ export function initializeWorkspaceStateInDb(state: WorkspaceState): number {
     const insMsg = handle.prepare("INSERT INTO messages(id, conversation_id, position, data) VALUES(?, ?, ?, ?)");
     const insDraft = handle.prepare("INSERT INTO composer_drafts(conversation_id, data) VALUES(?, ?)");
     const insKv = handle.prepare("INSERT INTO kv(key, value) VALUES(?, ?)");
-    state.chats.forEach((conversation, index) => insConv.run(conversation.id, null, index, JSON.stringify(normalizeConversationActivityTimestamp(conversation))));
+    state.chats.forEach((conversation, index) =>
+      insConv.run(conversation.id, null, index, JSON.stringify(withInitialThreadUpdatedAt(conversation, state.threads[conversation.id] ?? []))),
+    );
     state.projects.forEach((project, projectIndex) => {
       const { conversations, ...meta } = project;
       insProject.run(project.id, projectIndex, JSON.stringify(meta));
-      conversations.forEach((conversation, index) => insConv.run(conversation.id, project.id, index, JSON.stringify(normalizeConversationActivityTimestamp(conversation))));
+      conversations.forEach((conversation, index) =>
+        insConv.run(conversation.id, project.id, index, JSON.stringify(withInitialThreadUpdatedAt(conversation, state.threads[conversation.id] ?? []))),
+      );
     });
     for (const [conversationId, messages] of Object.entries(state.threads)) {
       messages.forEach((message, index) => insMsg.run(message.id, conversationId, index, JSON.stringify(message)));
@@ -482,6 +599,17 @@ function updateConversationInTransaction(handle: DatabaseHandle, conversation: C
   }
 }
 
+function touchConversationThreadInTransaction(handle: DatabaseHandle, conversationId: string, atMs = Date.now()): void {
+  const row = handle.prepare("SELECT data FROM conversations WHERE id = ?").get(conversationId) as { data: string } | undefined;
+  if (!row) {
+    throw new Error(`Conversation ${conversationId} does not exist.`);
+  }
+  const conversation = JSON.parse(row.data) as ConversationSummary;
+  const previous = normalizeThreadUpdatedAtMs(conversation.threadUpdatedAtMs);
+  const threadUpdatedAtMs = previous === undefined ? atMs : Math.max(previous, atMs);
+  updateConversationInTransaction(handle, { ...conversation, threadUpdatedAtMs });
+}
+
 function updateConversationProfileInTransaction(handle: DatabaseHandle, conversationId: string, profile: AgentProfile): void {
   const row = handle.prepare("SELECT data FROM conversations WHERE id = ?").get(conversationId) as { data: string } | undefined;
   if (!row) {
@@ -590,14 +718,19 @@ export function applyWorkspaceDbMutations(
           break;
         case "upsertMessage":
           upsertMessageInTransaction(handle, mutation.conversationId, mutation.message);
+          touchConversationThreadInTransaction(handle, mutation.conversationId);
           break;
         case "upsertMessages":
           for (const message of mutation.messages) {
             upsertMessageInTransaction(handle, mutation.conversationId, message);
           }
+          if (mutation.messages.length > 0) {
+            touchConversationThreadInTransaction(handle, mutation.conversationId);
+          }
           break;
         case "replaceConversationThread":
           replaceConversationThreadInTransaction(handle, mutation.conversationId, mutation.messages);
+          touchConversationThreadInTransaction(handle, mutation.conversationId);
           break;
       }
     }
@@ -625,6 +758,7 @@ export function upsertMessage(conversationId: string, message: ChatMessage): voi
   const handle = database();
   transaction(() => {
     upsertMessageInTransaction(handle, conversationId, message);
+    touchConversationThreadInTransaction(handle, conversationId);
     bumpWorkspaceRevisionInTransaction(handle);
   });
 }
@@ -663,6 +797,7 @@ export function patchMessageBlockById(blockIdToPatch: string, updateBlock: (bloc
       const conversation = readConversation(conversationId);
       if (conversation) {
         updateConversationInTransaction(handle, { ...conversation, status: "running" });
+        touchConversationThreadInTransaction(handle, conversationId);
       }
     }
     if (changedConversationIds.size > 0) {
@@ -711,6 +846,7 @@ export function upsertAgentMessageForUserTurn(conversationId: string, userMessag
       }
     }
     handle.prepare("INSERT INTO messages(id, conversation_id, position, data) VALUES(?, ?, ?, ?)").run(message.id, conversationId, userRow.position + 1, JSON.stringify(message));
+    touchConversationThreadInTransaction(handle, conversationId);
     bumpWorkspaceRevisionInTransaction(handle);
   });
 }
@@ -748,7 +884,8 @@ export function enqueuePendingTurn(record: PendingTurnRecord): PendingTurnQueueS
   const handle = database();
   transaction(() => {
     ensureConversationExists(handle, record.conversationId);
-    const data: PendingTurnStoredData = { message: record.message, origin: record.origin };
+    const message = record.message.createdAtMs === undefined ? { ...record.message, createdAtMs: record.createdAtMs } : record.message;
+    const data: PendingTurnStoredData = { message, origin: record.origin };
     handle
       .prepare("INSERT INTO pending_turns(id, conversation_id, position, created_at_ms, state, run_id, data) VALUES(?, ?, ?, ?, 'queued', NULL, ?)")
       .run(record.id, record.conversationId, nextPendingTurnPosition(handle, record.conversationId), record.createdAtMs, JSON.stringify(data));

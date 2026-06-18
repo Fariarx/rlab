@@ -2,14 +2,17 @@ import { applyWorkspaceMutationsToState, type WorkspaceMutation } from "../../..
 import { cloneWorkspaceState, type WorkspaceState } from "../../../lib/workspace-state";
 import { saveWorkspaceMutations, WorkspaceMutationConflictError } from "../../../client/api/workspace-api";
 import { mergeRemoteWorkspaceShell } from "../models/workspace-server-sync-model";
+import type { RemoteWorkspaceShellMerge } from "../models/workspace-server-sync-model";
 import type { RunMessageHandle } from "../models/workspace-run-state";
 import { preserveLiveActiveRunMessages, withoutStaleActiveRunMessageMutations } from "../models/workspace-run-state";
+import { workspaceConversations } from "../models/workspace-state-utils";
 
 const WORKSPACE_SAVE_DEBOUNCE_MS = 250;
 const WORKSPACE_SAVE_RETRY_MS = 2_000;
 
 export interface WorkspaceSaveQueueHost {
   readonly activeRuns: ReadonlyMap<string, RunMessageHandle>;
+  readonly applyRemoteMergedState?: (state: WorkspaceState, merge: RemoteWorkspaceShellMerge) => void;
   readonly applyServerState: (state: WorkspaceState) => void;
   readonly getLoadError: () => string | null;
   readonly getRevision: () => number;
@@ -83,15 +86,28 @@ export class WorkspaceSaveQueue {
   private rebaseAfterConflict(error: WorkspaceMutationConflictError, mutations: readonly WorkspaceMutation[]): void {
     const localState = this.host.getState();
     const unsavedMutations = withoutStaleActiveRunMessageMutations(localState, this.host.activeRuns, [...mutations, ...this.pendingMutations]);
-    const conflictBase = mergeRemoteWorkspaceShell({
+    const conflictMerge = mergeRemoteWorkspaceShell({
       current: localState,
       serverState: cloneWorkspaceState(error.workspace),
       preferredSelectedId: localState.selectedId,
       activeRuns: this.host.activeRuns,
-    }).state;
+    });
+    const conflictBase = conflictMerge.state;
     const rebasedState = preserveLiveActiveRunMessages(applyWorkspaceMutationsToState(conflictBase, unsavedMutations), localState, this.host.activeRuns);
+    const rebasedConversationIds = new Set(workspaceConversations(rebasedState).map((conversation) => conversation.id));
+    const rebasedMerge: RemoteWorkspaceShellMerge = {
+      ...conflictMerge,
+      state: rebasedState,
+      selectedId: rebasedState.selectedId,
+      knownConversationIds: rebasedConversationIds,
+      stalePreservedThreadIds: new Set([...conflictMerge.stalePreservedThreadIds].filter((id) => rebasedConversationIds.has(id))),
+    };
     this.host.setRevision(error.revision);
-    this.host.applyServerState(rebasedState);
+    if (this.host.applyRemoteMergedState) {
+      this.host.applyRemoteMergedState(rebasedState, rebasedMerge);
+    } else {
+      this.host.applyServerState(rebasedState);
+    }
     this.pendingMutations = unsavedMutations;
     this.host.setLoadError(null);
     this.pendingSaveUrgent = false;

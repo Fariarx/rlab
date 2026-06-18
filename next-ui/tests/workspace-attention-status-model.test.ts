@@ -16,12 +16,12 @@ function conversation(patch: Partial<ConversationSummary> & Pick<ConversationSum
 }
 
 describe("workspaceAttentionStatus", () => {
-  it("prioritizes unread errors, actions, running agents, then unread completions", () => {
+  it("prioritizes unread errors, unread actions, running agents, then unread completions", () => {
     expect(
       workspaceAttentionStatus([
         conversation({ id: "done", status: "done", unread: true }),
         conversation({ id: "running", status: "running" }),
-        conversation({ id: "waiting", status: "waiting" }),
+        conversation({ id: "waiting", status: "waiting", unread: true }),
         conversation({ id: "error", status: "error", unread: true }),
       ]),
     ).toBe("error");
@@ -30,7 +30,7 @@ describe("workspaceAttentionStatus", () => {
       workspaceAttentionStatus([
         conversation({ id: "done", status: "done", unread: true }),
         conversation({ id: "running", status: "running" }),
-        conversation({ id: "waiting", status: "waiting" }),
+        conversation({ id: "waiting", status: "waiting", unread: true }),
       ]),
     ).toBe("action");
 
@@ -43,6 +43,7 @@ describe("workspaceAttentionStatus", () => {
 
     expect(workspaceAttentionStatus([conversation({ id: "done", status: "done", unread: true })])).toBe("done");
     expect(workspaceAttentionStatus([conversation({ id: "read-error", status: "error", unread: false })])).toBeNull();
+    expect(workspaceAttentionStatus([conversation({ id: "read-waiting", status: "waiting", unread: false })])).toBeNull();
   });
 
   it("builds changing wave frames for attention states and a static one for done", () => {

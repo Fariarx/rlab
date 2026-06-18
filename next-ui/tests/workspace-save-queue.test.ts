@@ -3,7 +3,8 @@ import type { WorkspaceState } from "../src/lib/workspace-state";
 import { buildInitialWorkspaceState } from "../src/lib/workspace-state";
 import type { WorkspaceMutation } from "../src/lib/workspace-mutations";
 import { WorkspaceSaveQueue, type WorkspaceSaveQueueHost } from "../src/components/workspace/runtime/workspace-save-queue";
-import type { ChatMessage } from "../src/domain/agent-types";
+import type { RemoteWorkspaceShellMerge } from "../src/components/workspace/models/workspace-server-sync-model";
+import type { ChatMessage, ConversationSummary } from "../src/domain/agent-types";
 
 function hostFor(stateRef: { current: WorkspaceState }, revisionRef: { current: number }): WorkspaceSaveQueueHost {
   return {
@@ -127,6 +128,61 @@ describe("WorkspaceSaveQueue", () => {
     await flushMicrotasks();
 
     expect(stateRef.current.threads[selectedId]?.map((message) => message.id)).toEqual([...fullThread.map((message) => message.id), userMessage.id]);
+    expect(revisionRef.current).toBe(7);
+  });
+
+  it("keeps a locally created empty conversation known after conflict rebase", async () => {
+    const serverState = buildInitialWorkspaceState();
+    const newConversation: ConversationSummary = {
+      id: "chat-local-new",
+      title: "New chat",
+      snippet: "",
+      time: "12:00",
+      status: "idle",
+      agent: "codex",
+      profile: { agent: "codex", model: "default", reasoning: "default", mode: "default" },
+    };
+    const stateRef = {
+      current: {
+        ...serverState,
+        chats: [newConversation, ...serverState.chats],
+        threads: { ...serverState.threads, [newConversation.id]: [] },
+        selectedId: newConversation.id,
+      },
+    };
+    const revisionRef = { current: 3 };
+    const rebasedMerge: { current: RemoteWorkspaceShellMerge | null } = { current: null };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        mutationRequests.push(JSON.parse(String(init?.body ?? "{}")) as { baseRevision: number; mutations: WorkspaceMutation[] });
+        if (mutationRequests.length === 1) {
+          return Response.json({ error: "conflict", revision: 7, workspace: { ...serverState, threads: {} } }, { status: 409 });
+        }
+        return Response.json({ ok: true, revision: 8 });
+      }),
+    );
+    const host = {
+      ...hostFor(stateRef, revisionRef),
+      applyRemoteMergedState: (state, merge) => {
+        stateRef.current = state;
+        rebasedMerge.current = merge;
+      },
+    } satisfies WorkspaceSaveQueueHost;
+    const queue = new WorkspaceSaveQueue(host);
+
+    queue.enqueue(
+      { type: "upsertConversation", conversation: newConversation, projectId: null, insertAtFront: true },
+      { type: "upsertMessages", conversationId: newConversation.id, messages: [] },
+      { type: "setSelectedConversation", conversationId: newConversation.id },
+    );
+    await vi.advanceTimersByTimeAsync(250);
+    await flushMicrotasks();
+
+    const merge = rebasedMerge.current as RemoteWorkspaceShellMerge;
+    expect(merge.knownConversationIds.has(newConversation.id)).toBe(true);
+    expect(stateRef.current.selectedId).toBe(newConversation.id);
+    expect(stateRef.current.threads[newConversation.id]).toEqual([]);
     expect(revisionRef.current).toBe(7);
   });
 });

@@ -1,10 +1,9 @@
 import { conversationPreviewSnippet } from "../../../lib/conversation-preview";
-import { sortConversationsNewestFirst } from "../../../lib/conversation-order";
 import { messageToPlainText } from "../message/message-actions";
 import { conversationStatusKey as statusToKey, type ChatMessage, type ConversationSummary, type Project } from "../core/types";
 
 export const CONVERSATION_SECTION_INITIAL_LIMIT = 4;
-export type ConversationUnreadAttentionStatus = "error" | "done";
+export type ConversationUnreadAttentionStatus = "error" | "action" | "done";
 
 export type ConversationListIconKind = "pin" | "project" | "chat";
 
@@ -62,6 +61,9 @@ export function unreadAttentionStatus(conversation: ConversationSummary): Conver
   if (conversation.status === "error") {
     return "error";
   }
+  if (conversation.status === "waiting") {
+    return "action";
+  }
   if (conversation.status === "done") {
     return "done";
   }
@@ -69,7 +71,7 @@ export function unreadAttentionStatus(conversation: ConversationSummary): Conver
 }
 
 export function sortedConversationsByActivity(conversations: readonly ConversationSummary[]): readonly ConversationSummary[] {
-  return sortConversationsNewestFirst(conversations);
+  return conversations;
 }
 
 export function visibleConversationSections({

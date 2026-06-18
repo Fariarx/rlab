@@ -89,43 +89,60 @@ describe("ConversationList rename", () => {
 });
 
 describe("ConversationList status dots", () => {
-  it("hides the resting (idle/done) status dots but keeps actionable ones", () => {
+  it("hides resting and read attention statuses but keeps running visible", () => {
     render([
       { ...base, id: "done", title: "Done chat", status: "done" },
+      { ...base, id: "waiting", title: "Waiting chat", status: "waiting" },
+      { ...base, id: "error", title: "Error chat", status: "error" },
       { ...base, id: "run", title: "Running chat", status: "running" },
     ]);
 
     expect(screen.queryByRole("img", { name: "Готово" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: "Ждёт ввод" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: "Ошибка" })).not.toBeInTheDocument();
     expect(screen.getByRole("img", { name: "В работе" })).toBeInTheDocument();
   });
 
-  it("shows a green status dot for a finished, unviewed conversation and drops it once read", () => {
+  it("shows a small green status dot for a finished, unread conversation and drops it once read", () => {
     const finished = { ...base, id: "fin", title: "Finished chat", status: "done" as const, unread: true };
     const actions = noopActions();
     const rendered = renderWithThemeAndVirtuoso(
       <ConversationList projects={[]} chats={[finished]} selectedId="" onSelect={vi.fn()} actions={actions} wakeupConversationIds={new Set()} />,
     );
-    expect(screen.getByRole("img", { name: "Готово · не просмотрено" })).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "Готово" })).toBeInTheDocument();
 
     rendered.rerender(
       <ConversationList projects={[]} chats={[{ ...finished, unread: false }]} selectedId="" onSelect={vi.fn()} actions={actions} wakeupConversationIds={new Set()} />,
     );
-    expect(screen.queryByRole("img", { name: "Готово · не просмотрено" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: "Готово" })).not.toBeInTheDocument();
   });
 
-  it("shows a red attention dot for a failed, unviewed conversation and drops the unread label once read", () => {
+  it("shows a small red status dot for a failed, unread conversation and drops it once read", () => {
     const failed = { ...base, id: "err", title: "Failed chat", status: "error" as const, unread: true };
     const actions = noopActions();
     const rendered = renderWithThemeAndVirtuoso(
       <ConversationList projects={[]} chats={[failed]} selectedId="" onSelect={vi.fn()} actions={actions} wakeupConversationIds={new Set()} />,
     );
-    expect(screen.getByRole("img", { name: "Ошибка · не просмотрено" })).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "Ошибка" })).toBeInTheDocument();
 
     rendered.rerender(
       <ConversationList projects={[]} chats={[{ ...failed, unread: false }]} selectedId="" onSelect={vi.fn()} actions={actions} wakeupConversationIds={new Set()} />,
     );
-    expect(screen.queryByRole("img", { name: "Ошибка · не просмотрено" })).not.toBeInTheDocument();
-    expect(screen.getByRole("img", { name: "Ошибка" })).toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: "Ошибка" })).not.toBeInTheDocument();
+  });
+
+  it("shows an action status dot only while a waiting conversation is unread", () => {
+    const waiting = { ...base, id: "wait", title: "Waiting chat", status: "waiting" as const, unread: true };
+    const actions = noopActions();
+    const rendered = renderWithThemeAndVirtuoso(
+      <ConversationList projects={[]} chats={[waiting]} selectedId="" onSelect={vi.fn()} actions={actions} wakeupConversationIds={new Set()} />,
+    );
+    expect(screen.getByRole("img", { name: "Ждёт ввод" })).toBeInTheDocument();
+
+    rendered.rerender(
+      <ConversationList projects={[]} chats={[{ ...waiting, unread: false }]} selectedId="" onSelect={vi.fn()} actions={actions} wakeupConversationIds={new Set()} />,
+    );
+    expect(screen.queryByRole("img", { name: "Ждёт ввод" })).not.toBeInTheDocument();
   });
 
   it("shows a warning status for idle conversations with an active wakeup", () => {
@@ -146,7 +163,7 @@ describe("ConversationList status dots", () => {
     const actions = noopActions();
     const rendered = renderWithThemeAndVirtuoso(<ConversationList projects={[]} chats={[chat]} selectedId="wakeup" onSelect={vi.fn()} actions={actions} wakeupConversationIds={new Set()} />);
 
-    expect(screen.getByRole("img", { name: "Ошибка" })).toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: "Ошибка" })).not.toBeInTheDocument();
 
     rendered.rerender(<ConversationList projects={[]} chats={[chat]} selectedId="wakeup" onSelect={vi.fn()} actions={actions} wakeupConversationIds={new Set(["wakeup"])} />);
 
@@ -156,7 +173,7 @@ describe("ConversationList status dots", () => {
 });
 
 describe("ConversationList activity ordering", () => {
-  it("orders chats by recency without status priority", () => {
+  it("preserves server chat ordering without status priority", () => {
     render([
       { ...base, id: "waiting", title: "Waiting older", status: "waiting", updatedAtMs: 1000 },
       { ...base, id: "done", title: "Done newest", status: "done", updatedAtMs: 4000 },
@@ -165,14 +182,14 @@ describe("ConversationList activity ordering", () => {
     ]);
 
     expect(screen.getAllByRole("option").map((row) => row.getAttribute("aria-label"))).toEqual([
+      "Waiting older",
       "Done newest",
       "Idle middle",
       "Running old",
-      "Waiting older",
     ]);
   });
 
-  it("sorts conversations by recency inside each project without moving them between groups", () => {
+  it("preserves server ordering inside each project without moving them between groups", () => {
     renderWithThemeAndVirtuoso(
       <ConversationList
         projects={[
@@ -204,10 +221,10 @@ describe("ConversationList activity ordering", () => {
     );
 
     expect(screen.getAllByRole("option").map((row) => row.getAttribute("aria-label"))).toEqual([
-      "P1 idle new",
       "P1 running old",
-      "P2 done new",
+      "P1 idle new",
       "P2 wakeup old",
+      "P2 done new",
     ]);
   });
 });
@@ -297,9 +314,9 @@ describe("ConversationList collapsed group indicators", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /Чаты/ }));
 
-    expect(screen.getByRole("img", { name: "Ошибка · не просмотрено" })).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "Ошибка" })).toBeInTheDocument();
     expect(screen.queryByRole("img", { name: "в работе: 1" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("img", { name: "Готово · не просмотрено" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: "Готово" })).not.toBeInTheDocument();
   });
 
   it("shows the wakeup status when a collapsed group has scheduled work", () => {

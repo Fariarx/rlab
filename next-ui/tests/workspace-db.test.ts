@@ -46,7 +46,7 @@ const conv = (id: string, extra: Partial<ConversationSummary> = {}): Conversatio
   ...extra,
 });
 const msg = (id: string, text: string): ChatMessage => ({ id, role: "agent", blocks: [{ kind: "text", text }] });
-const userMsg = (id: string, text: string): ChatMessage => ({ id, role: "user", text, time: "12:00" });
+const userMsg = (id: string, text: string, extra: Omit<Partial<ChatMessage>, "id" | "role" | "text"> = {}): ChatMessage => ({ id, role: "user", text, time: "12:00", ...extra });
 const codexProfile: AgentProfile = { agent: "codex", model: "default", reasoning: "default", mode: "default" };
 const geminiProfile: AgentProfile = { agent: "gemini", model: "default", reasoning: "default", mode: "default" };
 
@@ -324,12 +324,12 @@ describe("workspace-db", () => {
     expect(readWorkspaceStateFromDb().chats.map((conversation) => conversation.id)).toEqual(["c3", "c2", "c1"]);
   });
 
-  it("reads conversations newest first inside root and project collections", () => {
+  it("reads conversations by latest user message inside root and project collections", () => {
     initializeWorkspaceStateInDb({
       ...buildEmptyWorkspaceState(),
       chats: [
-        conv("root-old", { updatedAtMs: 1000 }),
-        conv("root-new", { updatedAtMs: 3000 }),
+        conv("root-old", { updatedAtMs: 9000 }),
+        conv("root-new", { updatedAtMs: 1000 }),
         conv("root-middle", { updatedAtMs: 2000 }),
       ],
       projects: [
@@ -337,12 +337,20 @@ describe("workspace-db", () => {
           id: "p1",
           name: "Project",
           conversations: [
-            conv("project-old", { updatedAtMs: 1000 }),
-            conv("project-new", { updatedAtMs: 3000 }),
+            conv("project-old", { updatedAtMs: 9000 }),
+            conv("project-new", { updatedAtMs: 1000 }),
             conv("project-middle", { updatedAtMs: 2000 }),
           ],
         },
       ],
+      threads: {
+        "root-old": [userMsg("u-root-old", "old", { createdAtMs: 1000 }), msg("a-root-old", "agent update")],
+        "root-new": [userMsg("u-root-new", "new", { createdAtMs: 3000 })],
+        "root-middle": [userMsg("u-root-middle", "middle", { createdAtMs: 2000 })],
+        "project-old": [userMsg("u-project-old", "old", { createdAtMs: 1000 }), msg("a-project-old", "agent update")],
+        "project-new": [userMsg("u-project-new", "new", { createdAtMs: 3000 })],
+        "project-middle": [userMsg("u-project-middle", "middle", { createdAtMs: 2000 })],
+      },
       selectedId: "root-old",
     });
 

@@ -16,14 +16,13 @@ export interface WakeupsController {
   readonly removeWakeup: (wakeupId: string) => void;
 }
 
+const WAKEUPS_POLL_MS = 30_000;
+
 export function useWakeups({
   selectedConversationId,
-  selectedStatus,
-  messageCount,
   toast,
 }: UseWakeupsOptions): WakeupsController {
   const [wakeups, setWakeups] = useState<readonly WakeupSummary[]>([]);
-  const refreshKey = `${selectedConversationId ?? ""}:${selectedStatus ?? ""}:${messageCount}`;
 
   const refreshWakeups = useCallback((_reason: string) => {
     loadWakeups()
@@ -34,7 +33,9 @@ export function useWakeups({
   useEffect(() => {
     let canceled = false;
     const refresh = () => {
-      void refreshKey;
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+        return;
+      }
       loadWakeups()
         .then((items) => {
           if (!canceled) {
@@ -47,13 +48,20 @@ export function useWakeups({
           }
         });
     };
+    const handleVisibilityChange = () => {
+      if (typeof document === "undefined" || document.visibilityState === "visible") {
+        refresh();
+      }
+    };
     refresh();
-    const timer = window.setInterval(refresh, 5000);
+    const timer = window.setInterval(refresh, WAKEUPS_POLL_MS);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => {
       canceled = true;
       window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [refreshKey]);
+  }, []);
 
   const removeWakeup = useCallback((wakeupId: string) => {
     if (!selectedConversationId) {

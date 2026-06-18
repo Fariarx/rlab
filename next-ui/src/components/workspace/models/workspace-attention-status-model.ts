@@ -7,7 +7,7 @@ export function workspaceAttentionStatus(conversations: readonly ConversationSum
   if (conversations.some((conversation) => conversation.status === "error" && conversation.unread === true)) {
     return "error";
   }
-  if (conversations.some((conversation) => conversation.status === "waiting")) {
+  if (conversations.some((conversation) => conversation.status === "waiting" && conversation.unread === true)) {
     return "action";
   }
   if (conversations.some((conversation) => conversation.status === "running")) {

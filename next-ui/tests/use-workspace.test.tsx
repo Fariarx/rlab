@@ -396,6 +396,7 @@ describe("useWorkspace", () => {
     state = {
       ...state,
       selectedId: "chat-1",
+      chats: state.chats.map((chat) => (chat.id === "chat-2" ? { ...chat, threadUpdatedAtMs: 2000 } : chat)),
       threads: {
         ...state.threads,
         "chat-2": [...state.threads["chat-2"], remoteMessage],

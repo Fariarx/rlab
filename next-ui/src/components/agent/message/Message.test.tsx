@@ -3,6 +3,7 @@ import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../../../i18n/I18nProvider";
 import { appTheme } from "../../../theme/app-theme";
+import { ComposerSharedProvider, type ComposerSharedProps } from "../composer/composer-shared-context";
 import { Message, type MessageDisplayPrefs } from "./Message";
 import type { ChatMessage } from "../core/types";
 
@@ -11,11 +12,13 @@ function renderMessage(
   actions?: Parameters<typeof Message>[0]["actions"],
   agentProfile?: Parameters<typeof Message>[0]["agentProfile"],
   displayPrefs?: MessageDisplayPrefs,
+  composerShared?: ComposerSharedProps,
 ) {
+  const node = <Message message={message} actions={actions} agentProfile={agentProfile} displayPrefs={displayPrefs} />;
   return render(
     <ThemeProvider theme={appTheme}>
       <I18nProvider locale="ru">
-        <Message message={message} actions={actions} agentProfile={agentProfile} displayPrefs={displayPrefs} />
+        {composerShared ? <ComposerSharedProvider value={composerShared}>{node}</ComposerSharedProvider> : node}
       </I18nProvider>
     </ThemeProvider>,
   );
@@ -24,6 +27,7 @@ function renderMessage(
 describe("Message", () => {
   afterEach(() => {
     vi.useRealTimers();
+    vi.unstubAllGlobals();
   });
 
   it("renders retry action for agent messages", () => {
@@ -75,6 +79,51 @@ describe("Message", () => {
 
     const link = screen.getByRole("link", { name: "TaskWakeup" });
     expect(link).toHaveAttribute("href", "rlab-tool:TaskWakeup");
+  });
+
+  it("edits user messages with a lightweight multiline editor instead of mounting the dock composer", async () => {
+    class FakeSpeechRecognition {
+      lang = "";
+      continuous = false;
+      interimResults = false;
+      onresult = null;
+      onerror = null;
+      onend = null;
+      start(): void {}
+      stop(): void {}
+    }
+    vi.stubGlobal("SpeechRecognition", FakeSpeechRecognition);
+    const onEditAndResend = vi.fn();
+    const message: ChatMessage = {
+      id: "user-edit",
+      role: "user",
+      text: "original\n\n<attachment name=\"notes.txt\" type=\"text/plain\">\nhello\n</attachment>",
+    };
+
+    renderMessage(
+      message,
+      { onEditAndResend },
+      undefined,
+      undefined,
+      {
+        onAttachmentError: vi.fn(),
+        voiceProvider: { id: "web-speech", name: "Browser Web Speech", kind: "browser", language: "ru-RU", configured: true },
+      },
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Изменить и отправить" }));
+    const input = screen.getByTestId("message-edit-input");
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: "updated" } });
+
+    expect(screen.queryByTestId("composer-input")).not.toBeInTheDocument();
+    expect(screen.getByTestId("message-edit-attach-button")).toBeInTheDocument();
+    expect(await screen.findByTestId("message-edit-voice-button")).toBeInTheDocument();
+    expect(within(screen.getByTestId("message-edit-attachments")).getByTestId("attachment-tag")).toHaveTextContent("notes.txt");
+
+    fireEvent.click(screen.getByRole("button", { name: "Отправить изменённое сообщение" }));
+
+    expect(onEditAndResend).toHaveBeenCalledWith(message, "updated\n\n<attachment name=\"notes.txt\" type=\"text/plain\">\nhello\n</attachment>");
   });
 
   it("renders bare urls in user messages as links", () => {

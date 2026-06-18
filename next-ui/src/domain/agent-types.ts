@@ -150,6 +150,8 @@ export interface ChatMessage {
   readonly id: string;
   readonly role: "user" | "agent";
   readonly time?: string;
+  /** Epoch ms when this message was created. User-message activity ordering uses this stable timestamp. */
+  readonly createdAtMs?: number;
   /** Epoch ms when this assistant turn actually started. Used for live timers. */
   readonly startedAtMs?: number;
   /** Agent profile used for this specific assistant turn. */
@@ -227,6 +229,9 @@ export interface ConversationSummary {
   /** Epoch ms of the last activity (creation, sent message, run update). Drives
    *  newest→oldest sidebar ordering; `time` is only the display label. */
   readonly updatedAtMs?: number;
+  /** Epoch ms of the last persisted thread/message mutation. Summary-only
+   *  changes must not invalidate cached thread pages. */
+  readonly threadUpdatedAtMs?: number;
   readonly status: ConversationStatus;
   readonly agent: AgentId;
   readonly profile?: AgentProfile;

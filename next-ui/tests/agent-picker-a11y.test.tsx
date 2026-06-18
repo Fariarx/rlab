@@ -123,10 +123,45 @@ describe("AgentPicker a11y", () => {
     expect(onSelect).toHaveBeenCalledWith({ agent: "opencode", model: "anthropic/claude-custom-lab", reasoning: "default", mode: "default", autoConfirm: false });
   });
 
+  it("keeps built-in Claude Code aliases when live CLI models are discovered", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL | Request) => {
+        const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+        if (path === "/api/agents") {
+          return Response.json({
+            "claude-code": {
+              status: "available",
+              bins: ["claude"],
+              resolvedBin: "/usr/local/bin/claude",
+              runAdapter: true,
+              selectable: true,
+              env: [],
+              installCommand: "npm install -g @anthropic-ai/claude-code",
+              models: [{ id: "claude-sonnet-4-6-20260101", label: "Claude Sonnet 4.6", value: "claude-sonnet-4-6-20260101" }],
+            },
+          });
+        }
+        return Response.json({});
+      }),
+    );
+
+    renderWithTheme(
+      <AgentStatusProvider>
+        <AgentPicker open value={DEFAULT_PROFILE} onClose={vi.fn()} onSelect={vi.fn()} />
+      </AgentStatusProvider>,
+    );
+
+    expect(await screen.findByText("CLI-путь: /usr/local/bin/claude")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Opus" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Claude Sonnet 4.6" })).toBeInTheDocument();
+  });
+
   it("exposes Claude Code CLI model aliases and reasoning options but no work-mode control", () => {
     renderWithTheme(<AgentPicker open value={DEFAULT_PROFILE} onClose={vi.fn()} onSelect={vi.fn()} />);
 
     expect(screen.getByRole("button", { name: "Fable" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Opus" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Sonnet" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Haiku" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Max" })).toBeInTheDocument();

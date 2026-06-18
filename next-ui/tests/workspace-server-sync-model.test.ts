@@ -77,6 +77,78 @@ describe("workspace-server-sync-model", () => {
     expect(merge.state.threads.removed).toBeUndefined();
   });
 
+  it("keeps preserved local threads fresh when only their remote conversation shell changed", () => {
+    const current = workspace({
+      chats: [conversation("chat-1", { title: "Local title" }), conversation("chat-2")],
+      threads: {
+        "chat-1": [userMessage("u1", "cached")],
+        "chat-2": [userMessage("u2", "cached")],
+      },
+    });
+    const serverState = workspace({
+      chats: [conversation("chat-1", { title: "Remote title" }), conversation("chat-2")],
+      threads: {},
+    });
+
+    const merge = mergeRemoteWorkspaceShell({
+      current,
+      serverState,
+      preferredSelectedId: "chat-1",
+      activeRuns: new Map(),
+    });
+
+    expect([...merge.stalePreservedThreadIds]).toEqual([]);
+    expect(merge.state.threads["chat-1"]?.[0]?.text).toBe("cached");
+    expect(merge.state.threads["chat-2"]?.[0]?.text).toBe("cached");
+  });
+
+  it("marks preserved local threads stale when the remote thread marker changed", () => {
+    const current = workspace({
+      chats: [conversation("chat-1", { title: "Local title", threadUpdatedAtMs: 1000 }), conversation("chat-2", { threadUpdatedAtMs: 1000 })],
+      threads: {
+        "chat-1": [userMessage("u1", "cached")],
+        "chat-2": [userMessage("u2", "cached")],
+      },
+    });
+    const serverState = workspace({
+      chats: [conversation("chat-1", { title: "Remote title", threadUpdatedAtMs: 2000 }), conversation("chat-2", { threadUpdatedAtMs: 1000 })],
+      threads: {},
+    });
+
+    const merge = mergeRemoteWorkspaceShell({
+      current,
+      serverState,
+      preferredSelectedId: "chat-1",
+      activeRuns: new Map(),
+    });
+
+    expect([...merge.stalePreservedThreadIds]).toEqual(["chat-1"]);
+    expect(merge.state.threads["chat-1"]?.[0]?.text).toBe("cached");
+    expect(merge.state.threads["chat-2"]?.[0]?.text).toBe("cached");
+  });
+
+  it("does not mark active-run threads stale while their remote marker changes", () => {
+    const current = workspace({
+      chats: [conversation("chat-1", { activeRunId: "run-1", status: "running", threadUpdatedAtMs: 1000 })],
+      threads: {
+        "chat-1": [userMessage("u1", "cached"), agentMessage("a1", [{ kind: "text", text: "live", streaming: true }])],
+      },
+    });
+    const serverState = workspace({
+      chats: [conversation("chat-1", { activeRunId: "run-1", status: "running", threadUpdatedAtMs: 2000 })],
+      threads: {},
+    });
+
+    const merge = mergeRemoteWorkspaceShell({
+      current,
+      serverState,
+      preferredSelectedId: "chat-1",
+      activeRuns: new Map([["chat-1", { userMessageId: "u1", agentMessageId: "a1", serverOwned: true }]]),
+    });
+
+    expect([...merge.stalePreservedThreadIds]).toEqual([]);
+  });
+
   it("preserves live active-run messages over stale remote shell messages", () => {
     const liveBlocks: readonly AgentBlock[] = [{ kind: "text", text: "streaming", streaming: true }];
     const current = workspace({

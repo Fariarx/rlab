@@ -68,6 +68,41 @@ describe("useWakeups", () => {
     expect(controller.current?.wakeupConversationIds).toEqual(new Set(["chat-1", "chat-2"]));
   });
 
+  it("does not refetch wakeups when only the selected message count changes", async () => {
+    const wakeups = [wakeup("w1", "chat-1")];
+    loadWakeupsMock.mockResolvedValue(wakeups);
+    const controller: { current: WakeupsController | null } = { current: null };
+
+    const view = render(
+      <Harness
+        selectedConversationId="chat-1"
+        messageCount={1}
+        toast={vi.fn(() => "toast-1")}
+        capture={(next) => {
+          controller.current = next;
+        }}
+      />,
+    );
+    await waitFor(() => expect(controller.current?.wakeups).toEqual(wakeups));
+    expect(loadWakeupsMock).toHaveBeenCalledTimes(1);
+
+    view.rerender(
+      <Harness
+        selectedConversationId="chat-1"
+        messageCount={2}
+        toast={vi.fn(() => "toast-1")}
+        capture={(next) => {
+          controller.current = next;
+        }}
+      />,
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(loadWakeupsMock).toHaveBeenCalledTimes(1);
+  });
+
   it("removes a wakeup optimistically", async () => {
     const wakeups = [wakeup("w1", "chat-1"), wakeup("w2", "chat-1")];
     loadWakeupsMock.mockResolvedValueOnce(wakeups);

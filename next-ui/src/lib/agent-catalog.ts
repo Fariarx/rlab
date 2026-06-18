@@ -85,6 +85,7 @@ const CLAUDE_REASONING_OPTIONS = [
 const CLAUDE_MODEL_OPTIONS = [
   DEFAULT_OPTION,
   { id: "fable", label: "Fable", value: "fable" },
+  { id: "opus", label: "Opus", value: "opus" },
   { id: "sonnet", label: "Sonnet", value: "sonnet" },
   { id: "haiku", label: "Haiku", value: "haiku" },
 ] as const;

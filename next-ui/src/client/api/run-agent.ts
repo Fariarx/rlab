@@ -60,6 +60,7 @@ interface RunPersistenceBinding {
   readonly runId: string;
   readonly userMessageId: string;
   readonly userMessageTime: string;
+  readonly userMessageCreatedAtMs?: number;
   readonly agentMessageId: string;
   readonly agentMessageTime: string;
 }
@@ -316,28 +317,27 @@ export async function runConversation(opts: {
   const accumulator = createRunEventAccumulator();
   const rebuild = (): AgentBlock[] => runEventBlocks(accumulator);
 
-  let pendingLiveBlocks: AgentBlock[] | null = null;
+  let pendingLiveBlocksDirty = false;
   let liveFlushTimer: ReturnType<typeof setTimeout> | null = null;
   const clearPendingLiveBlocks = () => {
     if (liveFlushTimer !== null) {
       clearTimeout(liveFlushTimer);
       liveFlushTimer = null;
     }
-    pendingLiveBlocks = null;
+    pendingLiveBlocksDirty = false;
   };
   const flushLiveBlocks = () => {
     if (liveFlushTimer !== null) {
       clearTimeout(liveFlushTimer);
       liveFlushTimer = null;
     }
-    const blocks = pendingLiveBlocks;
-    pendingLiveBlocks = null;
-    if (blocks) {
-      opts.onBlocks(blocks);
+    if (pendingLiveBlocksDirty) {
+      pendingLiveBlocksDirty = false;
+      opts.onBlocks(rebuild());
     }
   };
   const queueLiveBlocks = () => {
-    pendingLiveBlocks = rebuild();
+    pendingLiveBlocksDirty = true;
     if (liveFlushTimer !== null) {
       return;
     }

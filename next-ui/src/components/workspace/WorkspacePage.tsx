@@ -206,6 +206,11 @@ export const WorkspacePageView = observer(function WorkspacePageView({
   const showTerminal = ws.settings.appearance.showTerminal;
   const selected = ws.find(ws.selectedId);
   const messages = ws.threads[ws.selectedId] ?? [];
+  const selectedAgentProfile = useMemo(() => conversationProfile(selected), [selected]);
+  const messageDisplayPrefs = useMemo(
+    () => ({ reasoningAutoExpand: ws.settings.appearance.reasoningAutoExpand }),
+    [ws.settings.appearance.reasoningAutoExpand],
+  );
   const previewEnabled = rlabChatToolEnabled(profile.tools, "BrowserPreview");
   const viewSwitcherLabel = useMemo(() => [
     t("chatTab"),
@@ -288,7 +293,7 @@ export const WorkspacePageView = observer(function WorkspacePageView({
     [profile.tools, registeredPlugins],
   );
   const messageHistory = useMemo(() => composerMessageHistory(messages), [messages]);
-  const selectedHasActiveWork = conversationHasActiveWork(selected, messages);
+  const selectedHasActiveWork = useMemo(() => conversationHasActiveWork(selected, messages), [messages, selected]);
   const lastTurnDiffs = useMemo(() => latestAgentDiffBlocks(messages), [messages]);
   const composerDraft = ws.composerDrafts[ws.selectedId] ?? { text: "", attachments: [] };
   const voiceProvider = useMemo(
@@ -515,9 +520,9 @@ export const WorkspacePageView = observer(function WorkspacePageView({
     </Stack>
   );
 
-  // Composer props shared by the bottom dock and the in-thread message editor, so
-  // editing a sent message gets the same capabilities (attachments, mentions,
-  // $-plugins, voice, modes, limits) as composing a new one.
+  // Conversation-level composer capabilities shared by the bottom dock and
+  // lightweight in-thread editors. Editors use this for voice and attachment
+  // handling without mounting a second full dock Composer inside the thread.
   const composerShared: ComposerSharedProps = {
     mentionableFiles,
     modes: supportedModes,
@@ -813,8 +818,8 @@ export const WorkspacePageView = observer(function WorkspacePageView({
                     messages={displayedMessages}
                     typing={selected.status === "running" && messages[messages.length - 1]?.role === "user"}
                     actions={messageActions}
-                    agentProfile={conversationProfile(selected)}
-                    displayPrefs={{ reasoningAutoExpand: ws.settings.appearance.reasoningAutoExpand }}
+                    agentProfile={selectedAgentProfile}
+                    displayPrefs={messageDisplayPrefs}
                     contentMaxWidth={THREAD_MAX_WIDTH}
                     contentPaddingX={THREAD_PADDING_X}
                     bottomInset={contentBottomInset}

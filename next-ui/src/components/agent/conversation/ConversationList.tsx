@@ -37,9 +37,9 @@ export interface ConversationActions {
 export { conversationMatches } from "./conversation-list-model";
 
 // Status dots on the avatar are noise for resting conversations, so only the
-// actionable states (running / waiting / error) get one. Idle (gray) and done
-// (green) render the bare avatar.
-const STATUSES_WITH_DOT: ReadonlySet<ConversationStatus> = new Set<ConversationStatus>(["running", "waiting", "error"]);
+// live running state is persistent. Finished/failed/waiting states are attention
+// signals and only get a dot while the conversation is unread.
+const STATUSES_WITH_DOT: ReadonlySet<ConversationStatus> = new Set<ConversationStatus>(["running"]);
 function conversationListItemKey(index: number, item: ConversationListItem | undefined): string {
   if (item?.kind === "group") {
     return `group:${item.idBase}`;
@@ -96,19 +96,26 @@ function InitialsAvatar({ title, agent }: { readonly title: string; readonly age
 
 function ConversationAvatar({ conversation, hasWakeup }: { readonly conversation: ConversationSummary; readonly hasWakeup: boolean }) {
   const { t, conversationStatus } = useI18n();
-  // Finished/failed runs the user hasn't opened yet earn a larger avatar dot,
-  // and clear through the existing unread flag when the chat is viewed.
   const unreadAttention = unreadAttentionStatus(conversation);
   const showDot = STATUSES_WITH_DOT.has(conversation.status) || hasWakeup || unreadAttention != null;
   const label = hasWakeup
     ? t("wakeupScheduledStatus")
     : unreadAttention === "error"
-      ? t("errorUnreadStatus")
-      : unreadAttention === "done"
-        ? t("finishedUnreadStatus")
-        : conversationStatus(conversation.status);
-  const dotStatus = unreadAttention === "error" ? "error" : visualStatusKey(conversation, hasWakeup);
-  const shouldPulse = conversation.status === "running" || conversation.status === "waiting" || unreadAttention === "error";
+      ? conversationStatus("error")
+      : unreadAttention === "action"
+        ? conversationStatus("waiting")
+        : unreadAttention === "done"
+          ? conversationStatus("done")
+          : conversationStatus(conversation.status);
+  const dotStatus =
+    unreadAttention === "error"
+      ? "error"
+      : unreadAttention === "action"
+        ? "warn"
+        : unreadAttention === "done"
+          ? "ok"
+          : visualStatusKey(conversation, hasWakeup);
+  const shouldPulse = conversation.status === "running" || unreadAttention === "error" || unreadAttention === "action";
   if (!showDot) {
     return <InitialsAvatar title={conversation.title} agent={conversation.agent} />;
   }
@@ -117,11 +124,18 @@ function ConversationAvatar({ conversation, hasWakeup }: { readonly conversation
       <InitialsAvatar title={conversation.title} agent={conversation.agent} />
       <Tooltip title={label}>
         <Box sx={{ position: "absolute", right: -3, bottom: -3, borderRadius: "50%", display: "flex", p: "2px", backgroundColor: (t) => t.custom.surfaces.s1 }}>
-          <StatusDot status={dotStatus} label={label} pulse={shouldPulse} size={unreadAttention != null ? "md" : "sm"} />
+          <StatusDot status={dotStatus} label={label} pulse={shouldPulse} size="sm" />
         </Box>
       </Tooltip>
     </Box>
   );
+}
+
+function selectedRowAccentStatus(conversation: ConversationSummary, hasWakeup: boolean): ReturnType<typeof visualStatusKey> | null {
+  if (hasWakeup || conversation.status === "running" || unreadAttentionStatus(conversation) !== null) {
+    return visualStatusKey(conversation, hasWakeup);
+  }
+  return null;
 }
 
 function groupIcons(iconKind: ConversationListIconKind): { readonly collapsedIcon: ReactNode; readonly expandedIcon: ReactNode } {
@@ -170,8 +184,7 @@ const ConversationRow = observer(function ConversationRow({
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const menuOpen = Boolean(menuAnchor);
   const { t } = useI18n();
-  const unreadAttention = unreadAttentionStatus(conversation);
-  const unreadError = unreadAttention === "error";
+  const activeAccent = selectedRowAccentStatus(conversation, hasWakeup);
 
   // Focus (and select) the rename field once it mounts. Doing it in an effect —
   // rather than relying on `autoFocus` — wins the race against the closing menu
@@ -249,17 +262,15 @@ const ConversationRow = observer(function ConversationRow({
         py: 1,
         borderRadius: (t) => `${t.custom.radii.md}px`,
         cursor: editing ? "default" : "pointer",
-        backgroundColor: (t) => (active ? t.custom.surfaces.s3 : unreadError ? t.palette.status.error.soft : "transparent"),
+        backgroundColor: (t) => (active ? t.custom.surfaces.s3 : "transparent"),
         // Accent rendered as an inset shadow (not an element) so it never shifts
         // the content or collides with the avatar.
         boxShadow: (t) =>
-          active
-            ? `inset 3px 0 0 0 ${t.palette.status[visualStatusKey(conversation, hasWakeup)].main}`
-            : unreadError
-              ? `inset 3px 0 0 0 ${t.palette.status.error.main}`
-              : "none",
+          active && activeAccent
+            ? `inset 3px 0 0 0 ${t.palette.status[activeAccent].main}`
+            : "none",
         transition: "background-color 140ms ease, box-shadow 140ms ease",
-        "&:hover": { backgroundColor: (t) => (unreadError && !active ? t.palette.status.error.soft : t.custom.surfaces.s3) },
+        "&:hover": { backgroundColor: (t) => t.custom.surfaces.s3 },
         "&:hover .row-more": { opacity: 1 },
         // Fade the date out whenever the ⋯ overlay is showing (hover or open
         // menu) so the date never peeks out from under it. The date stays in the
@@ -390,13 +401,13 @@ function ConversationGroupHeader({
   readonly onToggle: (idBase: string) => void;
   readonly wakeupConversationIds: ReadonlySet<string>;
 }) {
-  const { t } = useI18n();
+  const { t, conversationStatus } = useI18n();
   const runningCount = conversations.filter((c) => c.status === "running").length;
-  const actionCount = conversations.filter((c) => c.status === "waiting").length;
+  const actionCount = conversations.filter((c) => unreadAttentionStatus(c) === "action").length;
   const hasWakeup = conversations.some((c) => wakeupConversationIds.has(c.id));
   const hasUnread = conversations.some((c) => c.unread);
   const hasUnreadError = conversations.some((c) => unreadAttentionStatus(c) === "error");
-  const hasFinishedUnread = conversations.some((c) => c.status === "done" && c.unread);
+  const hasFinishedUnread = conversations.some((c) => unreadAttentionStatus(c) === "done");
   const panelId = `${idBase}-conversations`;
 
   const toggleOpen = () => onToggle(idBase);
@@ -438,7 +449,7 @@ function ConversationGroupHeader({
             user action, active work, wakeups, and finally unread completion. */}
         {!open &&
           (hasUnreadError ? (
-            <StatusDot status="error" label={t("errorUnreadStatus")} pulse />
+            <StatusDot status="error" label={conversationStatus("error")} pulse />
           ) : actionCount > 0 ? (
             <StatusDot status="warn" label={t("actionRequiredCount", { count: actionCount })} pulse />
           ) : runningCount > 0 ? (
@@ -446,7 +457,7 @@ function ConversationGroupHeader({
           ) : hasWakeup ? (
             <StatusDot status="warn" label={t("wakeupScheduledStatus")} pulse={false} />
           ) : hasFinishedUnread ? (
-            <StatusDot status="ok" label={t("finishedUnreadStatus")} pulse={false} />
+            <StatusDot status="ok" label={conversationStatus("done")} pulse={false} />
           ) : hasUnread ? (
             <Box role="img" aria-label={t("unread")} sx={{ width: 6, height: 6, borderRadius: "50%", backgroundColor: (t) => t.palette.status.running.main }} />
           ) : null)}

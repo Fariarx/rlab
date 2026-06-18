@@ -25,9 +25,10 @@ export type ComposerSharedProps = Omit<
   | "scheduledWakeups"
 >;
 
-/** Provided by WorkspacePage so the in-thread message editor can render the real
- *  Composer input stack instead of a bare textarea. Null outside a conversation
- *  (e.g. isolated tests), where editors fall back to plain text. */
+/** Provided by WorkspacePage so in-thread editors can reuse conversation
+ *  capabilities (voice provider, attachment errors, mentions/plugins) without
+ *  mounting the full dock Composer inside a message bubble. Null outside a
+ *  conversation (e.g. isolated tests), where editors keep plain local controls. */
 const ComposerSharedContext = createContext<ComposerSharedProps | null>(null);
 
 export const ComposerSharedProvider = ComposerSharedContext.Provider;

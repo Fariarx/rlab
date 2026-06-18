@@ -30,11 +30,16 @@ function liveOptionsOrCatalog(catalogOptions: readonly AgentOption[], liveOption
   if (!liveOptions?.length) {
     return catalogOptions;
   }
-  const defaultOption = catalogOptions[0];
-  if (!defaultOption || liveOptions.some((option) => option.id === defaultOption.id)) {
-    return liveOptions;
+  const result: AgentOption[] = [];
+  const seen = new Set<string>();
+  for (const option of [...catalogOptions, ...liveOptions]) {
+    if (seen.has(option.id)) {
+      continue;
+    }
+    seen.add(option.id);
+    result.push(option);
   }
-  return [defaultOption, ...liveOptions];
+  return result;
 }
 
 const CHAT_TOOL_LABEL_KEYS: Record<RlabChatToolId, {

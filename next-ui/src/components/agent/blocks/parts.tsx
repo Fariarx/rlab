@@ -14,7 +14,7 @@ import VisibilityOutlinedIcon from "@mui/icons-material/VisibilityOutlined";
 import { Box, Stack, Typography } from "@mui/material";
 import { styled, type Theme } from "@mui/material/styles";
 import { observer } from "mobx-react-lite";
-import { type MouseEvent as ReactMouseEvent, type ReactNode, useState } from "react";
+import { memo, type MouseEvent as ReactMouseEvent, type ReactNode, useMemo, useState } from "react";
 import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useI18n } from "../../../i18n/I18nProvider";
@@ -408,15 +408,16 @@ const markdownComponents = {
   },
 } satisfies Components;
 
-function MarkdownMessage({ text }: { readonly text: string }) {
+const MarkdownMessage = memo(function MarkdownMessage({ text }: { readonly text: string }) {
+  const markdownText = useMemo(() => rlabToolMarkdownLinks(text), [text]);
   return (
     <Stack spacing={1} sx={{ width: "100%", minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }}>
       <Markdown remarkPlugins={[remarkGfm]} skipHtml components={markdownComponents} urlTransform={messageMarkdownUrlTransform}>
-        {rlabToolMarkdownLinks(text)}
+        {markdownText}
       </Markdown>
     </Stack>
   );
-}
+});
 
 export function MessageText({ text, streaming }: { readonly text: string; readonly streaming?: boolean }) {
   return (

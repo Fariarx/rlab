@@ -29,16 +29,50 @@ export interface RemoteWorkspaceShellMerge {
   readonly selectedId: string;
   readonly knownConversationIds: ReadonlySet<string>;
   readonly shellThreadIds: ReadonlySet<string>;
+  readonly stalePreservedThreadIds: ReadonlySet<string>;
+}
+
+function conversationThreadUpdatedAtMs(conversation: WorkspaceState["chats"][number] | undefined): number | undefined {
+  return typeof conversation?.threadUpdatedAtMs === "number" && Number.isFinite(conversation.threadUpdatedAtMs) ? conversation.threadUpdatedAtMs : undefined;
+}
+
+function preservedThreadIsStale({
+  id,
+  currentConversation,
+  serverConversation,
+  activeRuns,
+}: {
+  readonly id: string;
+  readonly currentConversation: WorkspaceState["chats"][number] | undefined;
+  readonly serverConversation: WorkspaceState["chats"][number] | undefined;
+  readonly activeRuns: ReadonlyMap<string, RunMessageHandle>;
+}): boolean {
+  if (activeRuns.has(id)) {
+    return false;
+  }
+  const serverThreadUpdatedAtMs = conversationThreadUpdatedAtMs(serverConversation);
+  if (serverThreadUpdatedAtMs === undefined) {
+    return false;
+  }
+  return conversationThreadUpdatedAtMs(currentConversation) !== serverThreadUpdatedAtMs;
 }
 
 export function mergeRemoteWorkspaceShell({ current, serverState, preferredSelectedId, activeRuns }: MergeRemoteWorkspaceShellInput): RemoteWorkspaceShellMerge {
   const selectedId = selectedConversationIdAfterRemoteSync(serverState, preferredSelectedId);
-  const knownConversationIds = new Set(workspaceConversations(serverState).map((conversation) => conversation.id));
+  const serverConversations = new Map(workspaceConversations(serverState).map((conversation) => [conversation.id, conversation] as const));
+  const currentConversations = new Map(workspaceConversations(current).map((conversation) => [conversation.id, conversation] as const));
+  const knownConversationIds = new Set(serverConversations.keys());
   const shellThreadIds = new Set(Object.keys(serverState.threads));
+  const stalePreservedThreadIds = new Set<string>();
   const threads: Record<string, ChatMessage[]> = {};
   for (const [id, messages] of Object.entries(current.threads)) {
     if (knownConversationIds.has(id)) {
       threads[id] = messages;
+      const currentConversation = currentConversations.get(id);
+      const serverConversation = serverConversations.get(id);
+      if (!shellThreadIds.has(id) && currentConversation && serverConversation && preservedThreadIsStale({ id, currentConversation, serverConversation, activeRuns })) {
+        stalePreservedThreadIds.add(id);
+      }
     }
   }
   for (const [id, messages] of Object.entries(serverState.threads)) {
@@ -52,6 +86,7 @@ export function mergeRemoteWorkspaceShell({ current, serverState, preferredSelec
     selectedId,
     knownConversationIds,
     shellThreadIds,
+    stalePreservedThreadIds,
   };
 }
 

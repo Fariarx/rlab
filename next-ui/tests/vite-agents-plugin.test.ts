@@ -184,6 +184,7 @@ describe("vite agents plugin", () => {
         runId: "run-queued",
         userMessageId: "u-queued",
         userMessageTime: "12:05",
+        userMessageCreatedAtMs: 123,
         resume: "gemini-session",
         cwd: "/tmp/queued-worktree",
       });
@@ -538,9 +539,10 @@ describe("vite agents plugin", () => {
   });
 
   it("parses Claude CLI model aliases from the installed binary metadata", () => {
-    expect(parseClaudeCliModelAliasesSource("claude-fable-5 Fable 5 claude-sonnet-4-6 Sonnet 4.6 claude-haiku-4-5 Haiku 4.5")).toEqual([
+    expect(parseClaudeCliModelAliasesSource("claude-fable-5 Fable 5 claude-opus-4-7 Opus 4.7 claude-sonnet-4-6 Sonnet 4.6 claude-haiku-4-5 Haiku 4.5")).toEqual([
       { id: "default", label: "Default" },
       { id: "fable", label: "Fable", value: "fable" },
+      { id: "opus", label: "Opus", value: "opus" },
       { id: "sonnet", label: "Sonnet", value: "sonnet" },
       { id: "haiku", label: "Haiku", value: "haiku" },
     ]);
@@ -1033,6 +1035,26 @@ Built-in agents:
       { type: "tool_result", id: "wake-1", ok: true, output: "scheduled" },
       { type: "wakeup", toolId: "wake-1", prompt: "send OK", reason: "user asked for a reminder", delaySeconds: 180 },
     ]);
+  });
+
+  it("lets server-side TaskWakeup results replace the initial MCP ack with the timer list", () => {
+    const accumulator = createRunEventAccumulator();
+
+    accumulateRunEvent(accumulator, { type: "tool", id: "wake-1", name: "TaskWakeup", summary: "send OK" });
+    accumulateRunEvent(accumulator, { type: "tool_result", id: "wake-1", ok: true, output: "rlab accepted the request" });
+    accumulateRunEvent(accumulator, {
+      type: "tool_result",
+      id: "wake-1",
+      ok: true,
+      output: "TaskWakeup set · 2026-06-18 19:30\n\nScheduled TaskWakeup entries for this chat:\n1. id: wakeup-1; time 2026-06-18T17:30:00.000Z; prompt: send OK",
+    });
+
+    expect(accumulator.tools[0]).toMatchObject({
+      id: "wake-1",
+      state: "ok",
+      output: expect.stringContaining("Scheduled TaskWakeup entries for this chat:"),
+    });
+    expect(accumulator.tools[0]?.output).not.toBe("rlab accepted the request");
   });
 
   it("translates script wakeup tool input without requiring a timer-only trigger", () => {

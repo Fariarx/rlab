@@ -51,7 +51,7 @@ import {
 } from "./models/workspace-conversation-model";
 import { hasUntrackedPersistedActiveRuns, mergeBackgroundRunState } from "./models/workspace-background-runs-model";
 import { attachWorkspaceBackgroundRun, type RunHandle } from "./runtime/workspace-background-run-attachment";
-import { mergeLoadedThread, mergeRemoteWorkspaceShell, prependLoadedThreadPage } from "./models/workspace-server-sync-model";
+import { mergeLoadedThread, mergeRemoteWorkspaceShell, prependLoadedThreadPage, type RemoteWorkspaceShellMerge } from "./models/workspace-server-sync-model";
 import { WorkspaceThreadLoader } from "./runtime/workspace-thread-loader";
 import {
   appendCompactionRequestState,
@@ -76,7 +76,7 @@ import {
   patchConversation,
   patchConversationAgentSession,
   projectIdFromName,
-  serializableEqual,
+  workspaceStateStructuralEqual,
 } from "./models/workspace-state-utils";
 import { WorkspaceSaveQueue } from "./runtime/workspace-save-queue";
 import { prepareWorkspaceRunTurn } from "./models/workspace-run-turn-model";
@@ -85,6 +85,8 @@ export { buildAgentPrompt, conversationProfile } from "./models/workspace-state-
 
 const WORKSPACE_LOAD_RETRY_MS = 15_000;
 const WORKSPACE_SYNC_POLL_MS = 2_000;
+const WORKSPACE_HIDDEN_SYNC_POLL_MS = 30_000;
+const ACTIVE_RUN_DISCOVERY_POLL_MS = 30_000;
 
 export interface CreateProjectInput {
   readonly name: string;
@@ -169,10 +171,19 @@ export class WorkspaceStore implements Workspace {
 
   private loadRetryTimer: ReturnType<typeof setInterval> | null = null;
 
+  private lastHiddenPollAt = 0;
+
+  private lastActiveRunDiscoveryAt = 0;
+
+  private backgroundRunsRefreshInFlight = false;
+
   private readonly runs = new Map<string, RunHandle>();
 
   private readonly saveQueue = new WorkspaceSaveQueue({
     activeRuns: this.runs,
+    applyRemoteMergedState: (state, merge) => {
+      runInAction(() => this.applyRemoteMergedState(state, merge));
+    },
     applyServerState: (state) => {
       runInAction(() => this.applyServerState(state));
     },
@@ -297,13 +308,16 @@ export class WorkspaceStore implements Workspace {
 
   private applyRemoteServerState(serverState: WorkspaceState, preferredSelectedId: string): string {
     const merge = mergeRemoteWorkspaceShell({ current: this.state, serverState, preferredSelectedId, activeRuns: this.runs });
-    const nextState = merge.state;
+    this.applyRemoteMergedState(merge.state, merge);
+    return merge.selectedId;
+  }
+
+  private applyRemoteMergedState(nextState: WorkspaceState, merge: RemoteWorkspaceShellMerge): void {
     syncGeneratedWorkspaceIdSequence(nextState);
     this.threadLoader.reconcileRemoteShell(merge);
-    if (!serializableEqual(this.state, nextState)) {
+    if (!workspaceStateStructuralEqual(this.state, nextState)) {
       this.state = nextState;
     }
-    return merge.selectedId;
   }
 
   /** Lazily fetch a conversation's full message thread (the GET shell omits all
@@ -337,7 +351,7 @@ export class WorkspaceStore implements Workspace {
   }
 
   private refreshQueue(id: string): void {
-    if (!id || this.queueRefreshInFlight.has(id)) {
+    if (!id || this.queueRefreshInFlight.has(id) || this.hasPendingWorkspaceWrites()) {
       return;
     }
     this.queueRefreshInFlight.add(id);
@@ -361,6 +375,13 @@ export class WorkspaceStore implements Workspace {
     }
   }
 
+  private refreshSelectedQueueIfNeeded(): void {
+    const id = this.state.selectedId;
+    if (id && this.shouldRefreshQueue(id)) {
+      this.refreshQueue(id);
+    }
+  }
+
   private conversationHasActiveWork(id: string): boolean {
     if (this.runs.has(id)) {
       return true;
@@ -369,13 +390,40 @@ export class WorkspaceStore implements Workspace {
     return Boolean(conversation?.activeRunId && isLiveRunStatus(conversation.status));
   }
 
+  private shouldRefreshQueue(id: string): boolean {
+    const snapshot = this.queueSnapshot(id);
+    return snapshot.paused || snapshot.messages.length > 0 || this.conversationHasActiveWork(id);
+  }
+
+  private shouldRunWorkspacePollTick(): boolean {
+    if (typeof document === "undefined" || document.visibilityState !== "hidden") {
+      return true;
+    }
+    const now = Date.now();
+    if (now - this.lastHiddenPollAt < WORKSPACE_HIDDEN_SYNC_POLL_MS) {
+      return false;
+    }
+    this.lastHiddenPollAt = now;
+    return true;
+  }
+
+  private shouldRefreshBackgroundRunsFromPoll(): boolean {
+    if (this.runs.size > 0 || hasUntrackedPersistedActiveRuns(this.state, this.runs)) {
+      return true;
+    }
+    const now = Date.now();
+    return now - this.lastActiveRunDiscoveryAt >= ACTIVE_RUN_DISCOVERY_POLL_MS;
+  }
+
   mount(): void {
     if (!this.pollTimer) {
       this.pollTimer = setInterval(() => {
-        if (this.hydrated && !this.loading) {
+        if (this.hydrated && !this.loading && this.shouldRunWorkspacePollTick()) {
           void this.refreshWorkspaceFromServer();
-          void this.refreshBackgroundRuns();
-          this.refreshSelectedQueue();
+          if (this.shouldRefreshBackgroundRunsFromPoll()) {
+            void this.refreshBackgroundRuns();
+          }
+          this.refreshSelectedQueueIfNeeded();
         }
       }, WORKSPACE_SYNC_POLL_MS);
     }
@@ -434,7 +482,7 @@ export class WorkspaceStore implements Workspace {
           this.hydrated = true;
         });
         if (selectedId) {
-          void this.loadThreadFromServer(selectedId, true);
+          void this.loadThreadFromServer(selectedId, false);
         }
         void this.refreshBackgroundRuns();
         this.refreshSelectedQueue();
@@ -487,10 +535,16 @@ export class WorkspaceStore implements Workspace {
         this.loadError = null;
       });
       if (selectedId) {
-        void this.loadThreadFromServer(selectedId, true);
-        this.refreshQueue(selectedId);
+        if (this.threadLoader.isStale(selectedId)) {
+          void this.loadThreadFromServer(selectedId, false);
+        }
+        if (this.shouldRefreshQueue(selectedId)) {
+          this.refreshQueue(selectedId);
+        }
       }
-      void this.refreshBackgroundRuns();
+      if (this.shouldRefreshBackgroundRunsFromPoll()) {
+        void this.refreshBackgroundRuns();
+      }
     } catch (error) {
       if (seq !== this.loadSeq) {
         return;
@@ -516,30 +570,33 @@ export class WorkspaceStore implements Workspace {
    *     reload silently abandoned that live run; the server handle list is the
    *     source of truth, so we consult it to re-attach and surface the approval. */
   private async refreshBackgroundRuns(): Promise<void> {
-    if (hasUntrackedPersistedActiveRuns(this.state, this.runs)) {
-      void this.syncBackgroundRuns();
+    if (this.backgroundRunsRefreshInFlight) {
       return;
     }
+    this.backgroundRunsRefreshInFlight = true;
+    this.lastActiveRunDiscoveryAt = Date.now();
     const seq = this.loadSeq;
-    let active: ActiveRunSnapshot[];
     try {
+      if (hasUntrackedPersistedActiveRuns(this.state, this.runs)) {
+        await this.syncBackgroundRuns();
+        return;
+      }
+      let active: ActiveRunSnapshot[];
       active = await loadActiveRuns();
-    } catch (error) {
       if (seq !== this.loadSeq) {
         return;
       }
-      if (this.runs.size > 0) {
+      if (active.some((run) => !this.runs.has(run.conversationId))) {
+        await this.syncBackgroundRuns();
+      }
+    } catch (error) {
+      if (seq === this.loadSeq && this.runs.size > 0) {
         runInAction(() => {
           this.loadError = error instanceof Error ? error.message : String(error);
         });
       }
-      return;
-    }
-    if (seq !== this.loadSeq) {
-      return;
-    }
-    if (active.some((run) => !this.runs.has(run.conversationId))) {
-      void this.syncBackgroundRuns();
+    } finally {
+      this.backgroundRunsRefreshInFlight = false;
     }
   }
 
@@ -553,7 +610,11 @@ export class WorkspaceStore implements Workspace {
         return;
       }
       runInAction(() => {
-        this.applyServerState(mergeBackgroundRunState({ current: this.state, loaded: loadedState, activeRunIds, trackedRuns: this.runs }));
+        const nextState = mergeBackgroundRunState({ current: this.state, loaded: loadedState, activeRunIds, trackedRuns: this.runs });
+        syncGeneratedWorkspaceIdSequence(nextState);
+        if (!workspaceStateStructuralEqual(this.state, nextState)) {
+          this.state = nextState;
+        }
         this.loadError = null;
       });
       for (const run of activeRuns) {
@@ -822,7 +883,7 @@ export class WorkspaceStore implements Workspace {
         });
       return;
     }
-    const userMsg: ChatMessage = { id: nextWorkspaceId("u"), role: "user", text, time: nowLabel() };
+    const userMsg: ChatMessage = { id: nextWorkspaceId("u"), role: "user", text, time: nowLabel(), createdAtMs: Date.now() };
     if (this.isQueuePaused(id) && this.pendingMessageCount(id) === 0) {
       this.setQueuePaused(id, false);
     }
@@ -941,6 +1002,7 @@ export class WorkspaceStore implements Workspace {
       role: "user",
       text: translate(this.state.settings.general.locale, "compactionRequested"),
       time: nowLabel(),
+      createdAtMs: Date.now(),
     };
     this.setState((current) => appendCompactionRequestState(current, id, userMsg));
     const conversation = this.find(id);
@@ -957,7 +1019,7 @@ export class WorkspaceStore implements Workspace {
     if (comments.length === 0) {
       return;
     }
-    const message: ChatMessage = { id: nextWorkspaceId("u"), role: "user", time: nowLabel(), blocks: [{ kind: "review", comments: [...comments] }] };
+    const message: ChatMessage = { id: nextWorkspaceId("u"), role: "user", time: nowLabel(), createdAtMs: Date.now(), blocks: [{ kind: "review", comments: [...comments] }] };
     this.setState((current) => appendThreadMessageState(current, id, message));
     this.enqueueMutations({ type: "upsertMessage", conversationId: id, message });
     this.persistCurrentStateNow();
@@ -1071,6 +1133,7 @@ export class WorkspaceStore implements Workspace {
         runId,
         userMessageId: userMsg.id,
         userMessageTime: userMsg.time ?? nowLabel(),
+        userMessageCreatedAtMs: userMsg.createdAtMs ?? Date.now(),
         agentMessageId: aId,
         agentMessageTime: agentTime,
       },
@@ -1182,7 +1245,7 @@ export class WorkspaceStore implements Workspace {
 
   retryMessage(id: string, messageId: string): void {
     const thread = this.state.threads[id] ?? [];
-    const selection = retryUserTurn(thread, messageId);
+    const selection = retryUserTurn(thread, messageId, nowLabel(), Date.now());
     if (!selection) {
       return;
     }
@@ -1234,7 +1297,7 @@ export class WorkspaceStore implements Workspace {
 
   editAndResendMessage(id: string, messageId: string, text: string): void {
     const thread = this.state.threads[id] ?? [];
-    const selection = editUserTurn(thread, messageId, text, nowLabel());
+    const selection = editUserTurn(thread, messageId, text, nowLabel(), Date.now());
     if (!selection) {
       return;
     }

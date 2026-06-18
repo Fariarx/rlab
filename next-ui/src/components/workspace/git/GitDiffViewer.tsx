@@ -3,11 +3,14 @@ import EditIcon from "@mui/icons-material/Edit";
 import { Box, Stack, type SxProps, type Theme, Typography } from "@mui/material";
 import { observer } from "mobx-react-lite";
 import { Highlight, type PrismTheme } from "prism-react-renderer";
-import { useEffect, useMemo, useState } from "react";
+import { memo, useMemo, useState } from "react";
 import { useI18n } from "../../../i18n/I18nProvider";
 import type { DiffBlock, ReviewCommentEntry } from "../../agent";
-import { Button, IconButton } from "../../ui";
-import { DiffCommentComposerStore, DiffCommentRowStore, GitDiffLinesStore } from "./git-diff-viewer-store";
+import { AttachmentTile } from "../../agent/composer/AttachmentTile";
+import { InlineDraftEditor } from "../../agent/composer/InlineDraftEditor";
+import { parseUserDraft } from "../../agent/message/message-content-model";
+import { IconButton } from "../../ui";
+import { DiffCommentRowStore, GitDiffLinesStore } from "./git-diff-viewer-store";
 
 type DiffViewerLineKind = "add" | "del" | "ctx" | "meta";
 
@@ -17,29 +20,32 @@ export interface DiffViewerLine {
 }
 
 type HighlightToken = { readonly content: string; readonly types: string[]; readonly empty?: boolean };
-type KeyedDiffViewerLine = { readonly key: string; readonly line: DiffViewerLine; readonly lineNo: number };
+type KeyedDiffViewerLine = { readonly key: string; readonly line: DiffViewerLine; readonly lineNo: number; readonly tokenRow?: number };
 type KeyedHighlightToken = { readonly key: string; readonly token: HighlightToken };
 
 function keyedDiffViewerLines(lines: readonly DiffViewerLine[]): readonly KeyedDiffViewerLine[] {
   const keyed: KeyedDiffViewerLine[] = [];
   let lineNo = 1;
+  let tokenRow = 0;
   for (const line of lines) {
-    keyed.push({ key: `${lineNo}:${line.kind}:${line.text}`, line, lineNo });
+    const highlighted = line.kind !== "meta";
+    keyed.push({ key: `${lineNo}:${line.kind}:${line.text}`, line, lineNo, ...(highlighted ? { tokenRow } : {}) });
+    if (highlighted) {
+      tokenRow += 1;
+    }
     lineNo += 1;
   }
   return keyed;
 }
 
 function keyedHighlightTokens(lineNo: number, tokens: readonly HighlightToken[]): readonly KeyedHighlightToken[] {
-  const occurrences = new Map<string, number>();
   const keyed: KeyedHighlightToken[] = [];
   let offset = 0;
+  let index = 0;
   for (const token of tokens) {
-    const baseKey = `${lineNo}:${offset}:${token.types.join(".")}:${token.content}`;
-    const occurrence = occurrences.get(baseKey) ?? 0;
-    occurrences.set(baseKey, occurrence + 1);
-    keyed.push({ key: occurrence === 0 ? baseKey : `${baseKey}#${occurrence + 1}`, token });
+    keyed.push({ key: `${lineNo}:${index}:${offset}:${token.types.join(".")}`, token });
     offset += token.content.length;
+    index += 1;
   }
   return keyed;
 }
@@ -197,11 +203,153 @@ function gutterColor(kind: DiffViewerLineKind): (theme: Theme) => string {
   };
 }
 
+const GitDiffHighlightedLines = memo(function GitDiffHighlightedLines({
+  code,
+  language,
+  keyedLines,
+  interactive,
+  commentsByLine,
+  store,
+  onAddComment,
+  onUpdateComment,
+  onDeleteComment,
+  onInputActivityChange,
+}: {
+  readonly code: string;
+  readonly language: string;
+  readonly keyedLines: readonly KeyedDiffViewerLine[];
+  readonly interactive: boolean;
+  readonly commentsByLine: ReadonlyMap<number, readonly ReviewCommentEntry[]>;
+  readonly store: GitDiffLinesStore;
+  readonly onAddComment?: (line: number, lineText: string, body: string) => void;
+  readonly onUpdateComment?: (id: string, body: string) => void;
+  readonly onDeleteComment?: (id: string) => void;
+  readonly onInputActivityChange?: (active: boolean) => void;
+}) {
+  return (
+    <Highlight code={code} language={language} theme={diffSyntaxTheme}>
+      {({ tokens, getTokenProps }) => (
+        <Box
+          component="ol"
+          sx={{
+            m: 0,
+            p: 0,
+            listStyle: "none",
+            overflowX: "hidden",
+            fontFamily: (theme) => theme.custom.fonts.mono,
+            fontSize: "0.72rem",
+            lineHeight: 1.55,
+          }}
+        >
+          {keyedLines.map(({ key, line, lineNo, tokenRow }) => (
+            <GitDiffLineRow
+              key={key}
+              line={line}
+              lineNo={lineNo}
+              tokens={tokenRow === undefined ? [] : (tokens[tokenRow] ?? [])}
+              getTokenProps={getTokenProps}
+              comments={commentsByLine.get(lineNo) ?? []}
+              interactive={interactive}
+              store={store}
+              onAddComment={onAddComment}
+              onUpdateComment={onUpdateComment}
+              onDeleteComment={onDeleteComment}
+              onInputActivityChange={onInputActivityChange}
+            />
+          ))}
+        </Box>
+      )}
+    </Highlight>
+  );
+});
+
+const GitDiffLineRow = observer(function GitDiffLineRow({
+  line,
+  lineNo,
+  tokens,
+  getTokenProps,
+  comments,
+  interactive,
+  store,
+  onAddComment,
+  onUpdateComment,
+  onDeleteComment,
+  onInputActivityChange,
+}: {
+  readonly line: DiffViewerLine;
+  readonly lineNo: number;
+  readonly tokens: readonly HighlightToken[];
+  readonly getTokenProps: (input: { readonly token: HighlightToken }) => Record<string, unknown>;
+  readonly comments: readonly ReviewCommentEntry[];
+  readonly interactive: boolean;
+  readonly store: GitDiffLinesStore;
+  readonly onAddComment?: (line: number, lineText: string, body: string) => void;
+  readonly onUpdateComment?: (id: string, body: string) => void;
+  readonly onDeleteComment?: (id: string) => void;
+  readonly onInputActivityChange?: (active: boolean) => void;
+}) {
+  const composing = store.activeLine === lineNo;
+  return (
+    <Box component="li">
+      <Box
+        onClick={interactive ? () => store.setActiveLine((current) => (current === lineNo ? null : lineNo)) : undefined}
+        sx={{
+          display: "grid",
+          gridTemplateColumns: "minmax(2.75rem, max-content) 1fr",
+          alignItems: "start",
+          borderLeft: (theme) => `2px solid ${accentColor(line.kind)(theme)}`,
+          cursor: interactive ? "pointer" : "default",
+          ...rowBackground(line.kind),
+          ...(interactive ? { "&:hover": { boxShadow: (theme) => `inset 0 0 0 1px ${theme.palette.status.info.border}` } } : {}),
+        }}
+      >
+        <Box
+          component="span"
+          aria-hidden="true"
+          sx={{
+            userSelect: "none",
+            textAlign: "right",
+            px: 1,
+            color: gutterColor(line.kind),
+            fontWeight: line.kind === "add" || line.kind === "del" ? 600 : 400,
+            opacity: line.kind === "ctx" ? 0.6 : 1,
+            borderRight: (theme) => `1px solid ${theme.custom.borders.subtle}`,
+          }}
+        >
+          {lineNo}
+        </Box>
+        <Box component="span" sx={{ px: 1, whiteSpace: "pre-wrap", overflowWrap: "anywhere", wordBreak: "break-word", color: line.kind === "meta" ? "text.tertiary" : undefined }}>
+          {line.kind === "meta"
+            ? line.text
+            : keyedHighlightTokens(lineNo, tokens).map(({ key, token }) => {
+                const props = getTokenProps({ token });
+                return <span key={key} {...props} />;
+              })}
+        </Box>
+      </Box>
+      {(comments.length > 0 || composing) && (
+        <DiffCommentThread
+          comments={comments}
+          composing={composing}
+          onAdd={(body) => {
+            onAddComment?.(lineNo, lineContent(line), body);
+            store.setActiveLine(null);
+          }}
+          onCancel={() => store.setActiveLine(null)}
+          onUpdate={onUpdateComment}
+          onDelete={onDeleteComment}
+          onInputActivityChange={onInputActivityChange}
+        />
+      )}
+    </Box>
+  );
+});
+
 /** GitDiffLines — a line-numbered, syntax-highlighted unified diff body. Lines
  *  wrap inside the container (no horizontal scroll) and the list grows to fit
  *  its content (the surrounding panel owns the scroll). Added/removed rows carry
  *  a bright coloured gutter number and left accent border. */
-export const GitDiffLines = observer(function GitDiffLines({
+export function GitDiffLines({
   lines,
   path,
   comments = [],
@@ -218,99 +366,35 @@ export const GitDiffLines = observer(function GitDiffLines({
   readonly onDeleteComment?: (id: string) => void;
   readonly onInputActivityChange?: (active: boolean) => void;
 }) {
-  const code = lines.map(lineContent).join("\n");
-  const language = prismLanguageForPath(path ?? "");
+  const keyedLines = useMemo(() => keyedDiffViewerLines(lines), [lines]);
+  const code = useMemo(() => keyedLines.filter(({ line }) => line.kind !== "meta").map(({ line }) => lineContent(line)).join("\n"), [keyedLines]);
+  const language = useMemo(() => prismLanguageForPath(path ?? ""), [path]);
   const interactive = Boolean(onAddComment);
   const [store] = useState(() => new GitDiffLinesStore());
-  const { activeLine, setActiveLine } = store;
   const commentsByLine = useMemo(() => {
-    const map = new Map<number, ReviewCommentEntry[]>();
+    const map = new Map<number, readonly ReviewCommentEntry[]>();
     for (const comment of comments) {
       const list = map.get(comment.line) ?? [];
-      list.push(comment);
-      map.set(comment.line, list);
+      map.set(comment.line, [...list, comment]);
     }
     return map;
   }, [comments]);
 
   return (
-    <Highlight code={code} language={language} theme={diffSyntaxTheme}>
-      {({ tokens, getTokenProps }) => (
-        <Box
-          component="ol"
-          sx={{
-            m: 0,
-            p: 0,
-            listStyle: "none",
-            overflowX: "hidden",
-            fontFamily: (theme) => theme.custom.fonts.mono,
-            fontSize: "0.72rem",
-            lineHeight: 1.55,
-          }}
-        >
-          {keyedDiffViewerLines(lines).map(({ key, line, lineNo }) => {
-            const lineComments = commentsByLine.get(lineNo) ?? [];
-            const composing = activeLine === lineNo;
-            return (
-              <Box component="li" key={key}>
-                <Box
-                  onClick={interactive ? () => setActiveLine((current) => (current === lineNo ? null : lineNo)) : undefined}
-                  sx={{
-                    display: "grid",
-                    gridTemplateColumns: "minmax(2.75rem, max-content) 1fr",
-                    alignItems: "start",
-                    borderLeft: (theme) => `2px solid ${accentColor(line.kind)(theme)}`,
-                    cursor: interactive ? "pointer" : "default",
-                    ...rowBackground(line.kind),
-                    ...(interactive ? { "&:hover": { boxShadow: (theme) => `inset 0 0 0 1px ${theme.palette.status.info.border}` } } : {}),
-                  }}
-                >
-                  <Box
-                    component="span"
-                    aria-hidden="true"
-                    sx={{
-                      userSelect: "none",
-                      textAlign: "right",
-                      px: 1,
-                      color: gutterColor(line.kind),
-                      fontWeight: line.kind === "add" || line.kind === "del" ? 600 : 400,
-                      opacity: line.kind === "ctx" ? 0.6 : 1,
-                      borderRight: (theme) => `1px solid ${theme.custom.borders.subtle}`,
-                    }}
-                  >
-                    {lineNo}
-                  </Box>
-                  <Box component="span" sx={{ px: 1, whiteSpace: "pre-wrap", overflowWrap: "anywhere", wordBreak: "break-word", color: line.kind === "meta" ? "text.tertiary" : undefined }}>
-                    {line.kind === "meta"
-                      ? line.text
-                      : keyedHighlightTokens(lineNo, tokens[lineNo - 1] ?? []).map(({ key, token }) => {
-                          const props = getTokenProps({ token });
-                          return <span key={key} {...props} />;
-                        })}
-                  </Box>
-                </Box>
-                {(lineComments.length > 0 || composing) && (
-                  <DiffCommentThread
-                    comments={lineComments}
-                    composing={composing}
-                    onAdd={(body) => {
-                      onAddComment?.(lineNo, lineContent(line), body);
-                      setActiveLine(null);
-                    }}
-                    onCancel={() => setActiveLine(null)}
-                    onUpdate={onUpdateComment}
-                    onDelete={onDeleteComment}
-                    onInputActivityChange={onInputActivityChange}
-                  />
-                )}
-              </Box>
-            );
-          })}
-        </Box>
-      )}
-    </Highlight>
+    <GitDiffHighlightedLines
+      code={code}
+      language={language}
+      keyedLines={keyedLines}
+      interactive={interactive}
+      commentsByLine={commentsByLine}
+      store={store}
+      onAddComment={onAddComment}
+      onUpdateComment={onUpdateComment}
+      onDeleteComment={onDeleteComment}
+      onInputActivityChange={onInputActivityChange}
+    />
   );
-});
+}
 
 /** The comments anchored to one diff line, plus an inline composer when the user
  *  is adding a new one. */
@@ -337,6 +421,26 @@ function DiffCommentThread({
         <DiffCommentRow key={comment.id} comment={comment} onUpdate={onUpdate} onDelete={onDelete} onInputActivityChange={onInputActivityChange} />
       ))}
       {composing && <DiffCommentComposer onSubmit={onAdd} onCancel={onCancel} onInputActivityChange={onInputActivityChange} />}
+    </Stack>
+  );
+}
+
+function DiffCommentBody({ body }: { readonly body: string }) {
+  const draft = useMemo(() => parseUserDraft(body), [body]);
+  return (
+    <Stack spacing={0.5} sx={{ flex: 1, minWidth: 0 }}>
+      {draft.text && (
+        <Typography sx={{ fontFamily: (theme) => theme.custom.fonts.sans, fontSize: "0.8rem", color: "text.primary", whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
+          {draft.text}
+        </Typography>
+      )}
+      {draft.attachments.length > 0 && (
+        <Box sx={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 0.75 }}>
+          {draft.attachments.map((attachment) => (
+            <AttachmentTile key={attachment.id} name={attachment.name} mime={attachment.type} sizeBytes={attachment.size} />
+          ))}
+        </Box>
+      )}
     </Stack>
   );
 }
@@ -372,9 +476,7 @@ const DiffCommentRow = observer(function DiffCommentRow({
 
   return (
     <Stack direction="row" spacing={0.5} sx={{ alignItems: "flex-start" }}>
-      <Typography sx={{ flex: 1, minWidth: 0, fontFamily: (theme) => theme.custom.fonts.sans, fontSize: "0.8rem", color: "text.primary", whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
-        {comment.body}
-      </Typography>
+      <DiffCommentBody body={comment.body} />
       {onUpdate && (
         <IconButton size="small" aria-label={t("reviewEditComment")} onClick={() => setEditing(true)} sx={{ width: 24, height: 24 }}>
           <EditIcon sx={{ fontSize: 14 }} />
@@ -401,59 +503,36 @@ const DiffCommentComposer = observer(function DiffCommentComposer({
   readonly onInputActivityChange?: (active: boolean) => void;
 }) {
   const { t } = useI18n();
-  const [store] = useState(() => new DiffCommentComposerStore(initial));
-  const { draft, setDraft } = store;
-  useEffect(() => () => onInputActivityChange?.(false), [onInputActivityChange]);
-  const submit = () => {
-    const body = draft.trim();
-    if (body.length > 0) {
-      onSubmit(body);
-      setDraft("");
-    }
-  };
+  const initialDraft = useMemo(() => parseUserDraft(initial), [initial]);
 
   return (
     <Stack spacing={0.75}>
-      <Box
-        component="textarea"
-        autoFocus
-        aria-label={t("reviewCommentPlaceholder")}
+      <InlineDraftEditor
+        ariaLabel={t("reviewCommentPlaceholder")}
+        initialText={initialDraft.text}
+        initialAttachments={initialDraft.attachments}
         placeholder={t("reviewCommentPlaceholder")}
-        value={draft}
-        onFocus={() => onInputActivityChange?.(true)}
-        onBlur={() => onInputActivityChange?.(false)}
-        onChange={(event) => setDraft(event.currentTarget.value)}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-            event.preventDefault();
-            submit();
-          }
-        }}
-        rows={2}
-        sx={{
-          width: "100%",
-          resize: "vertical",
+        onSubmit={onSubmit}
+        onCancel={onCancel}
+        cancelLabel={t("cancel")}
+        onInputActivityChange={onInputActivityChange}
+        submitLabel={t("reviewSaveComment")}
+        submitShortcut="mod-enter"
+        inputRows={2}
+        minHeight={68}
+        maxHeight={260}
+        testIdPrefix="git-comment"
+        inputSx={{
           border: (theme) => `1px solid ${theme.custom.borders.subtle}`,
-          borderRadius: (theme) => `${theme.custom.radii.md}px`,
-          bgcolor: (theme) => theme.custom.surfaces.s1,
-          color: "text.primary",
-          font: "inherit",
           fontFamily: (theme) => theme.custom.fonts.sans,
           fontSize: "0.82rem",
           lineHeight: 1.45,
           p: 0.75,
-          outline: 0,
           "&:focus": { borderColor: (theme) => theme.custom.borders.focus },
         }}
+        actionsSx={{ gap: 0.25 }}
+        actionButtonSx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.74rem" }}
       />
-      <Stack direction="row" spacing={0.75} sx={{ justifyContent: "flex-end" }}>
-        <Button variant="subtle" size="small" onClick={onCancel} sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.74rem" }}>
-          {t("cancel")}
-        </Button>
-        <Button variant="contained" size="small" disabled={draft.trim().length === 0} onClick={submit} sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.74rem" }}>
-          {t("reviewSaveComment")}
-        </Button>
-      </Stack>
     </Stack>
   );
 });

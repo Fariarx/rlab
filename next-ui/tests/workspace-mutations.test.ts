@@ -71,6 +71,21 @@ describe("workspace mutation reducer", () => {
     expect(next.projects[0]?.conversations[1]?.title).toBe("Project updated");
   });
 
+  it("keeps an explicit empty thread when creating a conversation with no messages", () => {
+    const state = workspace({});
+    const newConversation = conversation("chat-new");
+
+    const next = applyWorkspaceMutationsToState(state, [
+      { type: "upsertConversation", conversation: newConversation, projectId: null, insertAtFront: true },
+      { type: "upsertMessages", conversationId: newConversation.id, messages: [] },
+      { type: "setSelectedConversation", conversationId: newConversation.id },
+    ]);
+
+    expect(next.selectedId).toBe(newConversation.id);
+    expect(next.chats[0]?.id).toBe(newConversation.id);
+    expect(next.threads[newConversation.id]).toEqual([]);
+  });
+
   it("preserves a user-picked profile when a stale run metadata update arrives", () => {
     const codexProfile: AgentProfile = { agent: "codex", model: "default", reasoning: "default", mode: "default" };
     const geminiProfile: AgentProfile = { agent: "gemini", model: "default", reasoning: "default", mode: "default" };

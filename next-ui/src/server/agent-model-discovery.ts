@@ -185,6 +185,7 @@ export function parseCodexModelsOutput(output: string): { readonly models: reado
 
 const CLAUDE_CLI_MODEL_ALIASES = [
   { id: "fable", label: "Fable", markers: ["claude-fable-", "Fable 5"] },
+  { id: "opus", label: "Opus", markers: ["claude-opus-", "Opus 4"] },
   { id: "sonnet", label: "Sonnet", markers: ["claude-sonnet-", "Sonnet 4"] },
   { id: "haiku", label: "Haiku", markers: ["claude-haiku-", "Haiku 4"] },
 ] as const;

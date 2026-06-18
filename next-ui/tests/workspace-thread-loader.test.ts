@@ -22,12 +22,13 @@ function deferredPage() {
   return { promise, reject, resolve };
 }
 
-function remoteMerge(knownConversationIds: readonly string[], shellThreadIds: readonly string[]): RemoteWorkspaceShellMerge {
+function remoteMerge(knownConversationIds: readonly string[], shellThreadIds: readonly string[], stalePreservedThreadIds: readonly string[] = []): RemoteWorkspaceShellMerge {
   return {
     state: buildEmptyWorkspaceState(),
     selectedId: knownConversationIds[0] ?? "",
     knownConversationIds: new Set(knownConversationIds),
     shellThreadIds: new Set(shellThreadIds),
+    stalePreservedThreadIds: new Set(stalePreservedThreadIds),
   };
 }
 
@@ -103,6 +104,65 @@ describe("WorkspaceThreadLoader", () => {
     expect(loadConversationThreadPage).toHaveBeenCalledWith("removed");
   });
 
+  it("keeps stale preserved threads visible while refreshing them on next load", async () => {
+    const loadConversationThreadPage = vi
+      .fn<(id: string) => Promise<WorkspaceThreadPage>>()
+      .mockResolvedValueOnce(page([userMessage("old")]))
+      .mockResolvedValueOnce(page([userMessage("fresh")]));
+    const onLoadedThread = vi.fn();
+    const loader = new WorkspaceThreadLoader({
+      loadConversationThreadFull: vi.fn(),
+      loadConversationThreadPage,
+      onLoadedOlderThread: vi.fn(),
+      onLoadedThread,
+      onLoadError: vi.fn(),
+    });
+
+    await loader.loadThread("chat-1");
+    expect(loader.isLoaded("chat-1")).toBe(true);
+
+    loader.reconcileRemoteShell(remoteMerge(["chat-1"], [], ["chat-1"]));
+    expect(loader.isLoaded("chat-1")).toBe(true);
+
+    await loader.loadThread("chat-1");
+
+    expect(loadConversationThreadPage).toHaveBeenCalledTimes(2);
+    expect(onLoadedThread).toHaveBeenLastCalledWith("chat-1", [userMessage("fresh")]);
+  });
+
+  it("ignores an in-flight page after its thread becomes stale", async () => {
+    const stale = deferredPage();
+    const fresh = deferredPage();
+    const loadConversationThreadPage = vi
+      .fn<() => Promise<WorkspaceThreadPage>>()
+      .mockReturnValueOnce(stale.promise)
+      .mockReturnValueOnce(fresh.promise);
+    const onLoadedThread = vi.fn();
+    const loader = new WorkspaceThreadLoader({
+      loadConversationThreadFull: vi.fn(),
+      loadConversationThreadPage,
+      onLoadedOlderThread: vi.fn(),
+      onLoadedThread,
+      onLoadError: vi.fn(),
+    });
+
+    const staleLoad = loader.loadThread("chat-1");
+    loader.reconcileRemoteShell(remoteMerge(["chat-1"], [], ["chat-1"]));
+    expect(loader.isStale("chat-1")).toBe(true);
+    const freshLoad = loader.loadThread("chat-1");
+
+    stale.resolve(page([userMessage("old")]));
+    await staleLoad;
+    expect(onLoadedThread).not.toHaveBeenCalledWith("chat-1", [userMessage("old")]);
+
+    fresh.resolve(page([userMessage("fresh")]));
+    await freshLoad;
+
+    expect(onLoadedThread).toHaveBeenCalledTimes(1);
+    expect(onLoadedThread).toHaveBeenCalledWith("chat-1", [userMessage("fresh")]);
+    expect(loader.isStale("chat-1")).toBe(false);
+  });
+
   it("reports load errors and allows a later retry", async () => {
     const loadConversationThreadPage = vi
       .fn<(id: string) => Promise<WorkspaceThreadPage>>()
@@ -150,6 +210,32 @@ describe("WorkspaceThreadLoader", () => {
     expect(onLoadedOlderThread).toHaveBeenCalledWith("chat-1", [userMessage("old")]);
     expect(loader.hasOlderMessages("chat-1")).toBe(false);
     expect(loader.isFullyLoaded("chat-1")).toBe(true);
+  });
+
+  it("preserves lazy older-page cursors for non-stale preserved threads", async () => {
+    const loadConversationThreadPage = vi
+      .fn<(id: string, before?: number) => Promise<WorkspaceThreadPage>>()
+      .mockResolvedValueOnce(page([userMessage("new")], true, 10))
+      .mockResolvedValueOnce(page([userMessage("old")], false, 5));
+    const onLoadedOlderThread = vi.fn();
+    const loader = new WorkspaceThreadLoader({
+      loadConversationThreadFull: vi.fn(),
+      loadConversationThreadPage,
+      onLoadedOlderThread,
+      onLoadedThread: vi.fn(),
+      onLoadError: vi.fn(),
+    });
+
+    await loader.loadThread("chat-1");
+    expect(loader.hasOlderMessages("chat-1")).toBe(true);
+
+    loader.reconcileRemoteShell(remoteMerge(["chat-1"], []));
+    expect(loader.hasOlderMessages("chat-1")).toBe(true);
+
+    await loader.loadOlderThread("chat-1");
+
+    expect(loadConversationThreadPage).toHaveBeenNthCalledWith(2, "chat-1", 10);
+    expect(onLoadedOlderThread).toHaveBeenCalledWith("chat-1", [userMessage("old")]);
   });
 
   it("loads full threads separately from the visible page", async () => {

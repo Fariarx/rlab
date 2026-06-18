@@ -11,7 +11,19 @@ import {
 import type { WorkspaceState } from "../../../lib/workspace-state";
 
 export function findConversation(state: WorkspaceState, id: string): ConversationSummary | null {
-  return [...state.chats, ...state.projects.flatMap((p) => p.conversations)].find((c) => c.id === id) ?? null;
+  for (const conversation of state.chats) {
+    if (conversation.id === id) {
+      return conversation;
+    }
+  }
+  for (const project of state.projects) {
+    for (const conversation of project.conversations) {
+      if (conversation.id === id) {
+        return conversation;
+      }
+    }
+  }
+  return null;
 }
 
 export function workspaceConversations(state: WorkspaceState): ConversationSummary[] {
@@ -45,6 +57,80 @@ export function extractAttachmentBlocks(text: string): string {
 
 export function serializableEqual(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function conversationSummaryEqual(left: ConversationSummary, right: ConversationSummary): boolean {
+  return (
+    left === right ||
+    (left.id === right.id &&
+      left.title === right.title &&
+      left.snippet === right.snippet &&
+      left.time === right.time &&
+      left.updatedAtMs === right.updatedAtMs &&
+      left.threadUpdatedAtMs === right.threadUpdatedAtMs &&
+      left.status === right.status &&
+      left.agent === right.agent &&
+      left.view === right.view &&
+      left.activeRunId === right.activeRunId &&
+      left.unread === right.unread &&
+      left.pinned === right.pinned &&
+      left.archived === right.archived &&
+      left.costUsd === right.costUsd &&
+      left.sessionId === right.sessionId &&
+      left.sessionAgent === right.sessionAgent &&
+      left.worktreePath === right.worktreePath &&
+      serializableEqual(left.profile, right.profile) &&
+      serializableEqual(left.compaction, right.compaction) &&
+      serializableEqual(left.usage, right.usage) &&
+      serializableEqual(left.agentSessions, right.agentSessions))
+  );
+}
+
+function conversationListsEqual(left: readonly ConversationSummary[], right: readonly ConversationSummary[]): boolean {
+  if (left === right) {
+    return true;
+  }
+  if (left.length !== right.length) {
+    return false;
+  }
+  return left.every((conversation, index) => conversationSummaryEqual(conversation, right[index]));
+}
+
+function projectsEqual(left: readonly Project[], right: readonly Project[]): boolean {
+  if (left === right) {
+    return true;
+  }
+  if (left.length !== right.length) {
+    return false;
+  }
+  return left.every((project, index) => {
+    const other = right[index];
+    return project.id === other.id && project.name === other.name && project.path === other.path && conversationListsEqual(project.conversations, other.conversations);
+  });
+}
+
+function threadRecordsReferenceEqual(left: WorkspaceState["threads"], right: WorkspaceState["threads"]): boolean {
+  if (left === right) {
+    return true;
+  }
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  if (leftKeys.length !== rightKeys.length) {
+    return false;
+  }
+  return leftKeys.every((key) => left[key] === right[key]);
+}
+
+export function workspaceStateStructuralEqual(left: WorkspaceState, right: WorkspaceState): boolean {
+  return (
+    left === right ||
+    (left.selectedId === right.selectedId &&
+      conversationListsEqual(left.chats, right.chats) &&
+      projectsEqual(left.projects, right.projects) &&
+      threadRecordsReferenceEqual(left.threads, right.threads) &&
+      serializableEqual(left.composerDrafts, right.composerDrafts) &&
+      serializableEqual(left.settings, right.settings))
+  );
 }
 
 export function conversationProfile(conversation: ConversationSummary | null | undefined): AgentProfile {
@@ -97,13 +183,29 @@ export function patchConversation(state: WorkspaceState, id: string, patch: Part
   // recency key that drives newest→oldest sidebar ordering (unless the caller
   // already set one explicitly).
   const stamped = patch.time !== undefined && patch.updatedAtMs === undefined ? { ...patch, updatedAtMs: Date.now() } : patch;
+  const chatIndex = state.chats.findIndex((conversation) => conversation.id === id);
+  if (chatIndex >= 0) {
+    return {
+      ...state,
+      chats: state.chats.map((conversation, index) => (index === chatIndex ? { ...conversation, ...stamped } : conversation)),
+    };
+  }
+  const projectIndex = state.projects.findIndex((project) => project.conversations.some((conversation) => conversation.id === id));
+  if (projectIndex < 0) {
+    return state;
+  }
+  const project = state.projects[projectIndex];
+  if (!project) {
+    return state;
+  }
+  const projects = [...state.projects];
+  projects[projectIndex] = {
+    ...project,
+    conversations: project.conversations.map((conversation) => (conversation.id === id ? { ...conversation, ...stamped } : conversation)),
+  };
   return {
     ...state,
-    chats: state.chats.map((c) => (c.id === id ? { ...c, ...stamped } : c)),
-    projects: state.projects.map((p) => ({
-      ...p,
-      conversations: p.conversations.map((c) => (c.id === id ? { ...c, ...stamped } : c)),
-    })),
+    projects,
   };
 }
 

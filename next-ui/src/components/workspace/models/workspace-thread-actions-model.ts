@@ -9,13 +9,14 @@ import {
 } from "./workspace-state-utils";
 
 export function appendUserMessageState(state: WorkspaceState, conversationId: string, message: ChatMessage): WorkspaceState {
+  const updatedAtMs = typeof message.createdAtMs === "number" && Number.isFinite(message.createdAtMs) ? message.createdAtMs : undefined;
   return patchConversation(
     {
       ...state,
       threads: { ...state.threads, [conversationId]: [...(state.threads[conversationId] ?? []), message] },
     },
     conversationId,
-    { archived: false },
+    { archived: false, ...(updatedAtMs === undefined ? {} : { updatedAtMs }) },
   );
 }
 
@@ -132,7 +133,7 @@ export function applyUserTurnSelectionState(state: WorkspaceState, conversationI
   };
 }
 
-export function retryUserTurn(thread: readonly ChatMessage[], messageId: string): UserTurnSelection | null {
+export function retryUserTurn(thread: readonly ChatMessage[], messageId: string, time?: string, createdAtMs?: number): UserTurnSelection | null {
   const target = thread.findIndex((message) => message.id === messageId);
   if (target < 0) {
     return null;
@@ -151,13 +152,18 @@ export function retryUserTurn(thread: readonly ChatMessage[], messageId: string)
   if (userMsg?.role !== "user") {
     return null;
   }
+  const retriedUserMsg: ChatMessage = {
+    ...userMsg,
+    ...(time === undefined ? {} : { time }),
+    ...(createdAtMs === undefined ? {} : { createdAtMs }),
+  };
   return {
-    userMsg,
-    thread: thread.slice(0, userIndex + 1),
+    userMsg: retriedUserMsg,
+    thread: [...thread.slice(0, userIndex), retriedUserMsg],
   };
 }
 
-export function editUserTurn(thread: readonly ChatMessage[], messageId: string, text: string, time: string): UserTurnSelection | null {
+export function editUserTurn(thread: readonly ChatMessage[], messageId: string, text: string, time: string, createdAtMs?: number): UserTurnSelection | null {
   const trimmed = text.trim();
   if (!trimmed) {
     return null;
@@ -170,7 +176,7 @@ export function editUserTurn(thread: readonly ChatMessage[], messageId: string, 
   if (previous?.role !== "user") {
     return null;
   }
-  const userMsg: ChatMessage = { ...previous, text: trimmed, time };
+  const userMsg: ChatMessage = { ...previous, text: trimmed, time, ...(createdAtMs === undefined ? {} : { createdAtMs }) };
   return {
     userMsg,
     thread: [...thread.slice(0, index), userMsg],

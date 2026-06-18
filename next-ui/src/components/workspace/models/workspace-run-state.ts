@@ -96,6 +96,10 @@ export function withoutStaleActiveRunMessageMutations(
       continue;
     }
     if (mutation.type === "upsertMessages") {
+      if (mutation.messages.length === 0) {
+        next.push(mutation);
+        continue;
+      }
       const messages = mutation.messages.filter((message) => !isStaleActiveRunMessageMutation(mutation.conversationId, message));
       if (messages.length > 0) {
         next.push({ ...mutation, messages });

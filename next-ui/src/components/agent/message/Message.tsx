@@ -2,11 +2,10 @@ import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import EditIcon from "@mui/icons-material/Edit";
 import AccountTreeIcon from "@mui/icons-material/AccountTree";
 import RefreshIcon from "@mui/icons-material/Refresh";
-import SendIcon from "@mui/icons-material/Send";
 import CloseIcon from "@mui/icons-material/Close";
 import { Box, Stack, Typography } from "@mui/material";
 import { observer } from "mobx-react-lite";
-import { type ChangeEvent, type KeyboardEvent, useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import { useI18n } from "../../../i18n/I18nProvider";
 import { localFileUrl } from "../../../lib/external-url";
 import { normalizeClockLabel } from "../../../lib/time-format";
@@ -14,8 +13,7 @@ import { Button, IconButton, ImageLightbox, Tooltip } from "../../ui";
 import { AgentBlockRenderer } from "../blocks/AgentBlockRenderer";
 import { AgentDetails } from "./AgentDetails";
 import { AttachmentTile } from "../composer/AttachmentTile";
-import { Composer } from "../composer/Composer";
-import { useComposerShared } from "../composer/composer-shared-context";
+import { InlineDraftEditor } from "../composer/InlineDraftEditor";
 import { ChangedFilesAccordion } from "./ChangedFilesAccordion";
 import { AgentMessageStore, MessageShellStore } from "../stores/agent-local-stores";
 import type { AgentProfile } from "../core/agents";
@@ -144,105 +142,44 @@ function MessageActionBar({
   );
 }
 
-/** Inline editor for a sent user message. When a Composer context is available
- *  (inside a live conversation) it reuses the real Composer input stack, but
- *  with edit-only chrome: text, attachments, mentions, and send. It falls back
- *  to a plain textarea in isolated contexts (tests/storybook) that lack the
- *  context. */
+/** Inline editor for a sent user message. It intentionally does not mount the
+ *  full dock Composer inside the thread: that component owns overlay layout and
+ *  can become expensive when nested in a message bubble. Keep this editor small
+ *  but feature-complete for the edit flow: multiline input, attachments, voice,
+ *  cancel, and send. */
 const UserMessageEditor = observer(function UserMessageEditor({
   message,
-  store,
   onResend,
   onCancel,
 }: {
   readonly message: ChatMessage;
-  readonly store: MessageShellStore;
   readonly onResend: (value: string) => void;
   readonly onCancel: () => void;
 }) {
   const { t } = useI18n();
-  const shared = useComposerShared();
   const editDraft = useMemo(() => parseUserDraft(message.text ?? ""), [message.text]);
 
-  if (shared) {
-    return (
-      <Box sx={{ width: "100%", p: 1.5, borderRadius: (t) => `${t.custom.radii.lg}px`, backgroundColor: (t) => t.custom.surfaces.s2 }}>
-        <Stack spacing={1}>
-          <Stack direction="row" sx={{ justifyContent: "space-between", alignItems: "center" }}>
-            <Typography variant="microLabel" sx={{ color: "text.secondary" }}>
-              {t("editMessage")}
-            </Typography>
-            <Button size="small" variant="text" onClick={onCancel} startIcon={<CloseIcon sx={{ fontSize: 15 }} />}>
-              {t("cancel")}
-            </Button>
-          </Stack>
-          <Composer
-            {...shared}
-            key={message.id}
-            variant="edit"
-            placeholder={t("editMessage")}
-            initialValue={editDraft.text}
-            initialAttachments={editDraft.attachments}
-            onSend={onResend}
-            running={false}
-          />
-        </Stack>
-      </Box>
-    );
-  }
-
-  const submit = () => {
-    const text = store.draft.trim();
-    if (text.length > 0) {
-      onResend(text);
-    }
-  };
   return (
-    <Box sx={{ width: "100%", p: 1.5, borderRadius: (t) => `${t.custom.radii.lg}px`, backgroundColor: (t) => t.custom.surfaces.s2 }}>
+    <Box data-testid="message-edit-editor" sx={{ width: "100%", p: 1.5, borderRadius: (t) => `${t.custom.radii.lg}px`, backgroundColor: (t) => t.custom.surfaces.s2 }}>
       <Stack spacing={1.25}>
-        <Typography variant="microLabel" sx={{ color: "text.secondary" }}>
-          {t("editMessage")}
-        </Typography>
-        <Box
-          component="textarea"
-          aria-label={t("editMessage")}
-          autoFocus
-          value={store.draft}
-          onChange={(event: ChangeEvent<HTMLTextAreaElement>) => store.setDraft(event.currentTarget.value)}
-          onKeyDown={(event: KeyboardEvent<HTMLTextAreaElement>) => {
-            if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-              event.preventDefault();
-              submit();
-            } else if (event.key === "Escape") {
-              event.preventDefault();
-              onCancel();
-            }
-          }}
-          rows={5}
-          sx={{
-            width: "100%",
-            minHeight: 120,
-            resize: "vertical",
-            border: 0,
-            borderRadius: (t) => `${t.custom.radii.md}px`,
-            bgcolor: (t) => t.custom.surfaces.s1,
-            color: "text.primary",
-            font: "inherit",
-            fontSize: "0.9rem",
-            lineHeight: 1.6,
-            p: 1.5,
-            outline: 0,
-            "&:focus": { outline: 0 },
-          }}
-        />
-        <Stack direction="row" spacing={1} sx={{ justifyContent: "flex-end", alignItems: "center" }}>
+        <Stack direction="row" sx={{ justifyContent: "space-between", alignItems: "center", gap: 1 }}>
+          <Typography variant="microLabel" sx={{ color: "text.secondary" }}>
+            {t("editMessage")}
+          </Typography>
           <Button size="small" variant="text" onClick={onCancel} startIcon={<CloseIcon sx={{ fontSize: 15 }} />}>
             {t("cancel")}
           </Button>
-          <Button size="small" variant="contained" aria-label={t("sendEditedMessage")} onClick={submit} startIcon={<SendIcon sx={{ fontSize: 15 }} />}>
-            {t("send")}
-          </Button>
         </Stack>
+        <InlineDraftEditor
+          ariaLabel={t("editMessage")}
+          initialText={editDraft.text}
+          initialAttachments={editDraft.attachments}
+          onSubmit={onResend}
+          onCancel={onCancel}
+          submitLabel={t("send")}
+          submitAriaLabel={t("sendEditedMessage")}
+          testIdPrefix="message-edit"
+        />
       </Stack>
     </Box>
   );
@@ -271,7 +208,6 @@ const UserMessage = observer(function UserMessage({
         {editing ? (
           <UserMessageEditor
             message={message}
-            store={store}
             onResend={(value) => {
               actions?.onEditAndResend?.(message, value);
               setEditing(false);
@@ -455,7 +391,7 @@ const AgentMessage = observer(function AgentMessage({
   );
 });
 
-export function Message({
+export const Message = memo(function Message({
   message,
   actions,
   displayPrefs,
@@ -476,4 +412,4 @@ export function Message({
   ) : (
     <AgentMessage message={message} delay={delay} actions={actions} displayPrefs={displayPrefs} agentProfile={agentProfile} />
   );
-}
+});

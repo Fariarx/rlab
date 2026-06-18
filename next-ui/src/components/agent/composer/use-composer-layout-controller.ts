@@ -57,6 +57,7 @@ export function useComposerLayoutController({
   const rootRef = useRef<HTMLDivElement | null>(null);
   const composerBarRef = useRef<HTMLDivElement | null>(null);
   const singleRowRef = useRef(0);
+  const overlayLiftRef = useRef(0);
 
   useLayoutEffect(() => {
     const el = textareaRef.current;
@@ -77,8 +78,11 @@ export function useComposerLayoutController({
       const overlayTop = el.getBoundingClientRect().top - 8;
       nextLift = Math.max(0, Math.round(root.getBoundingClientRect().top - overlayTop));
     }
-    setOverlayLift(nextLift);
-    onOverlayLiftChangeRef.current?.(nextLift);
+    if (overlayLiftRef.current !== nextLift) {
+      overlayLiftRef.current = nextLift;
+      setOverlayLift(nextLift);
+      onOverlayLiftChangeRef.current?.(nextLift);
+    }
   }, [composerFocused, composerValue, expanded, setExpanded, setOverlayLift]);
 
   useEffect(() => {

@@ -24,6 +24,13 @@ export interface ComposerViewModelInput {
 }
 
 export function composerViewModel({
+  registeredPlugins,
+  ...input
+}: ComposerViewModelInput) {
+  return composerViewModelWithTokenPattern({ ...input, registeredPlugins }, pluginTokenPattern(registeredPlugins));
+}
+
+function composerViewModelWithTokenPattern({
   activeSuggestion,
   agentId,
   agentLimit,
@@ -38,9 +45,8 @@ export function composerViewModel({
   registeredPlugins,
   suggestDismissed,
   t,
-}: ComposerViewModelInput) {
+}: ComposerViewModelInput, tokenPattern: RegExp | null) {
   const suggestionsState = composerSuggestions(composerValue, mentionableFiles, registeredPlugins, suggestDismissed, activeSuggestion);
-  const tokenPattern = pluginTokenPattern(registeredPlugins);
   const tokenRanges = pluginTokenRanges(composerValue, tokenPattern);
   const pluginPreviewParts = buildPluginPreviewParts(composerValue, tokenRanges);
   const limitLines = composerLimitLines(agentLimit, t);
@@ -72,10 +78,11 @@ export function useComposerViewModel(input: ComposerViewModelInput) {
     suggestDismissed,
     t,
   } = input;
+  const tokenPattern = useMemo(() => pluginTokenPattern(registeredPlugins), [registeredPlugins]);
 
   return useMemo(
     () =>
-      composerViewModel({
+      composerViewModelWithTokenPattern({
         activeSuggestion,
         agentId,
         agentLimit,
@@ -90,7 +97,7 @@ export function useComposerViewModel(input: ComposerViewModelInput) {
         registeredPlugins,
         suggestDismissed,
         t,
-      }),
+      }, tokenPattern),
     [
       activeSuggestion,
       agentId,
@@ -106,6 +113,7 @@ export function useComposerViewModel(input: ComposerViewModelInput) {
       registeredPlugins,
       suggestDismissed,
       t,
+      tokenPattern,
     ],
   );
 }

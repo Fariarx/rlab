@@ -339,6 +339,11 @@ export function applyWorkspaceMutationToState(state: WorkspaceState, mutation: W
       return { ...state, threads: { ...state.threads, [mutation.conversationId]: nextThread } };
     }
     case "upsertMessages":
+      if (mutation.messages.length === 0) {
+        return state.threads[mutation.conversationId] === undefined
+          ? { ...state, threads: { ...state.threads, [mutation.conversationId]: [] } }
+          : state;
+      }
       return mutation.messages.reduce((current, message) => applyWorkspaceMutationToState(current, { type: "upsertMessage", conversationId: mutation.conversationId, message }), state);
     case "replaceConversationThread":
       return { ...state, threads: { ...state.threads, [mutation.conversationId]: [...mutation.messages] } };

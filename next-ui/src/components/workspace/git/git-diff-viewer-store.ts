@@ -35,19 +35,3 @@ export class DiffCommentRowStore {
     this.editing = resolveState(this.editing, value);
   }
 }
-
-export class DiffCommentComposerStore {
-  draft: string;
-
-  constructor(initial: string) {
-    this.draft = initial;
-    makeObservable(this, {
-      draft: observable,
-      setDraft: action.bound,
-    });
-  }
-
-  setDraft(value: StateUpdater<string>): void {
-    this.draft = resolveState(this.draft, value);
-  }
-}

@@ -53,7 +53,14 @@ export function mergeBackgroundRunState({ current, loaded, activeRunIds, tracked
       next = patchConversation(next, id, loadedConversation);
     }
     const currentThread = current.threads[id] ?? [];
-    if (!serializableEqual(currentThread, loadedThread)) {
+    const currentThreadUpdatedAtMs = currentConversation?.threadUpdatedAtMs;
+    const loadedThreadUpdatedAtMs = loadedConversation.threadUpdatedAtMs;
+    const threadChanged =
+      currentThread !== loadedThread &&
+      (currentThreadUpdatedAtMs === undefined || loadedThreadUpdatedAtMs === undefined
+        ? !serializableEqual(currentThread, loadedThread)
+        : currentThreadUpdatedAtMs !== loadedThreadUpdatedAtMs || currentThread.length !== loadedThread.length);
+    if (threadChanged) {
       threads = threads ?? { ...current.threads };
       threads[id] = loadedThread;
     }

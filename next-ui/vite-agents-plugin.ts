@@ -564,8 +564,47 @@ interface TextDiscoveryResult {
 }
 
 function appendLimitedText(current: string, chunk: string, maxChars: number): string {
+  if (maxChars <= 0) {
+    return "";
+  }
   const next = `${current}${chunk}`;
   return next.length > maxChars ? next.slice(next.length - maxChars) : next;
+}
+
+function createLimitedTextAccumulator(maxChars: number) {
+  const chunks: string[] = [];
+  let length = 0;
+  const trim = () => {
+    let excess = length - maxChars;
+    while (excess > 0 && chunks.length > 0) {
+      const first = chunks[0];
+      if (first === undefined) {
+        break;
+      }
+      if (first.length <= excess) {
+        chunks.shift();
+        length -= first.length;
+        excess -= first.length;
+        continue;
+      }
+      chunks[0] = first.slice(excess);
+      length -= excess;
+      excess = 0;
+    }
+  };
+  return {
+    append(chunk: string): void {
+      if (chunk.length === 0 || maxChars <= 0) {
+        return;
+      }
+      chunks.push(chunk);
+      length += chunk.length;
+      trim();
+    },
+    text(): string {
+      return chunks.join("");
+    },
+  };
 }
 
 function runResolvedBinTextAsync(
@@ -576,8 +615,8 @@ function runResolvedBinTextAsync(
 ): Promise<TextDiscoveryResult> {
   const launch = resolveLaunchCommand(resolvedBin, args);
   return new Promise((resolve) => {
-    let stdout = "";
-    let stderr = "";
+    const stdout = createLimitedTextAccumulator(DISCOVERY_OUTPUT_LIMIT_CHARS);
+    const stderr = createLimitedTextAccumulator(STDERR_TAIL_LIMIT_CHARS);
     let settled = false;
     let timedOut = false;
     let child: ReturnType<typeof spawn> | null = null;
@@ -608,10 +647,10 @@ function runResolvedBinTextAsync(
     }
 
     child.stdout?.on("data", (chunk: Buffer) => {
-      stdout = appendLimitedText(stdout, chunk.toString("utf8"), DISCOVERY_OUTPUT_LIMIT_CHARS);
+      stdout.append(chunk.toString("utf8"));
     });
     child.stderr?.on("data", (chunk: Buffer) => {
-      stderr = appendLimitedText(stderr, chunk.toString("utf8"), STDERR_TAIL_LIMIT_CHARS);
+      stderr.append(chunk.toString("utf8"));
     });
     child.on("error", (error) => {
       finish({ output: null, error: `${basename(resolvedBin)} ${args.join(" ")} failed: ${error.message}` });
@@ -622,11 +661,11 @@ function runResolvedBinTextAsync(
         return;
       }
       if (code !== 0) {
-        const detail = stderr.trim().split(/\r?\n/)[0] || (signal ? `terminated by ${signal}` : `exited with status ${code ?? "unknown"}`);
+        const detail = stderr.text().trim().split(/\r?\n/)[0] || (signal ? `terminated by ${signal}` : `exited with status ${code ?? "unknown"}`);
         finish({ output: null, error: `${basename(resolvedBin)} ${args.join(" ")} failed: ${detail}` });
         return;
       }
-      const output = stdout.trim();
+      const output = stdout.text().trim();
       finish({ output: output.length > 0 ? output : null, error: null });
     });
   });
@@ -5904,6 +5943,7 @@ export interface BackgroundRunBinding {
   readonly runId: string;
   readonly userMessageId: string;
   readonly userMessageTime: string;
+  readonly userMessageCreatedAtMs?: number;
   readonly agentMessageId: string;
   readonly agentMessageTime: string;
 }
@@ -5980,6 +6020,7 @@ const TASK_WAKEUP_PROMPT_LINES = [
   "When you need rlab to wake you later in this same chat for an automation task, use TaskWakeup with the exact follow-up prompt; rlab persists and fires that wakeup server-side.",
   "Use TaskWakeup instead of sleeping, polling inside the agent, or keeping the turn open. After TaskWakeup succeeds, finish the current turn and wait for rlab to re-run you.",
   "TaskWakeup supports delaySeconds/fireAt/cron for time wakeups and script plus intervalSeconds or cron for condition wakeups; the script runs server-side in the project cwd, exit code 0 fires the wakeup, and non-zero exit codes keep polling.",
+  "After scheduling or cancelling, TaskWakeup returns the current wakeup list for this chat so duplicate timers are visible.",
   "For condition wakeups, write a deterministic shell script in the TaskWakeup input: { prompt, script, intervalSeconds, reason } or { prompt, script, cron, reason }. Do not describe the script in prose instead of calling the tool.",
   "To cancel task wakeups in this chat, call TaskWakeup with action=\"cancel\" and either wakeupId/id or all=true.",
   "To inspect scheduled wakeups in this chat, call TaskWakeup with action=\"list\". The tool result returns wakeup ids, trigger type, next fire/check time, prompt, and reason.",
@@ -6015,7 +6056,7 @@ const CODEX_RLAB_DYNAMIC_TOOLS: readonly CodexDynamicToolSpec[] = [
   {
     name: TASK_WAKEUP_TOOL_NAME,
     description:
-      "Set or cancel a server-side task wakeup in the current rlab chat. To set a wakeup, provide prompt plus delaySeconds, fireAt, cron, or script with intervalSeconds/cron. To cancel, provide action='cancel' plus wakeupId/id or all=true. The script is syntax-checked before acceptance, runs server-side in the project cwd, exit code 0 fires the wakeup, and non-zero keeps polling.",
+      "Set or cancel a server-side task wakeup in the current rlab chat. To set a wakeup, provide prompt plus delaySeconds, fireAt, cron, or script with intervalSeconds/cron. To cancel, provide action='cancel' plus wakeupId/id or all=true. Schedule/cancel results include the current wakeup list for this chat. The script is syntax-checked before acceptance, runs server-side in the project cwd, exit code 0 fires the wakeup, and non-zero keeps polling.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -7606,6 +7647,7 @@ export function queuedTurnRunBody(record: PendingTurnRecord, runId: string): Rec
     runId,
     userMessageId: record.message.id,
     userMessageTime: record.message.time ?? agentMessageTime,
+    userMessageCreatedAtMs: record.message.createdAtMs ?? record.createdAtMs,
     agentMessageId: scheduledRunId("a"),
     agentMessageTime,
   };
@@ -7793,6 +7835,14 @@ function wakeupCancelStatusText(count: number, locale: Locale): string {
   return locale === "ru" ? `TaskWakeup отменён · ${count}` : `TaskWakeup canceled · ${count}`;
 }
 
+function wakeupScheduleToolResultText(record: ScheduledWakeupRecord, locale: Locale): string {
+  return [wakeupStatusText(record, locale), scheduledWakeupListToolText(record.conversationId)].join("\n\n");
+}
+
+function wakeupCancelToolResultText(count: number, conversationId: string, locale: Locale): string {
+  return [wakeupCancelStatusText(count, locale), scheduledWakeupListToolText(conversationId)].join("\n\n");
+}
+
 function shellScriptLaunch(script: string): { readonly command: string; readonly args: readonly string[] } {
   return process.platform === "win32"
     ? { command: process.env.ComSpec ?? "cmd.exe", args: ["/d", "/s", "/c", script] }
@@ -7853,6 +7903,7 @@ async function fireScheduledWakeup(record: ScheduledWakeupRecord): Promise<void>
   removeScheduledWakeupRecord(record.id);
   const request = wakeupRequestWithLatestSession(record);
   const runId = scheduledRunId("run");
+  const userMessageCreatedAtMs = Date.now();
   const userMessageTime = serverNowLabel();
   const body = {
     ...request,
@@ -7861,6 +7912,7 @@ async function fireScheduledWakeup(record: ScheduledWakeupRecord): Promise<void>
     runId,
     userMessageId: scheduledRunId("u"),
     userMessageTime,
+    userMessageCreatedAtMs,
     agentMessageId: scheduledRunId("a"),
     agentMessageTime: userMessageTime,
   };
@@ -8404,7 +8456,7 @@ function ensureBackgroundUserMessage(state: WorkspaceState, binding: BackgroundR
   if (existing.some((message) => message.id === binding.userMessageId)) {
     return state;
   }
-  const message: ChatMessage = { id: binding.userMessageId, role: "user", text: prompt, time: binding.userMessageTime };
+  const message: ChatMessage = { id: binding.userMessageId, role: "user", text: prompt, time: binding.userMessageTime, createdAtMs: binding.userMessageCreatedAtMs };
   return {
     ...state,
     threads: {
@@ -8723,12 +8775,13 @@ function backgroundBindingFromParsed(value: Record<string, unknown>): Background
   const runId = typeof value.runId === "string" ? value.runId.trim() : "";
   const userMessageId = typeof value.userMessageId === "string" ? value.userMessageId.trim() : "";
   const userMessageTime = typeof value.userMessageTime === "string" ? value.userMessageTime.trim() : "";
+  const userMessageCreatedAtMs = typeof value.userMessageCreatedAtMs === "number" && Number.isFinite(value.userMessageCreatedAtMs) ? value.userMessageCreatedAtMs : undefined;
   const agentMessageId = typeof value.agentMessageId === "string" ? value.agentMessageId.trim() : "";
   const agentMessageTime = typeof value.agentMessageTime === "string" ? value.agentMessageTime.trim() : "";
   if (!conversationId || !runId || !userMessageId || !userMessageTime || !agentMessageId || !agentMessageTime) {
     return null;
   }
-  return { conversationId, runId, userMessageId, userMessageTime, agentMessageId, agentMessageTime };
+  return { conversationId, runId, userMessageId, userMessageTime, userMessageCreatedAtMs, agentMessageId, agentMessageTime };
 }
 
 interface StreamedTool {
@@ -11425,7 +11478,7 @@ function pendingTurnRecordFromQueueRequest(conversationId: string, text: string,
     id: messageId,
     conversationId,
     createdAtMs: now,
-    message: { id: messageId, role: "user", text, time: serverNowLabel() },
+    message: { id: messageId, role: "user", text, time: serverNowLabel(), createdAtMs: now },
     origin,
   };
 }
@@ -11650,28 +11703,34 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
         }
       }
       if (event.type === "wakeup") {
-        const publicEvent: RunEvent = requestForWakeups
+        const publicEvents: RunEvent[] = requestForWakeups
           ? (() => {
               try {
                 const record = scheduleWakeupFromRunEvent(event, requestForWakeups, cwd, origin, binding);
-                return { type: "status", level: "ok", text: wakeupStatusText(record, cachedWorkspaceLocale) };
+                const resultText = wakeupScheduleToolResultText(record, cachedWorkspaceLocale);
+                return [
+                  ...(event.toolId ? [{ type: "tool_result" as const, id: event.toolId, ok: true, output: resultText }] : []),
+                  { type: "status" as const, level: "ok" as const, text: wakeupStatusText(record, cachedWorkspaceLocale) },
+                ];
               } catch (error) {
-                return { type: "error", text: errorMessage(error) };
+                return [{ type: "error", text: errorMessage(error) }];
               }
             })()
-          : { type: "error", text: "Wakeup scheduling failed: run request is not initialised." };
-        sender.send(publicEvent);
-        if (binding && accumulator) {
-          applyBackgroundRunEvent(binding, accumulator, publicEvent);
+          : [{ type: "error", text: "Wakeup scheduling failed: run request is not initialised." }];
+        for (const publicEvent of publicEvents) {
+          sender.send(publicEvent);
+          if (binding && accumulator) {
+            applyBackgroundRunEvent(binding, accumulator, publicEvent);
+          }
         }
         return;
       }
       if (event.type === "cancel_wakeup") {
-        const publicEvent: RunEvent = binding
+        const publicEvents: RunEvent[] = binding
           ? (() => {
               const canceled = cancelScheduledWakeups({ conversationId: binding.conversationId, wakeupId: event.wakeupId, all: event.all ?? !event.wakeupId });
               if (canceled === 0) {
-                return { type: "status", level: "warn", text: cachedWorkspaceLocale === "ru" ? "Wakeup не найден." : "Wakeup not found." };
+                return [{ type: "status", level: "warn", text: cachedWorkspaceLocale === "ru" ? "Wakeup не найден." : "Wakeup not found." }];
               }
               appendRunAuditEvent(RUN_AUDIT_FILE, {
                 type: "wakeup_canceled",
@@ -11681,12 +11740,18 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
                 count: canceled,
                 reason: event.reason,
               });
-              return { type: "status", level: "ok", text: wakeupCancelStatusText(canceled, cachedWorkspaceLocale) };
+              const resultText = wakeupCancelToolResultText(canceled, binding.conversationId, cachedWorkspaceLocale);
+              return [
+                ...(event.toolId ? [{ type: "tool_result" as const, id: event.toolId, ok: true, output: resultText }] : []),
+                { type: "status" as const, level: "ok" as const, text: wakeupCancelStatusText(canceled, cachedWorkspaceLocale) },
+              ];
             })()
-          : { type: "error", text: "Wakeup cancellation requires a conversation-bound run." };
-        sender.send(publicEvent);
-        if (binding && accumulator) {
-          applyBackgroundRunEvent(binding, accumulator, publicEvent);
+          : [{ type: "error", text: "Wakeup cancellation requires a conversation-bound run." }];
+        for (const publicEvent of publicEvents) {
+          sender.send(publicEvent);
+          if (binding && accumulator) {
+            applyBackgroundRunEvent(binding, accumulator, publicEvent);
+          }
         }
         return;
       }
