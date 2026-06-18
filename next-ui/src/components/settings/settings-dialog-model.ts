@@ -107,6 +107,10 @@ export function generalPreviewServerHostPatch(previewServerHost: string): AppSet
   return { general: { previewServerHost } };
 }
 
+export function generalSystemPromptPatch(systemPrompt: string): AppSettingsPatch {
+  return { general: { systemPrompt } };
+}
+
 export function generalVoiceProviderPatch(currentVoice: VoiceSettings, provider: VoiceProviderId): AppSettingsPatch {
   return { general: { voice: { ...currentVoice, provider } } };
 }

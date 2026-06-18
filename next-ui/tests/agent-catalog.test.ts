@@ -22,15 +22,29 @@ describe("agent catalog", () => {
   });
 
   it("exposes chat work modes for every runnable agent", () => {
-    for (const agent of ["claude-code", "codex", "gemini", "opencode"] as const) {
-      expect(getAgent(agent).modes.map((option) => option.id)).toEqual(["default", "plan"]);
+    for (const agent of ["claude-code", "gemini", "opencode"] as const) {
+      expect(getAgent(agent).modes.map((option) => option.id)).toEqual(["default", "plan", "review", "build", "explore", "summary"]);
     }
+    expect(getAgent("codex").modes.map((option) => option.id)).toEqual(["default", "fast", "plan", "review", "build", "explore", "summary"]);
+    expect(resolveAgentModeValue("codex", "fast")).toBeUndefined();
     expect(resolveAgentModeValue("codex", "plan")).toBe("plan");
+    expect(resolveAgentModeValue("gemini", "summary")).toBe("summary");
+    expect(resolveAgentModeValue("gemini", "fast")).toBeUndefined();
     expect(resolveAgentModeValue("gemini", "auto")).toBeUndefined();
     expect(accessModeForAgentProfile({ agent: "codex", model: "default", reasoning: "default", mode: "plan" })).toBe("read-only");
+    expect(accessModeForAgentProfile({ agent: "codex", model: "default", reasoning: "default", mode: "review" })).toBe("read-only");
+    expect(accessModeForAgentProfile({ agent: "codex", model: "default", reasoning: "default", mode: "fast" })).toBe("unrestricted");
+    expect(accessModeForAgentProfile({ agent: "codex", model: "default", reasoning: "default", mode: "build" })).toBe("unrestricted");
   });
 
   it("keeps auto-confirm as an explicit profile field only", () => {
+    expect(normalizeAgentProfile({ agent: "codex", model: "default", reasoning: "default", mode: "fast" })).toEqual({
+      agent: "codex",
+      model: "default",
+      reasoning: "default",
+      mode: "default",
+      fast: true,
+    });
     expect(normalizeAgentProfile({ agent: "claude-code", model: "default", reasoning: "default", mode: "auto" })).toEqual({
       agent: "claude-code",
       model: "default",

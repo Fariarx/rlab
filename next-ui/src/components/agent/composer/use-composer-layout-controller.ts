@@ -7,6 +7,7 @@ interface PopoverPositionActions {
 
 interface UseComposerLayoutControllerInput {
   readonly composerValue: string;
+  readonly composerFocused: boolean;
   readonly expanded: boolean;
   readonly limitLayoutKey: string;
   readonly modeMenuAnchor: HTMLElement | null;
@@ -34,6 +35,7 @@ interface UseComposerLayoutControllerResult {
 
 export function useComposerLayoutController({
   composerValue,
+  composerFocused,
   expanded,
   limitLayoutKey,
   modeMenuAnchor,
@@ -65,7 +67,9 @@ export function useComposerLayoutController({
       singleRowRef.current = el.scrollHeight;
     }
     const baseline = singleRowRef.current || 24;
-    const needsMultiline = composerValue.length > 0 && (composerValue.includes("\n") || el.scrollHeight > baseline * 1.5);
+    const hasHorizontalOverflow = el.scrollWidth > el.clientWidth + 1;
+    const hasVerticalOverflow = el.scrollHeight > el.clientHeight + 1;
+    const needsMultiline = composerValue.length > 0 && (composerValue.includes("\n") || el.scrollHeight > baseline * 1.5 || (composerFocused && (hasHorizontalOverflow || hasVerticalOverflow)));
     setExpanded(needsMultiline);
     const root = rootRef.current;
     let nextLift = 0;
@@ -75,7 +79,7 @@ export function useComposerLayoutController({
     }
     setOverlayLift(nextLift);
     onOverlayLiftChangeRef.current?.(nextLift);
-  }, [composerValue, expanded, setExpanded, setOverlayLift]);
+  }, [composerFocused, composerValue, expanded, setExpanded, setOverlayLift]);
 
   useEffect(() => {
     const el = tagsRef.current;

@@ -93,6 +93,8 @@ export interface StatusBlock {
   readonly kind: "status";
   readonly level: StatusKey;
   readonly text: string;
+  /** Force the status into the visible answer stream even when partial text exists. */
+  readonly surface?: boolean;
 }
 
 export interface CitationBlock {

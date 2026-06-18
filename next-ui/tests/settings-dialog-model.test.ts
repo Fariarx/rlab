@@ -15,6 +15,7 @@ import {
   generalDesktopNotificationsPatch,
   generalLocalePatch,
   generalPreviewServerHostPatch,
+  generalSystemPromptPatch,
   generalTelemetryPatch,
   generalVoiceLanguagePatch,
   generalVoiceProviderPatch,
@@ -143,6 +144,7 @@ describe("settings-dialog-model", () => {
     expect(generalConfirmDestructiveActionsPatch(false)).toEqual({ general: { confirmDestructiveActions: false } });
     expect(generalTelemetryPatch(true)).toEqual({ general: { telemetry: true } });
     expect(generalPreviewServerHostPatch("dev.example.com:8080")).toEqual({ general: { previewServerHost: "dev.example.com:8080" } });
+    expect(generalSystemPromptPatch("Be concise.")).toEqual({ general: { systemPrompt: "Be concise." } });
   });
 
   it("builds voice settings patches without dropping provider or language", () => {

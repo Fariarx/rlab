@@ -36,6 +36,17 @@ function cliInfo(modes: NonNullable<AgentCliInfo["modes"]>): AgentCliInfo {
   };
 }
 
+function t(key: "agentModeFast" | "agentModePlan" | "agentModeReview" | "agentModeBuild" | "agentModeExplore" | "agentModeSummary"): string {
+  return {
+    agentModeFast: "Fast",
+    agentModePlan: "Plan",
+    agentModeReview: "Review",
+    agentModeBuild: "Build",
+    agentModeExplore: "Explore",
+    agentModeSummary: "Summary",
+  }[key];
+}
+
 function Harness({
   profile = defaultProfile,
   selected = conversation(profile),
@@ -52,10 +63,11 @@ function Harness({
   readonly setProfile: (profile: AgentProfile) => void;
   readonly setConversationProfile: (conversationId: string, profile: AgentProfile) => void;
   readonly capture: (controller: {
-    readonly handleAutoConfirmChange: (enabled: boolean) => void;
-    readonly handleModeChange: (modeId: string) => void;
-    readonly handlePicked: (picked: AgentProfile) => void;
-    readonly supportedModes: readonly ComposerModeOption[];
+  readonly handleAutoConfirmChange: (enabled: boolean) => void;
+  readonly handleModeChange: (modeId: string) => void;
+  readonly handleModifierModeChange: (modeId: string, enabled: boolean) => void;
+  readonly handlePicked: (picked: AgentProfile) => void;
+  readonly supportedModes: readonly ComposerModeOption[];
   }) => void;
 }) {
   const controller = useWorkspaceAgentProfileController({
@@ -66,7 +78,7 @@ function Harness({
     setConversationProfile,
     setProfile,
     cliInfoOf,
-    t: () => "Plan",
+    t,
   });
 
   useEffect(() => {
@@ -81,18 +93,31 @@ describe("useWorkspaceAgentProfileController", () => {
     expect(
       buildWorkspaceComposerModes({
         agentId: "codex",
-        planLabel: "Plan",
+        modeLabels: {
+          agentModeFast: "Fast",
+          agentModePlan: "Plan",
+          agentModeReview: "Review",
+          agentModeBuild: "Build",
+          agentModeExplore: "Explore",
+          agentModeSummary: "Summary",
+        },
         cliModes: [
           { id: "default", label: "Default" },
           { id: "plan", label: "Plan raw" },
           { id: "auto", label: "Auto" },
           { id: "bypass-permissions", label: "Bypass" },
           { id: "review", label: "Review" },
+          { id: "custom-reviewer", label: "Custom Reviewer" },
         ],
       }),
     ).toEqual([
+      { id: "fast", label: "Fast" },
       { id: "plan", label: "Plan" },
       { id: "review", label: "Review" },
+      { id: "build", label: "Build" },
+      { id: "explore", label: "Explore" },
+      { id: "summary", label: "Summary" },
+      { id: "custom-reviewer", label: "Custom Reviewer" },
     ]);
   });
 
@@ -196,6 +221,31 @@ describe("useWorkspaceAgentProfileController", () => {
     expect(setProfile).toHaveBeenCalledWith(expect.objectContaining({ autoConfirm: true }));
   });
 
+  it("persists fast as a modifier without replacing the work mode", async () => {
+    const setProfile = vi.fn();
+    const setConversationProfile = vi.fn();
+    const captured: { current: UseWorkspaceAgentProfileControllerResult | null } = { current: null };
+    const profile: AgentProfile = { agent: "codex", model: "default", reasoning: "default", mode: "plan" };
+
+    render(
+      <Harness
+        profile={profile}
+        selected={conversation(profile)}
+        setProfile={setProfile}
+        setConversationProfile={setConversationProfile}
+        capture={(controller) => {
+          captured.current = controller;
+        }}
+      />,
+    );
+
+    await waitFor(() => expect(captured.current).not.toBeNull());
+    captured.current?.handleModifierModeChange("fast", true);
+
+    expect(setConversationProfile).toHaveBeenCalledWith("chat-1", expect.objectContaining({ mode: "plan", fast: true }));
+    expect(setProfile).toHaveBeenCalledWith(expect.objectContaining({ mode: "plan", fast: true }));
+  });
+
   it("exposes CLI-provided supported modes", async () => {
     const captured: { current: UseWorkspaceAgentProfileControllerResult | null } = { current: null };
 
@@ -210,6 +260,15 @@ describe("useWorkspaceAgentProfileController", () => {
       />,
     );
 
-    await waitFor(() => expect(captured.current?.supportedModes).toEqual([{ id: "review", label: "Review" }]));
+    await waitFor(() =>
+      expect(captured.current?.supportedModes).toEqual([
+        { id: "fast", label: "Fast" },
+        { id: "plan", label: "Plan" },
+        { id: "review", label: "Review" },
+        { id: "build", label: "Build" },
+        { id: "explore", label: "Explore" },
+        { id: "summary", label: "Summary" },
+      ]),
+    );
   });
 });

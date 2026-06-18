@@ -871,7 +871,9 @@ export class WorkspaceStore implements Workspace {
     if (this.pendingMessageCount(id) === 0) {
       return false;
     }
-    void sendNextPendingTurn(id)
+    const stopCurrentRun = this.conversationHasActiveWork(id) ? this.stopRunWithQueuePolicy(id, { pauseQueue: false }) : Promise.resolve();
+    void stopCurrentRun
+      .then(() => sendNextPendingTurn(id))
       .then((snapshot) => {
         runInAction(() => this.setQueueSnapshot(snapshot));
         void this.refreshBackgroundRuns();
@@ -1063,6 +1065,7 @@ export class WorkspaceStore implements Workspace {
       cwd: this.cwdOf(id),
       accessMode: accessModeForAgentProfile(profile),
       locale: this.state.settings.general.locale,
+      systemPrompt: this.state.settings.general.systemPrompt,
       binding: {
         conversationId: id,
         runId,
@@ -1136,31 +1139,33 @@ export class WorkspaceStore implements Workspace {
       });
   }
 
-  stopRun(id: string): void {
+  private stopRunWithQueuePolicy(id: string, options: { readonly pauseQueue: boolean }): Promise<void> {
     // Stopping the run also pauses the server-owned queue (only meaningful when
     // something is queued) so a pending turn doesn't immediately start after the
     // user explicitly hit stop.
-    if (this.pendingMessageCount(id) > 0) {
+    if (options.pauseQueue && this.pendingMessageCount(id) > 0) {
       this.setQueuePaused(id, true);
     }
     const active = this.runs.get(id);
+    let cancelPromise: Promise<void> = Promise.resolve();
     if (active) {
       active.canceled = true;
-      void cancelRun(active.runId).catch(() => undefined);
+      cancelPromise = cancelRun(active.runId);
       active.controller.abort();
       this.runs.delete(id);
     } else {
       const activeRunId = this.find(id)?.activeRunId;
       if (activeRunId) {
-        void cancelRun(activeRunId).catch(() => undefined);
+        cancelPromise = cancelRun(activeRunId);
       }
     }
     // Reset the conversation even when there is no live run handle (e.g. a
     // seeded "running" conversation, or one left "running" after a decision):
     // otherwise the stop button would hang with nothing to cancel.
     const result: { current: StopRunConversationStateResult | null } = { current: null };
+    const canceledText = translate(this.state.settings.general.locale, "runCanceledSnippet");
     this.setState((current) => {
-      result.current = stopRunConversationState(current, id, nowLabel());
+      result.current = stopRunConversationState(current, id, nowLabel(), canceledText);
       return result.current.state;
     });
     if (result.current?.conversation) {
@@ -1168,6 +1173,11 @@ export class WorkspaceStore implements Workspace {
     }
     this.enqueueMutations({ type: "replaceConversationThread", conversationId: id, messages: result.current?.thread ?? [] });
     this.persistCurrentStateNow();
+    return cancelPromise;
+  }
+
+  stopRun(id: string): void {
+    void this.stopRunWithQueuePolicy(id, { pauseQueue: true }).catch(() => undefined);
   }
 
   retryMessage(id: string, messageId: string): void {

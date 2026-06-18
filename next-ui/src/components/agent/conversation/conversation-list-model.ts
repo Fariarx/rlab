@@ -1,18 +1,10 @@
 import { conversationPreviewSnippet } from "../../../lib/conversation-preview";
+import { sortConversationsNewestFirst } from "../../../lib/conversation-order";
 import { messageToPlainText } from "../message/message-actions";
-import { conversationStatusKey as statusToKey, type ChatMessage, type ConversationStatus, type ConversationSummary, type Project } from "../core/types";
+import { conversationStatusKey as statusToKey, type ChatMessage, type ConversationSummary, type Project } from "../core/types";
 
-const ACTIVE_STATUS_PRIORITY: ReadonlySet<ConversationStatus> = new Set<ConversationStatus>(["running", "waiting", "error"]);
 export const CONVERSATION_SECTION_INITIAL_LIMIT = 4;
 export type ConversationUnreadAttentionStatus = "error" | "done";
-const VISUAL_STATUS_SORT_RANK = {
-  ok: 0,
-  running: 1,
-  warn: 2,
-  error: 3,
-  info: 4,
-  idle: 5,
-} as const;
 
 export type ConversationListIconKind = "pin" | "project" | "chat";
 
@@ -60,9 +52,6 @@ export function visualStatusKey(conversation: ConversationSummary, hasWakeup: bo
   if (hasWakeup) {
     return "warn" as const;
   }
-  if (ACTIVE_STATUS_PRIORITY.has(conversation.status)) {
-    return statusToKey[conversation.status];
-  }
   return statusToKey[conversation.status];
 }
 
@@ -79,32 +68,13 @@ export function unreadAttentionStatus(conversation: ConversationSummary): Conver
   return null;
 }
 
-export function sortedConversationsByActivity(conversations: readonly ConversationSummary[], wakeupConversationIds: ReadonlySet<string>): readonly ConversationSummary[] {
-  return conversations
-    .map((conversation, index) => ({ conversation, index }))
-    .sort((left, right) => {
-      const leftRank = VISUAL_STATUS_SORT_RANK[visualStatusKey(left.conversation, wakeupConversationIds.has(left.conversation.id))];
-      const rightRank = VISUAL_STATUS_SORT_RANK[visualStatusKey(right.conversation, wakeupConversationIds.has(right.conversation.id))];
-      if (leftRank !== rightRank) {
-        return leftRank - rightRank;
-      }
-      // Newest activity first. Conversations without a recency stamp (legacy data,
-      // before this field existed) keep their original insertion order and sort
-      // below any stamped conversation.
-      const leftMs = left.conversation.updatedAtMs;
-      const rightMs = right.conversation.updatedAtMs;
-      if (leftMs !== undefined || rightMs !== undefined) {
-        return (rightMs ?? 0) - (leftMs ?? 0) || left.index - right.index;
-      }
-      return left.index - right.index;
-    })
-    .map((entry) => entry.conversation);
+export function sortedConversationsByActivity(conversations: readonly ConversationSummary[]): readonly ConversationSummary[] {
+  return sortConversationsNewestFirst(conversations);
 }
 
 export function visibleConversationSections({
   projects,
   chats,
-  wakeupConversationIds,
   pinnedLabel,
   chatsLabel,
 }: {
@@ -114,14 +84,14 @@ export function visibleConversationSections({
   readonly pinnedLabel: string;
   readonly chatsLabel: string;
 }): readonly ConversationListSection[] {
-  const pinned = sortedConversationsByActivity([...chats, ...projects.flatMap((project) => project.conversations)].filter((conversation) => conversation.pinned && !conversation.archived), wakeupConversationIds);
+  const pinned = sortedConversationsByActivity([...chats, ...projects.flatMap((project) => project.conversations)].filter((conversation) => conversation.pinned && !conversation.archived));
   const visibleProjects = projects
     .map((project) => ({
       ...project,
-      conversations: sortedConversationsByActivity(project.conversations.filter((conversation) => !conversation.pinned && !conversation.archived), wakeupConversationIds),
+      conversations: sortedConversationsByActivity(project.conversations.filter((conversation) => !conversation.pinned && !conversation.archived)),
     }))
     .filter((project) => project.conversations.length > 0);
-  const visibleChats = sortedConversationsByActivity(chats.filter((conversation) => !conversation.pinned && !conversation.archived), wakeupConversationIds);
+  const visibleChats = sortedConversationsByActivity(chats.filter((conversation) => !conversation.pinned && !conversation.archived));
 
   const sections: ConversationListSection[] = [];
   if (pinned.length > 0) {

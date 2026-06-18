@@ -65,6 +65,16 @@ describe("Composer", () => {
     expect(screen.getByTestId("composer-send-button")).toBe(screen.getByRole("button", { name: "Отправить" }));
   });
 
+  it("renders the agent placeholder with an icon instead of the handwriting glyph", () => {
+    renderWithTheme(<Composer placeholder="Написать: CODEX/GPT-5.5/XHIGH" />);
+
+    const input = screen.getByTestId("composer-input");
+    expect(input).toBe(screen.getByPlaceholderText("CODEX/GPT-5.5/XHIGH"));
+    expect(input.getAttribute("placeholder")).not.toContain("✍");
+    expect(screen.getByTestId("composer-placeholder-hint")).toHaveTextContent("CODEX/GPT-5.5/XHIGH");
+    expect(screen.getByTestId("composer-placeholder-icon")).toBeInTheDocument();
+  });
+
   it("uses minimal chrome for editing a sent message", () => {
     renderWithTheme(
       <Composer
@@ -796,6 +806,22 @@ describe("Composer", () => {
     expect(screen.getAllByPlaceholderText("Написать")).toHaveLength(1);
   });
 
+  it("lifts the focused input when a single long line overflows", async () => {
+    renderWithTheme(<Composer placeholder="Написать" />);
+    const input = screen.getByPlaceholderText("Написать");
+    Object.defineProperties(input, {
+      scrollWidth: { configurable: true, value: 360 },
+      clientWidth: { configurable: true, value: 180 },
+      scrollHeight: { configurable: true, value: 24 },
+      clientHeight: { configurable: true, value: 24 },
+    });
+
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: "single long prompt that does not fit in the composer row" } });
+
+    await waitFor(() => expect(screen.getByTestId("composer-input-area")).toHaveAttribute("data-expanded", "true"));
+  });
+
   it("collapses the overlay back to a single row when multiline content is cleared", () => {
     renderWithTheme(<Composer placeholder="Написать" />);
     const input = screen.getByPlaceholderText("Написать");
@@ -825,6 +851,90 @@ describe("Composer", () => {
 
     expect(planItem).toHaveStyle({ paddingLeft: "16px", paddingRight: "8px" });
     expect(switchRoot).toHaveStyle({ marginLeft: "auto", marginRight: "0px" });
+  });
+
+  it("separates work modes from modifier modes in the options menu", () => {
+    renderWithTheme(
+      <Composer
+        placeholder="Написать"
+        modes={[
+          { id: "fast", label: "Быстрый" },
+          { id: "plan", label: "План" },
+          { id: "review", label: "Ревью" },
+        ]}
+        supportsAutoConfirm
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Опции/ }));
+
+    const menu = screen.getByRole("menu");
+    const text = menu.textContent ?? "";
+    expect(text.indexOf("Прикрепить")).toBeLessThan(text.indexOf("План"));
+    expect(text.indexOf("Ревью")).toBeLessThan(text.indexOf("Быстрый"));
+    expect(text.indexOf("Быстрый")).toBeLessThan(text.indexOf("Автоподтверждение"));
+    expect(within(menu).getAllByRole("separator").length).toBeGreaterThanOrEqual(2);
+    expect(within(menu).getByTestId("SpeedRoundedIcon")).toBeInTheDocument();
+    expect(within(menu).getByTestId("TaskAltRoundedIcon")).toBeInTheDocument();
+  });
+
+  it("does not show the fast modifier as the active work mode indicator", () => {
+    renderWithTheme(
+      <Composer
+        placeholder="Написать"
+        modes={[
+          { id: "fast", label: "Быстрый" },
+          { id: "plan", label: "План" },
+        ]}
+        activeMode="fast"
+      />,
+    );
+
+    expect(screen.getByTestId("composer-options-button")).toBe(screen.getByRole("button", { name: /Опции/ }));
+    expect(screen.queryByTestId("active-mode-indicator")).not.toBeInTheDocument();
+  });
+
+  it("toggles fast through the modifier callback instead of replacing the work mode", () => {
+    const onModeChange = vi.fn();
+    const onModifierModeChange = vi.fn();
+    renderWithTheme(
+      <Composer
+        placeholder="Написать"
+        modes={[
+          { id: "fast", label: "Быстрый" },
+          { id: "plan", label: "План" },
+        ]}
+        activeMode="plan"
+        activeModifierModes={[]}
+        onModeChange={onModeChange}
+        onModifierModeChange={onModifierModeChange}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /План/ }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Быстрый" }));
+
+    expect(onModifierModeChange).toHaveBeenCalledWith("fast", true);
+    expect(onModeChange).not.toHaveBeenCalled();
+  });
+
+  it("renders fast as a checked modifier independently of the active work mode", () => {
+    renderWithTheme(
+      <Composer
+        placeholder="Написать"
+        modes={[
+          { id: "fast", label: "Быстрый" },
+          { id: "plan", label: "План" },
+        ]}
+        activeMode="plan"
+        activeModifierModes={["fast"]}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /План/ }));
+
+    expect(within(screen.getByRole("menuitem", { name: "План" })).getByRole("switch")).toBeChecked();
+    expect(within(screen.getByRole("menuitem", { name: "Быстрый" })).getByRole("switch")).toBeChecked();
   });
 
   it("uses a restrained shadow for the options menu window", () => {
@@ -977,10 +1087,12 @@ describe("Composer", () => {
     expect(within(popover).getByText("проверь деплой")).toBeInTheDocument();
     expect(within(popover).getByText("TaskWakeup · по времени")).toBeInTheDocument();
 
-    // The active agent mode is shown as a small badge on the options (gear)
+    // The active agent mode is shown as a small icon on the options (gear)
     // button — not a square tile and not an inline chip that eats input width.
     expect(screen.queryByTestId("active-mode-tile")).not.toBeInTheDocument();
     expect(screen.queryByTestId("active-mode-chip")).not.toBeInTheDocument();
-    expect(screen.getByTestId("active-mode-indicator")).toBeInTheDocument();
+    const modeIndicator = screen.getByTestId("active-mode-indicator");
+    expect(modeIndicator).toHaveTextContent("");
+    expect(within(modeIndicator).getByTestId("RateReviewOutlinedIcon")).toBeInTheDocument();
   });
 });

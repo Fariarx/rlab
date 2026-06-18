@@ -224,6 +224,23 @@ describe("Message", () => {
     expect(screen.queryByText("api retry · overloaded")).not.toBeInTheDocument();
   });
 
+  it("surfaces a canceled-run warning instead of promoting partial text to an answer", () => {
+    const message: ChatMessage = {
+      id: "agent-canceled",
+      role: "agent",
+      blocks: [
+        { kind: "reasoning", text: "Проверяю контекст", duration: "2с" },
+        { kind: "text", text: "Последнее промежуточное рассуждение", result: false },
+        { kind: "status", level: "warn", text: "Запуск остановлен", surface: true },
+      ],
+    };
+
+    renderMessage(message);
+
+    expect(screen.getByText("Запуск остановлен")).toBeInTheDocument();
+    expect(screen.queryByText("Последнее промежуточное рассуждение")).not.toBeInTheDocument();
+  });
+
   it("does not surface terminal warnings while reasoning is still active", () => {
     const message: ChatMessage = {
       id: "agent-live-warning",

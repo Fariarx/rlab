@@ -3,7 +3,7 @@ import { applyWorkspaceMutationToState } from "../../../lib/workspace-mutations"
 import type { WorkspaceState } from "../../../lib/workspace-state";
 import { normalizeAgentProfile, type AgentProfile, type ChatMessage, type ComposerDraft, type ConversationSummary, type Project } from "../../agent";
 import { conversationPreviewSnippet } from "../../../lib/conversation-preview";
-import { cloneMessageForFork, settleThreadLiveBlocks, snippetFromStateThread } from "./workspace-run-state";
+import { canceledRunStatusBlock, cloneMessageForFork, settleThreadLiveBlocks, snippetFromStateThread } from "./workspace-run-state";
 import { findConversation, patchConversation, serializableEqual, workspaceConversations } from "./workspace-state-utils";
 
 const FORK_TITLE_PREFIX_PATTERN = /^(?:Fork|Форк)(?:\s*#(\d+))?\s*:\s*(.+)$/i;
@@ -206,8 +206,10 @@ export interface StopRunConversationStateResult {
   readonly thread: readonly ChatMessage[];
 }
 
-export function stopRunConversationState(state: WorkspaceState, conversationId: string, time: string): StopRunConversationStateResult {
-  const settled = settleThreadLiveBlocks(state, conversationId);
+export function stopRunConversationState(state: WorkspaceState, conversationId: string, time: string, canceledText?: string): StopRunConversationStateResult {
+  const currentConversation = findConversation(state, conversationId);
+  const shouldMarkCanceled = currentConversation?.status === "running" || currentConversation?.status === "waiting";
+  const settled = settleThreadLiveBlocks(state, conversationId, shouldMarkCanceled && canceledText ? canceledRunStatusBlock(canceledText) : undefined);
   const conversation = findConversation(settled, conversationId);
   if (!conversation || (conversation.status !== "running" && conversation.status !== "waiting")) {
     return {

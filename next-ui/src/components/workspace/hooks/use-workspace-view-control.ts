@@ -6,6 +6,7 @@ export interface UseWorkspaceViewControlOptions {
   readonly selectedConversationId: string | undefined;
   readonly selectedView: ConversationView | undefined;
   readonly terminalEnabled: boolean;
+  readonly previewEnabled: boolean;
   readonly view: ConversationView;
   readonly setView: (view: ConversationView) => void;
   readonly persistConversationView: (conversationId: string, view: ConversationView) => void;
@@ -15,26 +16,28 @@ export function useWorkspaceViewControl({
   selectedConversationId,
   selectedView,
   terminalEnabled,
+  previewEnabled,
   view,
   setView,
   persistConversationView,
 }: UseWorkspaceViewControlOptions): (next: ConversationView) => void {
   const showView = useCallback((next: ConversationView) => {
-    setView(next);
+    const normalized = normalizeConversationView(next, terminalEnabled, previewEnabled);
+    setView(normalized);
     if (selectedConversationId) {
-      persistConversationView(selectedConversationId, next);
+      persistConversationView(selectedConversationId, normalized);
     }
-  }, [persistConversationView, selectedConversationId, setView]);
+  }, [persistConversationView, previewEnabled, selectedConversationId, setView, terminalEnabled]);
 
   useLayoutEffect(() => {
-    setView(normalizeConversationView(selectedView, terminalEnabled));
-  }, [selectedView, setView, terminalEnabled]);
+    setView(normalizeConversationView(selectedView, terminalEnabled, previewEnabled));
+  }, [previewEnabled, selectedView, setView, terminalEnabled]);
 
   useEffect(() => {
-    if (!terminalEnabled && view === "terminal") {
+    if ((!terminalEnabled && view === "terminal") || (!previewEnabled && view === "preview")) {
       showView("chat");
     }
-  }, [showView, terminalEnabled, view]);
+  }, [previewEnabled, showView, terminalEnabled, view]);
 
   return showView;
 }

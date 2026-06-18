@@ -3,7 +3,7 @@ import EditIcon from "@mui/icons-material/Edit";
 import { Box, Stack, type SxProps, type Theme, Typography } from "@mui/material";
 import { observer } from "mobx-react-lite";
 import { Highlight, type PrismTheme } from "prism-react-renderer";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useI18n } from "../../../i18n/I18nProvider";
 import type { DiffBlock, ReviewCommentEntry } from "../../agent";
 import { Button, IconButton } from "../../ui";
@@ -208,6 +208,7 @@ export const GitDiffLines = observer(function GitDiffLines({
   onAddComment,
   onUpdateComment,
   onDeleteComment,
+  onInputActivityChange,
 }: {
   readonly lines: readonly DiffViewerLine[];
   readonly path?: string;
@@ -215,6 +216,7 @@ export const GitDiffLines = observer(function GitDiffLines({
   readonly onAddComment?: (line: number, lineText: string, body: string) => void;
   readonly onUpdateComment?: (id: string, body: string) => void;
   readonly onDeleteComment?: (id: string) => void;
+  readonly onInputActivityChange?: (active: boolean) => void;
 }) {
   const code = lines.map(lineContent).join("\n");
   const language = prismLanguageForPath(path ?? "");
@@ -298,6 +300,7 @@ export const GitDiffLines = observer(function GitDiffLines({
                     onCancel={() => setActiveLine(null)}
                     onUpdate={onUpdateComment}
                     onDelete={onDeleteComment}
+                    onInputActivityChange={onInputActivityChange}
                   />
                 )}
               </Box>
@@ -318,6 +321,7 @@ function DiffCommentThread({
   onCancel,
   onUpdate,
   onDelete,
+  onInputActivityChange,
 }: {
   readonly comments: readonly ReviewCommentEntry[];
   readonly composing: boolean;
@@ -325,13 +329,14 @@ function DiffCommentThread({
   readonly onCancel: () => void;
   readonly onUpdate?: (id: string, body: string) => void;
   readonly onDelete?: (id: string) => void;
+  readonly onInputActivityChange?: (active: boolean) => void;
 }) {
   return (
     <Stack spacing={0.75} sx={{ px: 1.5, py: 1, borderLeft: (theme) => `2px solid ${theme.palette.status.info.border}`, backgroundColor: (theme) => theme.custom.surfaces.s2 }}>
       {comments.map((comment) => (
-        <DiffCommentRow key={comment.id} comment={comment} onUpdate={onUpdate} onDelete={onDelete} />
+        <DiffCommentRow key={comment.id} comment={comment} onUpdate={onUpdate} onDelete={onDelete} onInputActivityChange={onInputActivityChange} />
       ))}
-      {composing && <DiffCommentComposer onSubmit={onAdd} onCancel={onCancel} />}
+      {composing && <DiffCommentComposer onSubmit={onAdd} onCancel={onCancel} onInputActivityChange={onInputActivityChange} />}
     </Stack>
   );
 }
@@ -340,10 +345,12 @@ const DiffCommentRow = observer(function DiffCommentRow({
   comment,
   onUpdate,
   onDelete,
+  onInputActivityChange,
 }: {
   readonly comment: ReviewCommentEntry;
   readonly onUpdate?: (id: string, body: string) => void;
   readonly onDelete?: (id: string) => void;
+  readonly onInputActivityChange?: (active: boolean) => void;
 }) {
   const { t } = useI18n();
   const [store] = useState(() => new DiffCommentRowStore());
@@ -358,6 +365,7 @@ const DiffCommentRow = observer(function DiffCommentRow({
           setEditing(false);
         }}
         onCancel={() => setEditing(false)}
+        onInputActivityChange={onInputActivityChange}
       />
     );
   }
@@ -385,14 +393,17 @@ const DiffCommentComposer = observer(function DiffCommentComposer({
   initial = "",
   onSubmit,
   onCancel,
+  onInputActivityChange,
 }: {
   readonly initial?: string;
   readonly onSubmit: (body: string) => void;
   readonly onCancel: () => void;
+  readonly onInputActivityChange?: (active: boolean) => void;
 }) {
   const { t } = useI18n();
   const [store] = useState(() => new DiffCommentComposerStore(initial));
   const { draft, setDraft } = store;
+  useEffect(() => () => onInputActivityChange?.(false), [onInputActivityChange]);
   const submit = () => {
     const body = draft.trim();
     if (body.length > 0) {
@@ -409,6 +420,8 @@ const DiffCommentComposer = observer(function DiffCommentComposer({
         aria-label={t("reviewCommentPlaceholder")}
         placeholder={t("reviewCommentPlaceholder")}
         value={draft}
+        onFocus={() => onInputActivityChange?.(true)}
+        onBlur={() => onInputActivityChange?.(false)}
         onChange={(event) => setDraft(event.currentTarget.value)}
         onKeyDown={(event) => {
           if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {

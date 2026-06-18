@@ -1,12 +1,19 @@
 import AttachFileIcon from "@mui/icons-material/AttachFile";
-import AutoAwesomeRoundedIcon from "@mui/icons-material/AutoAwesomeRounded";
+import ChecklistRoundedIcon from "@mui/icons-material/ChecklistRounded";
+import ConstructionRoundedIcon from "@mui/icons-material/ConstructionRounded";
 import MicRoundedIcon from "@mui/icons-material/MicRounded";
 import OpenInBrowserIcon from "@mui/icons-material/OpenInBrowser";
 import RateReviewOutlinedIcon from "@mui/icons-material/RateReviewOutlined";
+import RuleRoundedIcon from "@mui/icons-material/RuleRounded";
 import SendIcon from "@mui/icons-material/Send";
 import CompressRoundedIcon from "@mui/icons-material/CompressRounded";
+import DriveFileRenameOutlineRoundedIcon from "@mui/icons-material/DriveFileRenameOutlineRounded";
+import SpeedRoundedIcon from "@mui/icons-material/SpeedRounded";
 import SettingsRoundedIcon from "@mui/icons-material/SettingsRounded";
 import StopCircleIcon from "@mui/icons-material/StopCircle";
+import SummarizeRoundedIcon from "@mui/icons-material/SummarizeRounded";
+import TaskAltRoundedIcon from "@mui/icons-material/TaskAltRounded";
+import TravelExploreRoundedIcon from "@mui/icons-material/TravelExploreRounded";
 import { Box, Divider, InputBase, Menu, MenuItem, Stack, Switch, type SxProps, TextField, type Theme, Tooltip, Typography } from "@mui/material";
 import { observer } from "mobx-react-lite";
 import { forwardRef, type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
@@ -20,6 +27,7 @@ import { WakeupTile, type WakeupTileProps } from "./WakeupTile";
 import { ComposerLimitsPanel } from "./ComposerLimitsPanel";
 import { browserActivityTone, type ComposerBrowserActivityEvent, type ComposerVoiceProvider } from "./composer-model";
 import type { ComposerAttachmentDraft, ComposerDraft } from "../core/types";
+import { isAgentModifierModeId, isAgentWorkModeId } from "../core/agents";
 import { VOICE_IDLE_LEVELS, VoiceRecordingStrip } from "./ComposerVoice";
 import type { AgentRateLimit } from "../../../lib/agent-limits";
 import { isImageMime } from "./composer-utils";
@@ -36,9 +44,82 @@ const COMPOSER_OPTIONS_MENU_Y_OFFSET_PX = -12;
 const LIMIT_UNSUPPORTED_AGENTS = new Set<string>(["opencode"]);
 const WRITE_PLACEHOLDER_PATTERN = /^(?:Написать|Message)\s*:?\s+(.+)$/;
 
-function composerInputPlaceholder(placeholder: string): string {
+function composerPlaceholderModel(placeholder: string): { readonly inputPlaceholder: string; readonly visualLabel: string | null } {
   const match = WRITE_PLACEHOLDER_PATTERN.exec(placeholder.trim());
-  return match ? `${match[1].trim()} ✍` : placeholder;
+  const label = match?.[1]?.trim();
+  return label ? { inputPlaceholder: label, visualLabel: label } : { inputPlaceholder: placeholder, visualLabel: null };
+}
+
+function ComposerPlaceholderHint({ label, panel = false }: { readonly label: string; readonly panel?: boolean }) {
+  return (
+    <Box
+      aria-hidden
+      data-testid="composer-placeholder-hint"
+      sx={{
+        position: "absolute",
+        left: panel ? 8 : 0,
+        right: panel ? 8 : 0,
+        top: panel ? 8 : "50%",
+        transform: panel ? "none" : "translateY(-50%)",
+        zIndex: 6,
+        display: "flex",
+        alignItems: "center",
+        gap: 0.5,
+        minWidth: 0,
+        color: "text.secondary",
+        opacity: 0.76,
+        fontSize: "0.84rem",
+        lineHeight: 1.45,
+        pointerEvents: "none",
+      }}
+    >
+      <Box component="span" sx={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        {label}
+      </Box>
+      <DriveFileRenameOutlineRoundedIcon data-testid="composer-placeholder-icon" sx={{ flex: "0 0 auto", fontSize: 15, color: "inherit" }} />
+    </Box>
+  );
+}
+
+type ComposerModeIconColor = string | ((theme: Theme) => string);
+
+function composerModeColor(modeId: string): ComposerModeIconColor {
+  switch (modeId) {
+    case "fast":
+      return (theme) => theme.palette.status.warn.main;
+    case "plan":
+      return (theme) => theme.palette.status.info.main;
+    case "review":
+      return (theme) => theme.palette.status.running.main;
+    case "build":
+      return (theme) => theme.palette.status.ok.main;
+    case "explore":
+      return "#a371f7";
+    case "summary":
+      return (theme) => theme.palette.status.idle.main;
+    default:
+      return (theme) => theme.palette.status.info.main;
+  }
+}
+
+function composerModeIcon(modeId: string, color: ComposerModeIconColor = "text.secondary", fontSize = 15): ReactNode {
+  const sx = { fontSize, color } as const;
+  switch (modeId) {
+    case "fast":
+      return <SpeedRoundedIcon sx={sx} />;
+    case "plan":
+      return <RuleRoundedIcon sx={sx} />;
+    case "review":
+      return <RateReviewOutlinedIcon sx={sx} />;
+    case "build":
+      return <ConstructionRoundedIcon sx={sx} />;
+    case "explore":
+      return <TravelExploreRoundedIcon sx={sx} />;
+    case "summary":
+      return <SummarizeRoundedIcon sx={sx} />;
+    default:
+      return <ChecklistRoundedIcon sx={sx} />;
+  }
 }
 
 export type { ComposerHandle } from "./use-composer-file-controller";
@@ -57,6 +138,8 @@ export interface ComposerProps {
   /** The currently active work mode id ("default" when none). */
   readonly activeMode?: string;
   readonly onModeChange?: (modeId: string) => void;
+  readonly activeModifierModes?: readonly string[];
+  readonly onModifierModeChange?: (modeId: string, enabled: boolean) => void;
   /** Sandbox approval setting for CLIs where this is not a chat work mode. */
   readonly autoConfirm?: boolean;
   readonly supportsAutoConfirm?: boolean;
@@ -126,6 +209,8 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
     modes = [],
     activeMode = "default",
     onModeChange,
+    activeModifierModes = [],
+    onModifierModeChange,
     autoConfirm = false,
     supportsAutoConfirm = false,
     onAutoConfirmChange,
@@ -192,13 +277,21 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
   // True when the input needs more than one row; it then lifts into an upward-
   // growing overlay (so the bar height never changes), and the floating tags
   // rise above it by `overlayLift`.
-  const activeModeOption = modes.find((mode) => mode.id === activeMode) ?? null;
+  const modifierModes = modes.filter((mode) => isAgentModifierModeId(mode.id));
+  const workModes = modes.filter((mode) => isAgentWorkModeId(mode.id));
+  const hasModifierModes = modifierModes.length > 0 || supportsAutoConfirm;
+  const activeModifierModeIds = new Set([...activeModifierModes, ...(isAgentModifierModeId(activeMode) ? [activeMode] : [])]);
+  const activeWorkModeOption = workModes.find((mode) => mode.id === activeMode) ?? null;
+  const activeModeIndicatorIcon = activeWorkModeOption ? composerModeIcon(activeWorkModeOption.id, composerModeColor(activeWorkModeOption.id), 13) : null;
   const { t } = useI18n();
   const composerValue = value ?? internalValue;
   const composerAttachments = attachments ?? internalAttachments;
-  const inputPlaceholder = composerInputPlaceholder(placeholder);
+  const placeholderModel = composerPlaceholderModel(placeholder);
+  const inputPlaceholder = placeholderModel.inputPlaceholder;
+  const showPlaceholderHint = Boolean(placeholderModel.visualLabel) && composerValue.length === 0;
   const showBrowserActivitySection = !editChrome && browserActivityEvents !== undefined;
   const effectiveReviewCount = editChrome ? 0 : reviewCount;
+  const [composerFocused, setComposerFocused] = useState(false);
   const inputAreaRef = useRef<HTMLDivElement | null>(null);
   const [floatingInsets, setFloatingInsets] = useState(() => ({ left: editChrome ? 39 : 43, right: 0 }));
 
@@ -243,6 +336,7 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
     updateOptionsMenuPosition,
   } = useComposerLayoutController({
     composerValue,
+    composerFocused,
     expanded,
     limitLayoutKey,
     modeMenuAnchor,
@@ -370,6 +464,19 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
 
   const showAgentStopButton = !editChrome && running && !hasComposerPayload && effectiveReviewCount === 0;
   const sendLabel = effectiveReviewCount > 0 ? t("reviewSendComments") : t("send");
+  const inputEventProps = {
+    onBeforeInput: handleBeforeInput,
+    onFocus: () => setComposerFocused(true),
+    onBlur: () => setComposerFocused(false),
+  } as const;
+  const hiddenNativePlaceholderSx = placeholderModel.visualLabel
+    ? {
+        "& input::placeholder, & textarea::placeholder": {
+          color: "transparent",
+          opacity: 0,
+        },
+      }
+    : undefined;
   const renderAttachmentTag = (attachment: ComposerAttachmentDraft) => {
     const isImage = isImageMime(attachment.type) && Boolean(attachment.path);
     return (
@@ -396,6 +503,24 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
   };
   const modeMenuItemSx: SxProps<Theme> = { display: "flex", gap: 1, fontSize: "0.8rem", minHeight: 0, pl: 2, pr: 1, width: "100%" };
   const modeSwitchSx: SxProps<Theme> = { ml: "auto", mr: 0, pointerEvents: "none" };
+  const sectionDividerSx: SxProps<Theme> = { my: 0.5, mx: 1.5 };
+  const renderWorkModeMenuItem = (mode: { readonly id: string; readonly label: string }) => (
+    <MenuItem key={mode.id} onClick={() => onModeChange?.(mode.id === activeMode ? "default" : mode.id)} sx={modeMenuItemSx}>
+      {composerModeIcon(mode.id)}
+      <Box component="span" sx={{ minWidth: 84 }}>{mode.label}</Box>
+      <Switch size="small" checked={mode.id === activeMode} onChange={() => undefined} tabIndex={-1} sx={modeSwitchSx} />
+    </MenuItem>
+  );
+  const renderModifierModeMenuItem = (mode: { readonly id: string; readonly label: string }) => {
+    const checked = activeModifierModeIds.has(mode.id);
+    return (
+      <MenuItem key={mode.id} onClick={() => onModifierModeChange?.(mode.id, !checked)} sx={modeMenuItemSx}>
+        {composerModeIcon(mode.id)}
+        <Box component="span" sx={{ minWidth: 84 }}>{mode.label}</Box>
+        <Switch size="small" checked={checked} onChange={() => undefined} tabIndex={-1} sx={modeSwitchSx} />
+      </MenuItem>
+    );
+  };
 
   useEffect(() => {
     // The selected agent scopes the rate-limit popover state.
@@ -535,33 +660,43 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
           </Tooltip>
         ) : (
           <>
-            <Tooltip title={activeModeOption ? t("activeModeTooltip", { mode: activeModeOption.label }) : t("composerOptions")}>
+            <Tooltip title={activeWorkModeOption ? t("activeModeTooltip", { mode: activeWorkModeOption.label }) : t("composerOptions")}>
               <Box sx={{ position: "relative", flex: "0 0 auto", display: "inline-flex" }}>
                 <IconButton
                   data-testid="composer-options-button"
-                  aria-label={activeModeOption ? t("activeModeTooltip", { mode: activeModeOption.label }) : t("composerOptions")}
+                  aria-label={activeWorkModeOption ? t("activeModeTooltip", { mode: activeWorkModeOption.label }) : t("composerOptions")}
                   onClick={(event) => openOptionsMenu(event.currentTarget)}
-                  sx={{ width: 34, height: 34, color: (theme) => (activeModeOption ? theme.palette.status.info.main : theme.palette.text.secondary), borderRadius: (theme) => `${theme.custom.radii.md}px` }}
+                  sx={{ width: 34, height: 34, color: "text.secondary", borderRadius: (theme) => `${theme.custom.radii.md}px` }}
                 >
                   <SettingsRoundedIcon sx={{ fontSize: 20 }} />
                 </IconButton>
-                {activeModeOption && (
+                {activeModeIndicatorIcon && (
                   <Box
                     component="span"
                     data-testid="active-mode-indicator"
                     aria-hidden="true"
                     sx={{
                       position: "absolute",
-                      top: 4,
-                      right: 4,
-                      width: 8,
-                      height: 8,
+                      top: 2,
+                      right: 1,
+                      width: 16,
+                      height: 16,
                       borderRadius: "50%",
                       pointerEvents: "none",
-                      backgroundColor: (theme) => theme.palette.status.info.main,
-                      border: (theme) => `1.5px solid ${theme.custom.surfaces.s2}`,
+                      display: "grid",
+                      placeItems: "center",
+                      backgroundColor: (theme) => theme.custom.surfaces.s3,
+                      border: (theme) => `1px solid ${theme.custom.borders.strong}`,
+                      boxShadow: "0 2px 5px rgba(0, 0, 0, 0.46)",
+                      color: "text.secondary",
+                      "& .MuiSvgIcon-root": {
+                        display: "block",
+                        filter: "drop-shadow(0 1px 1px rgba(0, 0, 0, 0.65))",
+                      },
                     }}
-                  />
+                  >
+                    {activeModeIndicatorIcon}
+                  </Box>
                 )}
               </Box>
             </Tooltip>
@@ -593,34 +728,30 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
                 },
               }}
             >
-          <MenuItem
-            onClick={() => {
-              setModeMenuAnchor(null);
-              openFilePicker();
-            }}
-            sx={{ gap: 1, fontSize: "0.8rem", minHeight: 0 }}
-          >
-            <AttachFileIcon sx={{ fontSize: 16, color: "text.secondary" }} />
-            <Box component="span">{t("attach")}</Box>
-          </MenuItem>
-          {modes.length > 0
-            && modes.map((mode) => (
-              <MenuItem key={mode.id} onClick={() => onModeChange?.(mode.id === activeMode ? "default" : mode.id)} sx={modeMenuItemSx}>
-                <AutoAwesomeRoundedIcon sx={{ fontSize: 15, color: "text.secondary" }} />
-                <Box component="span" sx={{ minWidth: 84 }}>{mode.label}</Box>
-                <Switch size="small" checked={mode.id === activeMode} onChange={() => undefined} tabIndex={-1} sx={modeSwitchSx} />
+              <MenuItem
+                onClick={() => {
+                  setModeMenuAnchor(null);
+                  openFilePicker();
+                }}
+                sx={{ gap: 1, fontSize: "0.8rem", minHeight: 0 }}
+              >
+                <AttachFileIcon sx={{ fontSize: 16, color: "text.secondary" }} />
+                <Box component="span">{t("attach")}</Box>
               </MenuItem>
-            ))}
-          {supportsAutoConfirm && (
-            <MenuItem onClick={() => onAutoConfirmChange?.(!autoConfirm)} sx={modeMenuItemSx}>
-              <AutoAwesomeRoundedIcon sx={{ fontSize: 15, color: "text.secondary" }} />
-              <Box component="span" sx={{ minWidth: 84 }}>{t("agentModeAutoConfirm")}</Box>
-              <Switch size="small" checked={autoConfirm} onChange={() => undefined} tabIndex={-1} sx={modeSwitchSx} />
-            </MenuItem>
-          )}
+              {(workModes.length > 0 || hasModifierModes) && <Divider sx={sectionDividerSx} />}
+              {workModes.map(renderWorkModeMenuItem)}
+              {workModes.length > 0 && hasModifierModes && <Divider sx={sectionDividerSx} />}
+              {modifierModes.map(renderModifierModeMenuItem)}
+              {supportsAutoConfirm && (
+                <MenuItem onClick={() => onAutoConfirmChange?.(!autoConfirm)} sx={modeMenuItemSx}>
+                  <TaskAltRoundedIcon sx={{ fontSize: 15, color: "text.secondary" }} />
+                  <Box component="span" sx={{ minWidth: 84 }}>{t("agentModeAutoConfirm")}</Box>
+                  <Switch size="small" checked={autoConfirm} onChange={() => undefined} tabIndex={-1} sx={modeSwitchSx} />
+                </MenuItem>
+              )}
           {showBrowserActivitySection && (
             <>
-              <Divider sx={{ my: 0.5 }} />
+              <Divider sx={sectionDividerSx} />
               <Box
                 data-testid="composer-browser-activity-section"
                 sx={{ px: 2, py: 0.75, cursor: "default" }}
@@ -695,7 +826,7 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
             </>
           )}
           {/* Compaction — below both conversation info sections */}
-          <Divider sx={{ my: 0.5 }} />
+          <Divider sx={sectionDividerSx} />
           {supportsAutoCompact && (
             <MenuItem onClick={() => onAutoCompactChange?.(!autoCompact)} sx={modeMenuItemSx}>
               <CompressRoundedIcon sx={{ fontSize: 15, color: "text.secondary" }} />
@@ -738,7 +869,7 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
             <CompressRoundedIcon sx={{ fontSize: 16, color: "text.secondary" }} />
             <Box component="span">{t("compactNow")}</Box>
           </MenuItem>
-          <Divider sx={{ my: 0.5 }} />
+          <Divider sx={sectionDividerSx} />
           <ComposerLimitsPanel
             emptyMessage={limitEmptyMessage}
             limitLines={limitLines}
@@ -817,7 +948,7 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
                 onKeyDown={handleKeyDown}
                 onPaste={handlePaste}
                 placeholder={inputPlaceholder}
-                inputProps={{ "aria-label": inputPlaceholder, "data-testid": "composer-input", spellCheck: false, autoCorrect: "off", autoCapitalize: "none", autoComplete: "off", onBeforeInput: handleBeforeInput }}
+                inputProps={{ "aria-label": inputPlaceholder, "data-testid": "composer-input", spellCheck: false, autoCorrect: "off", autoCapitalize: "none", autoComplete: "off", ...inputEventProps }}
                 multiline
                 minRows={1}
                 maxRows={7}
@@ -826,8 +957,10 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
                   fontSize: "0.84rem",
                   lineHeight: 1.45,
                   py: 0.25,
+                  ...hiddenNativePlaceholderSx,
                 }}
               />
+              {showPlaceholderHint && placeholderModel.visualLabel ? <ComposerPlaceholderHint label={placeholderModel.visualLabel} panel /> : null}
               <VoiceRecordingStrip label={voiceLabel} duration={voiceDuration} levels={voiceLevels} ambient={voiceAmbient} onLevelCountChange={setVoiceLevelCountForWidth} dockBottom />
             </Box>
           ) : (
@@ -838,7 +971,7 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}
               placeholder={inputPlaceholder}
-              inputProps={{ "aria-label": inputPlaceholder, "data-testid": "composer-input", spellCheck: false, autoCorrect: "off", autoCapitalize: "none", autoComplete: "off", onBeforeInput: handleBeforeInput }}
+              inputProps={{ "aria-label": inputPlaceholder, "data-testid": "composer-input", spellCheck: false, autoCorrect: "off", autoCapitalize: "none", autoComplete: "off", ...inputEventProps }}
               multiline
               minRows={1}
               maxRows={expanded ? 8 : 1}
@@ -847,6 +980,7 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
                 fontSize: "0.84rem",
                 lineHeight: 1.45,
                 py: 0.25,
+                ...hiddenNativePlaceholderSx,
                 ...(expanded && {
                   position: "absolute",
                   left: 0,
@@ -863,6 +997,7 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
               }}
             />
           )}
+          {voiceState !== "recording" && showPlaceholderHint && placeholderModel.visualLabel ? <ComposerPlaceholderHint label={placeholderModel.visualLabel} /> : null}
         </Box>
         <Stack direction="row" spacing={0.5} sx={{ alignItems: "center", flex: "0 0 auto" }}>
           {!editChrome && !running && !voiceInputActive ? (

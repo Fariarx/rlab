@@ -11,6 +11,7 @@ export type AgentId = PersistedAgentId;
 export type AgentSystemStatus = "available" | "running" | "needs-setup" | "unavailable" | "unsupported";
 export const KNOWN_AGENT_WORK_MODE_IDS = [
   "default",
+  "fast",
   "plan",
   "auto-edit",
   "auto",
@@ -24,6 +25,9 @@ export const KNOWN_AGENT_WORK_MODE_IDS = [
 export type KnownAgentWorkMode = (typeof KNOWN_AGENT_WORK_MODE_IDS)[number];
 export type AgentWorkMode = KnownAgentWorkMode | (string & {});
 export type AgentAccessMode = "read-only" | "unrestricted";
+export const AGENT_MODIFIER_MODE_IDS = ["fast"] as const;
+export const AGENT_WORK_MODE_IDS = ["plan", "review", "build", "explore", "summary"] as const;
+export type AgentModifierModeId = (typeof AGENT_MODIFIER_MODE_IDS)[number];
 
 export interface AgentOption {
   readonly id: string;
@@ -56,10 +60,18 @@ export const DEFAULT_AGENT_OPTION_ID = "default";
 const DEFAULT_OPTION: AgentOption = { id: DEFAULT_AGENT_OPTION_ID, label: "Default" };
 const DEFAULT_ONLY = [DEFAULT_OPTION] as const;
 export const CLAUDE_AGENT_MODE_PREFIX = "claude-agent:";
-const STANDARD_WORK_MODES = [
-  DEFAULT_OPTION,
+const STANDARD_WORKFLOW_MODES = [
   { id: "plan", label: "Plan", value: "plan" },
+  { id: "review", label: "Review", value: "review" },
+  { id: "build", label: "Build", value: "build" },
+  { id: "explore", label: "Explore", value: "explore" },
+  { id: "summary", label: "Summary", value: "summary" },
 ] as const;
+const STANDARD_WORK_MODES = [DEFAULT_OPTION, ...STANDARD_WORKFLOW_MODES] as const;
+const CODEX_WORK_MODES = [DEFAULT_OPTION, { id: "fast", label: "Fast", value: "fast" }, ...STANDARD_WORKFLOW_MODES] as const;
+const AGENT_MODIFIER_MODE_ID_SET = new Set<string>(AGENT_MODIFIER_MODE_IDS);
+const AGENT_WORK_MODE_ID_SET = new Set<string>(AGENT_WORK_MODE_IDS);
+const READ_ONLY_WORK_MODE_IDS = new Set<AgentWorkMode>(["plan", "review", "explore", "summary"]);
 const OPENCODE_INTERNAL_AGENT_IDS = new Set(["title", "compaction"]);
 const CLAUDE_INTERNAL_AGENT_IDS = new Set(["statusline-setup"]);
 const CLAUDE_REASONING_OPTIONS = [
@@ -133,7 +145,7 @@ export const AGENTS = [
       { id: "gpt-5.3-codex", label: "GPT-5.3 Codex", value: "gpt-5.3-codex" },
     ],
     reasoning: CODEX_REASONING_OPTIONS,
-    modes: STANDARD_WORK_MODES,
+    modes: CODEX_WORK_MODES,
   },
   {
     id: "gemini",
@@ -213,6 +225,14 @@ export function isAgentAccessMode(value: unknown): value is AgentAccessMode {
   return value === "read-only" || value === "unrestricted";
 }
 
+export function isAgentModifierModeId(value: string): value is AgentModifierModeId {
+  return AGENT_MODIFIER_MODE_ID_SET.has(value);
+}
+
+export function isAgentWorkModeId(value: string): boolean {
+  return AGENT_WORK_MODE_ID_SET.has(value);
+}
+
 export interface AgentCliInfo {
   readonly status: AgentSystemStatus;
   readonly bins: readonly string[];
@@ -250,8 +270,9 @@ export interface AgentProfile {
   readonly model: string;
   readonly reasoning: string;
   readonly mode: AgentWorkMode;
+  readonly fast?: boolean;
   readonly autoConfirm?: boolean;
-  /** Enabled rlab chat tools for this conversation. Undefined means all tools. */
+  /** Enabled rlab chat tools for this conversation. Undefined means the default tool set. */
   readonly tools?: readonly RlabChatToolId[];
 }
 
@@ -330,6 +351,9 @@ function normalizeOptionId(agent: AgentId, kind: "models" | "reasoning", options
 }
 
 function normalizeModeId(agent: AgentId, options: readonly AgentOption[], id: string): AgentWorkMode {
+  if (isAgentModifierModeId(id)) {
+    return DEFAULT_AGENT_OPTION_ID;
+  }
   if (hasOption(options, id) || isDirectAgentModeValue(agent, id)) {
     return id;
   }
@@ -357,6 +381,9 @@ export function normalizeAgentProfile(value: unknown, fallbackAgent: AgentId = D
   const agent = isAgentId(value.agent) ? value.agent : activeFallbackAgent;
   const def = getAgent(agent);
   const rawMode = isAgentWorkMode(value.mode) ? value.mode.trim() : DEFAULT_AGENT_OPTION_ID;
+  const rawFast = typeof value.fast === "boolean" ? value.fast : undefined;
+  const migratedFast = isAgentModifierModeId(rawMode) && rawMode === "fast";
+  const fast = rawFast ?? migratedFast;
   const autoConfirm = typeof value.autoConfirm === "boolean" ? value.autoConfirm : undefined;
   const tools = persistedRlabChatToolIds(value.tools);
   return {
@@ -364,6 +391,7 @@ export function normalizeAgentProfile(value: unknown, fallbackAgent: AgentId = D
     model: typeof value.model === "string" ? normalizeOptionId(agent, "models", def.models, value.model) : DEFAULT_AGENT_OPTION_ID,
     reasoning: typeof value.reasoning === "string" ? normalizeOptionId(agent, "reasoning", def.reasoning, value.reasoning) : DEFAULT_AGENT_OPTION_ID,
     mode: normalizeModeId(agent, def.modes, rawMode),
+    ...(fast ? { fast } : {}),
     ...(autoConfirm !== undefined ? { autoConfirm } : {}),
     ...(tools !== undefined ? { tools } : {}),
   };
@@ -377,6 +405,7 @@ export function agentProfileEquals(a: AgentProfile, b: AgentProfile): boolean {
     a.model === b.model &&
     a.reasoning === b.reasoning &&
     a.mode === b.mode &&
+    (a.fast ?? false) === (b.fast ?? false) &&
     (a.autoConfirm ?? false) === (b.autoConfirm ?? false) &&
     aTools.length === bTools.length &&
     aTools.every((tool, index) => tool === bTools[index])
@@ -384,7 +413,7 @@ export function agentProfileEquals(a: AgentProfile, b: AgentProfile): boolean {
 }
 
 export function accessModeForAgentProfile(profile: AgentProfile): AgentAccessMode {
-  return profile.mode === "plan" ? "read-only" : "unrestricted";
+  return READ_ONLY_WORK_MODE_IDS.has(profile.mode) ? "read-only" : "unrestricted";
 }
 
 function optionLabel(options: readonly AgentOption[], id: string): string | null {
@@ -479,6 +508,9 @@ export function resolveAgentReasoningValue(agent: AgentId, id: string): string |
 }
 
 export function resolveAgentModeValue(agent: AgentId, id: string): string | undefined {
+  if (isAgentModifierModeId(id)) {
+    return undefined;
+  }
   return getAgent(agent).modes.find((option) => option.id === id)?.value;
 }
 

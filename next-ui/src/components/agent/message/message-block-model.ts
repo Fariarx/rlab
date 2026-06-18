@@ -1,8 +1,9 @@
-import type { AgentBlock, DiffBlock, PlanBlock } from "../core/types";
+import type { AgentBlock, DiffBlock, PlanBlock, StatusBlock } from "../core/types";
 
 const ANSWER_BLOCK_KINDS: ReadonlySet<AgentBlock["kind"]> = new Set(["text", "options", "approval", "suggested"]);
 const DIFF_KIND: AgentBlock["kind"] = "diff";
-type VisibleTerminalStatusBlock = Extract<AgentBlock, { kind: "status"; level: "warn" | "error" }>;
+type VisibleTerminalStatusBlock = StatusBlock & { readonly level: "warn" | "error" };
+type SurfacedStatusBlock = VisibleTerminalStatusBlock & { readonly surface: true };
 
 export interface AgentMessageBlockModel {
   readonly answerBlocks: readonly AgentBlock[];
@@ -84,8 +85,21 @@ function isVisibleTerminalStatus(block: AgentBlock): block is VisibleTerminalSta
   return block.kind === "status" && (block.level === "warn" || block.level === "error");
 }
 
+function isSurfacedStatus(block: AgentBlock): block is SurfacedStatusBlock {
+  return isVisibleTerminalStatus(block) && block.surface === true;
+}
+
 function terminalStatusAnswerBlock(blocks: readonly AgentBlock[], live: boolean, hasVisibleAnswerOutput: boolean): VisibleTerminalStatusBlock | null {
-  if (live || hasVisibleAnswerOutput) {
+  if (live) {
+    return null;
+  }
+  for (let index = blocks.length - 1; index >= 0; index -= 1) {
+    const block = blocks[index];
+    if (isSurfacedStatus(block)) {
+      return block;
+    }
+  }
+  if (hasVisibleAnswerOutput) {
     return null;
   }
   for (let index = blocks.length - 1; index >= 0; index -= 1) {
@@ -130,7 +144,8 @@ export function createAgentMessageBlockModel({
   const resolvedInputsSignature = resolvedInputSignature(blocks);
   const hasResolvedInput = resolvedInputsSignature.length > 0;
   const lastNonTextBlockIndex = lastTimelineNonTextBlockIndex(blocks);
-  const isResultText = (block: AgentBlock, index: number): boolean => block.kind === "text" && !live && (block.result !== false || index > lastNonTextBlockIndex);
+  const hasSurfacedStatus = blocks.some(isSurfacedStatus);
+  const isResultText = (block: AgentBlock, index: number): boolean => block.kind === "text" && !live && (block.result !== false || (!hasSurfacedStatus && index > lastNonTextBlockIndex));
   const isAnswerBlock = (block: AgentBlock, index: number): boolean =>
     isImageAnswerBlock(block) || isResultText(block, index) || (ANSWER_BLOCK_KINDS.has(block.kind) && block.kind !== "text" && (!isResolvedInputBlock(block) || !hideResolvedInputs));
   const baseAnswerBlocks = blocks.filter((block, index) => isAnswerBlock(block, index));

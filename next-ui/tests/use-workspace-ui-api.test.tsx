@@ -23,16 +23,18 @@ function resolveState<T>(current: T, updater: StateUpdater<T>): T {
 
 function Harness({
   showView,
+  previewEnabled = true,
   setBrowserOpenRequest,
   setGitFocus,
   capture,
 }: {
   readonly showView: (view: ConversationView) => void;
+  readonly previewEnabled?: boolean;
   readonly setBrowserOpenRequest: (value: StateUpdater<BrowserOpenRequest>) => void;
   readonly setGitFocus: (value: StateUpdater<GitFocusRequest>) => void;
   readonly capture: (api: WorkspaceUiApi) => void;
 }) {
-  const api = useWorkspaceUiApi({ showView, setBrowserOpenRequest, setGitFocus });
+  const api = useWorkspaceUiApi({ showView, previewEnabled, setBrowserOpenRequest, setGitFocus });
   useEffect(() => {
     capture(api);
   }, [api, capture]);
@@ -90,5 +92,29 @@ describe("useWorkspaceUiApi", () => {
 
     expect(gitFocus).toEqual({ path: "src/App.tsx", nonce: 5 });
     expect(showView).toHaveBeenCalledWith("git");
+  });
+
+  it("ignores preview open requests when Preview is disabled", async () => {
+    const showView = vi.fn();
+    const setBrowserOpenRequest = vi.fn();
+    const captured: { current: WorkspaceUiApi | null } = { current: null };
+
+    render(
+      <Harness
+        showView={showView}
+        previewEnabled={false}
+        setBrowserOpenRequest={setBrowserOpenRequest}
+        setGitFocus={vi.fn()}
+        capture={(api) => {
+          captured.current = api;
+        }}
+      />,
+    );
+
+    await waitFor(() => expect(captured.current).not.toBeNull());
+    captured.current?.openPreview("vitest.dev/api");
+
+    expect(setBrowserOpenRequest).not.toHaveBeenCalled();
+    expect(showView).not.toHaveBeenCalled();
   });
 });

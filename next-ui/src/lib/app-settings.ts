@@ -29,6 +29,7 @@ export interface GeneralSettings {
    *  host (e.g. "203.0.113.10" or "dev.example.com:8080"). Empty ⇒ route such
    *  URLs through rlab's same-origin /preview-proxy instead. */
   readonly previewServerHost: string;
+  readonly systemPrompt: string;
   readonly voice: VoiceSettings;
 }
 
@@ -63,6 +64,7 @@ export const defaultAppSettings: AppSettings = {
     locale: "ru",
     telemetry: false,
     previewServerHost: "",
+    systemPrompt: "",
     voice: DEFAULT_VOICE_SETTINGS,
   },
   agents: {
@@ -86,6 +88,7 @@ export function cloneAppSettings(settings: AppSettings): AppSettings {
       locale: settings.general.locale,
       telemetry: settings.general.telemetry,
       previewServerHost: settings.general.previewServerHost,
+      systemPrompt: normalizeSystemPromptSetting(settings.general.systemPrompt),
       voice: normalizeVoiceSettings(settings.general.voice),
     },
     agents: {
@@ -103,6 +106,7 @@ export function mergeAppSettings(current: AppSettings, patch: AppSettingsPatch):
   const general = {
     ...current.general,
     ...patch.general,
+    systemPrompt: normalizeSystemPromptSetting(patch.general?.systemPrompt ?? current.general.systemPrompt),
     voice: normalizeVoiceSettings({ ...current.general.voice, ...voicePatch }),
   };
   return {
@@ -143,6 +147,10 @@ export function normalizeSidebarWidth(value: unknown): number {
   return Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, Math.round(value)));
 }
 
+function normalizeSystemPromptSetting(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
 function isAgentProfile(value: unknown): value is AgentProfile {
   if (!isRecord(value)) {
     return false;
@@ -152,7 +160,8 @@ function isAgentProfile(value: unknown): value is AgentProfile {
     typeof value.model === "string" &&
     typeof value.reasoning === "string" &&
     typeof value.mode === "string" &&
-    value.mode.trim().length > 0
+    value.mode.trim().length > 0 &&
+    (value.fast === undefined || typeof value.fast === "boolean")
   );
 }
 
@@ -177,6 +186,7 @@ export function isAppSettings(value: unknown): value is AppSettings {
     typeof general.confirmDestructiveActions === "boolean" &&
     typeof general.telemetry === "boolean" &&
     typeof general.previewServerHost === "string" &&
+    (general.systemPrompt === undefined || typeof general.systemPrompt === "string") &&
     isVoiceSettings(general.voice) &&
     isAgentProfile(agents.defaultProfile)
   );

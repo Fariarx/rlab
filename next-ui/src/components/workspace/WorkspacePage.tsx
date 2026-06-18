@@ -206,6 +206,14 @@ export const WorkspacePageView = observer(function WorkspacePageView({
   const showTerminal = ws.settings.appearance.showTerminal;
   const selected = ws.find(ws.selectedId);
   const messages = ws.threads[ws.selectedId] ?? [];
+  const previewEnabled = rlabChatToolEnabled(profile.tools, "BrowserPreview");
+  const viewSwitcherLabel = useMemo(() => [
+    t("chatTab"),
+    t("git"),
+    t("resourcesTab"),
+    previewEnabled ? t("previewTab") : undefined,
+    showTerminal ? t("terminalTab") : undefined,
+  ].filter((label): label is string => Boolean(label)).join(" / "), [previewEnabled, showTerminal, t]);
   const displayedMessages = useMemo(() => appendConversationErrorNotice(selected, messages, t("conversationErrorNotice")), [messages, selected, t]);
   const selectedThreadLoaded = selected ? ws.isThreadLoaded(selected.id) : false;
   const selectedHasOlderMessages = selected ? ws.hasOlderThreadMessages(selected.id) : false;
@@ -224,6 +232,7 @@ export const WorkspacePageView = observer(function WorkspacePageView({
     selectedConversationId: selected?.id,
     selectedView: selected?.view,
     terminalEnabled: showTerminal,
+    previewEnabled,
     view,
     setView,
     persistConversationView,
@@ -302,7 +311,7 @@ export const WorkspacePageView = observer(function WorkspacePageView({
     ws.sendMessage(ws.selectedId, message);
     showView("chat");
   };
-  const uiApi = useWorkspaceUiApi({ showView, setBrowserOpenRequest, setGitFocus });
+  const uiApi = useWorkspaceUiApi({ showView, previewEnabled, setBrowserOpenRequest, setGitFocus });
   const activeCwd = selectedCwd;
   const headerTitle = selected?.title ?? t("noConversation");
   const profileAccessMode = accessModeForAgentProfile(profile);
@@ -357,13 +366,16 @@ export const WorkspacePageView = observer(function WorkspacePageView({
     showView("git");
   }, [showView]);
   const openPreview = useCallback(() => {
+    if (!previewEnabled) {
+      return;
+    }
     showView("preview");
-  }, [showView]);
+  }, [previewEnabled, showView]);
   const toggleTheme = useCallback(() => {
     ws.updateSettings({ appearance: { theme: mode === "dark" ? "light" : "dark" } });
   }, [mode, ws]);
 
-  const { handleAutoConfirmChange, handleModeChange, handlePicked, supportedModes } = useWorkspaceAgentProfileController({
+  const { handleAutoConfirmChange, handleModeChange, handleModifierModeChange, handlePicked, supportedModes } = useWorkspaceAgentProfileController({
     defaultProfile: ws.settings.agents.defaultProfile,
     profile,
     selected,
@@ -410,6 +422,7 @@ export const WorkspacePageView = observer(function WorkspacePageView({
     openSettings,
     openGit,
     openPreview,
+    previewEnabled,
     toggleTheme,
     openKit,
   });
@@ -510,6 +523,8 @@ export const WorkspacePageView = observer(function WorkspacePageView({
     modes: supportedModes,
     activeMode: profile.mode,
     onModeChange: handleModeChange,
+    activeModifierModes: profile.fast ? ["fast"] : [],
+    onModifierModeChange: handleModifierModeChange,
     autoConfirm: profile.autoConfirm ?? false,
     supportsAutoConfirm: AGENT_AUTO_CONFIRM_AGENTS.has(profile.agent),
     onAutoConfirmChange: handleAutoConfirmChange,
@@ -544,7 +559,7 @@ export const WorkspacePageView = observer(function WorkspacePageView({
     },
     voiceProvider,
     onVoiceError: (message) => toast({ message, severity: "error", duration: 3500 }),
-    browserActivityEvents: view === "preview" ? browserActivityEvents : undefined,
+    browserActivityEvents: previewEnabled && view === "preview" ? browserActivityEvents : undefined,
     registeredPlugins: activeRegisteredPlugins,
   };
 
@@ -669,7 +684,7 @@ export const WorkspacePageView = observer(function WorkspacePageView({
                 exclusive
                 value={view}
                 onChange={(_, next: ConversationView | null) => next && showView(next)}
-                aria-label={t("viewSwitcher")}
+                aria-label={viewSwitcherLabel}
                 sx={{
                   // Single bordered container with borderless segments inside, so
                   // the selected highlight fills its segment edge-to-edge (no
@@ -715,10 +730,12 @@ export const WorkspacePageView = observer(function WorkspacePageView({
                   <InsertDriveFileOutlinedIcon sx={{ fontSize: 15 }} />
                   <Box component="span" sx={{ display: { xs: "none", sm: "inline" } }}>{t("resourcesTab")}</Box>
                 </ToggleButton>
-                <ToggleButton value="preview" aria-label={t("previewTab")}>
-                  <OpenInBrowserIcon sx={{ fontSize: 15 }} />
-                  <Box component="span" sx={{ display: { xs: "none", sm: "inline" } }}>{t("previewTab")}</Box>
-                </ToggleButton>
+                {previewEnabled && (
+                  <ToggleButton value="preview" aria-label={t("previewTab")}>
+                    <OpenInBrowserIcon sx={{ fontSize: 15 }} />
+                    <Box component="span" sx={{ display: { xs: "none", sm: "inline" } }}>{t("previewTab")}</Box>
+                  </ToggleButton>
+                )}
                 {showTerminal && (
                   <ToggleButton value="terminal" aria-label={t("terminalTab")}>
                     <TerminalIcon sx={{ fontSize: 15 }} />
@@ -828,20 +845,22 @@ export const WorkspacePageView = observer(function WorkspacePageView({
                   <ResourcesPanel messages={messages} bottomInset={contentBottomInset} />
                 </Box>
               )}
-              <Box sx={{ position: "absolute", inset: 0, display: view === "preview" ? "block" : "none" }}>
-                {selected ? (
-                  <BrowserPreview
-                    sessionId={selected.id}
-                    active={view === "preview"}
-                    bridgeActive={view === "preview" || selectedHasActiveWork}
-                    onSendAnnotation={sendBrowserAnnotation}
-                    onActivityEventsChange={setBrowserActivityEvents}
-                    openRequest={browserOpenRequest}
-                    serverHostOverride={ws.settings.general.previewServerHost}
-                    bottomInset={view === "preview" ? contentBottomInset : 0}
-                  />
-                ) : null}
-              </Box>
+              {previewEnabled && (
+                <Box sx={{ position: "absolute", inset: 0, display: view === "preview" ? "block" : "none" }}>
+                  {selected ? (
+                    <BrowserPreview
+                      sessionId={selected.id}
+                      active={view === "preview"}
+                      bridgeActive={view === "preview" || selectedHasActiveWork}
+                      onSendAnnotation={sendBrowserAnnotation}
+                      onActivityEventsChange={setBrowserActivityEvents}
+                      openRequest={browserOpenRequest}
+                      serverHostOverride={ws.settings.general.previewServerHost}
+                      bottomInset={view === "preview" ? contentBottomInset : 0}
+                    />
+                  ) : null}
+                </Box>
+              )}
               {/* Keyed by folder so each project's terminal keeps its own scrollback. */}
               {showTerminal && (
                 <Box sx={{ position: "absolute", inset: 0, display: view === "terminal" ? "block" : "none" }}>

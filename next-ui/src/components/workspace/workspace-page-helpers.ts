@@ -19,11 +19,17 @@ export interface ConversationRouteWorkspace {
 
 const CONVERSATION_VIEWS = new Set<ConversationView>(["chat", "git", "resources", "preview", "terminal"]);
 
-export function normalizeConversationView(view: ConversationView | undefined, terminalEnabled: boolean): ConversationView {
+export function normalizeConversationView(view: ConversationView | undefined, terminalEnabled: boolean, previewEnabled = true): ConversationView {
   if (!view || !CONVERSATION_VIEWS.has(view)) {
     return "chat";
   }
-  return view === "terminal" && !terminalEnabled ? "chat" : view;
+  if (view === "terminal" && !terminalEnabled) {
+    return "chat";
+  }
+  if (view === "preview" && !previewEnabled) {
+    return "chat";
+  }
+  return view;
 }
 
 /** The visible text of a sent user message (attachment blocks and file-link
@@ -33,7 +39,7 @@ export function composerHistoryText(raw: string): string {
 }
 
 export function buildComposerLabel(profile: AgentProfile): string {
-  return agentProfileCompactLabel(profile, "upper", { includeDefaults: true });
+  return agentProfileCompactLabel(profile, "lower", { includeDefaults: true });
 }
 
 export function liveModesOrCatalog<T extends { readonly id: string }>(catalogOptions: readonly T[], liveOptions: readonly T[] | undefined): readonly T[] {

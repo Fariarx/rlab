@@ -12,16 +12,16 @@ describe("workspace-page-helpers", () => {
 
   it("formats the composer profile label as compact slash-separated tokens", () => {
     expect(buildComposerLabel({ agent: "claude-code", model: "default", reasoning: "default", mode: "default" })).toBe(
-      "CLAUDE-CODE/DEFAULT/DEFAULT",
+      "claude-code/default/default",
     );
     expect(buildComposerLabel({ agent: "codex", model: "gpt-5.5", reasoning: "xhigh", mode: "default" })).toBe(
-      "CODEX/GPT-5.5/XHIGH",
+      "codex/gpt-5.5/xhigh",
     );
     expect(buildComposerLabel({ agent: "opencode", model: "opencode-big-pickle", reasoning: "max", mode: "default" })).toBe(
-      "OPENCODE/BIG-PICKLE/MAX",
+      "opencode/big-pickle/max",
     );
     expect(buildComposerLabel({ agent: "opencode", model: "opencode/deepseek-v4-flash-free", reasoning: "medium", mode: "default" })).toBe(
-      "OPENCODE/DEEPSEEK-V4-FLASH-FREE/MEDIUM",
+      "opencode/deepseek-v4-flash-free/medium",
     );
   });
 });

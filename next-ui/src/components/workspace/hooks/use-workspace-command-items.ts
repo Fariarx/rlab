@@ -9,6 +9,7 @@ export interface UseWorkspaceCommandItemsOptions {
   readonly openSettings: () => void;
   readonly openGit: () => void;
   readonly openPreview: () => void;
+  readonly previewEnabled: boolean;
   readonly toggleTheme: () => void;
   readonly openKit: () => void;
 }
@@ -20,6 +21,7 @@ export function useWorkspaceCommandItems({
   openSettings,
   openGit,
   openPreview,
+  previewEnabled,
   toggleTheme,
   openKit,
 }: UseWorkspaceCommandItemsOptions): readonly CommandPaletteItem[] {
@@ -51,12 +53,16 @@ export function useWorkspaceCommandItems({
         keywords: [t("git"), t("gitStatus")],
         action: openGit,
       },
-      {
-        id: "open-preview",
-        label: t("commandOpenPreview"),
-        keywords: [t("previewTab"), t("browserPreviewTitle")],
-        action: openPreview,
-      },
+      ...(previewEnabled
+        ? [
+            {
+              id: "open-preview",
+              label: t("commandOpenPreview"),
+              keywords: [t("previewTab"), t("browserPreviewTitle")],
+              action: openPreview,
+            },
+          ]
+        : []),
       {
         id: "toggle-theme",
         label: t("commandToggleTheme"),
@@ -70,6 +76,6 @@ export function useWorkspaceCommandItems({
         action: openKit,
       },
     ],
-    [createConversation, openConversationSearch, openGit, openKit, openPreview, openSettings, t, toggleTheme],
+    [createConversation, openConversationSearch, openGit, openKit, openPreview, openSettings, previewEnabled, t, toggleTheme],
   );
 }

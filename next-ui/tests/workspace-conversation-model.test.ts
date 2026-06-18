@@ -305,7 +305,7 @@ describe("workspace-conversation-model", () => {
       selectedId: "chat-1",
     });
 
-    const result = stopRunConversationState(state, "chat-1", "13:00");
+    const result = stopRunConversationState(state, "chat-1", "13:00", "Запуск остановлен");
 
     expect(result.conversation).toMatchObject({
       id: "chat-1",
@@ -314,7 +314,10 @@ describe("workspace-conversation-model", () => {
       status: "idle",
       time: "13:00",
     });
-    expect(result.thread[1]?.blocks).toEqual([{ kind: "text", text: "new answer", streaming: false, result: true }]);
+    expect(result.thread[1]?.blocks).toEqual([
+      { kind: "text", text: "new answer", streaming: false, result: false },
+      { kind: "status", level: "warn", text: "Запуск остановлен", surface: true },
+    ]);
     expect(result.state.threads["chat-1"]?.[1]).toBe(result.thread[1]);
   });
 

@@ -70,6 +70,8 @@ export class AgentPickerStore {
 
   mode: AgentWorkMode;
 
+  fast: boolean;
+
   autoConfirm: boolean;
 
   tools: readonly RlabChatToolId[];
@@ -79,6 +81,7 @@ export class AgentPickerStore {
     this.model = initialProfile.model;
     this.reasoning = initialProfile.reasoning;
     this.mode = initialProfile.mode;
+    this.fast = initialProfile.fast ?? false;
     this.autoConfirm = initialProfile.autoConfirm ?? false;
     this.tools = activeRlabChatToolIds(initialProfile.tools);
     makeObservable(this, {
@@ -86,12 +89,14 @@ export class AgentPickerStore {
       model: observable,
       reasoning: observable,
       mode: observable,
+      fast: observable,
       autoConfirm: observable,
       tools: observable.ref,
       setAgent: action.bound,
       setModel: action.bound,
       setReasoning: action.bound,
       setMode: action.bound,
+      setFast: action.bound,
       setAutoConfirm: action.bound,
       setToolEnabled: action.bound,
       setProfile: action.bound,
@@ -112,6 +117,10 @@ export class AgentPickerStore {
 
   setMode(value: StateUpdater<AgentWorkMode>): void {
     this.mode = resolveState(this.mode, value);
+  }
+
+  setFast(value: StateUpdater<boolean>): void {
+    this.fast = resolveState(this.fast, value);
   }
 
   setAutoConfirm(value: StateUpdater<boolean>): void {
@@ -137,6 +146,7 @@ export class AgentPickerStore {
     this.model = profile.model;
     this.reasoning = profile.reasoning;
     this.mode = profile.mode;
+    this.fast = profile.fast ?? false;
     this.autoConfirm = profile.autoConfirm ?? false;
     this.tools = activeRlabChatToolIds(profile.tools);
   }

@@ -8,7 +8,7 @@ import RefreshIcon from "@mui/icons-material/Refresh";
 import RemoveIcon from "@mui/icons-material/Remove";
 import { Alert, Box, CircularProgress, Collapse, Dialog, DialogActions, DialogContent, DialogContentText, DialogTitle, Divider, Stack, Tab, Tabs, type Theme, Tooltip, Typography } from "@mui/material";
 import { observer } from "mobx-react-lite";
-import { type ReactNode, type RefObject, useRef, useState } from "react";
+import { type ReactNode, type RefObject, useMemo, useRef, useState } from "react";
 import { type I18nApi, useI18n } from "../../../i18n/I18nProvider";
 import type { GitFileStatus } from "../../../lib/git-status";
 import type { DiffBlock, ReviewCommentEntry } from "../../agent";
@@ -30,6 +30,7 @@ export interface DiffCommentApi {
   readonly onAddComment: (file: string, line: number, lineText: string, body: string) => void;
   readonly onUpdateComment: (id: string, body: string) => void;
   readonly onDeleteComment: (id: string) => void;
+  readonly onInputActivityChange?: (active: boolean) => void;
 }
 
 interface GitViewProps {
@@ -96,6 +97,7 @@ const DiffFileCard = observer(function DiffFileCard({
   onAddComment,
   onUpdateComment,
   onDeleteComment,
+  onInputActivityChange,
   focusSignal = 0,
   t,
 }: {
@@ -110,6 +112,7 @@ const DiffFileCard = observer(function DiffFileCard({
   readonly onAddComment?: (line: number, lineText: string, body: string) => void;
   readonly onUpdateComment?: (id: string, body: string) => void;
   readonly onDeleteComment?: (id: string) => void;
+  readonly onInputActivityChange?: (active: boolean) => void;
   /** Increments when this card is the target of an external "open in Git" jump;
    *  each new value expands the card and scrolls it into view. */
   readonly focusSignal?: number;
@@ -199,7 +202,7 @@ const DiffFileCard = observer(function DiffFileCard({
               {t("gitDiffTooLarge", { count: lineCount })}
             </Alert>
           ) : lines && lines.length > 0 ? (
-            <GitDiffLines lines={lines} path={path} comments={comments} onAddComment={onAddComment} onUpdateComment={onUpdateComment} onDeleteComment={onDeleteComment} />
+            <GitDiffLines lines={lines} path={path} comments={comments} onAddComment={onAddComment} onUpdateComment={onUpdateComment} onDeleteComment={onDeleteComment} onInputActivityChange={onInputActivityChange} />
           ) : (
             <Typography sx={{ color: "text.secondary", fontSize: "0.8rem", px: 1.5, py: 1.25 }}>{t("gitDiffEmpty")}</Typography>
           )}
@@ -246,6 +249,7 @@ const GitFileDiffCard = observer(function GitFileDiffCard({
       onAddComment={review ? (line, lineText, body) => review.onAddComment(file.gitPath, line, lineText, body) : undefined}
       onUpdateComment={review?.onUpdateComment}
       onDeleteComment={review?.onDeleteComment}
+      onInputActivityChange={review?.onInputActivityChange}
       focusSignal={focusSignal}
       t={t}
     />
@@ -254,12 +258,19 @@ const GitFileDiffCard = observer(function GitFileDiffCard({
 
 export const GitView = observer(function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnstagedStatsChange, bottomInset = 0, focusPath, focusNonce = 0, reloadSignal = 0, worktree }: GitViewProps) {
   const { t } = useI18n();
+  const [reviewInputActive, setReviewInputActive] = useState(false);
+  const reviewWithActivity = useMemo<DiffCommentApi | undefined>(
+    () => review ? { ...review, onInputActivityChange: setReviewInputActive } : undefined,
+    [review],
+  );
   const controller = useGitViewController({
     cwd,
+    active,
     lastTurnDiffs,
     focusPath,
     focusNonce,
     reloadSignal,
+    autoRefreshPaused: reviewInputActive,
     onUnstagedStatsChange,
     t,
   });
@@ -464,7 +475,7 @@ export const GitView = observer(function GitView({ cwd, lastTurnDiffs = [], revi
                         mode="worktree"
                         autoLoad={active && unstagedFiles.length <= EAGER_DIFF_LIMIT}
                         scrollRef={scrollRef}
-                        review={review}
+                        review={reviewWithActivity}
                         focusSignal={focusSignalFor(file.gitPath)}
                         t={t}
                         action={
@@ -506,7 +517,7 @@ export const GitView = observer(function GitView({ cwd, lastTurnDiffs = [], revi
                         mode="staged"
                         autoLoad={active && stagedFiles.length <= EAGER_DIFF_LIMIT}
                         scrollRef={scrollRef}
-                        review={review}
+                        review={reviewWithActivity}
                         focusSignal={focusSignalFor(file.gitPath)}
                         t={t}
                         action={

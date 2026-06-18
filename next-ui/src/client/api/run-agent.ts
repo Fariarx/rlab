@@ -39,6 +39,22 @@ function isAbortError(value: unknown, signal?: AbortSignal): boolean {
   return value.name === "AbortError";
 }
 
+function canceledStatusBlock(locale: Locale): AgentBlock {
+  return { kind: "status", level: "warn", text: translate(locale, "runCanceledSnippet"), surface: true };
+}
+
+function appendUniqueStatusBlock(blocks: readonly AgentBlock[], statusBlock: AgentBlock): AgentBlock[] {
+  if (statusBlock.kind !== "status") {
+    return [...blocks, statusBlock];
+  }
+  const exists = blocks.some((block) => block.kind === "status" && block.level === statusBlock.level && block.text === statusBlock.text);
+  return exists ? [...blocks] : [...blocks, statusBlock];
+}
+
+function suppressCanceledTextResults(block: AgentBlock): AgentBlock {
+  return block.kind === "text" ? { ...block, streaming: false, result: false } : block;
+}
+
 interface RunPersistenceBinding {
   readonly conversationId: string;
   readonly runId: string;
@@ -213,6 +229,7 @@ async function streamRun(
   resume: string | undefined,
   compaction: CompactionSettings | undefined,
   serverPrompt: RunServerPromptRequest | undefined,
+  systemPrompt: string | undefined,
   onEvent: (e: RunEvent) => void,
   onAccepted: () => void,
   signal?: AbortSignal,
@@ -225,6 +242,7 @@ async function streamRun(
       model: profile.model,
       reasoning: profile.reasoning,
       mode: profile.mode,
+      fast: profile.fast ?? false,
       autoConfirm: profile.autoConfirm ?? false,
       ...(profile.tools !== undefined ? { tools: profile.tools } : {}),
       prompt,
@@ -234,6 +252,7 @@ async function streamRun(
       ...(compaction?.auto !== undefined ? { autoCompact: compaction.auto } : {}),
       ...(typeof compaction?.window === "number" ? { compactWindow: compaction.window } : {}),
       ...(serverPrompt ? { serverPrompt } : {}),
+      ...(systemPrompt && systemPrompt.trim().length > 0 ? { systemPrompt } : {}),
       ...binding,
     }),
     signal,
@@ -282,6 +301,7 @@ export async function runConversation(opts: {
    *  forwarded to the backend so the agent compacts to the user's settings. */
   readonly compaction?: CompactionSettings;
   readonly serverPrompt?: RunServerPromptRequest;
+  readonly systemPrompt?: string;
   readonly onAccepted?: () => void;
   /** Fires as soon as the agent reports its session id, so it can be persisted
    *  immediately (even if the run later detaches or errors). */
@@ -360,6 +380,7 @@ export async function runConversation(opts: {
       opts.resume,
       opts.compaction,
       opts.serverPrompt,
+      opts.systemPrompt,
       onEvent,
       () => {
         accepted = true;
@@ -399,10 +420,11 @@ export async function runConversation(opts: {
   const status = hadError || warningOnlyFailure ? "error" : needsInput ? "waiting" : "done";
   let finalBlocks = rebuild().map((block) => finishLiveBlock(block, status === "error" ? "error" : "ok"));
   // Always emit a final settled render so a canceled run doesn't leave the
-  // message stuck on the live "thinking" placeholder. If nothing streamed in
-  // before the cancel, show an explicit "stopped" note instead of an empty bubble.
-  if (canceled && finalBlocks.length === 0) {
-    finalBlocks = [{ kind: "status", level: "warn", text: translate(opts.locale, "runCanceledSnippet") }];
+  // message stuck on the live "thinking" placeholder. Canceled partial text is
+  // not a completed answer, so keep it folded and surface the stop warning.
+  if (canceled) {
+    const statusBlock = canceledStatusBlock(opts.locale);
+    finalBlocks = appendUniqueStatusBlock(finalBlocks.map(suppressCanceledTextResults), statusBlock);
   } else if (!canceled && finalBlocks.length === 0) {
     // A turn that settled without emitting any block (e.g. a slash command the
     // agent handled internally) must not leave the agent bubble stuck on the

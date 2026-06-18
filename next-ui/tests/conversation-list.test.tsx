@@ -156,23 +156,23 @@ describe("ConversationList status dots", () => {
 });
 
 describe("ConversationList activity ordering", () => {
-  it("floats active chats within their group with green status first", () => {
+  it("orders chats by recency without status priority", () => {
     render([
-      { ...base, id: "idle", title: "Idle chat", status: "idle" },
-      { ...base, id: "waiting", title: "Waiting chat", status: "waiting" },
-      { ...base, id: "done", title: "Done chat", status: "done" },
-      { ...base, id: "running", title: "Running chat", status: "running" },
+      { ...base, id: "waiting", title: "Waiting older", status: "waiting", updatedAtMs: 1000 },
+      { ...base, id: "done", title: "Done newest", status: "done", updatedAtMs: 4000 },
+      { ...base, id: "idle", title: "Idle middle", status: "idle", updatedAtMs: 3000 },
+      { ...base, id: "running", title: "Running old", status: "running", updatedAtMs: 2000 },
     ]);
 
     expect(screen.getAllByRole("option").map((row) => row.getAttribute("aria-label"))).toEqual([
-      "Done chat",
-      "Running chat",
-      "Waiting chat",
-      "Idle chat",
+      "Done newest",
+      "Idle middle",
+      "Running old",
+      "Waiting older",
     ]);
   });
 
-  it("sorts active conversations inside each project without moving them between groups", () => {
+  it("sorts conversations by recency inside each project without moving them between groups", () => {
     renderWithThemeAndVirtuoso(
       <ConversationList
         projects={[
@@ -181,8 +181,8 @@ describe("ConversationList activity ordering", () => {
             name: "Project one",
             path: "/project-one",
             conversations: [
-              { ...base, id: "p1-idle", title: "P1 idle", status: "idle" },
-              { ...base, id: "p1-running", title: "P1 running", status: "running" },
+              { ...base, id: "p1-running", title: "P1 running old", status: "running", updatedAtMs: 1000 },
+              { ...base, id: "p1-idle", title: "P1 idle new", status: "idle", updatedAtMs: 2000 },
             ],
           },
           {
@@ -190,8 +190,8 @@ describe("ConversationList activity ordering", () => {
             name: "Project two",
             path: "/project-two",
             conversations: [
-              { ...base, id: "p2-wakeup", title: "P2 wakeup", status: "idle" },
-              { ...base, id: "p2-done", title: "P2 done", status: "done" },
+              { ...base, id: "p2-wakeup", title: "P2 wakeup old", status: "idle", updatedAtMs: 1000 },
+              { ...base, id: "p2-done", title: "P2 done new", status: "done", updatedAtMs: 2000 },
             ],
           },
         ]}
@@ -204,10 +204,10 @@ describe("ConversationList activity ordering", () => {
     );
 
     expect(screen.getAllByRole("option").map((row) => row.getAttribute("aria-label"))).toEqual([
-      "P1 running",
-      "P1 idle",
-      "P2 done",
-      "P2 wakeup",
+      "P1 idle new",
+      "P1 running old",
+      "P2 done new",
+      "P2 wakeup old",
     ]);
   });
 });

@@ -8,6 +8,7 @@ function Harness({
   selectedConversationId = "chat-1",
   selectedView,
   terminalEnabled = true,
+  previewEnabled = true,
   view = "chat",
   setView,
   persistConversationView,
@@ -16,6 +17,7 @@ function Harness({
   readonly selectedConversationId?: string | null;
   readonly selectedView?: ConversationView;
   readonly terminalEnabled?: boolean;
+  readonly previewEnabled?: boolean;
   readonly view?: ConversationView;
   readonly setView: (view: ConversationView) => void;
   readonly persistConversationView: (conversationId: string, view: ConversationView) => void;
@@ -25,6 +27,7 @@ function Harness({
     selectedConversationId: selectedConversationId ?? undefined,
     selectedView,
     terminalEnabled,
+    previewEnabled,
     view,
     setView,
     persistConversationView,
@@ -105,6 +108,25 @@ describe("useWorkspaceViewControl", () => {
         selectedView="terminal"
         terminalEnabled={false}
         view="terminal"
+        setView={setView}
+        persistConversationView={persistConversationView}
+        capture={vi.fn()}
+      />,
+    );
+
+    expect(setView).toHaveBeenCalledWith("chat");
+    expect(persistConversationView).toHaveBeenCalledWith("chat-1", "chat");
+  });
+
+  it("leaves preview when the Preview tool is disabled", () => {
+    const setView = vi.fn();
+    const persistConversationView = vi.fn();
+
+    render(
+      <Harness
+        selectedView="preview"
+        previewEnabled={false}
+        view="preview"
         setView={setView}
         persistConversationView={persistConversationView}
         capture={vi.fn()}

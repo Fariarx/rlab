@@ -154,27 +154,45 @@ function lastTimelineNonTextIndex(blocks: readonly AgentBlock[]): number {
   return -1;
 }
 
-function settleStoppedRunBlocks(blocks: readonly AgentBlock[]): AgentBlock[] {
+function statusBlocksEqual(left: Extract<AgentBlock, { kind: "status" }>, right: Extract<AgentBlock, { kind: "status" }>): boolean {
+  return left.level === right.level && left.text === right.text;
+}
+
+function appendUniqueStatusBlock(blocks: readonly AgentBlock[], statusBlock: Extract<AgentBlock, { kind: "status" }>): AgentBlock[] {
+  return blocks.some((block) => block.kind === "status" && statusBlocksEqual(block, statusBlock)) ? [...blocks] : [...blocks, statusBlock];
+}
+
+export function canceledRunStatusBlock(text: string): Extract<AgentBlock, { kind: "status" }> {
+  return { kind: "status", level: "warn", text, surface: true };
+}
+
+function settleStoppedRunBlocks(blocks: readonly AgentBlock[], options: { readonly promoteTrailingText: boolean } = { promoteTrailingText: true }): AgentBlock[] {
   const lastNonText = lastTimelineNonTextIndex(blocks);
   return blocks.map((block, index) => {
     const settled = settleLiveBlock(block);
+    if (settled.kind === "text" && !options.promoteTrailingText) {
+      return { ...settled, result: false };
+    }
     return settled.kind === "text" && index > lastNonText ? { ...settled, result: true } : settled;
   });
 }
 
-export function settleThreadLiveBlocks(state: WorkspaceState, id: string): WorkspaceState {
+export function settleThreadLiveBlocks(state: WorkspaceState, id: string, statusBlock?: Extract<AgentBlock, { kind: "status" }>): WorkspaceState {
   const messages = state.threads[id];
   if (!messages) {
     return state;
   }
   let changed = false;
-  const next = messages.map((message) => {
+  const lastAgentIndex = statusBlock ? messages.findLastIndex((message) => message.role === "agent") : -1;
+  const next = messages.map((message, index) => {
     const previousBlocks = message.blocks;
     if (message.role !== "agent" || !previousBlocks) {
       return message;
     }
-    const blocks = settleStoppedRunBlocks(previousBlocks);
-    if (blocks.some((block, index) => block !== previousBlocks[index])) {
+    const shouldAppendStatus = statusBlock !== undefined && index === lastAgentIndex;
+    const settledBlocks = settleStoppedRunBlocks(previousBlocks, { promoteTrailingText: !shouldAppendStatus });
+    const blocks = shouldAppendStatus ? appendUniqueStatusBlock(settledBlocks, statusBlock) : settledBlocks;
+    if (blocks.length !== previousBlocks.length || blocks.some((block, index) => block !== previousBlocks[index])) {
       changed = true;
       return { ...message, blocks };
     }

@@ -324,6 +324,34 @@ describe("workspace-db", () => {
     expect(readWorkspaceStateFromDb().chats.map((conversation) => conversation.id)).toEqual(["c3", "c2", "c1"]);
   });
 
+  it("reads conversations newest first inside root and project collections", () => {
+    initializeWorkspaceStateInDb({
+      ...buildEmptyWorkspaceState(),
+      chats: [
+        conv("root-old", { updatedAtMs: 1000 }),
+        conv("root-new", { updatedAtMs: 3000 }),
+        conv("root-middle", { updatedAtMs: 2000 }),
+      ],
+      projects: [
+        {
+          id: "p1",
+          name: "Project",
+          conversations: [
+            conv("project-old", { updatedAtMs: 1000 }),
+            conv("project-new", { updatedAtMs: 3000 }),
+            conv("project-middle", { updatedAtMs: 2000 }),
+          ],
+        },
+      ],
+      selectedId: "root-old",
+    });
+
+    const read = readWorkspaceStateFromDb(new Set<string>());
+
+    expect(read.chats.map((conversation) => conversation.id)).toEqual(["root-new", "root-middle", "root-old"]);
+    expect(read.projects[0]?.conversations.map((conversation) => conversation.id)).toEqual(["project-new", "project-middle", "project-old"]);
+  });
+
   it("front-inserts projects without transient position collisions", () => {
     initializeWorkspaceStateInDb({ ...buildEmptyWorkspaceState(), selectedId: "" });
 

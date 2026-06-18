@@ -38,6 +38,7 @@ import {
   generalDesktopNotificationsPatch,
   generalLocalePatch,
   generalPreviewServerHostPatch,
+  generalSystemPromptPatch,
   generalTelemetryPatch,
   generalVoiceLanguagePatch,
   generalVoiceProviderPatch,
@@ -510,6 +511,33 @@ function GeneralSection({ settings, onSettingsChange }: Pick<SettingsDialogProps
   );
 }
 
+function SystemPromptSection({ settings, onSettingsChange }: Pick<SettingsDialogProps, "settings" | "onSettingsChange">) {
+  const { t } = useI18n();
+  return (
+    <Stack spacing={1.25}>
+      <TextField
+        fullWidth
+        multiline
+        minRows={9}
+        maxRows={16}
+        label={t("systemPrompt")}
+        value={settings.general.systemPrompt}
+        placeholder={t("systemPromptPlaceholder")}
+        onChange={(event) => onSettingsChange(generalSystemPromptPatch(event.target.value))}
+        slotProps={{ htmlInput: { spellCheck: true } }}
+        sx={{
+          "& .MuiInputBase-root": {
+            alignItems: "flex-start",
+            fontFamily: (theme) => theme.custom.fonts.mono,
+            fontSize: "0.82rem",
+            lineHeight: 1.55,
+          },
+        }}
+      />
+    </Stack>
+  );
+}
+
 const VoiceSection = observer(function VoiceSection({ settings, onSettingsChange, onVoiceConfigChange }: Pick<SettingsDialogProps, "settings" | "onSettingsChange" | "onVoiceConfigChange">) {
   const { t } = useI18n();
   const successMessage = useCallback((providerName: string) => t("voiceApiKeySaved", { provider: providerName }), [t]);
@@ -683,6 +711,7 @@ export const SettingsDialog = observer(function SettingsDialog({ open, onClose, 
           <Tab label={t("voice")} />
           <Tab label={t("appearance")} />
           <Tab label={t("general")} />
+          <Tab label={t("systemPrompt")} />
         </Tabs>
       </Box>
 
@@ -696,6 +725,7 @@ export const SettingsDialog = observer(function SettingsDialog({ open, onClose, 
         {tab === 1 && <VoiceSection settings={settings} onSettingsChange={onSettingsChange} onVoiceConfigChange={onVoiceConfigChange} />}
         {tab === 2 && <AppearanceSection settings={settings} onSettingsChange={onSettingsChange} />}
         {tab === 3 && <GeneralSection settings={settings} onSettingsChange={onSettingsChange} />}
+        {tab === 4 && <SystemPromptSection settings={settings} onSettingsChange={onSettingsChange} />}
       </Box>
     </Dialog>
   );

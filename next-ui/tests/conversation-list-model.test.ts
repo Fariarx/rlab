@@ -35,14 +35,14 @@ describe("conversation-list-model", () => {
     ]);
   });
 
-  it("sorts active conversations inside each section without moving them between sections", () => {
+  it("keeps status from overriding recency ordering inside each section", () => {
     const projects: readonly Project[] = [
       {
         id: "project",
         name: "Project",
         conversations: [
-          conversation({ id: "project-idle", status: "idle" }),
-          conversation({ id: "project-running", status: "running" }),
+          conversation({ id: "project-idle-newer", status: "idle", updatedAtMs: 3000 }),
+          conversation({ id: "project-running-older", status: "running", updatedAtMs: 1000 }),
         ],
       },
     ];
@@ -50,8 +50,8 @@ describe("conversation-list-model", () => {
     const sections = visibleConversationSections({
       projects,
       chats: [
-        conversation({ id: "chat-idle", status: "idle" }),
-        conversation({ id: "chat-done", status: "done" }),
+        conversation({ id: "chat-idle-newer", status: "idle", updatedAtMs: 3000 }),
+        conversation({ id: "chat-done-older", status: "done", updatedAtMs: 1000 }),
       ],
       wakeupConversationIds: new Set(),
       pinnedLabel: "Pinned",
@@ -59,8 +59,8 @@ describe("conversation-list-model", () => {
     });
 
     expect(sections.map((section) => [section.idBase, section.conversations.map((item) => item.id)])).toEqual([
-      ["project-group-project", ["project-running", "project-idle"]],
-      ["chats-group", ["chat-done", "chat-idle"]],
+      ["project-group-project", ["project-idle-newer", "project-running-older"]],
+      ["chats-group", ["chat-idle-newer", "chat-done-older"]],
     ]);
   });
 
@@ -70,7 +70,6 @@ describe("conversation-list-model", () => {
       chats: [
         conversation({ id: "older", updatedAtMs: 1000 }),
         conversation({ id: "newest", updatedAtMs: 3000 }),
-        conversation({ id: "legacy" }),
         conversation({ id: "middle", updatedAtMs: 2000 }),
       ],
       wakeupConversationIds: new Set(),
@@ -78,7 +77,7 @@ describe("conversation-list-model", () => {
       chatsLabel: "Chats",
     });
 
-    expect(sections[0]?.conversations.map((item) => item.id)).toEqual(["newest", "middle", "older", "legacy"]);
+    expect(sections[0]?.conversations.map((item) => item.id)).toEqual(["newest", "middle", "older"]);
   });
 
   it("flattens only expanded conversation rows for keyboard navigation", () => {

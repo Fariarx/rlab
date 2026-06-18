@@ -966,6 +966,8 @@ describe("useWorkspace", () => {
       expect(state.chats.find((chat) => chat.id === "chat-2")?.snippet).toBe("ok");
     });
     expect(JSON.stringify(state.threads["chat-2"])).not.toContain("Aborted");
+    expect(screen.getByTestId("agent-blocks")).toHaveTextContent("Запуск остановлен");
+    expect(screen.getByTestId("agent-blocks")).toHaveTextContent('"surface":true');
     activeRunController = undefined;
   });
 
@@ -1451,6 +1453,72 @@ describe("useWorkspace", () => {
     await waitFor(() => expect(screen.getByTestId("queued")).toHaveTextContent("0"));
     expect(runRequests).toHaveLength(1);
     expect((state.threads["chat-2"] ?? []).filter((message) => message.role === "user" && message.text === "Persist this message")).toHaveLength(1);
+  });
+
+  it("stops the active run before sending a queued message now", async () => {
+    state = {
+      ...state,
+      chats: state.chats.map((chat) =>
+        chat.id === "chat-2"
+          ? { ...chat, activeRunId: undefined, status: "idle", agent: "codex", profile: { agent: "codex", model: "default", reasoning: "default", mode: "default" } }
+          : chat,
+      ),
+    };
+    const encoder = new TextEncoder();
+    vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/workspace" && (!init || init.method === "GET")) {
+        return Response.json(state);
+      }
+      if (url === "/api/workspace/mutations" && init?.method === "POST") {
+        state = applyWorkspaceMutationRequest(state, init);
+        return Response.json({ ok: true });
+      }
+      const queueResponse = await handleQueueFetch(url, init);
+      if (queueResponse) {
+        return queueResponse;
+      }
+      if (url === "/api/runs") {
+        return Response.json(activeRunsPayloadFromState(state));
+      }
+      if (url === "/api/run") {
+        const request = JSON.parse(String(init?.body ?? "{}")) as RunRequestRecord;
+        runRequests.push(request);
+        activeRunSignal = init?.signal as AbortSignal | undefined;
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            activeRunController = controller;
+            controller.enqueue(encoder.encode(`${JSON.stringify({ type: "session", id: `codex-session-${runRequests.length}` })}\n`));
+            controller.enqueue(encoder.encode(`${JSON.stringify({ type: "text", text: "still running" })}\n`));
+          },
+        });
+        return new Response(stream, { headers: { "Content-Type": "application/x-ndjson" } });
+      }
+      if (url === "/api/run-cancel") {
+        runCancelRequests.push(JSON.parse(String(init?.body ?? "{}")) as { runId?: string });
+        return Response.json({ canceled: true });
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    render(<Probe />);
+
+    await screen.findByText("chat-2");
+    screen.getByRole("button", { name: "send" }).click();
+    await waitFor(() => expect(runRequests).toHaveLength(1));
+
+    screen.getByRole("button", { name: "send" }).click();
+    await waitFor(() => expect(screen.getByTestId("queued")).toHaveTextContent("1"));
+
+    screen.getByRole("button", { name: "send-queued-now" }).click();
+
+    await waitFor(() => expect(runCancelRequests).toHaveLength(1));
+    expect(activeRunSignal?.aborted).toBe(true);
+    await waitFor(() => expect(queueRequests).toContainEqual(expect.objectContaining({ action: "sendNext", conversationId: "chat-2" })));
+    expect(queueRequests).not.toContainEqual(expect.objectContaining({ action: "setPaused", conversationId: "chat-2", paused: true }));
+    await waitFor(() => expect(screen.getByTestId("queued")).toHaveTextContent("0"));
+    expect(runRequests).toHaveLength(1);
+    activeRunController?.close();
   });
 
   it("derives unrestricted run access from the default chat agent mode", async () => {

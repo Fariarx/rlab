@@ -28,6 +28,7 @@ class TestResizeObserver implements ResizeObserver {
 
 function Harness({
   composerValue,
+  composerFocused = false,
   expanded,
   onOverlayLiftChange = vi.fn(),
   onTagsHeightChange = vi.fn(),
@@ -39,6 +40,7 @@ function Harness({
   capture,
 }: {
   readonly composerValue: string;
+  readonly composerFocused?: boolean;
   readonly expanded: boolean;
   readonly onOverlayLiftChange?: (lift: number) => void;
   readonly onTagsHeightChange?: (height: number) => void;
@@ -51,6 +53,7 @@ function Harness({
 }) {
   const controller = useComposerLayoutController({
     composerValue,
+    composerFocused,
     expanded,
     limitLayoutKey: "ready",
     modeMenuAnchor: null,

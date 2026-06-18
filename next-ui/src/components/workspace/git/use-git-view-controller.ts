@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   branchOptionsFor,
   checkoutGitBranch,
@@ -19,10 +19,12 @@ import { GitViewStore, type GitPanelTab } from "./git-panel-store";
 
 export interface UseGitViewControllerOptions {
   readonly cwd?: string;
+  readonly active: boolean;
   readonly lastTurnDiffs: readonly DiffBlock[];
   readonly focusPath?: string;
   readonly focusNonce: number;
   readonly reloadSignal: number;
+  readonly autoRefreshPaused?: boolean;
   readonly onUnstagedStatsChange?: (stats: { readonly additions: number; readonly deletions: number }) => void;
   readonly t: I18nApi["t"];
 }
@@ -48,10 +50,12 @@ export interface GitViewController {
 
 export function useGitViewController({
   cwd,
+  active,
   lastTurnDiffs,
   focusPath,
   focusNonce,
   reloadSignal,
+  autoRefreshPaused = false,
   onUnstagedStatsChange,
   t,
 }: UseGitViewControllerOptions): GitViewController {
@@ -80,6 +84,10 @@ export function useGitViewController({
     applyStatus,
     resetForCwd,
   } = store;
+  const statusRef = useRef(status);
+  const autoRefreshPausedRef = useRef(autoRefreshPaused);
+  const silentRefreshInFlightRef = useRef(false);
+  statusRef.current = status;
 
   useEffect(() => {
     void cwd;
@@ -120,9 +128,61 @@ export function useGitViewController({
     };
   }, [applyStatus, cwd, reloadKey, reloadSignal, setError, setLoading, setStatus, t]);
 
+  const refreshStatusSilently = useCallback(() => {
+    if (!cwd || autoRefreshPaused || silentRefreshInFlightRef.current) {
+      return;
+    }
+    if (typeof document !== "undefined" && document.visibilityState !== "visible") {
+      return;
+    }
+    silentRefreshInFlightRef.current = true;
+    void fetchGitStatus(cwd)
+      .then((next) => {
+        applyStatus(next);
+        setError(null);
+      })
+      .catch((loadError) => {
+        if (!statusRef.current) {
+          setStatus(null);
+          setError(gitOperationErrorMessage(loadError, t("gitStatusUnavailable")));
+        }
+      })
+      .finally(() => {
+        silentRefreshInFlightRef.current = false;
+      });
+  }, [applyStatus, autoRefreshPaused, cwd, setError, setStatus, t]);
+
+  useEffect(() => {
+    if (!cwd || autoRefreshPaused) {
+      return;
+    }
+    const handleWindowFocus = () => refreshStatusSilently();
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        refreshStatusSilently();
+      }
+    };
+    const interval = window.setInterval(refreshStatusSilently, 20_000);
+    window.addEventListener("focus", handleWindowFocus);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", handleWindowFocus);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [autoRefreshPaused, cwd, refreshStatusSilently]);
+
+  useEffect(() => {
+    const wasPaused = autoRefreshPausedRef.current;
+    autoRefreshPausedRef.current = autoRefreshPaused;
+    if (wasPaused && !autoRefreshPaused) {
+      refreshStatusSilently();
+    }
+  }, [autoRefreshPaused, refreshStatusSilently]);
+
   useEffect(() => {
     void statusVersion;
-    if (!cwd || !status || (activeTab !== "tree" && !refPickerOpen)) {
+    if (!active || !cwd || !status || (activeTab !== "tree" && !refPickerOpen)) {
       setTreeLoading(false);
       return;
     }
@@ -153,7 +213,7 @@ export function useGitViewController({
     return () => {
       alive = false;
     };
-  }, [activeTab, cwd, refPickerOpen, setGraphBranchHeads, setGraphCommits, setTreeError, setTreeLoading, status, statusVersion, t]);
+  }, [active, activeTab, cwd, refPickerOpen, setGraphBranchHeads, setGraphCommits, setTreeError, setTreeLoading, status, statusVersion, t]);
 
   const unstagedFiles = useMemo(() => changedFilesForTab(status, "unstaged"), [status]);
   const stagedFiles = useMemo(() => changedFilesForTab(status, "staged"), [status]);

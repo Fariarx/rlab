@@ -60,6 +60,8 @@ import {
   parseTerminalSessionRequest,
   gitErrorStatus,
   gitPushRequestErrorStatus,
+  isPersistedBackgroundRunActive,
+  isBrowserPreviewTempSharedObjectName,
   isNoChangesGitCommitResult,
   jsonBodyReadErrorStatus,
   parseProjectDirectoryPayload,
@@ -113,7 +115,6 @@ import {
 import { MAX_AGENT_TOOL_OUTPUT_CHARS } from "../src/lib/agent-output";
 import { accumulateRunEvent, createRunEventAccumulator } from "../src/lib/run-event-accumulator";
 import { buildEmptyWorkspaceState, buildInitialWorkspaceState } from "../src/lib/workspace-state";
-import { type AgentProfile } from "../src/components/agent";
 import { closeWorkspaceDb, initializeWorkspaceStateInDb, initWorkspaceDb, type PendingTurnRecord } from "../workspace-db";
 
 describe("vite agents plugin", () => {
@@ -228,7 +229,7 @@ describe("vite agents plugin", () => {
       agentMessageId: "a-browser",
       agentMessageTime: "10:01",
     };
-    const prompt = prepareAgentPrompt("use preview", binding, "https://rlab.example");
+    const prompt = prepareAgentPrompt("use preview", binding, "https://rlab.example", ["AskUserQuestion", "TaskWakeup", "BrowserPreview"]);
 
     expect(prompt.indexOf("<rlab-chat-tools>")).toBeGreaterThan(-1);
     expect(prompt.indexOf("<browser-preview-bridge>")).toBeGreaterThan(prompt.indexOf("</rlab-chat-tools>"));
@@ -735,6 +736,15 @@ Built-in agents:
     ]);
     expect(buildClaudeRunArgs({ prompt: "hello", autoConfirm: true })).toContain("--permission-mode");
     expect(buildClaudeRunArgs({ prompt: "hello", autoConfirm: true })).toContain("auto");
+  });
+
+  it("passes the configured system prompt through Claude system append", () => {
+    const args = buildClaudeRunArgs({ prompt: "hello", systemPrompt: "Be terse." });
+    const appendIndex = args.indexOf("--append-system-prompt");
+
+    expect(args[1]).toBe("hello");
+    expect(appendIndex).toBeGreaterThan(-1);
+    expect(args[appendIndex + 1]).toContain("Be terse.");
   });
 
   it("builds Claude args with a selected CLI model alias", () => {
@@ -1379,11 +1389,8 @@ Built-in agents:
     expect(buildOpenCodeRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" })).not.toContain("--agent");
   });
 
-  it("normalizes away removed work modes (no per-mode agent flag)", () => {
-    // Work modes were removed; a stale `explore` mode normalizes to default and
-    // read-only still uses the plan agent, never a per-mode `--agent explore`.
+  it("passes quick work modes as read-only prompt intent for OpenCode", () => {
     const args = buildOpenCodeRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "explore", accessMode: "read-only" });
-    expect(args).not.toContain("explore");
     expect(args).toEqual([
       "run",
       "--format",
@@ -1393,8 +1400,79 @@ Built-in agents:
       "plan",
       "--model",
       "opencode/deepseek-v4-flash-free",
+      expect.stringContaining("Explore mode is active."),
+    ]);
+  });
+
+  it("passes quick work modes to Codex and Gemini prompts", () => {
+    expect(buildCodexRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "fast", accessMode: "unrestricted" })).toEqual([
+      "exec",
+      "--json",
+      "--sandbox",
+      "danger-full-access",
+      "--skip-git-repo-check",
+      "--enable",
+      "fast_mode",
+      "-c",
+      'service_tier="fast"',
       "hello",
     ]);
+    expect(buildCodexRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "plan", fast: true, accessMode: "unrestricted" })).toEqual([
+      "exec",
+      "--json",
+      "--sandbox",
+      "read-only",
+      "--skip-git-repo-check",
+      "--enable",
+      "fast_mode",
+      "-c",
+      'service_tier="fast"',
+      expect.stringContaining("Plan mode is active."),
+    ]);
+    expect(buildCodexRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "summary", accessMode: "unrestricted" })).toEqual([
+      "exec",
+      "--json",
+      "--sandbox",
+      "read-only",
+      "--skip-git-repo-check",
+      expect.stringContaining("Summary mode is active."),
+    ]);
+    expect(buildGeminiRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "review", accessMode: "unrestricted" })).toEqual([
+      "--prompt",
+      expect.stringContaining("Review mode is active."),
+      "--output-format",
+      "stream-json",
+      "--approval-mode",
+      "plan",
+      "--skip-trust",
+    ]);
+    expect(
+      buildCodexThreadParams({
+        agent: "codex",
+        model: "default",
+        reasoning: "default",
+        mode: "review",
+        prompt: "hello",
+        accessMode: "unrestricted",
+      }),
+    ).toMatchObject({
+      sandbox: "read-only",
+      prompt: expect.stringContaining("Review mode is active."),
+    });
+    expect(
+      buildCodexThreadParams({
+        agent: "codex",
+        model: "default",
+        reasoning: "default",
+        mode: "fast",
+        prompt: "hello",
+        accessMode: "unrestricted",
+      }),
+    ).toMatchObject({
+      sandbox: "danger-full-access",
+      prompt: "hello",
+      config: { service_tier: "fast", features: { fast_mode: true } },
+    });
   });
 
   it("threads native session resume into each agent's run args", () => {
@@ -1435,6 +1513,20 @@ Built-in agents:
         accessMode: "read-only",
       }).config,
     ).toBeUndefined();
+  });
+
+  it("prepends configured system prompt to Codex app-server prompts", () => {
+    expect(
+      buildCodexThreadParams({
+        agent: "codex",
+        model: "default",
+        reasoning: "default",
+        mode: "default",
+        prompt: "hello",
+        accessMode: "read-only",
+        systemPrompt: "Be terse.",
+      }).prompt,
+    ).toBe("<system-prompt>\nBe terse.\n</system-prompt>\n\nhello");
   });
 
   it("keeps Codex full access separate from app-server auto-review", () => {
@@ -2990,6 +3082,13 @@ Built-in agents:
     expect(targets.some((target) => target.selector === "[data-testid=\"composer-input\"]")).toBe(true);
   });
 
+  it("recognizes Chromium temp shared objects left by browser preview", () => {
+    expect(isBrowserPreviewTempSharedObjectName(".bcbbcf3eb4b5b7ac-00000000.so")).toBe(true);
+    expect(isBrowserPreviewTempSharedObjectName(".ffff50fcfbfaffed-00000000.so")).toBe(true);
+    expect(isBrowserPreviewTempSharedObjectName("regular.so")).toBe(false);
+    expect(isBrowserPreviewTempSharedObjectName(".profile.json")).toBe(false);
+  });
+
   it("does not apply browser storage to about:blank preview documents", async () => {
     const evaluate = vi.fn<() => Promise<unknown>>(async () => undefined);
 
@@ -3008,7 +3107,7 @@ Built-in agents:
     expect(parseRunRequestPayload("{")).toEqual({ ok: false, error: "Invalid run request payload." });
     expect(parseRunRequestPayload("[]")).toEqual({ ok: false, error: "Invalid run request payload." });
     expect(parseRunRequestPayload(JSON.stringify("hello"))).toEqual({ ok: false, error: "Invalid run request payload." });
-    expect(parseRunRequestPayload(JSON.stringify({ agent: "codex", model: "gpt-5.5", reasoning: "high", mode: "default", accessMode: "unrestricted", prompt: "hello" }))).toMatchObject({
+    expect(parseRunRequestPayload(JSON.stringify({ agent: "codex", model: "gpt-5.5", reasoning: "high", mode: "default", accessMode: "unrestricted", prompt: "hello", systemPrompt: "Be terse." }))).toMatchObject({
       ok: true,
       agent: "codex",
       model: "gpt-5.5",
@@ -3016,6 +3115,7 @@ Built-in agents:
       mode: "default",
       accessMode: "unrestricted",
       prompt: "hello",
+      systemPrompt: "Be terse.",
     });
     expect(parseRunRequestPayload(JSON.stringify({ agent: "codex", model: "default", reasoning: "default", mode: "review", prompt: "hello" }))).toMatchObject({
       ok: true,
@@ -3547,8 +3647,8 @@ Built-in agents:
     });
     expect(canceledBlocks).toEqual([
       { kind: "reasoning", text: "Still running", active: false },
-      { kind: "text", text: "partial", streaming: false, result: true },
-      { kind: "status", level: "warn", text: "Запуск остановлен" },
+      { kind: "text", text: "partial", streaming: false, result: false },
+      { kind: "status", level: "warn", text: "Запуск остановлен", surface: true },
     ]);
   });
 
@@ -3591,7 +3691,7 @@ Built-in agents:
     });
     expect(result.state.threads["chat-2"].find((message) => message.id === "a-detached")?.blocks).toEqual([
       { kind: "reasoning", text: "Still running", active: false },
-      { kind: "status", level: "warn", text: "Запуск остановлен" },
+      { kind: "status", level: "warn", text: "Запуск остановлен", surface: true },
     ]);
   });
 
@@ -3651,9 +3751,66 @@ Built-in agents:
     });
     expect(blocks).toEqual([
       { kind: "reasoning", text: "Still running", active: false, duration: expect.stringMatching(/s$/) },
-      { kind: "text", text: "partial", streaming: false, result: true },
-      { kind: "status", level: "warn", text: "Запуск остановлен" },
+      { kind: "text", text: "partial", streaming: false, result: false },
+      { kind: "status", level: "warn", text: "Запуск остановлен", surface: true },
     ]);
+  });
+
+  it("marks agent run timeouts as errors instead of manual cancellations", () => {
+    const state = buildInitialWorkspaceState();
+    const binding = {
+      conversationId: "chat-2",
+      runId: "run-timeout",
+      userMessageId: "u-timeout",
+      userMessageTime: "10:00",
+      agentMessageId: "a-timeout",
+      agentMessageTime: "10:30",
+    };
+    const runningState = {
+      ...state,
+      chats: state.chats.map((conversation) =>
+        conversation.id === "chat-2"
+          ? {
+              ...conversation,
+              activeRunId: "run-timeout",
+              status: "running" as const,
+              snippet: "still working",
+              time: "10:00",
+            }
+          : conversation,
+      ),
+      threads: {
+        ...state.threads,
+        "chat-2": [
+          ...state.threads["chat-2"],
+          { id: "u-timeout", role: "user" as const, text: "long task", time: "10:00" },
+          {
+            id: "a-timeout",
+            role: "agent" as const,
+            time: "10:01",
+            blocks: [{ kind: "reasoning" as const, text: "Still thinking", active: true }],
+          },
+        ],
+      },
+    };
+    const accumulator = { ...createRunEventAccumulator(Date.now()), lastPersistedAt: 0, persistTimer: null };
+    accumulateRunEvent(accumulator, { type: "reasoning", text: "Still thinking" });
+    accumulateRunEvent(accumulator, { type: "error", text: "codex timed out after 10080 min." });
+
+    const finished = finishBackgroundRunState(runningState, binding, accumulator, false);
+    const blocks = finished.threads["chat-2"].find((message) => message.id === "a-timeout")?.blocks;
+
+    expect(finished.chats.find((conversation) => conversation.id === "chat-2")).toMatchObject({
+      activeRunId: undefined,
+      status: "error",
+      snippet: "long task",
+      updatedAtMs: expect.any(Number),
+    });
+    expect(blocks).toEqual([
+      { kind: "reasoning", text: "Still thinking", active: false, duration: expect.stringMatching(/s$/) },
+      { kind: "status", level: "error", text: "codex timed out after 10080 min." },
+    ]);
+    expect(blocks).not.toEqual(expect.arrayContaining([expect.objectContaining({ text: "Запуск остановлен" })]));
   });
 
   it("keeps server-owned background conversations that are missing from a stale workspace PUT", () => {
@@ -3862,8 +4019,8 @@ Built-in agents:
     const staleBlocks = reconciled.threads["chat-2"].find((message) => message.id === "a-stale")?.blocks;
     expect(staleBlocks).toEqual([
       { kind: "reasoning", text: "Still thinking", active: false },
-      { kind: "text", text: "partial answer", streaming: false, result: true },
-      { kind: "status", level: "error", text: "Фоновый запуск прерван" },
+      { kind: "text", text: "partial answer", streaming: false, result: false },
+      { kind: "status", level: "error", text: "Фоновый запуск прерван", surface: true },
     ]);
     expect(reconciled.projects[0]?.conversations.find((conversation) => conversation.id === "c-flaky")).toMatchObject({
       activeRunId: "run-live",
@@ -3889,7 +4046,7 @@ Built-in agents:
       status: "error",
       snippet: "Still running",
     });
-    expect(Object.prototype.hasOwnProperty.call(reconciled.threads, "chat-2")).toBe(false);
+    expect(Object.hasOwn(reconciled.threads, "chat-2")).toBe(false);
   });
 
   it("does not materialize an empty thread while canceling an unloaded background run", () => {
@@ -3909,7 +4066,7 @@ Built-in agents:
       status: "idle",
       snippet: "Still running",
     });
-    expect(Object.prototype.hasOwnProperty.call(canceled.threads, "chat-2")).toBe(false);
+    expect(Object.hasOwn(canceled.threads, "chat-2")).toBe(false);
   });
 
   it("re-asserts a streaming background run as active so a stale interrupt can't strand it", () => {
@@ -3965,6 +4122,60 @@ Built-in agents:
         startedAt: "2026-06-06T14:00:02.000Z",
       },
     ]);
+  });
+
+  it("filters detached background run handles before exposing active runs", () => {
+    const liveBinding: BackgroundRunBinding = {
+      conversationId: "chat-live",
+      runId: "run-live",
+      userMessageId: "u-live",
+      userMessageTime: "2026-06-06T14:00:00.000Z",
+      agentMessageId: "a-live",
+      agentMessageTime: "2026-06-06T14:00:01.000Z",
+    };
+    const staleBinding: BackgroundRunBinding = {
+      conversationId: "chat-stale",
+      runId: "run-stale",
+      userMessageId: "u-stale",
+      userMessageTime: "2026-06-06T14:00:00.000Z",
+      agentMessageId: "a-stale",
+      agentMessageTime: "2026-06-06T14:00:01.000Z",
+    };
+    const handles = new Map<string, BackgroundRunHandle>([
+      [liveBinding.runId, { binding: liveBinding, startedAt: "2026-06-06T14:00:02.000Z", cancel: () => undefined }],
+      [staleBinding.runId, { binding: staleBinding, startedAt: "2026-06-06T14:00:03.000Z", cancel: () => undefined }],
+    ]);
+
+    expect(activeBackgroundRunSnapshotsFromHandles(handles, (handle) => handle.binding.runId === liveBinding.runId)).toEqual([
+      {
+        runId: "run-live",
+        conversationId: "chat-live",
+        userMessageId: "u-live",
+        agentMessageId: "a-live",
+        startedAt: "2026-06-06T14:00:02.000Z",
+      },
+    ]);
+  });
+
+  it("treats a background handle as active only while the persisted conversation owns that run", () => {
+    const binding: BackgroundRunBinding = {
+      conversationId: "chat-2",
+      runId: "run-owned",
+      userMessageId: "u-owned",
+      userMessageTime: "2026-06-06T14:00:00.000Z",
+      agentMessageId: "a-owned",
+      agentMessageTime: "2026-06-06T14:00:01.000Z",
+    };
+    const conversation = buildInitialWorkspaceState().chats.find((chat) => chat.id === "chat-2");
+    if (!conversation) {
+      throw new Error("Expected demo chat-2 conversation.");
+    }
+
+    expect(isPersistedBackgroundRunActive({ ...conversation, activeRunId: binding.runId, status: "running" }, binding)).toBe(true);
+    expect(isPersistedBackgroundRunActive({ ...conversation, activeRunId: binding.runId, status: "waiting" }, binding)).toBe(true);
+    expect(isPersistedBackgroundRunActive({ ...conversation, activeRunId: binding.runId, status: "error" }, binding)).toBe(false);
+    expect(isPersistedBackgroundRunActive({ ...conversation, activeRunId: "run-other", status: "running" }, binding)).toBe(false);
+    expect(isPersistedBackgroundRunActive({ ...conversation, activeRunId: undefined, status: "running" }, binding)).toBe(false);
   });
 
   it("builds attach stream updates from persisted background run state", () => {

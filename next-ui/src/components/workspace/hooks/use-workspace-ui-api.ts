@@ -17,18 +17,23 @@ type StateUpdater<T> = T | ((current: T) => T);
 
 export interface UseWorkspaceUiApiOptions {
   readonly showView: (view: ConversationView) => void;
+  readonly previewEnabled: boolean;
   readonly setBrowserOpenRequest: (value: StateUpdater<BrowserOpenRequest>) => void;
   readonly setGitFocus: (value: StateUpdater<GitFocusRequest>) => void;
 }
 
 export function useWorkspaceUiApi({
   showView,
+  previewEnabled,
   setBrowserOpenRequest,
   setGitFocus,
 }: UseWorkspaceUiApiOptions): WorkspaceUiApi {
   return useMemo(
     () => ({
       openPreview: (url: string) => {
+        if (!previewEnabled) {
+          return;
+        }
         const target = normalizeExternalUrl(url) ?? url;
         setBrowserOpenRequest((prev) => ({ url: target, nonce: prev.nonce + 1 }));
         showView("preview");
@@ -38,6 +43,6 @@ export function useWorkspaceUiApi({
         showView("git");
       },
     }),
-    [setBrowserOpenRequest, setGitFocus, showView],
+    [previewEnabled, setBrowserOpenRequest, setGitFocus, showView],
   );
 }

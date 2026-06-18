@@ -17,6 +17,8 @@ export {
   getAgent,
   getAgentStatus,
   isAgentId,
+  isAgentModifierModeId,
+  isAgentWorkModeId,
   normalizeAgentProfile,
   resolveAgentModeValue,
   resolveAgentModelValue,

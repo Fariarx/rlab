@@ -1,6 +1,6 @@
 import CheckIcon from "@mui/icons-material/Check";
 import CloseIcon from "@mui/icons-material/Close";
-import { Alert, Box, Dialog, DialogActions, Divider, Stack, Switch, Typography } from "@mui/material";
+import { Alert, Box, Chip, Dialog, DialogActions, Divider, Stack, Switch, Typography } from "@mui/material";
 import { observer } from "mobx-react-lite";
 import { useEffect, useState } from "react";
 import { useI18n } from "../../../i18n/I18nProvider";
@@ -46,6 +46,26 @@ const CHAT_TOOL_LABEL_KEYS: Record<RlabChatToolId, {
   BrowserPreview: { title: "chatToolBrowserPreviewTitle", description: "chatToolBrowserPreviewDescription" },
 };
 
+function AlphaVersionChip({ label }: { readonly label: string }) {
+  return (
+    <Chip
+      label={label}
+      size="small"
+      sx={{
+        flex: "0 0 auto",
+        height: 20,
+        borderRadius: (theme) => `${theme.custom.radii.pill}px`,
+        border: (theme) => `1px solid ${theme.palette.status.warn.border}`,
+        backgroundColor: (theme) => theme.palette.status.warn.soft,
+        color: (theme) => theme.palette.status.warn.main,
+        fontSize: "0.64rem",
+        fontWeight: 700,
+        "& .MuiChip-label": { px: 0.75 },
+      }}
+    />
+  );
+}
+
 /** AgentPicker — a polished dialog for choosing the agent profile, showing
  * each agent's status in the system. */
 export const AgentPicker = observer(function AgentPicker({
@@ -61,7 +81,7 @@ export const AgentPicker = observer(function AgentPicker({
 }) {
   const initialProfile = normalizeAgentProfile(value);
   const [store] = useState(() => new AgentPickerStore(initialProfile));
-  const { agent, setAgent, model, setModel, reasoning, setReasoning, mode, setMode, autoConfirm, setAutoConfirm, tools, setToolEnabled, setProfile } = store;
+  const { agent, setAgent, model, setModel, reasoning, setReasoning, mode, setMode, fast, setFast, autoConfirm, setAutoConfirm, tools, setToolEnabled, setProfile } = store;
   const statusOf = useAgentStatus();
   const cliInfoOf = useAgentCliInfo();
   const liveCliDetection = useAgentStatusLive();
@@ -93,11 +113,12 @@ export const AgentPicker = observer(function AgentPicker({
     setModel(nextProfile.model);
     setReasoning(nextProfile.reasoning);
     setMode(nextProfile.mode);
+    setFast(nextProfile.fast ?? false);
     setAutoConfirm(nextProfile.autoConfirm ?? false);
   };
 
   const confirm = () => {
-    onSelect(normalizeAgentProfile({ agent, model, reasoning, mode, autoConfirm, tools: store.persistedTools() }));
+    onSelect(normalizeAgentProfile({ agent, model, reasoning, mode, ...(fast ? { fast } : {}), autoConfirm, tools: store.persistedTools() }));
     onClose();
   };
 
@@ -276,15 +297,18 @@ export const AgentPicker = observer(function AgentPicker({
                 }}
               >
                 <Box sx={{ minWidth: 0 }}>
-                  <Typography sx={{ fontSize: "0.78rem", fontWeight: 650, color: checked ? "text.primary" : "text.secondary" }}>
-                    {title}
-                  </Typography>
+                  <Stack direction="row" spacing={0.75} sx={{ alignItems: "center", minWidth: 0 }}>
+                    <Typography sx={{ fontSize: "0.78rem", fontWeight: 650, color: checked ? "text.primary" : "text.secondary" }}>
+                      {title}
+                    </Typography>
+                    {tool.id === "BrowserPreview" && <AlphaVersionChip label={t("alphaVersion")} />}
+                  </Stack>
                   <Typography sx={{ fontSize: "0.7rem", color: "text.secondary" }}>{t(labels.description)}</Typography>
                 </Box>
                 <Switch
                   checked={checked}
                   onChange={(event) => setToolEnabled(tool.id, event.target.checked)}
-                  slotProps={{ input: { "aria-label": t("chatToolToggle", { tool: title }) } }}
+                  slotProps={{ input: { "aria-label": t(checked ? "chatToolToggle" : "chatToolToggleOff", { tool: title }) } }}
                 />
               </Stack>
             );

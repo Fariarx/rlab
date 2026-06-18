@@ -146,6 +146,34 @@ describe("SettingsDialog agent configuration", () => {
     });
   });
 
+  it("updates the global system prompt from the settings tab", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL | Request) => {
+        const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+        if (path === "/api/agent-config") {
+          return Response.json({ agents: {} });
+        }
+        return Response.json({});
+      }),
+    );
+    const onSettingsChange = vi.fn();
+
+    renderWithTheme(
+      <SettingsDialog
+        open
+        onClose={vi.fn()}
+        settings={defaultAppSettings}
+        onSettingsChange={onSettingsChange}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("tab", { name: "Системный промпт" }));
+    fireEvent.change(screen.getByLabelText("Системный промпт"), { target: { value: "Отвечай кратко." } });
+
+    expect(onSettingsChange).toHaveBeenCalledWith({ general: { systemPrompt: "Отвечай кратко." } });
+  });
+
   it("places the voice language field before the provider hint and uses a muted microphone icon for disabled voice input", async () => {
     vi.stubGlobal(
       "fetch",

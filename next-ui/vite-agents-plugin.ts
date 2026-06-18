@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { appendFileSync, chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, type Dirent } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { request as httpRequest, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
 import { homedir, tmpdir } from "node:os";
@@ -1233,12 +1233,61 @@ interface BrowserPreviewSession {
 const BROWSER_PREVIEW_VIEWPORT = { width: 1280, height: 720 } as const;
 const BROWSER_PREVIEW_EVENT_LIMIT = 80;
 const BROWSER_PREVIEW_SESSION_ID_PATTERN = /^[a-zA-Z0-9_.:-]{1,160}$/;
+const BROWSER_PREVIEW_TEMP_CLEANUP_INTERVAL_MS = 60_000;
+const BROWSER_PREVIEW_TEMP_FILE_MAX_AGE_MS = 10 * 60_000;
+const BROWSER_PREVIEW_TEMP_DIR_MAX_AGE_MS = 30 * 60_000;
 // A session with no connected viewers (SSE clients) is closed after this idle
 // window so headless Chromium processes don't leak. The timer is unref'ed so it
 // does not keep the Node process alive in tests/CLI runs.
 const BROWSER_PREVIEW_IDLE_MS = 5 * 60_000;
 let browserPreviewSessions = new Map<string, BrowserPreviewSession>();
 let browserPreviewIdleSweepTimer: ReturnType<typeof setTimeout> | null = null;
+let lastBrowserPreviewTempCleanupAt = 0;
+
+export function isBrowserPreviewTempSharedObjectName(name: string): boolean {
+  return /^\.[A-Za-z0-9_-]+-\d+\.so$/.test(name);
+}
+
+function isBrowserPreviewTempDirName(name: string): boolean {
+  return name.startsWith("playwright-artifacts-") || name.startsWith("playwright_chromiumdev_profile-");
+}
+
+function cleanupStaleBrowserPreviewTempFiles(now = Date.now(), options: { readonly force?: boolean } = {}): number {
+  if (!options.force && now - lastBrowserPreviewTempCleanupAt < BROWSER_PREVIEW_TEMP_CLEANUP_INTERVAL_MS) {
+    return 0;
+  }
+  lastBrowserPreviewTempCleanupAt = now;
+  let removed = 0;
+  let removedBytes = 0;
+  let entries: Dirent[];
+  try {
+    entries = readdirSync(tmpdir(), { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  for (const entry of entries) {
+    const path = join(tmpdir(), entry.name);
+    try {
+      const stats = statSync(path);
+      const age = now - stats.mtimeMs;
+      if (entry.isFile() && isBrowserPreviewTempSharedObjectName(entry.name) && age > BROWSER_PREVIEW_TEMP_FILE_MAX_AGE_MS) {
+        unlinkSync(path);
+        removed += 1;
+        removedBytes += stats.size;
+      } else if (entry.isDirectory() && isBrowserPreviewTempDirName(entry.name) && age > BROWSER_PREVIEW_TEMP_DIR_MAX_AGE_MS) {
+        rmSync(path, { recursive: true, force: true });
+        removed += 1;
+        removedBytes += stats.size;
+      }
+    } catch {
+      // Temp entries race with Chromium teardown; ignore vanished/in-use paths.
+    }
+  }
+  if (removed > 0) {
+    console.info(`[rlab] cleaned ${removed} stale browser preview temp entr${removed === 1 ? "y" : "ies"} (${Math.round(removedBytes / 1024 / 1024)} MB)`);
+  }
+  return removed;
+}
 
 function unrefBrowserPreviewTimer(timer: ReturnType<typeof setTimeout>): void {
   const maybeUnref = (timer as ReturnType<typeof setTimeout> & { readonly unref?: () => void }).unref;
@@ -1262,10 +1311,29 @@ function scheduleBrowserPreviewIdleSweep(): void {
 function sweepIdleBrowserPreviewSessions(now: number): void {
   for (const [id, session] of browserPreviewSessions) {
     if (session.clients.size === 0 && now - session.lastActiveAt > BROWSER_PREVIEW_IDLE_MS) {
-      browserPreviewSessions.delete(id);
-      void session.browser.close().catch(() => undefined);
+      closeBrowserPreviewSession(id, { force: true });
     }
   }
+}
+
+function closeBrowserPreviewSession(sessionId: string, options: { readonly force?: boolean } = {}): boolean {
+  const session = browserPreviewSessions.get(sessionId);
+  if (!session) {
+    return false;
+  }
+  if (!options.force && session.clients.size > 0) {
+    session.lastActiveAt = Date.now();
+    return false;
+  }
+  browserPreviewSessions.delete(sessionId);
+  void session.browser.close().finally(() => {
+    cleanupStaleBrowserPreviewTempFiles(Date.now(), { force: true });
+  }).catch(() => undefined);
+  return true;
+}
+
+function closeIdleBrowserPreviewSession(sessionId: string): boolean {
+  return closeBrowserPreviewSession(sessionId);
 }
 
 function normalizeBrowserPreviewSessionId(value: unknown): string {
@@ -1708,8 +1776,7 @@ function currentBrowserPreviewSession(sessionId: string): BrowserPreviewSession 
     }
   }
   if (session.pages.size === 0) {
-    browserPreviewSessions.delete(sessionId);
-    void session.browser.close();
+    closeBrowserPreviewSession(sessionId, { force: true });
     return null;
   }
   if (!session.pages.has(session.activeTabId)) {
@@ -1720,6 +1787,7 @@ function currentBrowserPreviewSession(sessionId: string): BrowserPreviewSession 
 }
 
 async function ensureBrowserPreviewSession(sessionId: string): Promise<BrowserPreviewSession> {
+  cleanupStaleBrowserPreviewTempFiles();
   sweepIdleBrowserPreviewSessions(Date.now());
   const current = currentBrowserPreviewSession(sessionId);
   if (current) {
@@ -2169,15 +2237,18 @@ function lastTimelineNonTextBlockIndex(blocks: readonly AgentBlock[]): number {
   return -1;
 }
 
-function settleStoppedRunBlocks(blocks: readonly AgentBlock[]): AgentBlock[] {
+function settleStoppedRunBlocks(blocks: readonly AgentBlock[], options: { readonly promoteTrailingText: boolean } = { promoteTrailingText: true }): AgentBlock[] {
   const lastNonTextIndex = lastTimelineNonTextBlockIndex(blocks);
   return blocks.map((block, index) => {
     const settled = settleLiveBlock(block);
+    if (settled.kind === "text" && !options.promoteTrailingText) {
+      return { ...settled, result: false };
+    }
     return settled.kind === "text" && index > lastNonTextIndex ? { ...settled, result: true } : settled;
   });
 }
 
-function settleLiveThreadWithStatus(messages: readonly ChatMessage[], statusBlock: Extract<AgentBlock, { kind: "status" }>): ChatMessage[] {
+function settleLiveThreadWithStatus(messages: readonly ChatMessage[], statusBlock: Extract<AgentBlock, { kind: "status" }>, options: { readonly promoteTrailingText: boolean } = { promoteTrailingText: true }): ChatMessage[] {
   const lastAgentIndex = messages.findLastIndex((message) => message.role === "agent");
   if (lastAgentIndex < 0) {
     return [...messages];
@@ -2185,13 +2256,13 @@ function settleLiveThreadWithStatus(messages: readonly ChatMessage[], statusBloc
   const message = messages[lastAgentIndex];
   const blocks = message.blocks ?? [];
   const hasStatus = blocks.some((block) => block.kind === "status" && block.level === statusBlock.level && block.text === statusBlock.text);
-  const settledBlocks = settleStoppedRunBlocks(blocks);
+  const settledBlocks = settleStoppedRunBlocks(blocks, options);
   const nextBlocks = hasStatus ? settledBlocks : [...settledBlocks, statusBlock];
   return messages.map<ChatMessage>((item, index) => (index === lastAgentIndex ? { ...message, blocks: nextBlocks } : item));
 }
 
 function settleInterruptedThread(messages: readonly ChatMessage[], locale: Locale): ChatMessage[] {
-  return settleLiveThreadWithStatus(messages, { kind: "status", level: "error", text: interruptedRunSnippet[locale] });
+  return settleLiveThreadWithStatus(messages, { kind: "status", level: "error", text: interruptedRunSnippet[locale], surface: true }, { promoteTrailingText: false });
 }
 
 export function reconcileStaleBackgroundRuns(state: WorkspaceState, activeRunIds: ReadonlySet<string>): WorkspaceState {
@@ -2251,11 +2322,11 @@ export function cancelBackgroundRunState(state: WorkspaceState, runId: string): 
     return state;
   }
 
-  const statusBlock: Extract<AgentBlock, { kind: "status" }> = { kind: "status", level: "warn", text: canceledText };
+  const statusBlock: Extract<AgentBlock, { kind: "status" }> = { kind: "status", level: "warn", text: canceledText, surface: true };
   const threads = { ...state.threads };
   for (const conversationId of canceledConversationIds) {
     if (Object.prototype.hasOwnProperty.call(state.threads, conversationId)) {
-      threads[conversationId] = settleLiveThreadWithStatus(state.threads[conversationId] ?? [], statusBlock);
+      threads[conversationId] = settleLiveThreadWithStatus(state.threads[conversationId] ?? [], statusBlock, { promoteTrailingText: false });
     }
   }
   return { ...state, chats, projects, threads };
@@ -2304,7 +2375,7 @@ function readWorkspaceState(): WorkspaceState {
   const raw = readWorkspaceStateFromDb();
   cachedWorkspaceLocale = raw.settings?.general?.locale ?? cachedWorkspaceLocale;
   const normalized = normalizeSeedProjectPaths(raw);
-  const reconciled = reconcileStaleBackgroundRuns(normalized, new Set(backgroundRunHandles.keys()));
+  const reconciled = reconcileStaleBackgroundRuns(normalized, activeBackgroundRunIds());
   if (reconciled !== normalized) {
     persistWorkspaceDelta(normalized, reconciled);
   }
@@ -2322,7 +2393,7 @@ function readWorkspaceShellForClient(): WorkspaceState {
     initializeWorkspaceState(initial);
     return { ...initial, threads: {} };
   }
-  const activeRunIds = new Set(backgroundRunHandles.keys());
+  const activeRunIds = activeBackgroundRunIds();
   const shell = readWorkspaceStateFromDb(new Set<string>());
   cachedWorkspaceLocale = shell.settings?.general?.locale ?? cachedWorkspaceLocale;
   const normalizedShell = normalizeSeedProjectPaths(shell);
@@ -5064,6 +5135,7 @@ interface RunRequest {
   readonly model: string;
   readonly reasoning: string;
   readonly mode: AgentProfile["mode"];
+  readonly fast?: boolean;
   readonly prompt: string;
   readonly accessMode: AgentAccessMode;
   /** CLI approval shortcut for agents where auto-confirm is a sandbox setting,
@@ -5080,8 +5152,10 @@ interface RunRequest {
   /** Compaction window override in tokens (Claude `autoCompactWindow`); unset =
    *  the model's full context window. */
   readonly compactWindow?: number;
-  /** Enabled rlab chat tools. Undefined means all tools. */
+  /** Enabled rlab chat tools. Undefined means the default tool set. */
   readonly tools?: readonly RlabChatToolId[];
+  /** Extra user-configured system instruction for this run. */
+  readonly systemPrompt?: string;
 }
 
 interface RunServerPromptRequest {
@@ -5812,12 +5886,14 @@ interface RunArgsRequest {
   readonly model?: string;
   readonly reasoning?: string;
   readonly mode?: AgentProfile["mode"];
+  readonly fast?: boolean;
   readonly autoConfirm?: boolean;
   readonly accessMode?: AgentAccessMode;
   readonly resume?: string;
   readonly sessionId?: string;
   readonly autoCompact?: boolean;
   readonly compactWindow?: number;
+  readonly systemPrompt?: string;
 }
 
 // The in-app Preview tab is native iframe UI for the user; the /bridge endpoints
@@ -6015,12 +6091,73 @@ const CODEX_PLAN_PROMPT_PREFIX = [
   "",
 ].join("\n");
 
-const GEMINI_PLAN_PROMPT_PREFIX = [
-  "Plan mode is active.",
-  "Do not modify files or run commands that write to the filesystem.",
-  "Inspect the workspace as needed, then respond with a concise implementation plan.",
-  "",
-].join("\n");
+const WORK_MODE_PROMPT_PREFIXES: Partial<Record<string, string>> = {
+  plan: CODEX_PLAN_PROMPT_PREFIX,
+  review: [
+    "Review mode is active.",
+    "Do not modify files or run commands that write to the filesystem.",
+    "Inspect the relevant code and respond with findings first: bugs, regressions, risks, and missing tests.",
+    "",
+  ].join("\n"),
+  build: [
+    "Build mode is active.",
+    "Implement the requested change end to end, verify it, and keep the final response concise.",
+    "",
+  ].join("\n"),
+  explore: [
+    "Explore mode is active.",
+    "Do not modify files or run commands that write to the filesystem.",
+    "Investigate the codebase and explain the relevant findings, tradeoffs, and recommended next step.",
+    "",
+  ].join("\n"),
+  summary: [
+    "Summary mode is active.",
+    "Do not modify files or run commands that write to the filesystem.",
+    "Summarize the relevant state clearly and briefly, with concrete file or behavior references where useful.",
+    "",
+  ].join("\n"),
+};
+
+const READ_ONLY_WORK_MODE_VALUES = new Set(["plan", "review", "explore", "summary"]);
+const CODEX_FAST_MODE = "fast";
+
+function workModeRequiresReadOnly(mode: string | undefined): boolean {
+  return mode !== undefined && READ_ONLY_WORK_MODE_VALUES.has(mode);
+}
+
+function promptForWorkMode(prompt: string, mode: string | undefined): string {
+  const prefix = mode ? WORK_MODE_PROMPT_PREFIXES[mode] : undefined;
+  return prefix ? `${prefix}${prompt}` : prompt;
+}
+
+function normalizedSystemPrompt(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function joinPromptSections(...sections: readonly (string | undefined)[]): string {
+  return sections.map((section) => normalizedSystemPrompt(section)).filter((section): section is string => Boolean(section)).join("\n\n");
+}
+
+function promptWithSystemPrompt(prompt: string, systemPrompt: string | undefined): string {
+  const normalized = normalizedSystemPrompt(systemPrompt);
+  return normalized ? `<system-prompt>\n${normalized}\n</system-prompt>\n\n${prompt}` : prompt;
+}
+
+function promptForWorkModeWithSystemPrompt(prompt: string, mode: string | undefined, systemPrompt: string | undefined): string {
+  return promptForWorkMode(promptWithSystemPrompt(prompt, systemPrompt), mode);
+}
+
+function claudeCliSystemPromptAppend(request: RunArgsRequest): string {
+  return joinPromptSections(CLAUDE_CHAT_UI_SYSTEM_PROMPT, request.systemPrompt);
+}
+
+function claudeSdkSystemPromptAppend(request: RunRequest): string {
+  return joinPromptSections(request.systemPrompt, rlabChatToolsPrompt(request.tools));
+}
 
 function firstForwardedHeaderValue(value: string | string[] | undefined): string | undefined {
   const raw = Array.isArray(value) ? value[0] : value;
@@ -6177,6 +6314,7 @@ function profileForArgs(agent: AgentProfile["agent"], request: RunArgsRequest): 
       model: request.model ?? "default",
       reasoning: request.reasoning ?? "default",
       mode: request.mode ?? "default",
+      fast: request.fast,
       autoConfirm: request.autoConfirm,
     },
     agent,
@@ -6200,11 +6338,22 @@ function asClaudeEffort(value: string | undefined): EffortLevel | undefined {
 }
 
 function codexPromptForMode(prompt: string, mode: string | undefined): string {
-  return mode === "plan" ? `${CODEX_PLAN_PROMPT_PREFIX}${prompt}` : prompt;
+  return promptForWorkMode(prompt, mode);
 }
 
 function geminiPromptForMode(prompt: string, mode: string | undefined): string {
-  return mode === "plan" ? `${GEMINI_PLAN_PROMPT_PREFIX}${prompt}` : prompt;
+  return promptForWorkMode(prompt, mode);
+}
+
+function codexFastModeEnabled(profile: AgentProfile): boolean {
+  return profile.fast === true || profile.mode === CODEX_FAST_MODE;
+}
+
+function appendCodexFastModeArgs(args: string[], profile: AgentProfile): void {
+  if (!codexFastModeEnabled(profile)) {
+    return;
+  }
+  args.push("--enable", "fast_mode", "-c", 'service_tier="fast"');
 }
 
 function requestedProfileError(agent: AgentProfile["agent"], model: string, reasoning: string, mode: AgentProfile["mode"]): string | null {
@@ -6239,6 +6388,7 @@ interface ParsedRunRequestSuccess {
   readonly model: string;
   readonly reasoning: string;
   readonly mode: AgentProfile["mode"];
+  readonly fast: boolean | undefined;
   readonly prompt: string;
   readonly requestedCwd: string;
   readonly accessMode: AgentAccessMode;
@@ -6247,6 +6397,7 @@ interface ParsedRunRequestSuccess {
   readonly autoCompact: boolean | undefined;
   readonly compactWindow: number | undefined;
   readonly tools: readonly RlabChatToolId[] | undefined;
+  readonly systemPrompt: string | undefined;
   readonly serverPrompt: RunServerPromptRequest | undefined;
   readonly accessModeValid: boolean;
   readonly profileValid: boolean;
@@ -6277,6 +6428,7 @@ export function parseRunRequestPayload(body: string): ParsedRunRequestPayload {
   let model = "default";
   let reasoning = "default";
   let mode: AgentProfile["mode"] = "default";
+  let fast: boolean | undefined;
   let prompt = "";
   let requestedCwd = "";
   let accessMode: AgentAccessMode = "unrestricted";
@@ -6309,11 +6461,13 @@ export function parseRunRequestPayload(body: string): ParsedRunRequestPayload {
   }
   prompt = typeof parsed.prompt === "string" ? parsed.prompt.trim() : "";
   const resume = typeof parsed.resume === "string" && parsed.resume.trim().length > 0 ? parsed.resume.trim() : undefined;
+  fast = typeof parsed.fast === "boolean" ? parsed.fast : undefined;
   autoConfirm = typeof parsed.autoConfirm === "boolean" ? parsed.autoConfirm : undefined;
   const autoCompact = typeof parsed.autoCompact === "boolean" ? parsed.autoCompact : undefined;
   const compactWindow =
     typeof parsed.compactWindow === "number" && Number.isFinite(parsed.compactWindow) && parsed.compactWindow > 0 ? Math.floor(parsed.compactWindow) : undefined;
   const tools = Array.isArray(parsed.tools) ? activeRlabChatToolIds(parsed.tools) : undefined;
+  const systemPrompt = normalizedSystemPrompt(parsed.systemPrompt);
   serverPrompt = serverPromptFromRunPayload(parsed.serverPrompt);
   requestedCwd = typeof parsed.cwd === "string" ? parsed.cwd : "";
   const parsedAccessMode = parseAccessMode(parsed.accessMode);
@@ -6332,6 +6486,7 @@ export function parseRunRequestPayload(body: string): ParsedRunRequestPayload {
     model,
     reasoning,
     mode,
+    fast,
     prompt,
     requestedCwd,
     accessMode,
@@ -6340,6 +6495,7 @@ export function parseRunRequestPayload(body: string): ParsedRunRequestPayload {
     autoCompact,
     compactWindow,
     tools,
+    systemPrompt,
     serverPrompt,
     accessModeValid,
     profileValid,
@@ -6352,7 +6508,7 @@ export function parseRunRequestPayload(body: string): ParsedRunRequestPayload {
 function claudePermissionModeForRequest(request: RunRequest): ClaudeQueryOptions["permissionMode"] {
   const profile = normalizeAgentProfile(request, "claude-code");
   const mode = modeForProfile(profile);
-  if (request.accessMode === "read-only" || mode === "plan") {
+  if (request.accessMode === "read-only" || workModeRequiresReadOnly(mode)) {
     return "plan";
   }
   if (request.autoConfirm || profile.autoConfirm) {
@@ -6364,7 +6520,7 @@ function claudePermissionModeForRequest(request: RunRequest): ClaudeQueryOptions
 function claudeToolsForRequest(request: RunRequest): ClaudeQueryOptions["tools"] {
   const profile = normalizeAgentProfile(request, "claude-code");
   const mode = modeForProfile(profile);
-  if (request.accessMode === "read-only" || mode === "plan") {
+  if (request.accessMode === "read-only" || workModeRequiresReadOnly(mode)) {
     return [
       ...CLAUDE_SAFE_READ_TOOLS,
       ...(rlabChatToolEnabled(request.tools, "AskUserQuestion") ? ["AskUserQuestion" as const] : []),
@@ -6394,7 +6550,7 @@ export function buildClaudeSdkOptions(
       ...(typeof request.compactWindow === "number" && request.compactWindow > 0 ? { autoCompactWindow: request.compactWindow } : {}),
     },
     permissionMode,
-    systemPrompt: { type: "preset", preset: "claude_code", append: rlabChatToolsPrompt(request.tools) },
+    systemPrompt: { type: "preset", preset: "claude_code", append: claudeSdkSystemPromptAppend(request) },
     tools: claudeToolsForRequest(request),
     ...(rlabChatToolEnabled(request.tools, "TaskWakeup")
       ? {
@@ -6437,7 +6593,16 @@ export function buildClaudeRunArgs(request: RunArgsRequest): string[] {
   const profile = profileForArgs("claude-code", request);
   const accessMode = request.accessMode ?? "unrestricted";
   const mode = modeForProfile(profile);
-  const args = ["-p", request.prompt, "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--append-system-prompt", CLAUDE_CHAT_UI_SYSTEM_PROMPT];
+  const args = [
+    "-p",
+    promptForWorkMode(request.prompt, mode),
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--include-partial-messages",
+    "--append-system-prompt",
+    claudeCliSystemPromptAppend(request),
+  ];
   const settings: Record<string, boolean | number> = { autoCompactEnabled: request.autoCompact ?? true };
   if (typeof request.compactWindow === "number" && request.compactWindow > 0) {
     settings.autoCompactWindow = request.compactWindow;
@@ -6455,7 +6620,7 @@ export function buildClaudeRunArgs(request: RunArgsRequest): string[] {
   if (agentName) {
     args.push("--agent", agentName);
   }
-  if (accessMode === "read-only" || mode === "plan") {
+  if (accessMode === "read-only" || workModeRequiresReadOnly(mode)) {
     args.push("--permission-mode", "plan", "--tools", CLAUDE_READ_ONLY_TOOLS.join(","));
   } else if (request.autoConfirm || profile.autoConfirm) {
     args.push("--permission-mode", "auto");
@@ -6475,11 +6640,10 @@ export function buildCodexRunArgs(request: RunArgsRequest): string[] {
   const profile = profileForArgs("codex", request);
   const accessMode = request.accessMode ?? "unrestricted";
   const mode = modeForProfile(profile);
-  const planMode = mode === "plan";
   const reviewMode = mode === "review";
   // Resume a prior session continues it: `codex exec resume <id> [flags] <prompt>`.
   const args = request.resume ? ["exec", "resume", request.resume, "--json"] : reviewMode ? ["exec", "review", "--json"] : ["exec", "--json"];
-  if (planMode) {
+  if (workModeRequiresReadOnly(mode)) {
     args.push("--sandbox", "read-only");
   } else if (accessMode === "unrestricted") {
     args.push("--sandbox", "danger-full-access");
@@ -6487,6 +6651,7 @@ export function buildCodexRunArgs(request: RunArgsRequest): string[] {
     args.push("--sandbox", "read-only");
   }
   args.push("--skip-git-repo-check");
+  appendCodexFastModeArgs(args, profile);
   const model = modelForProfile(profile);
   if (model) {
     args.push("--model", model);
@@ -6495,7 +6660,7 @@ export function buildCodexRunArgs(request: RunArgsRequest): string[] {
   if (reasoning) {
     args.push("-c", `model_reasoning_effort="${reasoning}"`);
   }
-  args.push(codexPromptForMode(request.prompt, mode));
+  args.push(codexPromptForMode(promptWithSystemPrompt(request.prompt, request.systemPrompt), mode));
   return args;
 }
 
@@ -6504,7 +6669,7 @@ function geminiApprovalModeForRequest(profile: AgentProfile, accessMode: AgentAc
   if (accessMode !== "unrestricted") {
     return "plan";
   }
-  if (mode === "plan") {
+  if (workModeRequiresReadOnly(mode)) {
     return "plan";
   }
   return autoConfirm || profile.autoConfirm ? "auto_edit" : "yolo";
@@ -6516,7 +6681,7 @@ export function buildGeminiRunArgs(request: RunArgsRequest): string[] {
   const mode = modeForProfile(profile);
   const args = [
     "--prompt",
-    geminiPromptForMode(request.prompt, mode),
+    geminiPromptForMode(promptWithSystemPrompt(request.prompt, request.systemPrompt), mode),
     "--output-format",
     "stream-json",
     "--approval-mode",
@@ -6538,20 +6703,31 @@ export function buildGeminiRunArgs(request: RunArgsRequest): string[] {
 }
 
 export function buildAmpRunArgs(request: RunArgsRequest): string[] {
+  const profile = profileForArgs("amp", request);
+  const mode = modeForProfile(profile);
   const args: string[] = [];
-  if ((request.accessMode ?? "unrestricted") === "unrestricted") {
+  if ((request.accessMode ?? "unrestricted") === "unrestricted" && !workModeRequiresReadOnly(mode)) {
     args.push("--dangerously-allow-all");
   } else {
     args.push("--settings-file", AMP_READ_ONLY_SETTINGS_FILE);
   }
-  args.push("--execute", request.prompt, "--stream-json", "--stream-json-thinking");
+  args.push("--execute", promptForWorkModeWithSystemPrompt(request.prompt, mode, request.systemPrompt), "--stream-json", "--stream-json-thinking");
   return args;
 }
 
 export function buildQwenRunArgs(request: RunArgsRequest): string[] {
   const profile = profileForArgs("qwen", request);
   const accessMode = request.accessMode ?? "unrestricted";
-  const args = ["--prompt", request.prompt, "--output-format", "stream-json", "--include-partial-messages", "--approval-mode", accessMode === "unrestricted" && profile.mode !== "plan" ? "yolo" : "plan"];
+  const mode = modeForProfile(profile);
+  const args = [
+    "--prompt",
+    promptForWorkModeWithSystemPrompt(request.prompt, mode, request.systemPrompt),
+    "--output-format",
+    "stream-json",
+    "--include-partial-messages",
+    "--approval-mode",
+    accessMode === "unrestricted" && !workModeRequiresReadOnly(mode) ? "yolo" : "plan",
+  ];
   const model = modelForProfile(profile);
   if (model) {
     args.push("--model", model);
@@ -6561,8 +6737,9 @@ export function buildQwenRunArgs(request: RunArgsRequest): string[] {
 
 export function buildCursorRunArgs(request: RunArgsRequest): string[] {
   const profile = profileForArgs("cursor", request);
-  const args = ["-p", request.prompt, "--output-format", "stream-json"];
-  if ((request.accessMode ?? "unrestricted") === "unrestricted") {
+  const mode = modeForProfile(profile);
+  const args = ["-p", promptForWorkModeWithSystemPrompt(request.prompt, mode, request.systemPrompt), "--output-format", "stream-json"];
+  if ((request.accessMode ?? "unrestricted") === "unrestricted" && !workModeRequiresReadOnly(mode)) {
     args.push("--force");
   }
   const model = modelForProfile(profile);
@@ -6599,9 +6776,9 @@ export function buildOpenCodeRunArgs(request: RunArgsRequest): string[] {
   if (request.resume) {
     args.push("--session", request.resume);
   }
-  if (accessMode === "unrestricted" && mode !== "plan") {
+  if (accessMode === "unrestricted" && !workModeRequiresReadOnly(mode)) {
     args.push("--dangerously-skip-permissions");
-  } else if (accessMode !== "unrestricted" || mode === "plan") {
+  } else if (accessMode !== "unrestricted" || workModeRequiresReadOnly(mode)) {
     // Read-only: opencode's default `build` agent auto-allows edits/bash, so force
     // the built-in `plan` agent, which denies file writes. (bash isn't fully
     // gated by opencode here, but this is the safe known-good restriction.)
@@ -6615,7 +6792,7 @@ export function buildOpenCodeRunArgs(request: RunArgsRequest): string[] {
   if (reasoning) {
     args.push("--variant", reasoning);
   }
-  args.push(request.prompt);
+  args.push(promptForWorkModeWithSystemPrompt(request.prompt, mode, request.systemPrompt));
   return args;
 }
 
@@ -7276,17 +7453,73 @@ export function createRunApprovalHandler(send: (event: RunEvent) => void, scopeI
 
 const backgroundRunHandles = new Map<string, BackgroundRunHandle>();
 
-export function activeBackgroundRunSnapshotsFromHandles(handles: ReadonlyMap<string, BackgroundRunHandle>): ActiveBackgroundRunSnapshot[] {
-  return Array.from(handles.values(), ({ binding, startedAt }) => ({
+export function isPersistedBackgroundRunActive<T extends Pick<WorkspaceConversation, "activeRunId" | "status">>(
+  conversation: T | null | undefined,
+  binding: Pick<BackgroundRunBinding, "runId">,
+): conversation is T {
+  return Boolean(conversation && conversation.activeRunId === binding.runId && (conversation.status === "running" || conversation.status === "waiting"));
+}
+
+export function activeBackgroundRunSnapshotsFromHandles(
+  handles: ReadonlyMap<string, BackgroundRunHandle>,
+  isActive: (handle: BackgroundRunHandle) => boolean = () => true,
+): ActiveBackgroundRunSnapshot[] {
+  return Array.from(handles.values())
+    .filter(isActive)
+    .map(({ binding, startedAt }) => ({
     runId: binding.runId,
     conversationId: binding.conversationId,
     userMessageId: binding.userMessageId,
     agentMessageId: binding.agentMessageId,
     startedAt,
-  }));
+    }));
+}
+
+function persistedConversationForBackgroundHandle(handle: BackgroundRunHandle): WorkspaceConversation | null {
+  ensureWorkspaceDb();
+  const conversation = readConversation(handle.binding.conversationId);
+  return isPersistedBackgroundRunActive(conversation, handle.binding) ? conversation : null;
+}
+
+function cleanupOrphanBackgroundRun(handle: BackgroundRunHandle, reason: string): void {
+  if (!backgroundRunHandles.has(handle.binding.runId)) {
+    return;
+  }
+  backgroundRunHandles.delete(handle.binding.runId);
+  try {
+    handle.cancel();
+  } catch {
+    // The child may already be exiting; the registry cleanup is still required.
+  }
+  closeIdleBrowserPreviewSession(handle.binding.conversationId);
+  drainServerQueue(handle.binding.conversationId);
+  try {
+    appendRunAuditEvent(RUN_AUDIT_FILE, {
+      type: "background_run_orphan_cleaned",
+      runId: handle.binding.runId,
+      conversationId: handle.binding.conversationId,
+      reason,
+    });
+  } catch {
+    // Audit logging must never keep an orphan process alive.
+  }
+}
+
+function pruneOrphanBackgroundRuns(): void {
+  for (const handle of Array.from(backgroundRunHandles.values())) {
+    if (!persistedConversationForBackgroundHandle(handle)) {
+      cleanupOrphanBackgroundRun(handle, "persisted conversation is not active for this run");
+    }
+  }
+}
+
+function activeBackgroundRunIds(): Set<string> {
+  pruneOrphanBackgroundRuns();
+  return new Set(backgroundRunHandles.keys());
 }
 
 function activeBackgroundRunSnapshots(): ActiveBackgroundRunSnapshot[] {
+  pruneOrphanBackgroundRuns();
   return activeBackgroundRunSnapshotsFromHandles(backgroundRunHandles);
 }
 
@@ -7316,7 +7549,10 @@ const serverQueueDrainInFlight = new Set<string>();
 function activeBackgroundRunForConversation(conversationId: string): BackgroundRunHandle | null {
   for (const handle of backgroundRunHandles.values()) {
     if (handle.binding.conversationId === conversationId) {
-      return handle;
+      if (persistedConversationForBackgroundHandle(handle)) {
+        return handle;
+      }
+      cleanupOrphanBackgroundRun(handle, "conversation active-work check found detached run");
     }
   }
   return null;
@@ -7825,6 +8061,12 @@ function notifyBackgroundRunUpdate(binding: BackgroundRunBinding, done: boolean)
   if (!conversation) {
     return;
   }
+  if (!done && !isPersistedBackgroundRunActive(conversation, binding)) {
+    if (handle) {
+      cleanupOrphanBackgroundRun(handle, "background notification found detached run");
+    }
+    return;
+  }
   const update = buildActiveRunUpdate(conversation, readMessage(binding.agentMessageId), binding, done);
   for (const subscriber of handle.subscribers) {
     subscriber(update);
@@ -7833,6 +8075,7 @@ function notifyBackgroundRunUpdate(binding: BackgroundRunBinding, done: boolean)
 
 function finishBackgroundHandle(binding: BackgroundRunBinding, canceled: boolean): void {
   backgroundRunHandles.delete(binding.runId);
+  closeIdleBrowserPreviewSession(binding.conversationId);
   if (!canceled) {
     drainServerQueue(binding.conversationId);
   }
@@ -8210,8 +8453,12 @@ function putBackgroundAgentMessage(
   };
 }
 
-function persistBackgroundRunSnapshot(binding: BackgroundRunBinding, accumulator: BackgroundRunAccumulator): void {
+function persistBackgroundRunSnapshot(binding: BackgroundRunBinding, accumulator: BackgroundRunAccumulator): boolean {
   ensureWorkspaceDb();
+  const conversation = readConversation(binding.conversationId);
+  if (!isPersistedBackgroundRunActive(conversation, binding)) {
+    return false;
+  }
   // Hot path: upsert ONLY the streamed message + its conversation row, never the
   // whole workspace. mergeInputBlockState preserves any interactive-block state
   // (approvals/options) the previous snapshot already recorded.
@@ -8226,18 +8473,16 @@ function persistBackgroundRunSnapshot(binding: BackgroundRunBinding, accumulator
     ...(accumulator.usage === undefined ? {} : { usage: accumulator.usage }),
   };
   upsertAgentMessageForUserTurn(binding.conversationId, binding.userMessageId, message);
-  const conversation = readConversation(binding.conversationId);
-  if (conversation) {
-    const patched = { ...conversation, ...backgroundRunStatusPatch(binding, blocks) };
-    updateConversationData(
-      accumulator.agent && accumulator.sessionId
-        ? { ...patched, agentSessions: { ...(patched.agentSessions ?? {}), [accumulator.agent]: accumulator.sessionId }, sessionId: accumulator.sessionId, sessionAgent: accumulator.agent }
-        : patched,
-    );
-  }
+  const patched = { ...conversation, ...backgroundRunStatusPatch(binding, blocks) };
+  updateConversationData(
+    accumulator.agent && accumulator.sessionId
+      ? { ...patched, agentSessions: { ...(patched.agentSessions ?? {}), [accumulator.agent]: accumulator.sessionId }, sessionId: accumulator.sessionId, sessionAgent: accumulator.agent }
+      : patched,
+  );
   const now = Date.now();
   accumulator.lastPersistedAt = now;
   lastBackgroundPersistAt = now;
+  return true;
 }
 
 function clearBackgroundRunPersistTimer(accumulator: BackgroundRunAccumulator): void {
@@ -8250,7 +8495,13 @@ function clearBackgroundRunPersistTimer(accumulator: BackgroundRunAccumulator): 
 
 function persistAndNotifyBackgroundRun(binding: BackgroundRunBinding, accumulator: BackgroundRunAccumulator, done: boolean): void {
   clearBackgroundRunPersistTimer(accumulator);
-  persistBackgroundRunSnapshot(binding, accumulator);
+  if (!persistBackgroundRunSnapshot(binding, accumulator)) {
+    const handle = backgroundRunHandles.get(binding.runId);
+    if (handle) {
+      cleanupOrphanBackgroundRun(handle, "background snapshot found detached run");
+    }
+    return;
+  }
   notifyBackgroundRunUpdate(binding, done);
 }
 
@@ -8279,7 +8530,13 @@ function scheduleBackgroundRunPersist(binding: BackgroundRunBinding, accumulator
   accumulator.persistTimer = setTimeout(() => {
     accumulator.persistTimer = null;
     try {
-      persistBackgroundRunSnapshot(binding, accumulator);
+      if (!persistBackgroundRunSnapshot(binding, accumulator)) {
+        const handle = backgroundRunHandles.get(binding.runId);
+        if (handle) {
+          cleanupOrphanBackgroundRun(handle, "scheduled background snapshot found detached run");
+        }
+        return;
+      }
       notifyBackgroundRunUpdate(binding, false);
     } catch (error) {
       console.error(`[rlab] Failed to persist background run ${binding.runId}: ${errorMessage(error)}`);
@@ -8397,7 +8654,8 @@ export function finishBackgroundRunState(state: WorkspaceState, binding: Backgro
   const hadError = accumulator.statuses.some((status) => status.level === "error");
   let blocks = finishBackgroundLiveBlocks(backgroundBlocks(accumulator), canceled || hadError ? "error" : "ok");
   if (canceled) {
-    const canceledStatusBlock: AgentBlock = { kind: "status", level: "warn", text: serverRunSnippet(locale, "runCanceledSnippet") };
+    blocks = blocks.map((block) => (block.kind === "text" ? { ...block, streaming: false, result: false } : block));
+    const canceledStatusBlock: AgentBlock = { kind: "status", level: "warn", text: serverRunSnippet(locale, "runCanceledSnippet"), surface: true };
     const hasCanceledStatus = blocks.some((block) => block.kind === "status" && block.level === canceledStatusBlock.level && block.text === canceledStatusBlock.text);
     blocks = blocks.length === 0 ? [canceledStatusBlock] : hasCanceledStatus ? blocks : [...blocks, canceledStatusBlock];
   }
@@ -8435,7 +8693,7 @@ function finishPersistedBackgroundRun(binding: BackgroundRunBinding, accumulator
   clearBackgroundRunPersistTimer(accumulator);
   ensureWorkspaceDb();
   const conversation = readConversation(binding.conversationId);
-  if (!conversation) {
+  if (!isPersistedBackgroundRunActive(conversation, binding)) {
     accumulator.lastPersistedAt = Date.now();
     return;
   }
@@ -10048,6 +10306,53 @@ function translateSdkMessage(translate: (line: string) => RunEvent[], message: u
   }
 }
 
+const DEFAULT_AGENT_RUN_TIMEOUT_MS = 7 * 24 * 60 * 60_000;
+
+interface AgentRunTimeout {
+  readonly timeoutMs: number | null;
+  readonly timedOut: () => boolean;
+  readonly clear: () => void;
+}
+
+function configuredAgentRunTimeoutMs(env: NodeJS.ProcessEnv = process.env): number | null {
+  const raw = env.RLAB_AGENT_RUN_TIMEOUT_MS?.trim();
+  if (!raw) {
+    return DEFAULT_AGENT_RUN_TIMEOUT_MS;
+  }
+  const normalized = raw.toLowerCase();
+  if (normalized === "0" || normalized === "false" || normalized === "off" || normalized === "none" || normalized === "disabled") {
+    return null;
+  }
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : DEFAULT_AGENT_RUN_TIMEOUT_MS;
+}
+
+function agentRunTimeoutText(agent: string, timeoutMs: number, suffix = ""): string {
+  return `${agent} timed out after ${Math.max(1, Math.round(timeoutMs / 60_000))} min.${suffix}`;
+}
+
+function startAgentRunTimeout(onTimeout: () => void): AgentRunTimeout {
+  const timeoutMs = configuredAgentRunTimeoutMs();
+  if (timeoutMs === null) {
+    return { timeoutMs, timedOut: () => false, clear: () => undefined };
+  }
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    try {
+      onTimeout();
+    } catch (error) {
+      console.error(`[rlab] agent run timeout handler failed: ${errorMessage(error)}`);
+    }
+  }, timeoutMs);
+  unrefBrowserPreviewTimer(timer);
+  return {
+    timeoutMs,
+    timedOut: () => timedOut,
+    clear: () => clearTimeout(timer),
+  };
+}
+
 async function runClaudeSdk(
   request: RunRequest,
   cwd: string,
@@ -10060,6 +10365,19 @@ async function runClaudeSdk(
   accumulator: BackgroundRunAccumulator | null,
 ): Promise<void> {
   const abortController = new AbortController();
+  const runTimeout = startAgentRunTimeout(() => {
+    if (!abortController.signal.aborted) {
+      abortController.abort();
+    }
+  });
+  let timeoutErrorSent = false;
+  const sendTimeoutError = () => {
+    if (timeoutErrorSent || runTimeout.timeoutMs === null) {
+      return;
+    }
+    timeoutErrorSent = true;
+    send({ type: "error", text: agentRunTimeoutText(request.agent, runTimeout.timeoutMs) });
+  };
   res.on("close", () => {
     if (!binding && !abortController.signal.aborted) {
       abortController.abort();
@@ -10079,13 +10397,14 @@ async function runClaudeSdk(
   const translate = createClaudeStreamTranslator();
   const canUseTool = createRunApprovalHandler(send, binding?.runId, claudePermissionModeForRequest(request) === "bypassPermissions", request.tools);
   let stderr = "";
+  const profile = normalizeAgentProfile(request, "claude-code");
   const options = buildClaudeSdkOptions(request, cwd, abortController, canUseTool, runEnv);
   options.stderr = (data: string) => {
     stderr = appendLimitedText(stderr, data, STDERR_TAIL_LIMIT_CHARS);
   };
 
   try {
-    for await (const message of query({ prompt: request.prompt, options })) {
+    for await (const message of query({ prompt: promptForWorkMode(request.prompt, modeForProfile(profile)), options })) {
       if (message.type === "rate_limit_event" && isRecord(message.rate_limit_info)) {
         recordClaudeRateLimit(request.agent, message.rate_limit_info);
       }
@@ -10094,15 +10413,23 @@ async function runClaudeSdk(
       }
     }
   } catch (error) {
-    if (!abortController.signal.aborted) {
+    if (runTimeout.timedOut()) {
+      sendTimeoutError();
+    } else if (!abortController.signal.aborted) {
       const stderrText = stderr.trim();
       send({ type: "error", text: stderrText ? `${errorMessage(error)}\n${clip(stderrText, 1_000)}` : errorMessage(error) });
     }
   } finally {
+    const timedOut = runTimeout.timedOut();
+    if (timedOut) {
+      sendTimeoutError();
+    }
+    runTimeout.clear();
+    const canceled = abortController.signal.aborted && !timedOut;
     if (binding && accumulator) {
-      finishPersistedBackgroundRun(binding, accumulator, abortController.signal.aborted);
+      finishPersistedBackgroundRun(binding, accumulator, canceled);
       notifyBackgroundRunUpdate(binding, true);
-      finishBackgroundHandle(binding, abortController.signal.aborted);
+      finishBackgroundHandle(binding, canceled);
     }
     sendDone();
     end();
@@ -10115,10 +10442,6 @@ async function runClaudeSdk(
 // so we drive opencode through a per-run server instead of the CLI run mode.
 
 const OPENCODE_SERVER_TIMEOUT_MS = 20_000;
-// Heavy agentic tasks (install deps, build, start servers) routinely exceed
-// 5 min and got killed mid-command before producing output — match Codex's
-// 30-min ceiling so long installs/builds aren't aborted prematurely.
-const OPENCODE_RUN_TIMEOUT_MS = 30 * 60_000;
 
 function waitForOpenCodeServerUrl(proc: ReturnType<typeof spawn>, signal: AbortSignal): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -10277,13 +10600,25 @@ async function runOpenCodeServer(
       },
     });
   }
-  let timedOut = false;
-  const runTimeout = setTimeout(() => {
+  const runTimeout = startAgentRunTimeout(() => {
     if (!abortController.signal.aborted) {
-      timedOut = true;
       abortController.abort();
     }
-  }, OPENCODE_RUN_TIMEOUT_MS);
+  });
+  let timeoutErrorSent = false;
+  const sendTimeoutError = (recoveredParts: number, recoverySuffix: string) => {
+    if (timeoutErrorSent || runTimeout.timeoutMs === null) {
+      return;
+    }
+    timeoutErrorSent = true;
+    send({
+      type: "error",
+      text:
+        recoveredParts > 0
+          ? agentRunTimeoutText("opencode", runTimeout.timeoutMs, ` Partial output was recovered from the OpenCode session.${recoverySuffix}`)
+          : agentRunTimeoutText("opencode", runTimeout.timeoutMs, recoverySuffix),
+    });
+  };
   let serverProc: ReturnType<typeof spawn> | null = null;
   let sessionId = request.resume;
   const runStartedAtMs = Date.now();
@@ -10317,7 +10652,8 @@ async function runOpenCodeServer(
     send({ type: "session", id: sessionId });
 
     const profile = normalizeAgentProfile(request, "opencode");
-    const body: Record<string, unknown> = { parts: [{ type: "text", text: request.prompt }] };
+    const mode = modeForProfile(profile);
+    const body: Record<string, unknown> = { parts: [{ type: "text", text: promptForWorkModeWithSystemPrompt(request.prompt, mode, request.systemPrompt) }] };
     const modelValue = modelForProfile(profile);
     if (modelValue && modelValue.includes("/")) {
       const slash = modelValue.indexOf("/");
@@ -10327,7 +10663,7 @@ async function runOpenCodeServer(
     if (reasoning) {
       body.variant = reasoning;
     }
-    if (request.accessMode !== "unrestricted") {
+    if (request.accessMode !== "unrestricted" || workModeRequiresReadOnly(mode)) {
       body.agent = "plan";
     }
 
@@ -10353,7 +10689,7 @@ async function runOpenCodeServer(
   } catch (error) {
     let recoveredParts = 0;
     let recoveryError: string | null = null;
-    if (sessionId && (timedOut || !abortController.signal.aborted)) {
+    if (sessionId && (runTimeout.timedOut() || !abortController.signal.aborted)) {
       try {
         recoveredParts = emitOpenCodeParts(readOpenCodePersistedAssistantParts(sessionId, runStartedAtMs), send);
       } catch (persistedPartsError) {
@@ -10361,17 +10697,8 @@ async function runOpenCodeServer(
       }
     }
     const recoverySuffix = recoveryError ? ` Persisted OpenCode parts recovery failed: ${recoveryError}` : "";
-    if (timedOut) {
-      // Surface the timeout as an error in the chat — otherwise the abort
-      // silently swallows it and the agent message hangs empty forever.
-      const minutes = Math.round(OPENCODE_RUN_TIMEOUT_MS / 60000);
-      send({
-        type: "error",
-        text:
-          recoveredParts > 0
-            ? `opencode timed out after ${minutes} min. Partial output was recovered from the OpenCode session.${recoverySuffix}`
-            : `opencode timed out after ${minutes} min.${recoverySuffix}`,
-      });
+    if (runTimeout.timedOut()) {
+      sendTimeoutError(recoveredParts, recoverySuffix);
     } else if (!abortController.signal.aborted) {
       const text = openCodeServerErrorText(error);
       send({
@@ -10380,7 +10707,11 @@ async function runOpenCodeServer(
       });
     }
   } finally {
-    clearTimeout(runTimeout);
+    const timedOut = runTimeout.timedOut();
+    if (timedOut) {
+      sendTimeoutError(0, "");
+    }
+    runTimeout.clear();
     if (serverProc) {
       try {
         terminateAgentProcessTree(serverProc);
@@ -10388,10 +10719,11 @@ async function runOpenCodeServer(
         // already gone
       }
     }
+    const canceled = abortController.signal.aborted && !timedOut;
     if (binding && accumulator) {
-      finishPersistedBackgroundRun(binding, accumulator, abortController.signal.aborted);
+      finishPersistedBackgroundRun(binding, accumulator, canceled);
       notifyBackgroundRunUpdate(binding, true);
-      finishBackgroundHandle(binding, abortController.signal.aborted);
+      finishBackgroundHandle(binding, canceled);
     }
     sendDone();
     end();
@@ -10407,7 +10739,6 @@ async function runOpenCodeServer(
 // installed codex 0.137): `codex app-server generate-ts`.
 
 const CODEX_APP_SERVER_TIMEOUT_MS = 30_000;
-const CODEX_RUN_TIMEOUT_MS = 30 * 60_000;
 
 /** Map a Codex `ThreadTokenUsage` (total breakdown) to our RunUsage shape. */
 export function codexAppServerUsage(tokenUsage: unknown): RunUsage | undefined {
@@ -10538,10 +10869,16 @@ export function codexAppServerItemEvents(item: Record<string, unknown>, complete
   }
 }
 
-function codexCompactionConfigForRequest(request: RunRequest): Record<string, number> | undefined {
-  return typeof request.compactWindow === "number" && request.compactWindow > 0
-    ? { model_auto_compact_token_limit: request.compactWindow }
-    : undefined;
+function codexConfigForRequest(request: RunRequest, profile: AgentProfile): Record<string, unknown> | undefined {
+  const config: Record<string, unknown> = {};
+  if (typeof request.compactWindow === "number" && request.compactWindow > 0) {
+    config.model_auto_compact_token_limit = request.compactWindow;
+  }
+  if (codexFastModeEnabled(profile)) {
+    config.service_tier = "fast";
+    config.features = { fast_mode: true };
+  }
+  return Object.keys(config).length > 0 ? config : undefined;
 }
 
 /** Sandbox/approval/model/effort + plan-aware prompt for a Codex thread. */
@@ -10552,22 +10889,21 @@ export function buildCodexThreadParams(request: RunRequest): {
   readonly model?: string;
   readonly effort?: string;
   readonly prompt: string;
-  readonly config?: Record<string, number>;
+  readonly config?: Record<string, unknown>;
   readonly dynamicTools: readonly CodexDynamicToolSpec[];
 } {
   const profile = normalizeAgentProfile(request, "codex");
   const mode = modeForProfile(profile);
-  const planMode = mode === "plan";
   const autoConfirm = Boolean(request.autoConfirm || profile.autoConfirm);
-  const sandbox = planMode || request.accessMode !== "unrestricted" ? "read-only" : "danger-full-access";
+  const sandbox = workModeRequiresReadOnly(mode) || request.accessMode !== "unrestricted" ? "read-only" : "danger-full-access";
   return {
     sandbox,
     approvalPolicy: autoConfirm && sandbox === "danger-full-access" ? "on-request" : "never",
     ...(autoConfirm && sandbox === "danger-full-access" ? { approvalsReviewer: "auto_review" as const } : {}),
     model: modelForProfile(profile),
     effort: reasoningForProfile(profile),
-    prompt: codexPromptForMode(request.prompt, mode),
-    config: codexCompactionConfigForRequest(request),
+    prompt: codexPromptForMode(promptWithSystemPrompt(request.prompt, request.systemPrompt), mode),
+    config: codexConfigForRequest(request, profile),
     dynamicTools: codexRlabDynamicTools(request.tools),
   };
 }
@@ -10599,13 +10935,19 @@ async function runCodexAppServer(
       },
     });
   }
-  let timedOut = false;
-  const runTimeout = setTimeout(() => {
+  const runTimeout = startAgentRunTimeout(() => {
     if (!abortController.signal.aborted) {
-      timedOut = true;
       abortController.abort();
     }
-  }, CODEX_RUN_TIMEOUT_MS);
+  });
+  let timeoutErrorSent = false;
+  const sendTimeoutError = () => {
+    if (timeoutErrorSent || runTimeout.timeoutMs === null) {
+      return;
+    }
+    timeoutErrorSent = true;
+    send({ type: "error", text: agentRunTimeoutText("codex", runTimeout.timeoutMs) });
+  };
 
   let child: ReturnType<typeof spawn> | null = null;
   const unrestricted = request.accessMode === "unrestricted";
@@ -10880,13 +11222,17 @@ async function runCodexAppServer(
 
     await turnSettled;
   } catch (error) {
-    if (timedOut) {
-      send({ type: "error", text: `codex timed out after ${Math.round(CODEX_RUN_TIMEOUT_MS / 60000)} min.` });
+    if (runTimeout.timedOut()) {
+      sendTimeoutError();
     } else if (!abortController.signal.aborted) {
       send({ type: "error", text: error instanceof Error ? error.message : String(error) });
     }
   } finally {
-    clearTimeout(runTimeout);
+    const timedOut = runTimeout.timedOut();
+    if (timedOut) {
+      sendTimeoutError();
+    }
+    runTimeout.clear();
     if (child && child.exitCode === null) {
       try {
         terminateAgentProcessTree(child);
@@ -10894,10 +11240,11 @@ async function runCodexAppServer(
         // already gone
       }
     }
+    const canceled = abortController.signal.aborted && !timedOut;
     if (binding && accumulator) {
-      finishPersistedBackgroundRun(binding, accumulator, abortController.signal.aborted);
+      finishPersistedBackgroundRun(binding, accumulator, canceled);
       notifyBackgroundRunUpdate(binding, true);
-      finishBackgroundHandle(binding, abortController.signal.aborted);
+      finishBackgroundHandle(binding, canceled);
     }
     sendDone();
     end();
@@ -10950,8 +11297,12 @@ function handleRunAttach(req: IncomingMessage, res: ServerResponse): void {
     sendJson(res, 404, { error: `No active run for ${runId}.` });
     return;
   }
-  ensureWorkspaceDb();
-  const attachConversation = readConversation(handle.binding.conversationId);
+  const attachConversation = persistedConversationForBackgroundHandle(handle);
+  if (!attachConversation) {
+    cleanupOrphanBackgroundRun(handle, "run attach found detached run");
+    sendJson(res, 404, { error: `No active run for ${runId}.` });
+    return;
+  }
   const initial = attachConversation ? buildActiveRunUpdate(attachConversation, readMessage(handle.binding.agentMessageId), handle.binding, false) : null;
   if (!initial) {
     sendJson(res, 409, { error: `Active run ${runId} has no persisted workspace state.` });
@@ -11160,6 +11511,7 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
       model,
       reasoning,
       mode,
+      fast,
       prompt: parsedPrompt,
       requestedCwd,
       accessMode,
@@ -11168,6 +11520,7 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
       autoCompact,
       compactWindow,
       tools,
+      systemPrompt,
       serverPrompt,
       accessModeValid,
       profileValid,
@@ -11355,7 +11708,22 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
     // can resume it later. Claude/Codex/OpenCode mint their own and report it back
     // via a "session" event from their stream translators.
     const assignedSessionId = !resume && agent === "gemini" ? randomUUID() : undefined;
-    const request: RunRequest = { agent, model, reasoning, mode, prompt, accessMode, resume, sessionId: assignedSessionId, autoConfirm, autoCompact, compactWindow, ...(tools !== undefined ? { tools } : {}) };
+    const request: RunRequest = {
+      agent,
+      model,
+      reasoning,
+      mode,
+      fast,
+      prompt,
+      accessMode,
+      resume,
+      sessionId: assignedSessionId,
+      autoConfirm,
+      autoCompact,
+      compactWindow,
+      ...(tools !== undefined ? { tools } : {}),
+      ...(systemPrompt ? { systemPrompt } : {}),
+    };
     requestForWakeups = request;
     if (assignedSessionId) {
       send({ type: "session", id: assignedSessionId });
@@ -11444,6 +11812,36 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
         sendDone();
       }
     };
+    const runTimeout = startAgentRunTimeout(() => {
+      if (child.exitCode === null) {
+        terminateAgentProcessTree(child);
+      }
+    });
+    let timeoutErrorSent = false;
+    const sendTimeoutError = () => {
+      if (timeoutErrorSent || runTimeout.timeoutMs === null) {
+        return;
+      }
+      timeoutErrorSent = true;
+      send({ type: "error", text: agentRunTimeoutText(agent, runTimeout.timeoutMs) });
+    };
+    let finalized = false;
+    const finishCliRun = (finishCanceled: boolean) => {
+      if (finalized) {
+        return;
+      }
+      finalized = true;
+      runTimeout.clear();
+      if (binding && accumulator) {
+        finishPersistedBackgroundRun(binding, accumulator, finishCanceled);
+        notifyBackgroundRunUpdate(binding, true);
+        finishBackgroundHandle(binding, finishCanceled);
+      }
+      // Flush the buffered terminal `done` (it carries usage/cost) on normal exit;
+      // a bare sendDone() here dropped token/cost stats for codex & gemini.
+      sendFinalDone();
+      sender.end();
+    };
     const translate = spec.createTranslator();
 
     let buffer = "";
@@ -11469,28 +11867,20 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
       stderr = appendLimitedText(stderr, chunk.toString("utf8"), STDERR_TAIL_LIMIT_CHARS);
     });
     child.on("error", (err) => {
-      send({ type: "error", text: `Failed to launch ${spec.bin}: ${err.message}` });
-      if (binding && accumulator) {
-        finishPersistedBackgroundRun(binding, accumulator, canceled);
-        notifyBackgroundRunUpdate(binding, true);
-        finishBackgroundHandle(binding, true);
+      if (runTimeout.timedOut()) {
+        sendTimeoutError();
+      } else if (!canceled) {
+        send({ type: "error", text: `Failed to launch ${spec.bin}: ${err.message}` });
       }
-      sendFinalDone();
-      sender.end();
+      finishCliRun(canceled && !runTimeout.timedOut());
     });
     child.on("close", (code) => {
-      if (code !== 0 && stderr) {
+      if (runTimeout.timedOut()) {
+        sendTimeoutError();
+      } else if (!canceled && code !== 0 && stderr) {
         send({ type: "error", text: clip(stderr, 400) });
       }
-      if (binding && accumulator) {
-        finishPersistedBackgroundRun(binding, accumulator, canceled);
-        notifyBackgroundRunUpdate(binding, true);
-        finishBackgroundHandle(binding, canceled);
-      }
-      // Flush the buffered terminal `done` (it carries usage/cost) on normal exit;
-      // a bare sendDone() here dropped token/cost stats for codex & gemini.
-      sendFinalDone();
-      sender.end();
+      finishCliRun(canceled && !runTimeout.timedOut());
     });
 
     // Abort the child if the client disconnects. Listen on the RESPONSE, not the
@@ -11704,6 +12094,7 @@ function attach(server: ViteDevServer | PreviewServer): void {
     { path: "/api/run-input", handler: methodOnly("POST", handleRunInput) },
   ];
   attachExactApiRoutes(server, routes);
+  cleanupStaleBrowserPreviewTempFiles(Date.now(), { force: true });
   prewarmAgentDetectionCache();
   startCliUpdateMonitor();
 }

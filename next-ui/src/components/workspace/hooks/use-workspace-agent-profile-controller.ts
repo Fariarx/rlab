@@ -3,6 +3,7 @@ import {
   DEFAULT_AGENT_OPTION_ID,
   agentProfileEquals,
   getAgent,
+  isAgentModifierModeId,
   normalizeAgentProfile,
   type AgentCliInfo,
   type AgentId,
@@ -20,22 +21,61 @@ export interface ComposerModeOption {
 export interface BuildWorkspaceComposerModesInput {
   readonly agentId: AgentId;
   readonly cliModes?: readonly AgentOption[];
-  readonly planLabel: string;
+  readonly modeLabels: WorkModeLabels;
+}
+
+type WorkModeLabelKey = "agentModeFast" | "agentModePlan" | "agentModeReview" | "agentModeBuild" | "agentModeExplore" | "agentModeSummary";
+type WorkModeLabels = Record<WorkModeLabelKey, string>;
+
+function modeLabel(mode: AgentOption, labels: WorkModeLabels): string {
+  switch (mode.id) {
+    case "fast":
+      return labels.agentModeFast;
+    case "plan":
+      return labels.agentModePlan;
+    case "review":
+      return labels.agentModeReview;
+    case "build":
+      return labels.agentModeBuild;
+    case "explore":
+      return labels.agentModeExplore;
+    case "summary":
+      return labels.agentModeSummary;
+    default:
+      return mode.label;
+  }
+}
+
+function modeLabelKey(label: string): string {
+  return label.trim().toLowerCase().replace(/[\s._-]+/g, "-");
 }
 
 export function buildWorkspaceComposerModes({
   agentId,
   cliModes,
-  planLabel,
+  modeLabels,
 }: BuildWorkspaceComposerModesInput): readonly ComposerModeOption[] {
   const def = getAgent(agentId);
-  const sourceModes = cliModes && cliModes.length > 0 ? cliModes : def.modes;
-  return sourceModes
-    .filter((mode) => mode.id !== DEFAULT_AGENT_OPTION_ID && mode.id !== "auto" && mode.id !== "bypass-permissions")
-    .map((mode) => ({
-      id: mode.id,
-      label: mode.id === "plan" ? planLabel : mode.label,
-    }));
+  const sourceModes = [...def.modes, ...(cliModes ?? [])];
+  const seenIds = new Set<string>();
+  const seenLabels = new Set<string>();
+  const modes: ComposerModeOption[] = [];
+  for (const mode of sourceModes) {
+    if (mode.id === DEFAULT_AGENT_OPTION_ID || mode.id === "auto" || mode.id === "bypass-permissions") {
+      continue;
+    }
+    const label = modeLabel(mode, modeLabels);
+    const labelKey = modeLabelKey(label);
+    const sourceLabelKey = modeLabelKey(mode.label);
+    if (seenIds.has(mode.id) || seenLabels.has(labelKey) || seenLabels.has(sourceLabelKey)) {
+      continue;
+    }
+    seenIds.add(mode.id);
+    seenLabels.add(labelKey);
+    seenLabels.add(sourceLabelKey);
+    modes.push({ id: mode.id, label });
+  }
+  return modes;
 }
 
 export interface UseWorkspaceAgentProfileControllerInput {
@@ -46,12 +86,13 @@ export interface UseWorkspaceAgentProfileControllerInput {
   readonly setConversationProfile: (conversationId: string, profile: AgentProfile) => void;
   readonly setProfile: (profile: AgentProfile) => void;
   readonly cliInfoOf: (id: AgentId) => AgentCliInfo | null;
-  readonly t: (key: "agentModePlan") => string;
+  readonly t: (key: WorkModeLabelKey) => string;
 }
 
 export interface UseWorkspaceAgentProfileControllerResult {
   readonly handleAutoConfirmChange: (enabled: boolean) => void;
   readonly handleModeChange: (modeId: string) => void;
+  readonly handleModifierModeChange: (modeId: string, enabled: boolean) => void;
   readonly handlePicked: (picked: AgentProfile) => void;
   readonly supportedModes: readonly ComposerModeOption[];
 }
@@ -93,7 +134,14 @@ export function useWorkspaceAgentProfileController({
       buildWorkspaceComposerModes({
         agentId: profile.agent,
         cliModes: cliInfoOf(profile.agent)?.modes,
-        planLabel: t("agentModePlan"),
+        modeLabels: {
+          agentModeFast: t("agentModeFast"),
+          agentModePlan: t("agentModePlan"),
+          agentModeReview: t("agentModeReview"),
+          agentModeBuild: t("agentModeBuild"),
+          agentModeExplore: t("agentModeExplore"),
+          agentModeSummary: t("agentModeSummary"),
+        },
       }),
     [cliInfoOf, profile.agent, t],
   );
@@ -111,7 +159,17 @@ export function useWorkspaceAgentProfileController({
   }, [updateSelectedProfile]);
 
   const handleModeChange = useCallback((modeId: string) => {
+    if (isAgentModifierModeId(modeId)) {
+      updateSelectedProfile(normalizeAgentProfile({ ...profile, fast: modeId === "fast" ? !(profile.fast ?? false) : false }));
+      return;
+    }
     updateSelectedProfile(normalizeAgentProfile({ ...profile, mode: modeId }));
+  }, [profile, updateSelectedProfile]);
+
+  const handleModifierModeChange = useCallback((modeId: string, enabled: boolean) => {
+    if (modeId === "fast") {
+      updateSelectedProfile(normalizeAgentProfile({ ...profile, fast: enabled }));
+    }
   }, [profile, updateSelectedProfile]);
 
   const handleAutoConfirmChange = useCallback((enabled: boolean) => {
@@ -121,6 +179,7 @@ export function useWorkspaceAgentProfileController({
   return {
     handleAutoConfirmChange,
     handleModeChange,
+    handleModifierModeChange,
     handlePicked,
     supportedModes,
   };

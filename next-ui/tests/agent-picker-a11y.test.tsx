@@ -151,9 +151,12 @@ describe("AgentPicker a11y", () => {
     const onSelect = vi.fn();
     renderWithTheme(<AgentPicker open value={DEFAULT_PROFILE} onClose={vi.fn()} onSelect={onSelect} />);
 
-    fireEvent.click(screen.getByRole("switch", { name: "TaskWakeup: включён" }));
+    expect(screen.getByText("Альфа-версия")).toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: "Просмотр: выключен" })).not.toBeChecked();
+
+    fireEvent.click(screen.getByRole("switch", { name: "Отложенные задачи: включён" }));
     fireEvent.click(screen.getByRole("button", { name: "Применить" }));
 
-    expect(onSelect).toHaveBeenCalledWith(expect.objectContaining({ tools: ["AskUserQuestion", "BrowserPreview"] }));
+    expect(onSelect).toHaveBeenCalledWith(expect.objectContaining({ tools: ["AskUserQuestion"] }));
   });
 });

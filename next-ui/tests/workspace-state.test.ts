@@ -31,6 +31,7 @@ describe("workspace state", () => {
         locale: "ru",
         telemetry: false,
         previewServerHost: "",
+        systemPrompt: "",
         voice: {
           provider: "none",
           language: "ru-RU",

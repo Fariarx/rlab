@@ -29,6 +29,7 @@ function options(): UseWorkspaceCommandItemsOptions {
     openSettings: vi.fn(),
     openGit: vi.fn(),
     openPreview: vi.fn(),
+    previewEnabled: true,
     toggleTheme: vi.fn(),
     openKit: vi.fn(),
   };
@@ -63,5 +64,13 @@ describe("useWorkspaceCommandItems", () => {
 
     expect(commandOptions.openGit).toHaveBeenCalledTimes(1);
     expect(commandOptions.toggleTheme).toHaveBeenCalledTimes(1);
+  });
+
+  it("omits the Preview command when the Preview tool is disabled", async () => {
+    const captured: { current: readonly CommandPaletteItem[] } = { current: [] };
+
+    render(<Harness options={{ ...options(), previewEnabled: false }} capture={(items) => { captured.current = items; }} />);
+
+    await waitFor(() => expect(captured.current.map((item) => item.id)).not.toContain("open-preview"));
   });
 });

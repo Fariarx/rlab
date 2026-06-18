@@ -4,6 +4,7 @@ import process from "node:process";
 import type { AgentBlock, ChatMessage, ComposerDraft, ConversationSummary, Project } from "./src/domain/agent-types";
 import type { AgentProfile } from "./src/lib/agent-catalog";
 import { conversationPreviewSnippet, messagePreviewText, previewSnippet } from "./src/lib/conversation-preview";
+import { sortConversationsNewestFirst } from "./src/lib/conversation-order";
 import { normalizeConversationUpdatedAtMs } from "./src/lib/time-format";
 import { mergeConversationUpdate, type WorkspaceMutation } from "./src/lib/workspace-mutations";
 import type { WorkspaceState } from "./src/lib/workspace-state";
@@ -311,7 +312,8 @@ export function readWorkspaceStateFromDb(includeThreadIds?: ReadonlySet<string>)
     (threads[row.conversationId] ??= []).push(messageFromRow(row));
   }
   const snippets = includeThreadIds ? new Map<string, string>() : previewSnippetsFromLoadedThreads(threads);
-  const conversationsForProject = (projectId: string | null): ConversationSummary[] => (convsByProject.get(projectId) ?? []).map((conversation) => withConversationPreview(conversation, snippets));
+  const conversationsForProject = (projectId: string | null): ConversationSummary[] =>
+    sortConversationsNewestFirst((convsByProject.get(projectId) ?? []).map((conversation) => withConversationPreview(conversation, snippets)));
   const projects: Project[] = projectRows.map((row) => ({
     ...(JSON.parse(row.data) as Omit<Project, "conversations">),
     conversations: conversationsForProject(row.id),

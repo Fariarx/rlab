@@ -63,6 +63,20 @@ function timedStreamResponse(chunks: readonly { readonly delayMs: number; readon
   );
 }
 
+function abortableStreamResponse(events: readonly unknown[], signal?: AbortSignal): Response {
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const event of events) {
+          controller.enqueue(new TextEncoder().encode(`${JSON.stringify(event)}\n`));
+        }
+        signal?.addEventListener("abort", () => controller.error(new DOMException("Aborted", "AbortError")), { once: true });
+      },
+    }),
+    { headers: { "Content-Type": "application/x-ndjson" } },
+  );
+}
+
 describe("runConversation", () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -107,6 +121,27 @@ describe("runConversation", () => {
 
     expect(result.status).toBe("done");
     expect(blocks.at(-1)).toEqual([{ kind: "status", level: "ok", text: "Done" }]);
+  });
+
+  it("sends the configured system prompt with the run request", async () => {
+    const fetch = vi.fn(async () => streamResponse([{ type: "done" }]));
+    vi.stubGlobal("fetch", fetch);
+
+    await runConversation({
+      profile: DEFAULT_PROFILE,
+      prompt: "answer",
+      accessMode: "read-only",
+      locale: "en",
+      systemPrompt: "Be concise.",
+      onBlocks: vi.fn(),
+    });
+
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/run",
+      expect.objectContaining({
+        body: expect.stringContaining('"systemPrompt":"Be concise."'),
+      }),
+    );
   });
 
   it("surfaces a foreground stream that closes before done as an explicit error", async () => {
@@ -583,6 +618,44 @@ describe("runConversation", () => {
     await resultPromise;
 
     expect(blocks.at(-1)).toEqual([{ kind: "text", text: "hello", streaming: false, result: true }]);
+  });
+
+  it("surfaces a canceled foreground run warning without promoting partial text", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) =>
+        abortableStreamResponse(
+          [
+            { type: "reasoning", text: "Проверяю контекст" },
+            { type: "text", text: "partial" },
+          ],
+          init?.signal ?? undefined,
+        ),
+      ),
+    );
+    const controller = new AbortController();
+    const blocks: AgentBlock[][] = [];
+
+    const resultPromise = runConversation({
+      profile: DEFAULT_PROFILE,
+      prompt: "answer",
+      accessMode: "read-only",
+      locale: "ru",
+      signal: controller.signal,
+      onBlocks: (nextBlocks) => blocks.push(nextBlocks),
+    });
+
+    await vi.advanceTimersByTimeAsync(40);
+    controller.abort();
+    const result = await resultPromise;
+
+    expect(result.status).toBe("done");
+    expect(blocks.at(-1)).toEqual([
+      { kind: "reasoning", text: "Проверяю контекст", active: false, duration: expect.stringMatching(/s$/) },
+      { kind: "text", text: "partial", streaming: false, result: false },
+      { kind: "status", level: "warn", text: "Запуск остановлен", surface: true },
+    ]);
   });
 
   it("surfaces malformed run stream lines as explicit errors", async () => {

@@ -73,14 +73,16 @@ describe("WorkspacePage", () => {
     vi.unstubAllGlobals();
   });
 
-  it("renders the sidebar, chats list, and conversation thread", () => {
+  it("renders the sidebar, chats list, and conversation thread", async () => {
     renderWithThemeAndVirtuoso(<WorkspacePage />);
 
     expect(screen.getByText("rlab / агенты")).toBeInTheDocument();
     // Appears in both the sidebar row and the pane header.
     expect(screen.getAllByText(/Release notes для 0\.1\.69/i).length).toBeGreaterThan(0);
     // Default conversation thread (release notes) is rendered in the pane.
-    expect(screen.getByText(/по merged PR/i)).toBeInTheDocument();
+    expect(await screen.findByText(/по merged PR/i)).toBeInTheDocument();
+    expect(screen.getByLabelText("Чат / Git / Ресурсы")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Просмотр" })).not.toBeInTheDocument();
   });
 
   it("shows projects in the unified sidebar list", () => {
@@ -90,7 +92,7 @@ describe("WorkspacePage", () => {
   });
 
   it("shows full selected agent model and reasoning labels in the composer placeholder", async () => {
-    let workspace = buildInitialWorkspaceState();
+    const workspace = buildInitialWorkspaceState();
     const profile = { agent: "codex", model: "gpt-5.5", reasoning: "xhigh", mode: "default" } as const;
     const selectedId = workspace.selectedId;
     vi.mocked(fetch).mockImplementation(async (url: string | URL | Request, init?: RequestInit) => {
@@ -119,12 +121,12 @@ describe("WorkspacePage", () => {
 
     renderWithThemeAndVirtuoso(<WorkspacePage />);
 
-    expect(await screen.findByPlaceholderText("CODEX/GPT-5.5/XHIGH ✍")).toBeInTheDocument();
-    expect(screen.queryByPlaceholderText("C/G ✍")).not.toBeInTheDocument();
+    expect(await screen.findByPlaceholderText("codex/gpt-5.5/xhigh")).toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("C/G")).not.toBeInTheDocument();
   });
 
   it("shows a bottom sidebar notice when a CLI update is available", async () => {
-    let workspace = buildInitialWorkspaceState();
+    const workspace = buildInitialWorkspaceState();
     const installRequests: string[] = [];
     vi.mocked(fetch).mockImplementation(async (url: string | URL | Request, init?: RequestInit) => {
       const path = typeof url === "string" ? url : url instanceof URL ? `${url.pathname}${url.search}` : url.url;
@@ -165,7 +167,9 @@ describe("WorkspacePage", () => {
     renderWithThemeAndVirtuoso(<WorkspacePage />);
 
     expect(await screen.findByText("Нужно обновить CLI")).toBeInTheDocument();
-    expect(screen.getByText("Codex: 1.0.0 -> 1.1.0")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("cli-updates-accordion-toggle"));
+    expect((await screen.findAllByText("Codex")).length).toBeGreaterThan(0);
+    expect(screen.getByText("1.0.0 → 1.1.0")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Обновить" }));
 
@@ -356,7 +360,7 @@ describe("WorkspacePage", () => {
     // standalone conversation right away (no draft/prelude), with the default agent.
     fireEvent.click(await screen.findByRole("menuitem", { name: "Простой чат" }));
 
-    const input = await screen.findByPlaceholderText("CLAUDE-CODE/DEFAULT/DEFAULT ✍");
+    const input = await screen.findByPlaceholderText("claude-code/default/default");
     fireEvent.change(input, { target: { value: "Set up CI" } });
     fireEvent.keyDown(input, { key: "Enter" });
 
@@ -438,7 +442,7 @@ describe("WorkspacePage", () => {
   it("sends a message into the active conversation", async () => {
     renderWithThemeAndVirtuoso(<WorkspacePage />);
 
-    const input = await screen.findByPlaceholderText(/ ✍$/);
+    const input = await screen.findByPlaceholderText(/^[a-z0-9.-]+(?:\/[a-z0-9.-]+){2}$/);
     fireEvent.change(input, { target: { value: "Ship it" } });
     fireEvent.keyDown(input, { key: "Enter" });
 
@@ -466,7 +470,7 @@ describe("WorkspacePage", () => {
     vi.stubGlobal("fetch", fetch);
 
     const firstRender = renderWithThemeAndVirtuoso(<WorkspacePage />);
-    const input = await screen.findByPlaceholderText(/ ✍$/);
+    const input = await screen.findByPlaceholderText(/^[a-z0-9.-]+(?:\/[a-z0-9.-]+){2}$/);
 
     fireEvent.change(input, { target: { value: "Черновик не из браузера" } });
 
@@ -478,7 +482,7 @@ describe("WorkspacePage", () => {
     renderWithThemeAndVirtuoso(<WorkspacePage />);
 
     await waitFor(() => {
-      expect(screen.getByPlaceholderText(/ ✍$/)).toHaveValue("Черновик не из браузера");
+      expect(screen.getByPlaceholderText(/^[a-z0-9.-]+(?:\/[a-z0-9.-]+){2}$/)).toHaveValue("Черновик не из браузера");
     });
   });
 
@@ -510,7 +514,7 @@ describe("WorkspacePage", () => {
     vi.stubGlobal("fetch", fetch);
 
     const firstRender = renderWithThemeAndVirtuoso(<WorkspacePage />);
-    await screen.findByPlaceholderText(/ ✍$/);
+    await screen.findByPlaceholderText(/^[a-z0-9.-]+(?:\/[a-z0-9.-]+){2}$/);
     const file = new File(["hello from persisted file"], "notes.txt", { type: "text/plain" });
 
     fireEvent.change(screen.getByLabelText("Выбрать файлы"), { target: { files: [file] } });
@@ -527,7 +531,7 @@ describe("WorkspacePage", () => {
     renderWithThemeAndVirtuoso(<WorkspacePage />);
 
     expect(await screen.findByText("notes.txt")).toBeInTheDocument();
-    fireEvent.change(screen.getByPlaceholderText(/ ✍$/), { target: { value: "Read attachment" } });
+    fireEvent.change(screen.getByPlaceholderText(/^[a-z0-9.-]+(?:\/[a-z0-9.-]+){2}$/), { target: { value: "Read attachment" } });
     fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
 
     await waitFor(() => {
@@ -585,7 +589,7 @@ describe("WorkspacePage", () => {
     await waitFor(() => {
       expect(screen.queryByRole("button", { name: "Остановить запуск" })).not.toBeInTheDocument();
     });
-    const input = screen.getByPlaceholderText(/ ✍$/);
+    const input = screen.getByPlaceholderText(/^[a-z0-9.-]+(?:\/[a-z0-9.-]+){2}$/);
     fireEvent.change(input, { target: { value: "Notify me" } });
     fireEvent.keyDown(input, { key: "Enter" });
 
@@ -657,7 +661,7 @@ describe("WorkspacePage", () => {
     await waitFor(() => {
       expect(screen.queryByRole("button", { name: "Остановить запуск" })).not.toBeInTheDocument();
     });
-    const input = screen.getByPlaceholderText(/ ✍$/);
+    const input = screen.getByPlaceholderText(/^[a-z0-9.-]+(?:\/[a-z0-9.-]+){2}$/);
     fireEvent.change(input, { target: { value: "Ask before running tests" } });
     fireEvent.keyDown(input, { key: "Enter" });
 
@@ -803,7 +807,8 @@ describe("WorkspacePage", () => {
     });
     renderWithThemeAndVirtuoso(<WorkspacePage />);
 
-    fireEvent.click(screen.getAllByRole("button", { name: "Скопировать сообщение" })[0]);
+    const copyButtons = await screen.findAllByRole("button", { name: "Скопировать сообщение" });
+    fireEvent.click(copyButtons[0]);
 
     await waitFor(() => {
       expect(writeText).toHaveBeenCalledWith("Собери черновик release notes для 0.1.69 по merged PR.");
@@ -817,7 +822,7 @@ describe("WorkspacePage", () => {
 
     expect(await screen.findByText("Форк диалога создан")).toBeInTheDocument();
     expect(screen.getAllByText("Fork #1: Release notes для 0.1.69").length).toBeGreaterThan(0);
-    expect(screen.getByPlaceholderText("CODEX/DEFAULT/DEFAULT ✍")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("codex/default/default")).toBeInTheDocument();
   });
 
   it("posts approval decisions from streamed approval cards", async () => {
@@ -871,7 +876,7 @@ describe("WorkspacePage", () => {
   });
 
   it("posts option selections from streamed question cards", async () => {
-    let workspace = {
+    const workspace = {
       ...buildInitialWorkspaceState(),
       selectedId: "chat-2",
       threads: {
@@ -933,7 +938,7 @@ describe("WorkspacePage", () => {
   });
 
   it("posts free-text answers from streamed question cards", async () => {
-    let workspace = {
+    const workspace = {
       ...buildInitialWorkspaceState(),
       selectedId: "chat-2",
       threads: {
@@ -1073,7 +1078,7 @@ describe("WorkspacePage", () => {
 
     renderWithThemeAndVirtuoso(<WorkspacePage />);
 
-    await screen.findByPlaceholderText("CLAUDE-CODE/DEFAULT/DEFAULT ✍");
+    await screen.findByPlaceholderText("claude-code/default/default");
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
 
     await waitFor(() => {
@@ -1145,7 +1150,7 @@ describe("WorkspacePage", () => {
 
     renderWithThemeAndVirtuoso(<WorkspacePage />);
 
-    await screen.findByPlaceholderText("CLAUDE-CODE/DEFAULT/DEFAULT ✍");
+    await screen.findByPlaceholderText("claude-code/default/default");
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
     fireEvent.click(await screen.findByRole("tab", { name: /Граф коммитов/ }));
 
@@ -1192,7 +1197,7 @@ describe("WorkspacePage", () => {
 
     renderWithThemeAndVirtuoso(<WorkspacePage />);
 
-    await screen.findByPlaceholderText("CLAUDE-CODE/DEFAULT/DEFAULT ✍");
+    await screen.findByPlaceholderText("claude-code/default/default");
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
     fireEvent.click(await screen.findByRole("button", { name: "Переключить ветку" }));
     fireEvent.click(await screen.findByRole("button", { name: /feature\/ui/ }));
@@ -1269,7 +1274,7 @@ describe("WorkspacePage", () => {
 
     renderWithThemeAndVirtuoso(<WorkspacePage />);
 
-    await screen.findByPlaceholderText("CLAUDE-CODE/DEFAULT/DEFAULT ✍");
+    await screen.findByPlaceholderText("claude-code/default/default");
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
     expect(await screen.findByText("src/worktree-only.ts")).toBeInTheDocument();
     expect(await screen.findByText("oldWorktree")).toBeInTheDocument();
@@ -1314,7 +1319,7 @@ describe("WorkspacePage", () => {
 
     renderWithThemeAndVirtuoso(<WorkspacePage />);
 
-    await screen.findByPlaceholderText("CLAUDE-CODE/DEFAULT/DEFAULT ✍");
+    await screen.findByPlaceholderText("claude-code/default/default");
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
 
     expect(await screen.findByText("Git status failed (500)")).toBeInTheDocument();
@@ -1365,7 +1370,7 @@ describe("WorkspacePage", () => {
 
     renderWithThemeAndVirtuoso(<WorkspacePage />);
 
-    await screen.findByPlaceholderText("CLAUDE-CODE/DEFAULT/DEFAULT ✍");
+    await screen.findByPlaceholderText("claude-code/default/default");
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
 
     // The unstaged tab lists each changed file as a card that loads and (for a
@@ -1415,7 +1420,7 @@ describe("WorkspacePage", () => {
 
     renderWithThemeAndVirtuoso(<WorkspacePage />);
 
-    await screen.findByPlaceholderText("CLAUDE-CODE/DEFAULT/DEFAULT ✍");
+    await screen.findByPlaceholderText("claude-code/default/default");
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
 
     // The card header (file path) shows, but a large diff stays collapsed.
@@ -1458,7 +1463,7 @@ describe("WorkspacePage", () => {
 
     renderWithThemeAndVirtuoso(<WorkspacePage />);
 
-    await screen.findByPlaceholderText("CLAUDE-CODE/DEFAULT/DEFAULT ✍");
+    await screen.findByPlaceholderText("claude-code/default/default");
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
 
     const header = await screen.findByText("src/huge.ts");
@@ -1512,7 +1517,7 @@ describe("WorkspacePage", () => {
 
     renderWithThemeAndVirtuoso(<WorkspacePage />);
 
-    await screen.findByPlaceholderText("CLAUDE-CODE/DEFAULT/DEFAULT ✍");
+    await screen.findByPlaceholderText("claude-code/default/default");
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
 
     expect(await screen.findByRole("tab", { name: /^Непоставленные 1$/i })).toHaveAttribute("aria-selected", "true");
@@ -1554,7 +1559,7 @@ describe("WorkspacePage", () => {
 
     renderWithThemeAndVirtuoso(<WorkspacePage />);
 
-    await screen.findByPlaceholderText("CLAUDE-CODE/DEFAULT/DEFAULT ✍");
+    await screen.findByPlaceholderText("claude-code/default/default");
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
     fireEvent.click(await screen.findByRole("tab", { name: /Последний ход 1/i }));
 
@@ -1607,7 +1612,7 @@ describe("WorkspacePage", () => {
 
     renderWithThemeAndVirtuoso(<WorkspacePage />);
 
-    await screen.findByPlaceholderText("CLAUDE-CODE/DEFAULT/DEFAULT ✍");
+    await screen.findByPlaceholderText("claude-code/default/default");
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
     fireEvent.click(await screen.findByRole("tab", { name: /Поставленные/ }));
 
@@ -1657,7 +1662,7 @@ describe("WorkspacePage", () => {
 
     renderWithThemeAndVirtuoso(<WorkspacePage />);
 
-    await screen.findByPlaceholderText("CLAUDE-CODE/DEFAULT/DEFAULT ✍");
+    await screen.findByPlaceholderText("claude-code/default/default");
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
 
     // The small diff auto-opens; click a line to attach a review comment.
