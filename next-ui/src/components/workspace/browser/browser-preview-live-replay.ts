@@ -340,10 +340,6 @@ export function replayBrowserActivityEvent(frame: HTMLIFrameElement | null, even
     }
     return dispatchLiveKey(keyDocument, event.key);
   }
-  if (event.type === "action.eval" && typeof event.script === "string") {
-    view.eval(event.script);
-    return true;
-  }
   // A replayable event reached here only if it was missing its payload (e.g. a
   // click with neither target nor point) — report it as not replayed.
   return false;
@@ -360,7 +356,6 @@ export function isReplayableBrowserActivityEvent(event: BrowserActivityEvent): b
     event.type === "action.select" ||
     event.type === "action.hover" ||
     event.type === "action.type" ||
-    event.type === "action.press" ||
-    event.type === "action.eval"
+    event.type === "action.press"
   );
 }

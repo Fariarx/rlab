@@ -56,26 +56,53 @@ describe("ConversationList pinning", () => {
     expect(screen.queryByRole("button", { name: /Закреплённые/ })).not.toBeInTheDocument();
   });
 
-  it("offers Pin as a row icon and calls onTogglePin", () => {
+  it("confirms Pin inline before calling onTogglePin", () => {
     const actions = render([{ ...base, id: "plain", title: "Plain chat" }]);
 
     fireEvent.click(screen.getByRole("button", { name: "Закрепить" }));
 
+    expect(actions.onTogglePin).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Закрепить?" }));
+
     expect(actions.onTogglePin).toHaveBeenCalledWith("plain");
   });
 
-  it("offers Unpin as a row icon for an already pinned conversation", () => {
-    render([{ ...base, id: "pinned", title: "Pinned chat", pinned: true }]);
+  it("confirms Unpin inline for an already pinned conversation", () => {
+    const actions = render([{ ...base, id: "pinned", title: "Pinned chat", pinned: true }]);
 
-    expect(screen.getByRole("button", { name: "Открепить" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Открепить" }));
+
+    expect(actions.onTogglePin).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Открепить?" }));
+
+    expect(actions.onTogglePin).toHaveBeenCalledWith("pinned");
   });
 
-  it("offers Archive as a row icon and calls onArchive", () => {
+  it("confirms Archive inline before calling onArchive", () => {
     const actions = render([{ ...base, id: "plain", title: "Plain chat" }]);
 
     fireEvent.click(screen.getByRole("button", { name: "Архивировать" }));
 
+    expect(actions.onArchive).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Архивировать?" }));
+
     expect(actions.onArchive).toHaveBeenCalledWith("plain");
+  });
+
+  it("clears inline Pin and Archive confirmations when clicking away", () => {
+    const actions = render([{ ...base, id: "plain", title: "Plain chat" }]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Закрепить" }));
+    expect(screen.getByRole("button", { name: "Закрепить?" })).toBeInTheDocument();
+    fireEvent.pointerDown(document.body);
+    expect(screen.queryByRole("button", { name: "Закрепить?" })).not.toBeInTheDocument();
+    expect(actions.onTogglePin).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Архивировать" }));
+    expect(screen.getByRole("button", { name: "Архивировать?" })).toBeInTheDocument();
+    fireEvent.pointerDown(document.body);
+    expect(screen.queryByRole("button", { name: "Архивировать?" })).not.toBeInTheDocument();
+    expect(actions.onArchive).not.toHaveBeenCalled();
   });
 
   it("keeps Pin and Archive out of the overflow menu", () => {

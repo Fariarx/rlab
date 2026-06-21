@@ -43,6 +43,17 @@ function rawChunkResponse(chunk: string): Response {
   );
 }
 
+function hangingStreamResponse(): Response {
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      start() {
+        // Intentionally leave the stream open without bytes.
+      },
+    }),
+    { headers: { "Content-Type": "application/x-ndjson" } },
+  );
+}
+
 function timedStreamResponse(chunks: readonly { readonly delayMs: number; readonly events: readonly unknown[]; readonly close?: boolean }[]): Response {
   return new Response(
     new ReadableStream<Uint8Array>({
@@ -198,6 +209,34 @@ describe("runConversation", () => {
 
     expect(result.status).toBe("detached");
     expect(blocks.at(-1)).toContainEqual({ kind: "status", level: "info", text: "Запуск продолжается в фоне; идёт синхронизация с сервером" });
+  });
+
+  it("surfaces an idle server-owned stream as a transport error instead of detaching", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("fetch", vi.fn(async () => hangingStreamResponse()));
+    const blocks: AgentBlock[][] = [];
+
+    const resultPromise = runConversation({
+      profile: DEFAULT_PROFILE,
+      prompt: "answer",
+      accessMode: "read-only",
+      locale: "en",
+      binding: {
+        conversationId: "chat-1",
+        runId: "run-1",
+        userMessageId: "user-1",
+        userMessageTime: "10:00",
+        agentMessageId: "agent-1",
+        agentMessageTime: "10:00",
+      },
+      onBlocks: (nextBlocks) => blocks.push(nextBlocks),
+    });
+
+    await vi.advanceTimersByTimeAsync(30_001);
+    const result = await resultPromise;
+
+    expect(result.status).toBe("error");
+    expect(blocks.at(-1)).toContainEqual({ kind: "status", level: "error", text: "Run stream stalled while waiting for server heartbeat." });
   });
 
   it("maps Edit tool calls to diff blocks", async () => {
@@ -780,23 +819,26 @@ describe("runConversation", () => {
     expect(updates).toEqual([update]);
   });
 
-  it("rejects attach stream updates without a bound user message id", async () => {
+  it("skips malformed attach stream updates without dropping the stream", async () => {
     const update = {
       runId: "run-1",
       conversationId: "chat-1",
       agentMessageId: "agent-1",
       status: "done",
       time: "10:00",
+      agentMessageTime: "10:01",
       done: true,
       blocks: [{ kind: "text", text: "done", streaming: false }],
     };
-    vi.stubGlobal("fetch", vi.fn(async () => rawChunkResponse(JSON.stringify({ type: "update", update }))));
+    const validUpdate = { ...update, userMessageId: "user-1" };
+    vi.stubGlobal("fetch", vi.fn(async () => rawChunkResponse(`${JSON.stringify({ type: "update", update })}\n${JSON.stringify({ type: "update", update: validUpdate })}\n`)));
+    const updates: unknown[] = [];
 
-    await expect(
-      attachRunUpdates({
-        runId: "run-1",
-        onUpdate: vi.fn(),
-      }),
-    ).rejects.toThrow("Malformed run attach event");
+    await attachRunUpdates({
+      runId: "run-1",
+      onUpdate: (nextUpdate) => updates.push(nextUpdate),
+    });
+
+    expect(updates).toEqual([validUpdate]);
   });
 });

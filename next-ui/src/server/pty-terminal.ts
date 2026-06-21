@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import type { IncomingMessage, Server } from "node:http";
 import type { Socket } from "node:net";
 import process from "node:process";
+import { StringDecoder } from "node:string_decoder";
 import * as pty from "node-pty";
 import type { RawData, WebSocket } from "ws";
 import { WebSocketServer } from "ws";
@@ -61,6 +62,7 @@ interface TerminalSession {
   readonly ptyProcess: pty.IPty;
   readonly mirror: TerminalStateMirror;
   readonly listeners: Map<number, TerminalListener>;
+  readonly inputDecoder: StringDecoder;
   replayChunks: Buffer[];
   replayBytes: number;
   initialReplayClaimed: boolean;
@@ -88,6 +90,14 @@ interface TerminalStreamState {
 
 const DEFAULT_COLS = 120;
 const DEFAULT_ROWS = 32;
+const MAX_TERMINAL_COLS = 1_000;
+const MAX_TERMINAL_ROWS = 1_000;
+const MAX_TERMINAL_PIXEL_DIMENSION = 100_000;
+const MAX_TERMINAL_SESSIONS = 16;
+const MAX_TERMINAL_VIEWERS_PER_SESSION = 8;
+const MAX_TERMINAL_INPUT_MESSAGE_BYTES = 1024 * 1024;
+const TERMINAL_UNVIEWED_GRACE_MS = 30_000;
+const TERMINAL_WS_PING_INTERVAL_MS = 15_000;
 const TERMINAL_SCROLLBACK = 10_000;
 const INITIAL_REPLAY_BUFFER_BYTES = 512 * 1024;
 
@@ -99,7 +109,12 @@ const { SerializeAddon } = serializeAddonModule as unknown as { readonly Seriali
 const { Terminal: HeadlessTerminal } = headlessTerminalModule as unknown as { readonly Terminal: HeadlessTerminalConstructor };
 
 function normalizeTerminalSize(value: number | undefined, fallback: number): number {
-  return Number.isFinite(value) && (value ?? 0) > 0 ? Math.max(1, Math.floor(value ?? fallback)) : fallback;
+  const max = fallback === DEFAULT_COLS ? MAX_TERMINAL_COLS : MAX_TERMINAL_ROWS;
+  return Number.isFinite(value) && (value ?? 0) > 0 ? Math.min(max, Math.max(1, Math.floor(value ?? fallback))) : fallback;
+}
+
+function normalizeTerminalPixelDimension(value: number | undefined): number | undefined {
+  return Number.isFinite(value) && (value ?? 0) > 0 ? Math.min(MAX_TERMINAL_PIXEL_DIMENSION, Math.max(1, Math.floor(value ?? 0))) : undefined;
 }
 
 function terminalLaunch(): { readonly command: string; readonly args: readonly string[] } {
@@ -157,10 +172,16 @@ function rawDataToBuffer(message: RawData): Buffer {
   if (Buffer.isBuffer(message)) {
     return message;
   }
+  if (message instanceof ArrayBuffer) {
+    return Buffer.from(message);
+  }
+  if (ArrayBuffer.isView(message)) {
+    return Buffer.from(message.buffer, message.byteOffset, message.byteLength);
+  }
   if (Array.isArray(message)) {
     return Buffer.concat(message.map((part) => rawDataToBuffer(part)));
   }
-  return Buffer.from(message.toString(), "utf8");
+  return Buffer.alloc(0);
 }
 
 function sendControlMessage(ws: WebSocket, message: TerminalControlServerMessage): void {
@@ -255,6 +276,9 @@ export class PtyTerminalManager {
   private readonly sessions = new Map<string, TerminalSession>();
 
   create({ cwd, cols, rows }: TerminalSessionCreateRequest): TerminalCreateResult {
+    if (this.sessions.size >= MAX_TERMINAL_SESSIONS) {
+      throw new Error(`Terminal session limit reached (${MAX_TERMINAL_SESSIONS}). Close an existing terminal before opening another.`);
+    }
     const id = `term-${randomUUID()}`;
     const launch = terminalLaunch();
     const resolvedCols = normalizeTerminalSize(cols, DEFAULT_COLS);
@@ -274,6 +298,7 @@ export class PtyTerminalManager {
       ptyProcess,
       mirror,
       listeners: new Map(),
+      inputDecoder: new StringDecoder("utf8"),
       replayChunks: [],
       replayBytes: 0,
       initialReplayClaimed: false,
@@ -365,7 +390,10 @@ export class PtyTerminalManager {
     if (!session?.running) {
       return false;
     }
-    session.ptyProcess.write(data.toString("utf8"));
+    const text = session.inputDecoder.write(data);
+    if (text.length > 0) {
+      session.ptyProcess.write(text);
+    }
     return true;
   }
 
@@ -377,8 +405,10 @@ export class PtyTerminalManager {
     const resolvedCols = normalizeTerminalSize(cols, DEFAULT_COLS);
     const resolvedRows = normalizeTerminalSize(rows, DEFAULT_ROWS);
     try {
-      if (pixelWidth && pixelHeight) {
-        session.ptyProcess.resize(resolvedCols, resolvedRows, { width: Math.floor(pixelWidth), height: Math.floor(pixelHeight) });
+      const resolvedPixelWidth = normalizeTerminalPixelDimension(pixelWidth);
+      const resolvedPixelHeight = normalizeTerminalPixelDimension(pixelHeight);
+      if (resolvedPixelWidth && resolvedPixelHeight) {
+        session.ptyProcess.resize(resolvedCols, resolvedRows, { width: resolvedPixelWidth, height: resolvedPixelHeight });
       } else {
         session.ptyProcess.resize(resolvedCols, resolvedRows);
       }
@@ -410,10 +440,65 @@ export class PtyTerminalManager {
 
 export function attachPtyTerminalWebSockets(server: Server, terminalManager: PtyTerminalManager, guard?: TerminalWebSocketGuard): () => Promise<void> {
   const terminalStreamStates = new Map<string, TerminalStreamState>();
+  const unviewedTerminalTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const ioServer = new WebSocketServer({ noServer: true });
   const controlServer = new WebSocketServer({ noServer: true });
 
+  const cancelUnviewedTerminalClose = (terminalId: string): void => {
+    const timer = unviewedTerminalTimers.get(terminalId);
+    if (!timer) {
+      return;
+    }
+    clearTimeout(timer);
+    unviewedTerminalTimers.delete(terminalId);
+  };
+
+  const scheduleUnviewedTerminalClose = (terminalId: string): void => {
+    if (unviewedTerminalTimers.has(terminalId) || !terminalManager.get(terminalId)) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      unviewedTerminalTimers.delete(terminalId);
+      if (!terminalStreamStates.has(terminalId)) {
+        terminalManager.close(terminalId);
+      }
+    }, TERMINAL_UNVIEWED_GRACE_MS);
+    timer.unref?.();
+    unviewedTerminalTimers.set(terminalId, timer);
+  };
+
+  const attachSocketHeartbeat = (ws: WebSocket): void => {
+    let alive = true;
+    const cleanup = () => {
+      clearInterval(timer);
+      ws.off("pong", markAlive);
+      ws.off("close", cleanup);
+      ws.off("error", cleanup);
+    };
+    const markAlive = () => {
+      alive = true;
+    };
+    const timer = setInterval(() => {
+      if (ws.readyState !== ws.OPEN) {
+        cleanup();
+        return;
+      }
+      if (!alive) {
+        ws.terminate();
+        cleanup();
+        return;
+      }
+      alive = false;
+      ws.ping();
+    }, TERMINAL_WS_PING_INTERVAL_MS);
+    timer.unref?.();
+    ws.on("pong", markAlive);
+    ws.on("close", cleanup);
+    ws.on("error", cleanup);
+  };
+
   const getOrCreateStreamState = (terminalId: string): TerminalStreamState => {
+    cancelUnviewedTerminalClose(terminalId);
     const existing = terminalStreamStates.get(terminalId);
     if (existing) {
       return existing;
@@ -434,12 +519,16 @@ export function attachPtyTerminalWebSockets(server: Server, terminalManager: Pty
     }
     state.detachOutputListener?.();
     terminalStreamStates.delete(terminalId);
+    scheduleUnviewedTerminalClose(terminalId);
   };
 
-  const getOrCreateViewer = (streamState: TerminalStreamState, clientId: string): TerminalViewer => {
+  const getOrCreateViewer = (streamState: TerminalStreamState, clientId: string): TerminalViewer | null => {
     const existing = streamState.viewers.get(clientId);
     if (existing) {
       return existing;
+    }
+    if (streamState.viewers.size >= MAX_TERMINAL_VIEWERS_PER_SESSION) {
+      return null;
     }
     const created: TerminalViewer = {
       clientId,
@@ -520,8 +609,14 @@ export function attachPtyTerminalWebSockets(server: Server, terminalManager: Pty
 
   ioServer.on("connection", (ws, context) => {
     const { terminalId, clientId } = context as unknown as { terminalId: string; clientId: string };
+    attachSocketHeartbeat(ws);
     const streamState = getOrCreateStreamState(terminalId);
     const viewer = getOrCreateViewer(streamState, clientId);
+    if (!viewer) {
+      ws.close(1013, `Terminal viewer limit reached (${MAX_TERMINAL_VIEWERS_PER_SESSION}).`);
+      cleanupStreamStateIfUnused(terminalId);
+      return;
+    }
     const previousSocket = viewer.ioSocket;
     viewer.ioState?.dispose();
     viewer.ioState = createTerminalIoOutputState({
@@ -540,7 +635,12 @@ export function attachPtyTerminalWebSockets(server: Server, terminalManager: Pty
     }
 
     ws.on("message", (rawMessage) => {
-      if (!terminalManager.write(terminalId, rawDataToBuffer(rawMessage))) {
+      const input = rawDataToBuffer(rawMessage);
+      if (input.byteLength > MAX_TERMINAL_INPUT_MESSAGE_BYTES) {
+        ws.close(1009, "Terminal input message is too large.");
+        return;
+      }
+      if (!terminalManager.write(terminalId, input)) {
         ws.close(1011, "Terminal session is not running.");
       }
     });
@@ -557,8 +657,14 @@ export function attachPtyTerminalWebSockets(server: Server, terminalManager: Pty
 
   controlServer.on("connection", (ws, context) => {
     const { terminalId, clientId } = context as unknown as { terminalId: string; clientId: string };
+    attachSocketHeartbeat(ws);
     const streamState = getOrCreateStreamState(terminalId);
     const viewer = getOrCreateViewer(streamState, clientId);
+    if (!viewer) {
+      ws.close(1013, `Terminal viewer limit reached (${MAX_TERMINAL_VIEWERS_PER_SESSION}).`);
+      cleanupStreamStateIfUnused(terminalId);
+      return;
+    }
     const previousSocket = viewer.controlSocket;
     viewer.restoreComplete = false;
     viewer.pendingOutputChunks = [];
@@ -605,8 +711,10 @@ export function attachPtyTerminalWebSockets(server: Server, terminalManager: Pty
         viewer.ioState?.acknowledgeOutput(message.bytes);
         return;
       }
-      viewer.restoreComplete = true;
-      viewer.flushPendingOutput();
+      if (message.type === "restore_complete") {
+        viewer.restoreComplete = true;
+        viewer.flushPendingOutput();
+      }
     });
     ws.on("close", () => {
       if (viewer.controlSocket !== ws) {
@@ -627,6 +735,10 @@ export function attachPtyTerminalWebSockets(server: Server, terminalManager: Pty
     for (const client of controlServer.clients) {
       client.terminate();
     }
+    for (const timer of unviewedTerminalTimers.values()) {
+      clearTimeout(timer);
+    }
+    unviewedTerminalTimers.clear();
     await new Promise<void>((resolve) => ioServer.close(() => controlServer.close(() => resolve())));
   };
 }

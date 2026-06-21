@@ -28,10 +28,28 @@ describe("request security guard", () => {
       statusCode: 403,
       message: "Cross-site requests are not allowed.",
     });
+    expect(validateRlabRequest(req({ host: "localhost:5187", "sec-fetch-site": "cross-site" }, "GET"))).toEqual({
+      statusCode: 403,
+      message: "Cross-site requests are not allowed.",
+    });
+    expect(validateRlabRequest(req({ host: "localhost:5187" }, "POST"))).toEqual({
+      statusCode: 403,
+      message: "Unsafe requests require a same-origin browser signal.",
+    });
   });
 
   it("normalizes host headers without trusting ports", () => {
     expect(hostHeaderHostname("RLab.Example.Test:443")).toBe("rlab.example.test");
+    expect(hostHeaderHostname("localhost.:5187")).toBe("localhost");
     expect(hostHeaderHostname("[::1]:5187")).toBe("::1");
+  });
+
+  it("allows unsafe requests only with a positive same-origin signal", () => {
+    expect(validateRlabRequest(req({ host: "localhost:5187", origin: "http://localhost:5187" }, "POST"))).toBeNull();
+    expect(validateRlabRequest(req({ host: "localhost:5187", "sec-fetch-site": "same-origin" }, "POST"))).toBeNull();
+    expect(validateRlabRequest(req({ host: "localhost:5187", origin: "http://localhost:5173" }, "POST"))).toEqual({
+      statusCode: 403,
+      message: "Cross-origin requests are not allowed.",
+    });
   });
 });

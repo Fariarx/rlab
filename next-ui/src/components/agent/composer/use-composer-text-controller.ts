@@ -12,7 +12,12 @@ import {
 import { composerDraftsEqual, fileToAttachmentDraft } from "./composer-utils";
 import type { ComposerAttachmentDraft, ComposerDraft } from "../core/types";
 
-const STALE_SUBMIT_CHANGE_GUARD_MS = 750;
+const STALE_SUBMIT_CHANGE_GUARD_MIN_CHARS = 8;
+
+interface StaleSubmitChangeGuard {
+  readonly submittedText: string;
+  userInputObserved: boolean;
+}
 
 interface UseComposerTextControllerInput {
   readonly attachmentsControlled: boolean;
@@ -27,6 +32,7 @@ interface UseComposerTextControllerInput {
   readonly onSend?: (value: string) => void;
   readonly onSendReview?: () => void;
   readonly pluginTokenRanges: readonly ComposerPluginTokenRange[];
+  readonly recentlySubmittedValue?: string;
   readonly reviewCount: number;
   readonly sending: boolean;
   readonly setActiveSuggestion: (value: number | ((current: number) => number)) => void;
@@ -63,6 +69,28 @@ function changeEventInputType(event: ChangeEvent<HTMLInputElement | HTMLTextArea
   return typeof nativeEvent.inputType === "string" ? nativeEvent.inputType : null;
 }
 
+function submittedChangeGuard(value: string | undefined): StaleSubmitChangeGuard | null {
+  const submittedText = value?.trim() ?? "";
+  return submittedText.length > 0 ? { submittedText, userInputObserved: false } : null;
+}
+
+function looksLikeStaleSubmittedChange(guard: StaleSubmitChangeGuard, previousValue: string, nextValue: string): boolean {
+  const normalizedNextValue = nextValue.trim();
+  return (
+    !guard.userInputObserved
+    && previousValue.trim().length === 0
+    && normalizedNextValue.length >= STALE_SUBMIT_CHANGE_GUARD_MIN_CHARS
+    && (guard.submittedText.includes(normalizedNextValue) || normalizedNextValue.includes(guard.submittedText))
+  );
+}
+
+function isComposerEditingKey(event: KeyboardEvent<HTMLTextAreaElement>): boolean {
+  if (event.altKey || event.ctrlKey || event.metaKey) {
+    return false;
+  }
+  return event.key.length === 1 || event.key === "Backspace" || event.key === "Delete";
+}
+
 function insertedTextFromChange(previous: string, next: string): string {
   if (next.length <= previous.length) {
     return "";
@@ -95,6 +123,7 @@ export function useComposerTextController({
   onSend,
   onSendReview,
   pluginTokenRanges,
+  recentlySubmittedValue,
   reviewCount,
   sending,
   setActiveSuggestion,
@@ -115,27 +144,33 @@ export function useComposerTextController({
   const initialDraftRef = useRef<ComposerDraft>({ text: initialValue, attachments: initialAttachments });
   const localDraftDirtyRef = useRef(false);
   const latestDraftRef = useRef<ComposerDraft>({ text: composerValue, attachments: composerAttachments });
-  const staleSubmitChangeGuardRef = useRef<string | null>(null);
-  const staleSubmitChangeGuardTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const staleSubmitChangeGuardRef = useRef<StaleSubmitChangeGuard | null>(submittedChangeGuard(recentlySubmittedValue));
   latestDraftRef.current = { text: composerValue, attachments: composerAttachments };
 
   const clearStaleSubmitChangeGuard = useCallback(() => {
     staleSubmitChangeGuardRef.current = null;
-    if (staleSubmitChangeGuardTimerRef.current) {
-      clearTimeout(staleSubmitChangeGuardTimerRef.current);
-      staleSubmitChangeGuardTimerRef.current = null;
-    }
   }, []);
 
   const armStaleSubmitChangeGuard = useCallback((submittedText: string) => {
-    clearStaleSubmitChangeGuard();
-    const normalized = submittedText.trim();
-    if (!normalized) {
+    staleSubmitChangeGuardRef.current = submittedChangeGuard(submittedText);
+  }, []);
+
+  const markUserInputAfterSubmit = useCallback(() => {
+    const guard = staleSubmitChangeGuardRef.current;
+    if (guard) {
+      guard.userInputObserved = true;
+    }
+  }, []);
+
+  useEffect(() => {
+    const guard = submittedChangeGuard(recentlySubmittedValue);
+    if (!guard || latestDraftRef.current.text.trim().length > 0) {
       return;
     }
-    staleSubmitChangeGuardRef.current = normalized;
-    staleSubmitChangeGuardTimerRef.current = setTimeout(clearStaleSubmitChangeGuard, STALE_SUBMIT_CHANGE_GUARD_MS);
-  }, [clearStaleSubmitChangeGuard]);
+    if (staleSubmitChangeGuardRef.current?.submittedText !== guard.submittedText) {
+      staleSubmitChangeGuardRef.current = guard;
+    }
+  }, [recentlySubmittedValue]);
 
   useEffect(() => clearStaleSubmitChangeGuard, [clearStaleSubmitChangeGuard]);
 
@@ -314,10 +349,10 @@ export function useComposerTextController({
       void addFiles([pastedTextFile]);
       return;
     }
-    const staleSubmittedText = staleSubmitChangeGuardRef.current;
-    if (staleSubmittedText) {
-      const normalizedNextValue = nextValue.trim();
-      if (normalizedNextValue.length > 0 && staleSubmittedText.includes(normalizedNextValue)) {
+    const staleSubmittedChangeGuard = staleSubmitChangeGuardRef.current;
+    if (staleSubmittedChangeGuard) {
+      if (looksLikeStaleSubmittedChange(staleSubmittedChangeGuard, composerValue, nextValue)) {
+        event.target.value = composerValue;
         return;
       }
       clearStaleSubmitChangeGuard();
@@ -350,6 +385,9 @@ export function useComposerTextController({
   }, [addFiles, clearStaleSubmitChangeGuard, deleteComposerPluginToken]);
 
   const handleKeyDown = useCallback((event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (isComposerEditingKey(event)) {
+      markUserInputAfterSubmit();
+    }
     if (suggestionsOpen) {
       if (event.key === "ArrowDown") {
         event.preventDefault();
@@ -405,6 +443,7 @@ export function useComposerTextController({
     applySuggestion,
     composerValue,
     deleteComposerPluginToken,
+    markUserInputAfterSubmit,
     navigateHistory,
     send,
     setActiveSuggestion,
@@ -416,6 +455,7 @@ export function useComposerTextController({
   ]);
 
   const handlePaste = useCallback((event: ClipboardEvent<HTMLDivElement>) => {
+    markUserInputAfterSubmit();
     const clipboard = event.clipboardData;
     if (!clipboard) {
       return;
@@ -432,7 +472,7 @@ export function useComposerTextController({
       event.preventDefault();
       void addFiles([pastedTextFile]);
     }
-  }, [addFiles]);
+  }, [addFiles, markUserInputAfterSubmit]);
 
   const hasComposerPayload = composerValue.trim().length > 0 || composerAttachments.length > 0;
 

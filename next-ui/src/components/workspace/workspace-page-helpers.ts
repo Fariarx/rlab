@@ -145,7 +145,11 @@ export function showDesktopNotification(enabled: boolean, notification: { readon
   if (!enabled || notification == null || typeof Notification === "undefined" || Notification.permission !== "granted") {
     return;
   }
-  new Notification(notification.title, { body: notification.body });
+  try {
+    new Notification(notification.title, { body: notification.body });
+  } catch (error) {
+    console.warn(`[rlab] Browser notification show failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 /** Ask the browser for notification permission when notifications are enabled but
@@ -155,5 +159,11 @@ export function ensureBrowserNotificationPermission(enabled: boolean): void {
   if (!enabled || typeof Notification === "undefined" || Notification.permission !== "default") {
     return;
   }
-  void Notification.requestPermission().catch(() => undefined);
+  try {
+    void Promise.resolve(Notification.requestPermission()).catch((error: unknown) => {
+      console.warn(`[rlab] Browser notification permission request failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  } catch (error) {
+    console.warn(`[rlab] Browser notification permission request failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }

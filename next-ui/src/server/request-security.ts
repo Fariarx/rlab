@@ -13,8 +13,12 @@ function firstHeader(value: string | readonly string[] | undefined): string {
 }
 
 function normalizeHostname(value: string): string {
-  const trimmed = value.trim().toLowerCase();
+  const trimmed = value.trim().toLowerCase().replace(/\.$/, "");
   return trimmed.startsWith("[") && trimmed.endsWith("]") ? trimmed.slice(1, -1) : trimmed;
+}
+
+function normalizeAuthority(value: string): string {
+  return value.trim().toLowerCase().replace(/\.$/, "");
 }
 
 export function isLoopbackHostname(value: string): boolean {
@@ -54,23 +58,38 @@ export function requestHostAllowed(hostHeader: string, env: NodeJS.ProcessEnv = 
   return allowedHostnamesFromEnv(env).has(hostname);
 }
 
-function originHostname(value: string): string | null {
+function originAuthority(value: string): string | null {
   try {
-    return normalizeHostname(new URL(value).hostname);
+    return normalizeAuthority(new URL(value).host);
   } catch {
     return null;
   }
 }
 
+function hostHeaderAuthority(hostHeader: string): string | null {
+  const trimmed = hostHeader.trim();
+  if (!trimmed) {
+    return null;
+  }
+  try {
+    return normalizeAuthority(new URL(`http://${trimmed}`).host);
+  } catch {
+    return normalizeAuthority(trimmed);
+  }
+}
+
 function sameOriginHost(origin: string, hostHeader: string): boolean {
-  const originHost = originHostname(origin);
-  const requestHost = hostHeaderHostname(hostHeader);
+  const originHost = originAuthority(origin);
+  const requestHost = hostHeaderAuthority(hostHeader);
   return Boolean(originHost && requestHost && originHost === requestHost);
 }
 
-function isCrossSiteFetch(req: IncomingMessage): boolean {
-  const fetchSite = firstHeader(req.headers["sec-fetch-site"]).toLowerCase();
-  return fetchSite === "cross-site";
+function fetchSiteHeader(req: IncomingMessage): string {
+  return firstHeader(req.headers["sec-fetch-site"]).toLowerCase();
+}
+
+function isSameOriginFetchSite(fetchSite: string): boolean {
+  return fetchSite === "same-origin" || fetchSite === "none";
 }
 
 export function validateRlabRequest(req: IncomingMessage, env: NodeJS.ProcessEnv = process.env): RequestSecurityFailure | null {
@@ -85,14 +104,18 @@ export function validateRlabRequest(req: IncomingMessage, env: NodeJS.ProcessEnv
   const method = (req.method ?? "GET").toUpperCase();
   const origin = firstHeader(req.headers.origin);
   const referer = firstHeader(req.headers.referer);
+  const fetchSite = fetchSiteHeader(req);
   if (origin && !sameOriginHost(origin, host)) {
     return { statusCode: 403, message: "Cross-origin requests are not allowed." };
   }
   if (!origin && referer && !sameOriginHost(referer, host)) {
     return { statusCode: 403, message: "Cross-origin requests are not allowed." };
   }
-  if (UNSAFE_METHODS.has(method) && isCrossSiteFetch(req)) {
+  if (fetchSite === "cross-site") {
     return { statusCode: 403, message: "Cross-site requests are not allowed." };
+  }
+  if (UNSAFE_METHODS.has(method) && !origin && !referer && !isSameOriginFetchSite(fetchSite)) {
+    return { statusCode: 403, message: "Unsafe requests require a same-origin browser signal." };
   }
   return null;
 }

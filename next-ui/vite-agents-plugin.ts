@@ -2,7 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { appendFileSync, chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, type Dirent } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
-import { request as httpRequest, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
+import { request as httpRequest, type IncomingHttpHeaders, type IncomingMessage, type OutgoingHttpHeaders, type Server as HttpServer, type ServerResponse } from "node:http";
 import { homedir, tmpdir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import process from "node:process";
@@ -1066,7 +1066,36 @@ export function jsonBodyReadErrorStatus(error: unknown): 413 | 500 {
   return /^JSON request body exceeds \d+ bytes\.$/.test(errorMessage(error)) ? 413 : 500;
 }
 
+function requestContentType(req: IncomingMessage): string {
+  const value = req.headers["content-type"];
+  return (Array.isArray(value) ? value[0] : value)?.split(";")[0]?.trim().toLowerCase() ?? "";
+}
+
+function requestContentLength(req: IncomingMessage): number | null {
+  const value = req.headers["content-length"];
+  const raw = Array.isArray(value) ? value[0] : value;
+  if (typeof raw !== "string" || raw.trim().length === 0) {
+    return null;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function isJsonContentType(value: string): boolean {
+  return value === "application/json" || value.endsWith("+json");
+}
+
 function readJsonBody(req: IncomingMessage, res: ServerResponse, onDone: (body: string) => void, maxBytes = MAX_JSON_BODY_BYTES): void {
+  const contentType = requestContentType(req);
+  if (!isJsonContentType(contentType)) {
+    sendJson(res, 415, { error: "Content-Type application/json is required." });
+    return;
+  }
+  const contentLength = requestContentLength(req);
+  if (contentLength !== null && contentLength > maxBytes) {
+    sendJson(res, 413, { error: jsonBodyTooLargeMessage(maxBytes) });
+    return;
+  }
   let accumulator: JsonBodyAccumulator = { body: "", bytes: 0 };
   let finished = false;
   req.on("data", (chunk: Buffer | string) => {
@@ -1303,6 +1332,7 @@ interface BrowserPreviewSession {
 
 const BROWSER_PREVIEW_VIEWPORT = { width: 1280, height: 720 } as const;
 const BROWSER_PREVIEW_EVENT_LIMIT = 80;
+const MAX_BROWSER_PREVIEW_SESSIONS = 4;
 const BROWSER_PREVIEW_SESSION_ID_PATTERN = /^[a-zA-Z0-9_.:-]{1,160}$/;
 const BROWSER_PREVIEW_TEMP_CLEANUP_INTERVAL_MS = 60_000;
 const BROWSER_PREVIEW_TEMP_FILE_MAX_AGE_MS = 10 * 60_000;
@@ -1385,6 +1415,19 @@ function sweepIdleBrowserPreviewSessions(now: number): void {
       closeBrowserPreviewSession(id, { force: true });
     }
   }
+}
+
+function closeLeastRecentlyActiveUnviewedBrowserPreviewSession(): boolean {
+  let candidate: BrowserPreviewSession | null = null;
+  for (const session of browserPreviewSessions.values()) {
+    if (session.clients.size > 0) {
+      continue;
+    }
+    if (!candidate || session.lastActiveAt < candidate.lastActiveAt) {
+      candidate = session;
+    }
+  }
+  return candidate ? closeBrowserPreviewSession(candidate.id, { force: true }) : false;
 }
 
 function closeBrowserPreviewSession(sessionId: string, options: { readonly force?: boolean } = {}): boolean {
@@ -1749,10 +1792,26 @@ function trimBrowserPreviewEvents(events: BrowserPreviewEvent[]): void {
   }
 }
 
-function writeBrowserPreviewSseEvent(res: ServerResponse, event: BrowserPreviewEvent): void {
-  res.write(`id: ${event.id}\n`);
-  res.write("event: browser\n");
-  res.write(`data: ${JSON.stringify(event)}\n\n`);
+function writeBrowserPreviewSseEvent(res: ServerResponse, event: BrowserPreviewEvent): boolean {
+  if (res.destroyed || res.writableEnded) {
+    return false;
+  }
+  try {
+    res.write(`id: ${event.id}\n`);
+    res.write("event: browser\n");
+    res.write(`data: ${JSON.stringify(event)}\n\n`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function removeBrowserPreviewClient(session: BrowserPreviewSession, res: ServerResponse): void {
+  if (!session.clients.delete(res)) {
+    return;
+  }
+  session.lastActiveAt = Date.now();
+  scheduleBrowserPreviewIdleSweep();
 }
 
 function emitBrowserPreviewEvent(
@@ -1769,7 +1828,9 @@ function emitBrowserPreviewEvent(
   session.events.push(event);
   trimBrowserPreviewEvents(session.events);
   for (const client of session.clients) {
-    writeBrowserPreviewSseEvent(client, event);
+    if (!writeBrowserPreviewSseEvent(client, event)) {
+      removeBrowserPreviewClient(session, client);
+    }
   }
   return event;
 }
@@ -1864,6 +1925,9 @@ async function ensureBrowserPreviewSession(sessionId: string): Promise<BrowserPr
   if (current) {
     scheduleBrowserPreviewIdleSweep();
     return current;
+  }
+  if (browserPreviewSessions.size >= MAX_BROWSER_PREVIEW_SESSIONS && !closeLeastRecentlyActiveUnviewedBrowserPreviewSession()) {
+    throw new Error(`Too many active browser preview sessions (${MAX_BROWSER_PREVIEW_SESSIONS}).`);
   }
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({ viewport: BROWSER_PREVIEW_VIEWPORT });
@@ -3946,28 +4010,54 @@ function handleBrowserBridgeSnapshot(req: IncomingMessage, res: ServerResponse):
   })();
 }
 
+function browserPreviewLastEventId(req: IncomingMessage): number | null {
+  const raw = req.headers["last-event-id"];
+  const value = (Array.isArray(raw) ? raw[0] : raw)?.trim();
+  if (!value) {
+    return null;
+  }
+  const parsed = Number.parseInt(value, 10);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
 function handleBrowserEvents(req: IncomingMessage, res: ServerResponse): void {
   void (async () => {
     try {
       const query = browserPreviewQuery(req);
       const session = await ensureBrowserPreviewSession(query.sessionId);
+      const lastEventId = browserPreviewLastEventId(req);
       res.statusCode = 200;
       res.setHeader("Content-Type", "text/event-stream");
       res.setHeader("Cache-Control", "no-store");
       res.setHeader("Connection", "keep-alive");
       res.flushHeaders?.();
       for (const event of session.events) {
-        writeBrowserPreviewSseEvent(res, event);
+        if (lastEventId === null || event.id > lastEventId) {
+          writeBrowserPreviewSseEvent(res, event);
+        }
       }
-      const heartbeat = setInterval(() => res.write(": heartbeat\n\n"), 15_000);
+      const heartbeat = setInterval(() => {
+        if (res.destroyed || res.writableEnded) {
+          cleanup();
+          return;
+        }
+        try {
+          res.write(": heartbeat\n\n");
+        } catch {
+          cleanup();
+        }
+      }, 15_000);
       session.clients.add(res);
-      req.on("close", () => {
+      const cleanup = () => {
         clearInterval(heartbeat);
-        session.clients.delete(res);
-        session.lastActiveAt = Date.now();
-        scheduleBrowserPreviewIdleSweep();
-        res.end();
-      });
+        removeBrowserPreviewClient(session, res);
+        if (!res.destroyed && !res.writableEnded) {
+          res.end();
+        }
+      };
+      req.on("close", cleanup);
+      res.on("close", cleanup);
+      res.on("error", cleanup);
     } catch (error) {
       sendJson(res, browserPreviewErrorStatus(error), { error: errorMessage(error) });
     }
@@ -4980,14 +5070,19 @@ export function gitHardResetDirtyError(mode: GitResetMode, statusPorcelain: stri
   return "Hard reset refused: working tree has uncommitted changes. Commit, stash, or discard them first.";
 }
 
+const GIT_COMMAND_TIMEOUT_MS = 30_000;
+const GIT_OUTPUT_LIMIT_CHARS = 2_000_000;
+
 function runGit(cwd: string, args: readonly string[], onDone: (result: GitCommandResult) => void): void {
   const child = spawn("git", ["-C", cwd, ...args], {
     cwd,
+    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
     shell: false,
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   });
   if (!child.stdout || !child.stderr) {
+    child.kill("SIGKILL");
     onDone({ ok: false, stdout: "", error: "Git command streams are unavailable." });
     return;
   }
@@ -4995,30 +5090,57 @@ function runGit(cwd: string, args: readonly string[], onDone: (result: GitComman
   let stdout = "";
   let stderr = "";
   let done = false;
-  child.stdout.setEncoding("utf8");
-  child.stderr.setEncoding("utf8");
-  child.stdout.on("data", (chunk: string) => {
-    stdout += chunk;
-  });
-  child.stderr.on("data", (chunk: string) => {
-    stderr += chunk;
-  });
-  child.on("error", (error) => {
-    if (!done) {
-      done = true;
-      onDone({ ok: false, stdout, error: error.message });
-    }
-  });
-  child.on("close", (code) => {
+  let timedOut = false;
+  let outputTooLarge = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    child.kill("SIGKILL");
+  }, GIT_COMMAND_TIMEOUT_MS);
+  timeout.unref?.();
+  const finish = (result: GitCommandResult) => {
     if (done) {
       return;
     }
     done = true;
-    if (code !== 0) {
-      onDone({ ok: false, stdout, error: stderr.trim() || `git ${args[0] ?? "command"} exited with code ${code ?? "unknown"}.` });
+    clearTimeout(timeout);
+    onDone(result);
+  };
+  const appendGitOutput = (current: string, chunk: string): string => {
+    if (outputTooLarge) {
+      return current;
+    }
+    if (current.length + chunk.length > GIT_OUTPUT_LIMIT_CHARS) {
+      outputTooLarge = true;
+      child.kill("SIGKILL");
+      return current;
+    }
+    return current + chunk;
+  };
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk: string) => {
+    stdout = appendGitOutput(stdout, chunk);
+  });
+  child.stderr.on("data", (chunk: string) => {
+    stderr = appendGitOutput(stderr, chunk);
+  });
+  child.on("error", (error) => {
+    finish({ ok: false, stdout, error: error.message });
+  });
+  child.on("close", (code) => {
+    if (timedOut) {
+      finish({ ok: false, stdout, error: `git ${args[0] ?? "command"} timed out after ${Math.round(GIT_COMMAND_TIMEOUT_MS / 1000)}s.` });
       return;
     }
-    onDone({ ok: true, stdout, error: "" });
+    if (outputTooLarge) {
+      finish({ ok: false, stdout, error: `git ${args[0] ?? "command"} output exceeded ${Math.round(GIT_OUTPUT_LIMIT_CHARS / 1_000_000)}MB.` });
+      return;
+    }
+    if (code !== 0) {
+      finish({ ok: false, stdout, error: stderr.trim() || `git ${args[0] ?? "command"} exited with code ${code ?? "unknown"}.` });
+      return;
+    }
+    finish({ ok: true, stdout, error: "" });
   });
 }
 
@@ -7990,6 +8112,21 @@ function persistedConversationForBackgroundHandle(handle: BackgroundRunHandle): 
   ensureWorkspaceDb();
   const conversation = readConversation(handle.binding.conversationId);
   return isPersistedBackgroundRunActive(conversation, handle.binding) ? conversation : null;
+}
+
+function settledConversationForBackgroundHandle(handle: BackgroundRunHandle): WorkspaceConversation | null {
+  ensureWorkspaceDb();
+  const conversation = readConversation(handle.binding.conversationId);
+  if (!conversation) {
+    return null;
+  }
+  const active = conversation.activeRunId === handle.binding.runId && (conversation.status === "running" || conversation.status === "waiting");
+  if (active) {
+    return conversation;
+  }
+  return conversation.activeRunId === undefined && (conversation.status === "done" || conversation.status === "error" || conversation.status === "waiting" || conversation.status === "idle")
+    ? conversation
+    : null;
 }
 
 function cleanupOrphanBackgroundRun(handle: BackgroundRunHandle, reason: string): void {
@@ -11859,13 +11996,14 @@ function handleRunAttach(req: IncomingMessage, res: ServerResponse): void {
     sendJson(res, 404, { error: `No active run for ${runId}.` });
     return;
   }
-  const attachConversation = persistedConversationForBackgroundHandle(handle);
+  const attachConversation = settledConversationForBackgroundHandle(handle);
   if (!attachConversation) {
     cleanupOrphanBackgroundRun(handle, "run attach found detached run");
     sendJson(res, 404, { error: `No active run for ${runId}.` });
     return;
   }
-  const initial = attachConversation ? buildActiveRunUpdate(attachConversation, readMessage(handle.binding.agentMessageId), handle.binding, false) : null;
+  const initialDone = !isPersistedBackgroundRunActive(attachConversation, handle.binding);
+  const initial = attachConversation ? buildActiveRunUpdate(attachConversation, readMessage(handle.binding.agentMessageId), handle.binding, initialDone) : null;
   if (!initial) {
     sendJson(res, 409, { error: `Active run ${runId} has no persisted workspace state.` });
     return;
@@ -11902,6 +12040,11 @@ function handleRunAttach(req: IncomingMessage, res: ServerResponse): void {
   res.on("close", cleanup);
   res.flushHeaders();
   sendUpdate(initial);
+  if (initial.done && !res.writableEnded) {
+    cleanup();
+    backgroundRunHandles.delete(runId);
+    res.end();
+  }
 }
 
 function handleWakeups(req: IncomingMessage, res: ServerResponse): void {
@@ -12476,6 +12619,17 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
 }
 
 const PREVIEW_PROXY_PREFIX = "/preview-proxy";
+const HOP_BY_HOP_PROXY_HEADERS = new Set([
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "trailers",
+  "transfer-encoding",
+  "upgrade",
+]);
 
 /** Strips a `frame-ancestors` directive so a proxied page can be iframed. */
 function stripFrameAncestors(csp: string): string {
@@ -12508,6 +12662,34 @@ function rewritePreviewProxyLocation(location: string, port: number): string {
 
 const LOCALHOST_PROXY_HOSTS = new Set(["localhost", "127.0.0.1", "0.0.0.0", "::1", "[::1]"]);
 
+function connectionHeaderTokens(value: string | readonly string[] | number | undefined): readonly string[] {
+  if (value === undefined) {
+    return [];
+  }
+  const values: readonly string[] = Array.isArray(value) ? value.map((entry) => String(entry)) : [String(value)];
+  return values.flatMap((entry) =>
+    entry
+      .split(",")
+      .map((token: string) => token.trim().toLowerCase())
+      .filter((token: string) => token.length > 0),
+  );
+}
+
+function stripHopByHopHeaders(headers: IncomingHttpHeaders | OutgoingHttpHeaders): OutgoingHttpHeaders {
+  const blocked = new Set(HOP_BY_HOP_PROXY_HEADERS);
+  for (const token of connectionHeaderTokens(headers.connection)) {
+    blocked.add(token);
+  }
+  const output: OutgoingHttpHeaders = {};
+  for (const [name, value] of Object.entries(headers)) {
+    if (value === undefined || blocked.has(name.toLowerCase())) {
+      continue;
+    }
+    output[name] = value;
+  }
+  return output;
+}
+
 /** Reverse-proxies `/preview-proxy/<port>/<path>` to `127.0.0.1:<port>` so the
  *  agent's local dev servers are reachable from the user's browser over rlab's
  *  own (same) origin — no extra firewall ports, and no mixed-content blocking
@@ -12532,10 +12714,12 @@ function handlePreviewProxy(req: IncomingMessage, res: ServerResponse): void {
 
   // Point Host at the upstream so dev servers with host checks accept it, and
   // request identity encoding so HTML can be rewritten without gunzipping first.
-  const headers: Record<string, string | string[] | undefined> = { ...req.headers, host: `127.0.0.1:${port}`, "accept-encoding": "identity" };
+  const headers = stripHopByHopHeaders(req.headers);
+  headers.host = `127.0.0.1:${port}`;
+  headers["accept-encoding"] = "identity";
 
   const proxyReq = httpRequest({ host: "127.0.0.1", port, method: req.method, path: targetPath, headers }, (proxyRes) => {
-    const outHeaders: Record<string, string | string[]> = { ...proxyRes.headers } as Record<string, string | string[]>;
+    const outHeaders = stripHopByHopHeaders(proxyRes.headers);
     delete outHeaders["x-frame-options"];
     delete outHeaders["content-security-policy-report-only"];
     if (typeof outHeaders["content-security-policy"] === "string") {

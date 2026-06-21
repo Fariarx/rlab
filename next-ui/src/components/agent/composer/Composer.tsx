@@ -133,6 +133,9 @@ export interface ComposerProps {
   readonly attachments?: readonly ComposerAttachmentDraft[];
   readonly initialValue?: string;
   readonly initialAttachments?: readonly ComposerAttachmentDraft[];
+  /** Last user message sent in this conversation. Used to reject delayed mobile
+   *  browser change events that try to resurrect the submitted text as a draft. */
+  readonly recentlySubmittedValue?: string;
   /** Non-default work modes the current agent supports (toggleable per chat). */
   readonly modes?: readonly { readonly id: string; readonly label: string }[];
   /** The currently active work mode id ("default" when none). */
@@ -206,6 +209,7 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
     attachments,
     initialValue = "",
     initialAttachments = [],
+    recentlySubmittedValue,
     modes = [],
     activeMode = "default",
     onModeChange,
@@ -375,6 +379,7 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
     onSend,
     onSendReview: editChrome ? undefined : onSendReview,
     pluginTokenRanges: composerPluginTokenRanges,
+    recentlySubmittedValue,
     reviewCount: effectiveReviewCount,
     sending,
     setActiveSuggestion,

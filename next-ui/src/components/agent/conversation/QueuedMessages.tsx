@@ -3,6 +3,7 @@ import ContentCopyRoundedIcon from "@mui/icons-material/ContentCopyRounded";
 import PauseRoundedIcon from "@mui/icons-material/PauseRounded";
 import PlayArrowRoundedIcon from "@mui/icons-material/PlayArrowRounded";
 import ScheduleSendRoundedIcon from "@mui/icons-material/ScheduleSendRounded";
+import SendRoundedIcon from "@mui/icons-material/SendRounded";
 import { Box, Stack, Typography } from "@mui/material";
 import { useI18n } from "../../../i18n/I18nProvider";
 import { Button, IconButton, Tooltip } from "../../ui";
@@ -22,6 +23,22 @@ const queuedActionButtonSx = {
   width: 22,
   height: 22,
   color: "text.secondary",
+} as const;
+
+const queuedHeaderButtonSx = {
+  minWidth: { xs: 28, sm: 0 },
+  width: { xs: 28, sm: "auto" },
+  height: { xs: 28, sm: 26 },
+  px: { xs: 0, sm: 1 },
+  color: "text.secondary",
+  whiteSpace: "nowrap",
+  lineHeight: 1.15,
+  "& .MuiButton-startIcon": {
+    margin: { xs: 0, sm: "0 6px 0 -2px" },
+  },
+  "& .queued-header-button-label": {
+    display: { xs: "none", sm: "inline" },
+  },
 } as const;
 
 const QUEUED_VISIBLE_ROW_COUNT = 5;
@@ -54,16 +71,12 @@ export function QueuedMessages({ messages, paused, onCancel, onCopy, onSendNow, 
       <Box
         sx={{
           display: "grid",
-          gridTemplateColumns: { xs: "minmax(0, 1fr) auto", sm: "minmax(0, 1fr) auto auto" },
-          gridTemplateAreas: {
-            xs: '"title send" "pause send"',
-            sm: '"title pause send"',
-          },
-          alignItems: { xs: "stretch", sm: "center" },
-          columnGap: 0.5,
-          rowGap: 0.35,
+          gridTemplateColumns: { xs: "minmax(0, 1fr) 28px 28px", sm: "minmax(0, 1fr) auto auto" },
+          gridTemplateAreas: '"title pause send"',
+          alignItems: "center",
+          columnGap: { xs: 0.35, sm: 0.5 },
           px: { xs: 1, sm: 1.25 },
-          py: { xs: 0.65, sm: 0.35 },
+          py: { xs: 0.45, sm: 0.35 },
           borderBottom: (theme) => `1px solid ${theme.custom.borders.subtle}`,
         }}
       >
@@ -77,36 +90,35 @@ export function QueuedMessages({ messages, paused, onCancel, onCopy, onSendNow, 
           variant="text"
           size="small"
           onClick={onTogglePause}
+          aria-label={paused ? t("resumeQueue") : t("pauseQueue")}
           startIcon={paused ? <PlayArrowRoundedIcon sx={{ fontSize: 16 }} /> : <PauseRoundedIcon sx={{ fontSize: 16 }} />}
           sx={{
+            ...queuedHeaderButtonSx,
             gridArea: "pause",
-            justifySelf: "start",
+            justifySelf: { xs: "end", sm: "start" },
             alignSelf: "center",
-            color: "text.secondary",
-            minWidth: 0,
-            px: { xs: 0, sm: 1 },
-            whiteSpace: "nowrap",
-            lineHeight: 1.15,
           }}
         >
-          {paused ? t("resumeQueue") : t("pauseQueue")}
+          <Box component="span" className="queued-header-button-label">
+            {paused ? t("resumeQueue") : t("pauseQueue")}
+          </Box>
         </Button>
         <Button
           variant="text"
           size="small"
           onClick={onSendNow}
+          aria-label={t("sendQueuedNow")}
+          startIcon={<SendRoundedIcon sx={{ fontSize: 16 }} />}
           sx={{
+            ...queuedHeaderButtonSx,
             gridArea: "send",
             justifySelf: "end",
             alignSelf: "center",
-            color: "text.secondary",
-            minWidth: 0,
-            px: { xs: 0.75, sm: 1 },
-            whiteSpace: "nowrap",
-            lineHeight: 1.15,
           }}
         >
-          {t("sendQueuedNow")}
+          <Box component="span" className="queued-header-button-label">
+            {t("sendQueuedNow")}
+          </Box>
         </Button>
       </Box>
       <Stack

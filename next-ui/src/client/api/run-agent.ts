@@ -21,6 +21,14 @@ import type { Locale } from "../../lib/app-settings";
 import { isRecord, responseErrorMessage } from "./http";
 
 const LIVE_BLOCK_FLUSH_MS = 32;
+const RUN_STREAM_IDLE_TIMEOUT_MS = 30_000;
+
+class RunStreamIdleTimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RunStreamIdleTimeoutError";
+  }
+}
 
 export interface RunConversationResult {
   readonly status: "done" | "error" | "waiting" | "detached";
@@ -37,6 +45,14 @@ function isAbortError(value: unknown, signal?: AbortSignal): boolean {
     return false;
   }
   return value.name === "AbortError";
+}
+
+function isRunStreamIdleTimeoutError(value: unknown): value is RunStreamIdleTimeoutError {
+  return value instanceof RunStreamIdleTimeoutError;
+}
+
+function abortError(): DOMException {
+  return new DOMException("Aborted", "AbortError");
 }
 
 function canceledStatusBlock(locale: Locale): AgentBlock {
@@ -118,6 +134,46 @@ function readFinalNdjsonLine(buffer: string, onLine: (line: string) => void): vo
   }
 }
 
+async function readNdjsonStreamChunk(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  options: { readonly signal?: AbortSignal; readonly timeoutMs?: number; readonly timeoutMessage: string },
+): Promise<ReadableStreamReadResult<Uint8Array>> {
+  const timeoutMs = options.timeoutMs ?? RUN_STREAM_IDLE_TIMEOUT_MS;
+  if (options.signal?.aborted) {
+    throw abortError();
+  }
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      options.signal?.removeEventListener("abort", onAbort);
+    };
+    const onAbort = () => {
+      cleanup();
+      reject(abortError());
+    };
+    timer = setTimeout(() => {
+      cleanup();
+      void reader.cancel().catch(() => undefined);
+      reject(new RunStreamIdleTimeoutError(options.timeoutMessage));
+    }, timeoutMs);
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+    reader.read().then(
+      (result) => {
+        cleanup();
+        resolve(result);
+      },
+      (error) => {
+        cleanup();
+        reject(error);
+      },
+    );
+  });
+}
+
 function isActiveRunSnapshot(value: unknown): value is ActiveRunSnapshot {
   return (
     isRecord(value) &&
@@ -197,14 +253,21 @@ export async function attachRunUpdates(opts: {
   const decoder = new TextDecoder();
   let buffer = "";
   const readLine = (line: string) => {
-    const parsed = JSON.parse(line) as unknown;
-    if (!isRunAttachEvent(parsed)) {
-      throw new Error(`Malformed run attach event: ${line}`);
+    try {
+      const parsed = JSON.parse(line) as unknown;
+      if (isRunAttachEvent(parsed)) {
+        opts.onUpdate(parsed.update);
+      }
+    } catch {
+      // A truncated final line must not tear down an otherwise healthy attach;
+      // the background-run reconciler will recover from missed updates.
     }
-    opts.onUpdate(parsed.update);
   };
   for (;;) {
-    const { done, value } = await reader.read();
+    const { done, value } = await readNdjsonStreamChunk(reader, {
+      signal: opts.signal,
+      timeoutMessage: `Run attach ${opts.runId} stalled while waiting for server updates.`,
+    });
     if (done) {
       break;
     }
@@ -279,7 +342,10 @@ async function streamRun(
     }
   };
   for (;;) {
-    const { done, value } = await reader.read();
+    const { done, value } = await readNdjsonStreamChunk(reader, {
+      signal,
+      timeoutMessage: "Run stream stalled while waiting for server heartbeat.",
+    });
     if (done) {
       break;
     }
@@ -404,6 +470,8 @@ export async function runConversation(opts: {
   } catch (err) {
     if (isAbortError(err, opts.signal)) {
       canceled = true;
+    } else if (isRunStreamIdleTimeoutError(err)) {
+      accumulateRunEvent(accumulator, { type: "error", text: err.message });
     } else if (opts.binding && accepted) {
       detached = true;
     } else {

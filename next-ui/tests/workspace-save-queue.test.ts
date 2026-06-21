@@ -6,6 +6,8 @@ import { WorkspaceSaveQueue, type WorkspaceSaveQueueHost } from "../src/componen
 import type { RemoteWorkspaceShellMerge } from "../src/components/workspace/models/workspace-server-sync-model";
 import type { ChatMessage, ConversationSummary } from "../src/domain/agent-types";
 
+const pendingMutationsStorageKey = "rlab.workspace.pendingMutations.v1";
+
 function hostFor(stateRef: { current: WorkspaceState }, revisionRef: { current: number }): WorkspaceSaveQueueHost {
   return {
     activeRuns: new Map(),
@@ -25,14 +27,28 @@ function hostFor(stateRef: { current: WorkspaceState }, revisionRef: { current: 
 async function flushMicrotasks(): Promise<void> {
   await Promise.resolve();
   await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
 }
 
 describe("WorkspaceSaveQueue", () => {
   let mutationRequests: Array<{ readonly baseRevision: number; readonly mutations: readonly WorkspaceMutation[] }>;
+  let storageEntries: Map<string, string>;
 
   beforeEach(() => {
     vi.useFakeTimers();
     mutationRequests = [];
+    storageEntries = new Map();
+    vi.stubGlobal("localStorage", {
+      getItem: vi.fn((key: string) => storageEntries.get(key) ?? null),
+      setItem: vi.fn((key: string, value: string) => {
+        storageEntries.set(key, value);
+      }),
+      removeItem: vi.fn((key: string) => {
+        storageEntries.delete(key);
+      }),
+    });
   });
 
   afterEach(() => {
@@ -60,6 +76,66 @@ describe("WorkspaceSaveQueue", () => {
     await flushMicrotasks();
 
     expect(mutationRequests).toEqual([{ baseRevision: 3, mutations: [mutation] }]);
+    expect(revisionRef.current).toBe(4);
+  });
+
+  it("keeps queued mutations in the persistent log until the server acknowledges them", async () => {
+    const stateRef = { current: buildInitialWorkspaceState() };
+    const revisionRef = { current: 3 };
+    let resolveSave!: (response: Response) => void;
+    const saveResponse = new Promise<Response>((resolve) => {
+      resolveSave = resolve;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+        mutationRequests.push(JSON.parse(String(init?.body ?? "{}")) as { baseRevision: number; mutations: WorkspaceMutation[] });
+        return saveResponse;
+      }),
+    );
+    const queue = new WorkspaceSaveQueue(hostFor(stateRef, revisionRef));
+    const mutation: WorkspaceMutation = { type: "setSelectedConversation", conversationId: "chat-1" };
+
+    queue.enqueue(mutation);
+
+    expect(JSON.parse(storageEntries.get(pendingMutationsStorageKey) ?? "[]")).toEqual([mutation]);
+    await vi.advanceTimersByTimeAsync(250);
+    await flushMicrotasks();
+
+    expect(mutationRequests).toEqual([{ baseRevision: 3, mutations: [mutation] }]);
+    expect(JSON.parse(storageEntries.get(pendingMutationsStorageKey) ?? "[]")).toEqual([mutation]);
+
+    resolveSave(Response.json({ ok: true, revision: 4 }));
+    await flushMicrotasks();
+
+    expect(storageEntries.has(pendingMutationsStorageKey)).toBe(false);
+    expect(revisionRef.current).toBe(4);
+  });
+
+  it("replays persisted mutations after loading the server state", async () => {
+    const stateRef = { current: buildInitialWorkspaceState() };
+    const revisionRef = { current: 3 };
+    const mutation: WorkspaceMutation = { type: "setSelectedConversation", conversationId: "chat-1" };
+    storageEntries.set(pendingMutationsStorageKey, JSON.stringify([mutation]));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        mutationRequests.push(JSON.parse(String(init?.body ?? "{}")) as { baseRevision: number; mutations: WorkspaceMutation[] });
+        return Response.json({ ok: true, revision: 4 });
+      }),
+    );
+    const queue = new WorkspaceSaveQueue(hostFor(stateRef, revisionRef));
+
+    queue.replayPersistedMutationsAfterServerLoad();
+
+    expect(stateRef.current.selectedId).toBe("chat-1");
+    expect(JSON.parse(storageEntries.get(pendingMutationsStorageKey) ?? "[]")).toEqual([mutation]);
+
+    await vi.advanceTimersByTimeAsync(250);
+    await flushMicrotasks();
+
+    expect(mutationRequests).toEqual([{ baseRevision: 3, mutations: [mutation] }]);
+    expect(storageEntries.has(pendingMutationsStorageKey)).toBe(false);
     expect(revisionRef.current).toBe(4);
   });
 

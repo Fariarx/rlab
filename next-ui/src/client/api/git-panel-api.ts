@@ -1,5 +1,5 @@
 import type { GitFileStatus, GitStatusPayload } from "../../lib/git-status";
-import { payloadErrorMessage, readJsonPayload } from "./http";
+import { readJsonPayload, responseErrorMessage } from "./http";
 
 export interface GitDiffPayload {
   readonly diff: string;
@@ -30,11 +30,11 @@ export interface GitGraphCommit {
 
 export type GitDiffMode = GitDiffPayload["mode"];
 
-function assertGitApiOk<T>(label: string, response: Response, payload: unknown): T {
+async function readGitApiPayload<T>(label: string, response: Response): Promise<T> {
   if (!response.ok) {
-    throw new Error(payloadErrorMessage(payload, `${label} failed (${response.status})`));
+    throw new Error(await responseErrorMessage(response, `${label} failed (${response.status})`));
   }
-  return payload as T;
+  return readJsonPayload<T>(response);
 }
 
 export async function fetchGitStatus(cwd: string): Promise<GitStatusPayload> {
@@ -43,8 +43,7 @@ export async function fetchGitStatus(cwd: string): Promise<GitStatusPayload> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ cwd }),
   });
-  const payload = await readJsonPayload<GitStatusPayload>(response);
-  return assertGitApiOk("Git status", response, payload);
+  return readGitApiPayload("Git status", response);
 }
 
 export async function fetchGitTree(cwd: string): Promise<GitTreePayload> {
@@ -53,8 +52,7 @@ export async function fetchGitTree(cwd: string): Promise<GitTreePayload> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ cwd }),
   });
-  const payload = await readJsonPayload<GitTreePayload>(response);
-  return assertGitApiOk("Git tree", response, payload);
+  return readGitApiPayload("Git tree", response);
 }
 
 export async function fetchGitDiff(cwd: string, file: GitFileStatus, mode: GitDiffMode): Promise<GitDiffPayload> {
@@ -63,8 +61,7 @@ export async function fetchGitDiff(cwd: string, file: GitFileStatus, mode: GitDi
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ cwd, path: file.gitPath, mode }),
   });
-  const payload = await readJsonPayload<GitDiffPayload>(response);
-  return assertGitApiOk("Git diff", response, payload);
+  return readGitApiPayload("Git diff", response);
 }
 
 export async function mutateGitFile(endpoint: "/api/git-stage" | "/api/git-unstage", cwd: string, file: GitFileStatus): Promise<GitStatusPayload> {
@@ -73,8 +70,7 @@ export async function mutateGitFile(endpoint: "/api/git-stage" | "/api/git-unsta
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ cwd, path: file.gitPath }),
   });
-  const payload = await readJsonPayload<GitStatusPayload>(response);
-  return assertGitApiOk(endpoint === "/api/git-stage" ? "Git stage" : "Git unstage", response, payload);
+  return readGitApiPayload(endpoint === "/api/git-stage" ? "Git stage" : "Git unstage", response);
 }
 
 export async function initGitRepo(cwd: string): Promise<GitStatusPayload> {
@@ -83,8 +79,7 @@ export async function initGitRepo(cwd: string): Promise<GitStatusPayload> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ cwd }),
   });
-  const payload = await readJsonPayload<GitStatusPayload>(response);
-  return assertGitApiOk("Git init", response, payload);
+  return readGitApiPayload("Git init", response);
 }
 
 export async function commitGit(cwd: string, message: string): Promise<GitStatusPayload> {
@@ -93,8 +88,7 @@ export async function commitGit(cwd: string, message: string): Promise<GitStatus
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ cwd, message }),
   });
-  const payload = await readJsonPayload<GitStatusPayload>(response);
-  return assertGitApiOk("Git commit", response, payload);
+  return readGitApiPayload("Git commit", response);
 }
 
 export async function checkoutGitBranch(cwd: string, branch: string): Promise<GitStatusPayload> {
@@ -103,8 +97,7 @@ export async function checkoutGitBranch(cwd: string, branch: string): Promise<Gi
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ cwd, branch }),
   });
-  const payload = await readJsonPayload<GitStatusPayload>(response);
-  return assertGitApiOk("Git checkout", response, payload);
+  return readGitApiPayload("Git checkout", response);
 }
 
 export type GitResetMode = "soft" | "mixed" | "hard";
@@ -115,8 +108,7 @@ async function postGitCommitAction(endpoint: string, label: string, body: Record
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  const payload = await readJsonPayload<GitStatusPayload>(response);
-  return assertGitApiOk(label, response, payload);
+  return readGitApiPayload(label, response);
 }
 
 export function cherryPickGitCommit(cwd: string, hash: string): Promise<GitStatusPayload> {

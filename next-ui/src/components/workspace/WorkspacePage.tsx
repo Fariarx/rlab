@@ -293,6 +293,7 @@ export const WorkspacePageView = observer(function WorkspacePageView({
     [profile.tools, registeredPlugins],
   );
   const messageHistory = useMemo(() => composerMessageHistory(messages), [messages]);
+  const recentlySubmittedValue = messageHistory.at(-1);
   const selectedHasActiveWork = useMemo(() => conversationHasActiveWork(selected, messages), [messages, selected]);
   const lastTurnDiffs = useMemo(() => latestAgentDiffBlocks(messages), [messages]);
   const composerDraft = ws.composerDrafts[ws.selectedId] ?? { text: "", attachments: [] };
@@ -905,6 +906,7 @@ export const WorkspacePageView = observer(function WorkspacePageView({
                 placeholder={selected ? t("messagePlaceholder", { title: buildComposerLabel(profile) }) : t("startPlaceholder")}
                 initialValue={composerDraft.text}
                 initialAttachments={composerDraft.attachments}
+                recentlySubmittedValue={recentlySubmittedValue}
                 onDraftChange={(draft) => {
                   if (selected) {
                     composerDraftPersistence.scheduleDraft(ws.selectedId, draft);

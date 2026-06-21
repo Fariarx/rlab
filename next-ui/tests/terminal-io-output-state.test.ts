@@ -98,4 +98,62 @@ describe("terminal-io-output-state", () => {
     expect(terminalManager.resume).toHaveBeenCalledWith("term-1");
     expect(streamState.backpressuredViewerIds.has("client-1")).toBe(false);
   });
+
+  it("ignores impossible output acknowledgements", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(10);
+    const ws = new FakeOutputSocket();
+    const terminalManager = createTerminalManager();
+    const streamState = { backpressuredViewerIds: new Set<string>() };
+    const state = createTerminalIoOutputState({
+      ws,
+      streamState,
+      clientId: "client-1",
+      terminalId: "term-1",
+      terminalManager,
+      outputAckHighWaterMarkBytes: 3,
+      outputAckLowWaterMarkBytes: 1,
+    });
+
+    state.enqueueOutput(Buffer.from("abcd"));
+    expect(streamState.backpressuredViewerIds.has("client-1")).toBe(true);
+
+    state.acknowledgeOutput(Number.MAX_SAFE_INTEGER);
+
+    expect(terminalManager.resume).not.toHaveBeenCalled();
+    expect(streamState.backpressuredViewerIds.has("client-1")).toBe(true);
+
+    state.acknowledgeOutput(4);
+
+    expect(terminalManager.resume).toHaveBeenCalledWith("term-1");
+    expect(streamState.backpressuredViewerIds.has("client-1")).toBe(false);
+  });
+
+  it("does not fast-path output while the terminal is paused for backpressure", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(10);
+    const ws = new FakeOutputSocket();
+    const terminalManager = createTerminalManager();
+    const state = createTerminalIoOutputState({
+      ws,
+      streamState: { backpressuredViewerIds: new Set<string>() },
+      clientId: "client-1",
+      terminalId: "term-1",
+      terminalManager,
+      outputAckHighWaterMarkBytes: 3,
+      outputAckLowWaterMarkBytes: 1,
+      lowLatencyIdleWindowMs: 5,
+      outputBatchIntervalMs: 4,
+    });
+
+    state.enqueueOutput(Buffer.from("abcd"));
+    vi.setSystemTime(20);
+    state.enqueueOutput(Buffer.from("e"));
+
+    expect(ws.sent.map((chunk) => chunk.toString("utf8"))).toEqual(["abcd"]);
+
+    vi.advanceTimersByTime(4);
+
+    expect(ws.sent.map((chunk) => chunk.toString("utf8"))).toEqual(["abcd", "e"]);
+  });
 });

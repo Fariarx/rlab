@@ -51,7 +51,17 @@ export function applyWorkspaceAgentBlocks({
     },
   };
 
-  if (canceled || !needsInput) {
+  if (canceled) {
+    const snippet = snippetFromStateThread(nextState, conversationId);
+    return {
+      message,
+      shouldFlush,
+      shouldPersistBlocks,
+      state: patchConversation(nextState, conversationId, { activeRunId: undefined, status: "idle", ...(snippet ? { snippet } : {}) }),
+    };
+  }
+
+  if (!needsInput) {
     return { message, shouldFlush, shouldPersistBlocks, state: nextState };
   }
 

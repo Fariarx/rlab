@@ -1,4 +1,4 @@
-import { applyWorkspaceMutationsToState, type WorkspaceMutation } from "../../../lib/workspace-mutations";
+import { applyWorkspaceMutationsToState, parseWorkspaceMutation, type WorkspaceMutation } from "../../../lib/workspace-mutations";
 import { cloneWorkspaceState, type WorkspaceState } from "../../../lib/workspace-state";
 import { saveWorkspaceMutations, WorkspaceMutationConflictError, WorkspaceMutationRejectedError } from "../../../client/api/workspace-api";
 import { mergeRemoteWorkspaceShell } from "../models/workspace-server-sync-model";
@@ -9,6 +9,7 @@ import { workspaceConversations } from "../models/workspace-state-utils";
 
 const WORKSPACE_SAVE_DEBOUNCE_MS = 250;
 const WORKSPACE_SAVE_RETRY_MS = 2_000;
+const WORKSPACE_PENDING_MUTATIONS_STORAGE_KEY = "rlab.workspace.pendingMutations.v1";
 
 export interface WorkspaceSaveQueueHost {
   readonly activeRuns: ReadonlyMap<string, RunMessageHandle>;
@@ -21,6 +22,52 @@ export interface WorkspaceSaveQueueHost {
   readonly setRevision: (revision: number) => void;
 }
 
+function workspaceMutationStorage(): Storage | null {
+  try {
+    return globalThis.localStorage ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function readPersistedWorkspaceMutations(): WorkspaceMutation[] {
+  const storage = workspaceMutationStorage();
+  if (!storage) {
+    return [];
+  }
+  const raw = storage.getItem(WORKSPACE_PENDING_MUTATIONS_STORAGE_KEY);
+  if (!raw) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) {
+      throw new Error("Workspace pending mutation log is invalid.");
+    }
+    return parsed.map(parseWorkspaceMutation);
+  } catch {
+    storage.removeItem(WORKSPACE_PENDING_MUTATIONS_STORAGE_KEY);
+    return [];
+  }
+}
+
+function writePersistedWorkspaceMutations(mutations: readonly WorkspaceMutation[]): string | null {
+  const storage = workspaceMutationStorage();
+  if (!storage) {
+    return null;
+  }
+  try {
+    if (mutations.length === 0) {
+      storage.removeItem(WORKSPACE_PENDING_MUTATIONS_STORAGE_KEY);
+      return null;
+    }
+    storage.setItem(WORKSPACE_PENDING_MUTATIONS_STORAGE_KEY, JSON.stringify(mutations));
+    return null;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+}
+
 export class WorkspaceSaveQueue {
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -28,11 +75,15 @@ export class WorkspaceSaveQueue {
 
   private pendingMutations: WorkspaceMutation[] = [];
 
+  private saveInFlightMutations: readonly WorkspaceMutation[] = [];
+
   private pendingSaveUrgent = false;
 
   private saveInFlight = false;
 
-  constructor(private readonly host: WorkspaceSaveQueueHost) {}
+  constructor(private readonly host: WorkspaceSaveQueueHost) {
+    this.pendingMutations = readPersistedWorkspaceMutations();
+  }
 
   hasPendingWrites(): boolean {
     return this.pendingMutations.length > 0 || this.saveInFlight || this.saveTimer !== null || this.saveRetryTimer !== null || this.pendingSaveUrgent;
@@ -43,6 +94,7 @@ export class WorkspaceSaveQueue {
       return;
     }
     this.pendingMutations.push(...mutations);
+    this.persistMutationLog();
     this.startSaveTimer();
   }
 
@@ -83,6 +135,30 @@ export class WorkspaceSaveQueue {
     }, WORKSPACE_SAVE_RETRY_MS);
   }
 
+  replayPersistedMutationsAfterServerLoad(): void {
+    if (this.pendingMutations.length === 0) {
+      return;
+    }
+    const localState = this.host.getState();
+    const unsavedMutations = withoutStaleActiveRunMessageMutations(localState, this.host.activeRuns, this.pendingMutations);
+    this.pendingMutations = unsavedMutations;
+    this.persistMutationLog();
+    if (unsavedMutations.length === 0) {
+      return;
+    }
+    const replayedState = preserveLiveActiveRunMessages(applyWorkspaceMutationsToState(localState, unsavedMutations), localState, this.host.activeRuns);
+    this.host.applyServerState(replayedState);
+    this.pendingSaveUrgent = false;
+    this.startSaveTimer();
+  }
+
+  private persistMutationLog(): void {
+    const persistError = writePersistedWorkspaceMutations([...this.saveInFlightMutations, ...this.pendingMutations]);
+    if (persistError) {
+      this.host.setLoadError(`Workspace pending mutations could not be persisted: ${persistError}`);
+    }
+  }
+
   private rebaseAfterConflict(error: WorkspaceMutationConflictError, mutations: readonly WorkspaceMutation[]): void {
     const localState = this.host.getState();
     const unsavedMutations = withoutStaleActiveRunMessageMutations(localState, this.host.activeRuns, [...mutations, ...this.pendingMutations]);
@@ -109,6 +185,7 @@ export class WorkspaceSaveQueue {
       this.host.applyServerState(rebasedState);
     }
     this.pendingMutations = unsavedMutations;
+    this.persistMutationLog();
     this.host.setLoadError(null);
     this.pendingSaveUrgent = false;
     this.startSaveRetryTimer();
@@ -155,6 +232,7 @@ export class WorkspaceSaveQueue {
         const message = salvageError instanceof Error ? salvageError.message : String(salvageError);
         this.host.setLoadError(message.startsWith("Workspace save failed") ? message : `Workspace save failed: ${message}`);
         this.pendingMutations = [...remainingMutations, ...this.pendingMutations];
+        this.persistMutationLog();
         this.pendingSaveUrgent = false;
         this.startSaveRetryTimer();
         return false;
@@ -176,6 +254,7 @@ export class WorkspaceSaveQueue {
     const message = error instanceof Error ? error.message : String(error);
     this.host.setLoadError(message.startsWith("Workspace save failed") ? message : `Workspace save failed: ${message}`);
     this.pendingMutations = [...mutations, ...this.pendingMutations];
+    this.persistMutationLog();
     this.pendingSaveUrgent = false;
     this.startSaveRetryTimer();
     return false;
@@ -200,6 +279,8 @@ export class WorkspaceSaveQueue {
     const mutations = this.pendingMutations;
     this.pendingMutations = [];
     this.pendingSaveUrgent = false;
+    this.saveInFlightMutations = mutations;
+    this.persistMutationLog();
     this.saveInFlight = true;
     let saveFailed = false;
     try {
@@ -217,6 +298,8 @@ export class WorkspaceSaveQueue {
       }
     } finally {
       this.saveInFlight = false;
+      this.saveInFlightMutations = [];
+      this.persistMutationLog();
       if (this.pendingMutations.length > 0) {
         if (this.pendingSaveUrgent) {
           void this.flush();

@@ -1,7 +1,17 @@
-import { describe, expect, it } from "vitest";
-import { buildComposerLabel, composerHistoryText } from "../src/components/workspace/workspace-page-helpers";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  buildComposerLabel,
+  composerHistoryText,
+  ensureBrowserNotificationPermission,
+  showDesktopNotification,
+} from "../src/components/workspace/workspace-page-helpers";
 
 describe("workspace-page-helpers", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
   it("keeps ordinary markdown links in composer history", () => {
     expect(composerHistoryText("Read [docs](https://example.com/path) first")).toBe("Read [docs](https://example.com/path) first");
   });
@@ -23,5 +33,33 @@ describe("workspace-page-helpers", () => {
     expect(buildComposerLabel({ agent: "opencode", model: "opencode/deepseek-v4-flash-free", reasoning: "medium", mode: "default" })).toBe(
       "opencode/deepseek-v4-flash-free/medium",
     );
+  });
+
+  it("does not crash when the browser rejects the Notification constructor", () => {
+    class ThrowingNotification {
+      static permission: NotificationPermission = "granted";
+
+      constructor() {
+        throw new TypeError("Illegal constructor. Use ServiceWorkerRegistration.showNotification() instead.");
+      }
+    }
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    vi.stubGlobal("Notification", ThrowingNotification);
+
+    expect(() => showDesktopNotification(true, { title: "Done", body: "Build" })).not.toThrow();
+    expect(warn).toHaveBeenCalledWith(
+      "[rlab] Browser notification show failed: Illegal constructor. Use ServiceWorkerRegistration.showNotification() instead.",
+    );
+  });
+
+  it("does not assume notification permission requests return a promise", () => {
+    const requestPermission = vi.fn(() => "granted" as NotificationPermission);
+    vi.stubGlobal("Notification", {
+      permission: "default",
+      requestPermission,
+    });
+
+    expect(() => ensureBrowserNotificationPermission(true)).not.toThrow();
+    expect(requestPermission).toHaveBeenCalledTimes(1);
   });
 });

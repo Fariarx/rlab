@@ -554,7 +554,7 @@ describe("BrowserPreview", () => {
     expect(typed.value).toBe("ok");
     expect(framedTyped.value).toBe("nested");
     expect(scrollBy).toHaveBeenCalledWith({ top: 450, left: 0, behavior: "auto" });
-    expect(frameDocument.body.dataset.agentEval).toBe("done");
+    expect(frameDocument.body.dataset.agentEval).toBeUndefined();
   });
 
   it("sends viewport annotations from the live iframe surface to the agent", async () => {

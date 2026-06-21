@@ -159,6 +159,60 @@ function groupIcons(iconKind: ConversationListIconKind): { readonly collapsedIco
   }
 }
 
+type ConversationRowConfirmation = "pin" | "archive" | null;
+
+const conversationRowActionIconSx = {
+  flex: "0 0 auto",
+  width: 22,
+  height: 22,
+  p: 0,
+} as const;
+
+function ConversationRowConfirmButton({
+  children,
+  onClick,
+  tone = "default",
+}: {
+  readonly children: ReactNode;
+  readonly onClick: (event: MouseEvent<HTMLElement>) => void;
+  readonly tone?: "default" | "danger";
+}) {
+  return (
+    <Box
+      component="button"
+      type="button"
+      onClick={onClick}
+      sx={{
+        height: 22,
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        flex: "0 0 auto",
+        px: 0.75,
+        border: 0,
+        borderRadius: (t) => `${t.custom.radii.sm}px`,
+        color: (t) => (tone === "danger" ? t.palette.status.error.main : t.palette.text.primary),
+        backgroundColor: (t) => (tone === "danger" ? t.palette.status.error.soft : t.custom.surfaces.s4),
+        cursor: "pointer",
+        font: "inherit",
+        fontSize: "0.68rem",
+        fontWeight: 650,
+        lineHeight: 1,
+        whiteSpace: "nowrap",
+        "&:hover": {
+          backgroundColor: (t) => (tone === "danger" ? t.palette.status.error.soft : t.custom.surfaces.s4),
+        },
+        "&:focus-visible": {
+          outline: (t) => `2px solid ${t.custom.borders.focus}`,
+          outlineOffset: 1,
+        },
+      }}
+    >
+      {children}
+    </Box>
+  );
+}
+
 const ConversationRow = observer(function ConversationRow({
   conversation,
   subtitle,
@@ -181,8 +235,10 @@ const ConversationRow = observer(function ConversationRow({
   readonly hasWakeup: boolean;
 }) {
   const [store] = useState(() => new ConversationRowStore(conversation.title));
+  const [confirmation, setConfirmation] = useState<ConversationRowConfirmation>(null);
   const { menuAnchor, setMenuAnchor, editing, setEditing, draft, setDraft } = store;
   const renameInputRef = useRef<HTMLInputElement | null>(null);
+  const rowRef = useRef<HTMLDivElement | null>(null);
   const menuOpen = Boolean(menuAnchor);
   const { t } = useI18n();
   const activeAccent = selectedRowAccentStatus(conversation, hasWakeup);
@@ -202,17 +258,47 @@ const ConversationRow = observer(function ConversationRow({
     return () => cancelAnimationFrame(handle);
   }, [editing]);
 
+  useEffect(() => {
+    setConfirmation(null);
+  }, [conversation.id, conversation.pinned, conversation.archived]);
+
+  useEffect(() => {
+    if (!confirmation) {
+      return;
+    }
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && rowRef.current?.contains(target)) {
+        return;
+      }
+      setConfirmation(null);
+    };
+    document.addEventListener("pointerdown", handlePointerDown, true);
+    return () => document.removeEventListener("pointerdown", handlePointerDown, true);
+  }, [confirmation]);
+
   const openMenu = (e: MouseEvent<HTMLElement>) => {
     e.stopPropagation();
+    setConfirmation(null);
     setMenuAnchor(e.currentTarget);
   };
   const closeMenu = () => setMenuAnchor(null);
   const togglePin = (e: MouseEvent<HTMLElement>) => {
     e.stopPropagation();
+    if (confirmation !== "pin") {
+      setConfirmation("pin");
+      return;
+    }
+    setConfirmation(null);
     actions.onTogglePin(conversation.id);
   };
   const archiveConversation = (e: MouseEvent<HTMLElement>) => {
     e.stopPropagation();
+    if (confirmation !== "archive") {
+      setConfirmation("archive");
+      return;
+    }
+    setConfirmation(null);
     actions.onArchive(conversation.id);
   };
 
@@ -255,7 +341,10 @@ const ConversationRow = observer(function ConversationRow({
 
   return (
     <Stack
-      ref={(element: HTMLDivElement | null) => registerRowRef(conversation.id, element)}
+      ref={(element: HTMLDivElement | null) => {
+        rowRef.current = element;
+        registerRowRef(conversation.id, element);
+      }}
       role="option"
       aria-label={conversation.title}
       aria-selected={active}
@@ -285,7 +374,7 @@ const ConversationRow = observer(function ConversationRow({
         // menu) so the date never peeks out from under it. The date stays in the
         // layout, just transparent.
         "&:hover .row-date": { opacity: 0 },
-        ...(menuOpen && { "& .row-date": { opacity: 0 } }),
+        ...((menuOpen || confirmation) && { "& .row-date": { opacity: 0 } }),
         "&:focus-visible": {
           outline: (t) => `2px solid ${t.custom.borders.focus}`,
           outlineOffset: "-2px",
@@ -342,26 +431,42 @@ const ConversationRow = observer(function ConversationRow({
             top: 6,
             right: 6,
             display: "flex",
+            alignItems: "center",
+            justifyContent: "flex-end",
             gap: 0.25,
-            p: 0.125,
+            p: 0,
+            width: "fit-content",
+            height: "fit-content",
             borderRadius: (t) => `${t.custom.radii.sm}px`,
             backgroundColor: (t) => t.custom.surfaces.s3,
-            opacity: menuOpen ? 1 : 0,
+            opacity: menuOpen || confirmation ? 1 : 0,
             transition: "opacity 120ms ease",
             "&:hover": { backgroundColor: (t) => t.custom.surfaces.s4 },
           }}
         >
-          <Tooltip title={conversation.pinned ? t("unpin") : t("pin")}>
-            <IconButton aria-label={conversation.pinned ? t("unpin") : t("pin")} onClick={togglePin} sx={{ p: 0.25 }}>
-              {conversation.pinned ? <PushPinRoundedIcon sx={{ fontSize: 16 }} /> : <PushPinOutlinedIcon sx={{ fontSize: 16 }} />}
-            </IconButton>
-          </Tooltip>
-          <Tooltip title={t("archive")}>
-            <IconButton aria-label={t("archive")} onClick={archiveConversation} sx={{ p: 0.25 }}>
-              <ArchiveOutlinedIcon sx={{ fontSize: 16 }} />
-            </IconButton>
-          </Tooltip>
-          <IconButton aria-label={t("conversationActions")} onClick={openMenu} sx={{ p: 0.25 }}>
+          {confirmation === "pin" ? (
+            <ConversationRowConfirmButton onClick={togglePin}>
+              {conversation.pinned ? t("confirmUnpin") : t("confirmPin")}
+            </ConversationRowConfirmButton>
+          ) : (
+            <Tooltip title={conversation.pinned ? t("unpin") : t("pin")}>
+              <IconButton aria-label={conversation.pinned ? t("unpin") : t("pin")} onClick={togglePin} sx={conversationRowActionIconSx}>
+                {conversation.pinned ? <PushPinRoundedIcon sx={{ fontSize: 16 }} /> : <PushPinOutlinedIcon sx={{ fontSize: 16 }} />}
+              </IconButton>
+            </Tooltip>
+          )}
+          {confirmation === "archive" ? (
+            <ConversationRowConfirmButton tone="danger" onClick={archiveConversation}>
+              {t("confirmArchive")}
+            </ConversationRowConfirmButton>
+          ) : (
+            <Tooltip title={t("archive")}>
+              <IconButton aria-label={t("archive")} onClick={archiveConversation} sx={conversationRowActionIconSx}>
+                <ArchiveOutlinedIcon sx={{ fontSize: 16 }} />
+              </IconButton>
+            </Tooltip>
+          )}
+          <IconButton aria-label={t("conversationActions")} onClick={openMenu} sx={conversationRowActionIconSx}>
             <MoreHorizIcon sx={{ fontSize: 16 }} />
           </IconButton>
         </Box>

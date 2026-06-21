@@ -208,6 +208,34 @@ describe("useBrowserPreviewEventStream", () => {
     expect(replayBrowserActivityEvent).toHaveBeenCalledTimes(1);
   });
 
+  it("does not replay stale events that were already applied", async () => {
+    vi.stubGlobal("EventSource", MockEventSource);
+    const replayBrowserActivityEvent = vi.fn(() => true);
+    const latest: { current: CapturedState | null } = { current: null };
+
+    render(
+      <Harness
+        capture={(state) => {
+          latest.current = state;
+        }}
+        replayBrowserActivityEvent={replayBrowserActivityEvent}
+      />,
+    );
+
+    await waitFor(() => expect(MockEventSource.instances.length).toBeGreaterThan(0));
+    act(() => {
+      MockEventSource.instances[0]?.emitBrowser(browserEvent({ id: 5, type: "action.click" }));
+    });
+    await waitFor(() => expect(latest.current?.cursor).toBe(5));
+
+    act(() => {
+      MockEventSource.instances[0]?.emitBrowser(browserEvent({ id: 5, type: "action.click" }));
+    });
+
+    expect(latest.current?.events.map((event) => event.id)).toEqual([5]);
+    expect(replayBrowserActivityEvent).toHaveBeenCalledTimes(1);
+  });
+
   it("refreshes the snapshot when tab events do not include a tab list", async () => {
     vi.stubGlobal("EventSource", MockEventSource);
     const refreshed = snapshot({ activeTabId: "tab-2", url: "https://app.test/two", title: "Two" });

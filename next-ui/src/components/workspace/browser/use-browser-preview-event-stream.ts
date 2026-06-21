@@ -71,8 +71,12 @@ export function useBrowserPreviewEventStream({
       if (!isBrowserActivityEvent(parsed) || parsed.sessionId !== sessionId) {
         return;
       }
+      const staleEvent = parsed.id <= browserEventCursorRef.current;
       browserEventCursorRef.current = Math.max(browserEventCursorRef.current, parsed.id);
       setActivityEvents((current) => appendBrowserActivityEvent(current, parsed));
+      if (staleEvent) {
+        return;
+      }
       if (isReplayableBrowserActivityEvent(parsed)) {
         let replayed = false;
         liveReplaySuppressionUntilRef.current = Date.now() + 500;

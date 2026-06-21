@@ -145,7 +145,13 @@ export function createTerminalIoOutputState({
   return {
     enqueueOutput: (chunk) => {
       const now = Date.now();
-      if (pendingOutputChunks.length === 0 && outputFlushTimer === null && chunk.byteLength <= lowLatencyChunkBytes && now - lastOutputSentAt >= lowLatencyIdleWindowMs) {
+      if (
+        !outputPaused
+        && pendingOutputChunks.length === 0
+        && outputFlushTimer === null
+        && chunk.byteLength <= lowLatencyChunkBytes
+        && now - lastOutputSentAt >= lowLatencyIdleWindowMs
+      ) {
         sendOutputChunk(chunk);
         return;
       }
@@ -155,7 +161,11 @@ export function createTerminalIoOutputState({
       }
     },
     acknowledgeOutput: (bytes) => {
-      unacknowledgedOutputBytes = Math.max(0, unacknowledgedOutputBytes - Math.max(0, Math.floor(bytes)));
+      const acknowledgedBytes = Math.floor(bytes);
+      if (!Number.isFinite(acknowledgedBytes) || acknowledgedBytes <= 0 || acknowledgedBytes > unacknowledgedOutputBytes) {
+        return;
+      }
+      unacknowledgedOutputBytes -= acknowledgedBytes;
       checkResumeAfterBackpressure();
     },
     dispose: () => {

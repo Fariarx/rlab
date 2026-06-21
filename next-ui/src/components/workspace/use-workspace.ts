@@ -456,6 +456,7 @@ export class WorkspaceStore implements Workspace {
     this.loadSeq += 1;
     this.saveQueue.flushNow();
     for (const run of this.runs.values()) {
+      run.canceled = true;
       run.controller.abort();
     }
     this.runs.clear();
@@ -491,8 +492,9 @@ export class WorkspaceStore implements Workspace {
         runInAction(() => {
           this.workspaceRevision = typeof loadedState.revision === "number" ? loadedState.revision : 0;
           this.applyServerState(cloneWorkspaceState(loadedState));
-          selectedId = this.state.selectedId;
           this.loadError = null;
+          this.saveQueue.replayPersistedMutationsAfterServerLoad();
+          selectedId = this.state.selectedId;
           this.loaded = true;
           this.hydrated = true;
         });
@@ -1125,20 +1127,22 @@ export class WorkspaceStore implements Workspace {
       let blockUpdateMessage: ChatMessage | null = null;
       let blockUpdateShouldFlush = false;
       let blockUpdateShouldPersistBlocks = true;
-      this.setState((current) => {
-        const update = applyWorkspaceAgentBlocks({
-          agentMessage,
-          blocks,
-          canceled: runHandle.canceled,
-          conversationId: id,
-          serverOwned: runHandle.serverOwned,
-          state: current,
-          userMessageId: userMsg.id,
+      runInAction(() => {
+        this.setState((current) => {
+          const update = applyWorkspaceAgentBlocks({
+            agentMessage,
+            blocks,
+            canceled: runHandle.canceled,
+            conversationId: id,
+            serverOwned: runHandle.serverOwned,
+            state: current,
+            userMessageId: userMsg.id,
+          });
+          blockUpdateMessage = update.message;
+          blockUpdateShouldFlush = update.shouldFlush;
+          blockUpdateShouldPersistBlocks = update.shouldPersistBlocks;
+          return update.state;
         });
-        blockUpdateMessage = update.message;
-        blockUpdateShouldFlush = update.shouldFlush;
-        blockUpdateShouldPersistBlocks = update.shouldPersistBlocks;
-        return update.state;
       });
       if (blockUpdateShouldPersistBlocks) {
         if (blockUpdateMessage) {

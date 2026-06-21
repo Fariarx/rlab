@@ -195,14 +195,61 @@ describe("Composer", () => {
     fireEvent.change(input, { target: { value: message } });
     fireEvent.click(screen.getByTestId("composer-send-button"));
 
-    await waitFor(() => {
-      expect(onSend).toHaveBeenCalledWith(message);
-      expect(input).toHaveValue("");
-    });
+    expect(onSend).toHaveBeenCalledWith(message);
+    expect(input).toHaveValue("");
 
     fireEvent.change(input, { target: { value: staleTail } });
 
     expect(input).toHaveValue("");
+  });
+
+  it("ignores delayed stale browser change events after a sent message", async () => {
+    const onSend = vi.fn();
+    renderWithTheme(<Composer placeholder="Написать" onSend={onSend} />);
+    const input = screen.getByPlaceholderText("Написать");
+    const message = "после отправки этот текст не должен возвращаться в черновик";
+
+    fireEvent.change(input, { target: { value: message } });
+    fireEvent.click(screen.getByTestId("composer-send-button"));
+
+    expect(onSend).toHaveBeenCalledWith(message);
+    expect(input).toHaveValue("");
+
+    await new Promise((resolve) => setTimeout(resolve, 850));
+    fireEvent.change(input, { target: { value: message } });
+
+    expect(input).toHaveValue("");
+  });
+
+  it("ignores stale submitted text after the composer remounts", async () => {
+    const message = "у меня нет там обученных моделей и 100к бэнков";
+    const mounted = renderWithTheme(<Composer placeholder="Написать" onSend={() => undefined} />);
+    let input = screen.getByPlaceholderText("Написать");
+
+    fireEvent.change(input, { target: { value: message } });
+    fireEvent.click(screen.getByTestId("composer-send-button"));
+    expect(input).toHaveValue("");
+
+    mounted.unmount();
+    renderWithTheme(<Composer placeholder="Написать" recentlySubmittedValue={message} />);
+    input = screen.getByPlaceholderText("Написать");
+
+    await new Promise((resolve) => setTimeout(resolve, 850));
+    fireEvent.change(input, { target: { value: message } });
+
+    expect(input).toHaveValue("");
+  });
+
+  it("allows intentional typing after a sent message guard is armed", () => {
+    const message = "у меня нет там обученных моделей и 100к бэнков";
+    const nextMessage = "у меня есть новый ввод";
+    renderWithTheme(<Composer placeholder="Написать" recentlySubmittedValue={message} />);
+    const input = screen.getByPlaceholderText("Написать");
+
+    fireEvent.keyDown(input, { key: "у" });
+    fireEvent.change(input, { target: { value: nextMessage } });
+
+    expect(input).toHaveValue(nextMessage);
   });
 
   it("calculates live voice levels across the full recording strip width", () => {
