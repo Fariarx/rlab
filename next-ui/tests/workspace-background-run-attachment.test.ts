@@ -20,6 +20,8 @@ function activeUpdate(patch: Partial<ActiveRunUpdate> = {}): ActiveRunUpdate {
     agentMessageId: patch.agentMessageId ?? "a1",
     status: patch.status ?? "running",
     time: patch.time ?? "12:00",
+    agentMessageTime: patch.agentMessageTime ?? "12:01",
+    updatedAtMs: patch.updatedAtMs,
     done: patch.done ?? false,
     blocks: patch.blocks ?? [],
     costUsd: patch.costUsd,

@@ -51,28 +51,64 @@ export function QueuedMessages({ messages, paused, onCancel, onCopy, onSendNow, 
         overflow: "hidden",
       }}
     >
-      <Stack
-        direction="row"
-        spacing={0.75}
-        sx={{ alignItems: "center", px: 1.25, py: 0.35, borderBottom: (theme) => `1px solid ${theme.custom.borders.subtle}` }}
+      <Box
+        sx={{
+          display: "grid",
+          gridTemplateColumns: { xs: "minmax(0, 1fr) auto", sm: "minmax(0, 1fr) auto auto" },
+          gridTemplateAreas: {
+            xs: '"title send" "pause send"',
+            sm: '"title pause send"',
+          },
+          alignItems: { xs: "stretch", sm: "center" },
+          columnGap: 0.5,
+          rowGap: 0.35,
+          px: { xs: 1, sm: 1.25 },
+          py: { xs: 0.65, sm: 0.35 },
+          borderBottom: (theme) => `1px solid ${theme.custom.borders.subtle}`,
+        }}
       >
-        <ScheduleSendRoundedIcon sx={{ fontSize: 14, color: (theme) => theme.palette.status.warn.main, flex: "0 0 auto" }} />
-        <Typography variant="microLabel" sx={{ color: "text.secondary", flex: 1, minWidth: 0 }}>
-          {paused ? t("queuedPausedTitle", { count: messages.length }) : t("queuedTitle", { count: messages.length })}
-        </Typography>
+        <Stack direction="row" spacing={0.75} sx={{ gridArea: "title", alignItems: "center", minWidth: 0, alignSelf: "center" }}>
+          <ScheduleSendRoundedIcon sx={{ fontSize: 14, color: (theme) => theme.palette.status.warn.main, flex: "0 0 auto" }} />
+          <Typography variant="microLabel" noWrap sx={{ color: "text.secondary", minWidth: 0 }}>
+            {paused ? t("queuedPausedTitle", { count: messages.length }) : t("queuedTitle", { count: messages.length })}
+          </Typography>
+        </Stack>
         <Button
           variant="text"
           size="small"
           onClick={onTogglePause}
           startIcon={paused ? <PlayArrowRoundedIcon sx={{ fontSize: 16 }} /> : <PauseRoundedIcon sx={{ fontSize: 16 }} />}
-          sx={{ minWidth: 0, color: "text.secondary" }}
+          sx={{
+            gridArea: "pause",
+            justifySelf: "start",
+            alignSelf: "center",
+            color: "text.secondary",
+            minWidth: 0,
+            px: { xs: 0, sm: 1 },
+            whiteSpace: "nowrap",
+            lineHeight: 1.15,
+          }}
         >
           {paused ? t("resumeQueue") : t("pauseQueue")}
         </Button>
-        <Button variant="text" size="small" onClick={onSendNow} sx={{ minWidth: 0, color: "text.secondary" }}>
+        <Button
+          variant="text"
+          size="small"
+          onClick={onSendNow}
+          sx={{
+            gridArea: "send",
+            justifySelf: "end",
+            alignSelf: "center",
+            color: "text.secondary",
+            minWidth: 0,
+            px: { xs: 0.75, sm: 1 },
+            whiteSpace: "nowrap",
+            lineHeight: 1.15,
+          }}
+        >
           {t("sendQueuedNow")}
         </Button>
-      </Stack>
+      </Box>
       <Stack
         data-testid="queued-messages-list"
         data-scrollable={scrollable ? "true" : undefined}

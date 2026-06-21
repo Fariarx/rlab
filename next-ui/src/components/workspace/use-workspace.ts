@@ -49,7 +49,7 @@ import {
   toggleConversationPinState,
   updateConversationProfileState,
 } from "./models/workspace-conversation-model";
-import { hasUntrackedPersistedActiveRuns, mergeBackgroundRunState } from "./models/workspace-background-runs-model";
+import { hasUntrackedPersistedActiveRuns, mergeBackgroundRunState, trackedPersistedActiveRunsMissingOnServer } from "./models/workspace-background-runs-model";
 import { attachWorkspaceBackgroundRun, type RunHandle } from "./runtime/workspace-background-run-attachment";
 import { mergeLoadedThread, mergeRemoteWorkspaceShell, prependLoadedThreadPage, type RemoteWorkspaceShellMerge } from "./models/workspace-server-sync-model";
 import { WorkspaceThreadLoader } from "./runtime/workspace-thread-loader";
@@ -87,6 +87,7 @@ const WORKSPACE_LOAD_RETRY_MS = 15_000;
 const WORKSPACE_SYNC_POLL_MS = 2_000;
 const WORKSPACE_HIDDEN_SYNC_POLL_MS = 30_000;
 const ACTIVE_RUN_DISCOVERY_POLL_MS = 30_000;
+const TRACKED_RUN_MISSING_ON_SERVER_RECONCILE_MS = 45_000;
 
 export interface CreateProjectInput {
   readonly name: string;
@@ -342,6 +343,20 @@ export class WorkspaceStore implements Workspace {
     return this.threadLoader.loadThread(id, force);
   }
 
+  private async ensureFullThreadLoaded(id: string): Promise<boolean> {
+    if (this.threadLoader.isFullyLoaded(id) && !this.threadLoader.isStale(id)) {
+      return true;
+    }
+    await this.threadLoader.loadFullThread(id);
+    return this.threadLoader.isFullyLoaded(id) && !this.threadLoader.isStale(id);
+  }
+
+  private enqueueThreadMessageUpserts(conversationId: string, messages: readonly ChatMessage[]): void {
+    if (messages.length > 0) {
+      this.enqueueMutations({ type: "upsertMessages", conversationId, messages });
+    }
+  }
+
   private queueSnapshot(id: string): PendingTurnQueueSnapshot {
     return this.pendingQueues.get(id) ?? { conversationId: id, paused: false, messages: [] };
   }
@@ -581,9 +596,20 @@ export class WorkspaceStore implements Workspace {
         await this.syncBackgroundRuns();
         return;
       }
-      let active: ActiveRunSnapshot[];
-      active = await loadActiveRuns();
+      const active = await loadActiveRuns();
       if (seq !== this.loadSeq) {
+        return;
+      }
+      const activeRunIds = new Set(active.map((run) => run.runId));
+      const activeConversationIds = new Set(active.map((run) => run.conversationId));
+      const missingTrackedConversationIds = trackedPersistedActiveRunsMissingOnServer(this.state, this.runs, activeRunIds, activeConversationIds)
+        .filter((conversationId) => {
+          const run = this.runs.get(conversationId);
+          return Boolean(run && Date.now() - run.lastUpdateAtMs >= TRACKED_RUN_MISSING_ON_SERVER_RECONCILE_MS);
+        });
+      if (missingTrackedConversationIds.length > 0) {
+        this.detachTrackedRuns(missingTrackedConversationIds);
+        await this.syncBackgroundRuns();
         return;
       }
       if (active.some((run) => !this.runs.has(run.conversationId))) {
@@ -597,6 +623,18 @@ export class WorkspaceStore implements Workspace {
       }
     } finally {
       this.backgroundRunsRefreshInFlight = false;
+    }
+  }
+
+  private detachTrackedRuns(conversationIds: readonly string[]): void {
+    for (const conversationId of conversationIds) {
+      const run = this.runs.get(conversationId);
+      if (!run) {
+        continue;
+      }
+      run.canceled = true;
+      run.controller.abort();
+      this.runs.delete(conversationId);
     }
   }
 
@@ -1050,7 +1088,7 @@ export class WorkspaceStore implements Workspace {
       options,
     });
     const { agentMessage, conversationPatch, profile, prompt, resume } = preparedRun;
-    const serverPrompt = options?.serverPrompt === true && !resume && options.promptOverride === undefined ? { userMessage: userMsg } : undefined;
+    const serverPrompt = options?.serverPrompt === true && options.promptOverride === undefined ? { userMessage: userMsg } : undefined;
     const promptForRequest = serverPrompt ? (userMsg.text ?? "") : prompt;
 
     // Cancel any run still in flight for this conversation BEFORE persisting the
@@ -1083,6 +1121,7 @@ export class WorkspaceStore implements Workspace {
     });
     this.enqueueMutations({ type: "upsertMessage", conversationId: id, message: agentMessage });
     const applyBlocks = (blocks: AgentBlock[]) => {
+      runHandle.lastUpdateAtMs = Date.now();
       let blockUpdateMessage: ChatMessage | null = null;
       let blockUpdateShouldFlush = false;
       let blockUpdateShouldPersistBlocks = true;
@@ -1116,7 +1155,7 @@ export class WorkspaceStore implements Workspace {
     };
 
     const controller = new AbortController();
-    const runHandle: RunHandle = { controller, runId, userMessageId: userMsg.id, agentMessageId: aId, serverOwned: false, canceled: false };
+    const runHandle: RunHandle = { controller, runId, userMessageId: userMsg.id, agentMessageId: aId, lastUpdateAtMs: Date.now(), serverOwned: false, canceled: false };
     this.runs.set(id, runHandle);
 
     runConversation({
@@ -1187,10 +1226,13 @@ export class WorkspaceStore implements Workspace {
             return patchConversation(settled, id, { activeRunId: undefined, status: "error", ...(snippet ? { snippet } : {}), ...unreadPatch });
           });
           const conversation = this.find(id);
+          if (serverPrompt) {
+            this.enqueueMutations({ type: "restartUserTurn", conversationId: id, userMessage: serverPrompt.userMessage });
+          }
           if (conversation) {
             this.enqueueMutations({ type: "updateConversation", conversation });
           }
-          this.enqueueMutations({ type: "replaceConversationThread", conversationId: id, messages: this.state.threads[id] ?? [] });
+          this.enqueueThreadMessageUpserts(id, this.state.threads[id] ?? []);
           this.persistCurrentStateNow();
         }
       })
@@ -1234,7 +1276,7 @@ export class WorkspaceStore implements Workspace {
     if (result.current?.conversation) {
       this.enqueueMutations({ type: "updateConversation", conversation: result.current.conversation });
     }
-    this.enqueueMutations({ type: "replaceConversationThread", conversationId: id, messages: result.current?.thread ?? [] });
+    this.enqueueThreadMessageUpserts(id, result.current?.thread ?? []);
     this.persistCurrentStateNow();
     return cancelPromise;
   }
@@ -1244,6 +1286,14 @@ export class WorkspaceStore implements Workspace {
   }
 
   retryMessage(id: string, messageId: string): void {
+    if (!this.threadLoader.isFullyLoaded(id) || this.threadLoader.isStale(id)) {
+      void this.ensureFullThreadLoaded(id).then((loaded) => {
+        if (loaded) {
+          this.retryMessage(id, messageId);
+        }
+      });
+      return;
+    }
     const thread = this.state.threads[id] ?? [];
     const selection = retryUserTurn(thread, messageId, nowLabel(), Date.now());
     if (!selection) {
@@ -1258,8 +1308,7 @@ export class WorkspaceStore implements Workspace {
     if (!applied) {
       throw new Error(`Failed to apply retry turn selection for conversation ${id}.`);
     }
-    this.enqueueMutations({ type: "replaceConversationThread", conversationId: id, messages: applied.thread });
-    this.runTurn(id, applied.userMsg);
+    this.runTurn(id, applied.userMsg, { serverPrompt: true });
   }
 
   forkConversationFromMessage(id: string, messageId: string): string | null {
@@ -1296,6 +1345,14 @@ export class WorkspaceStore implements Workspace {
   }
 
   editAndResendMessage(id: string, messageId: string, text: string): void {
+    if (!this.threadLoader.isFullyLoaded(id) || this.threadLoader.isStale(id)) {
+      void this.ensureFullThreadLoaded(id).then((loaded) => {
+        if (loaded) {
+          this.editAndResendMessage(id, messageId, text);
+        }
+      });
+      return;
+    }
     const thread = this.state.threads[id] ?? [];
     const selection = editUserTurn(thread, messageId, text, nowLabel(), Date.now());
     if (!selection) {
@@ -1310,8 +1367,7 @@ export class WorkspaceStore implements Workspace {
     if (!applied) {
       throw new Error(`Failed to apply edited turn selection for conversation ${id}.`);
     }
-    this.enqueueMutations({ type: "replaceConversationThread", conversationId: id, messages: applied.thread });
-    this.runTurn(id, applied.userMsg);
+    this.runTurn(id, applied.userMsg, { serverPrompt: true });
   }
 
   decideApproval(id: string, approvalId: string, decision: ApprovalDecision): void {
@@ -1323,7 +1379,7 @@ export class WorkspaceStore implements Workspace {
     if (result.current?.conversation) {
       this.enqueueMutations({ type: "updateConversation", conversation: result.current.conversation });
     }
-    this.enqueueMutations({ type: "replaceConversationThread", conversationId: id, messages: result.current?.thread ?? [] });
+    this.enqueueThreadMessageUpserts(id, result.current?.thread ?? []);
     this.persistCurrentStateNow();
   }
 
@@ -1336,14 +1392,22 @@ export class WorkspaceStore implements Workspace {
     if (result.current?.conversation) {
       this.enqueueMutations({ type: "updateConversation", conversation: result.current.conversation });
     }
-    this.enqueueMutations({ type: "replaceConversationThread", conversationId: id, messages: result.current?.thread ?? [] });
+    this.enqueueThreadMessageUpserts(id, result.current?.thread ?? []);
     this.persistCurrentStateNow();
   }
 
   updateComposerDraft(id: string, draft: ComposerDraft): void {
+    const previousState = this.state;
     this.setState((current) => putComposerDraftState(current, id, draft));
+    if (this.state === previousState) {
+      return;
+    }
     const nextDraft = this.state.composerDrafts[id] ?? { text: "", attachments: [] };
-    this.enqueueMutations(composerDraftMutation(id, nextDraft));
+    const mutation = composerDraftMutation(id, nextDraft);
+    this.enqueueMutations(mutation);
+    if (mutation.type === "deleteComposerDraft") {
+      this.persistCurrentStateNow();
+    }
   }
 
   updateSettings(patch: AppSettingsPatch): void {

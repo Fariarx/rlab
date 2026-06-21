@@ -2,10 +2,24 @@ import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 import { agentsApiPlugin } from "./vite-agents-plugin";
 
+function rlabAllowedHosts(): string[] | undefined {
+  const hosts = (process.env.RLAB_ALLOWED_HOSTS ?? "")
+    .split(",")
+    .map((host) => host.trim())
+    .filter((host) => host.length > 0);
+  return hosts.length > 0 ? hosts : undefined;
+}
+
+const allowedHosts = rlabAllowedHosts();
+
 export default defineConfig({
   plugins: [react(), agentsApiPlugin()],
   server: {
     port: 5187,
+    allowedHosts,
+  },
+  preview: {
+    allowedHosts,
   },
   build: {
     rolldownOptions: {

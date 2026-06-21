@@ -84,7 +84,11 @@ export interface ActiveRunUpdate {
   readonly agentMessageId: string;
   readonly startedAtMs?: number;
   readonly status: ConversationStatus;
+  /** Stable conversation-list time: the bound user message time. */
   readonly time: string;
+  /** Agent bubble time for the streamed assistant message. */
+  readonly agentMessageTime: string;
+  readonly updatedAtMs?: number;
   readonly done: boolean;
   readonly blocks: readonly AgentBlock[];
   readonly costUsd?: number;
@@ -148,6 +152,8 @@ function isActiveRunUpdate(value: unknown): value is ActiveRunUpdate {
     (value.startedAtMs === undefined || typeof value.startedAtMs === "number") &&
     isConversationStatus(value.status) &&
     typeof value.time === "string" &&
+    typeof value.agentMessageTime === "string" &&
+    (value.updatedAtMs === undefined || typeof value.updatedAtMs === "number") &&
     typeof value.done === "boolean" &&
     Array.isArray(value.blocks) &&
     (value.costUsd === undefined || typeof value.costUsd === "number") &&

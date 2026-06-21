@@ -216,6 +216,7 @@ export function CommandCard({ block }: { readonly block: CommandBlock }) {
 
 export function SearchCard({ block }: { readonly block: SearchBlock }) {
   const { t } = useI18n();
+  const hasResults = block.results.length > 0;
 
   return (
     <ActionFrame
@@ -233,19 +234,21 @@ export function SearchCard({ block }: { readonly block: SearchBlock }) {
       }
       meta={<Typography component="span" sx={metaSx}>{t("searchHitCount", { count: block.results.length })}</Typography>}
     >
-      <Stack spacing={0.75}>
-        {block.results.map((result) => (
-          <Stack key={result.url} direction="row" spacing={1} sx={{ alignItems: "baseline" }}>
-            <Box sx={{ width: 5, height: 5, borderRadius: "50%", mt: "7px", flex: "0 0 auto", backgroundColor: (t) => t.palette.status.info.main }} />
-            <Box sx={{ minWidth: 0 }}>
-              <Box sx={{ fontSize: "0.8rem" }}>
-                <MessageLink href={result.url}>{result.title}</MessageLink>
+      {hasResults ? (
+        <Stack spacing={0.75}>
+          {block.results.map((result) => (
+            <Stack key={result.url} direction="row" spacing={1} sx={{ alignItems: "baseline" }}>
+              <Box sx={{ width: 5, height: 5, borderRadius: "50%", mt: "7px", flex: "0 0 auto", backgroundColor: (t) => t.palette.status.info.main }} />
+              <Box sx={{ minWidth: 0 }}>
+                <Box sx={{ fontSize: "0.8rem" }}>
+                  <MessageLink href={result.url}>{result.title}</MessageLink>
+                </Box>
+                <Typography sx={{ ...metaSx, color: "text.secondary" }}>{result.url}</Typography>
               </Box>
-              <Typography sx={{ ...metaSx, color: "text.secondary" }}>{result.url}</Typography>
-            </Box>
-          </Stack>
-        ))}
-      </Stack>
+            </Stack>
+          ))}
+        </Stack>
+      ) : null}
     </ActionFrame>
   );
 }

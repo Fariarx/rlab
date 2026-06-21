@@ -159,6 +159,36 @@ describe("message actions", () => {
     expect(onOptionSelection).toHaveBeenCalledWith("toolu_question:q0", ["Use a terse changelog format"]);
   });
 
+  it("does not locally confirm option selections without a persistence handler", () => {
+    renderWithThemeAndVirtuoso(
+      <Conversation
+        messages={[
+          {
+            id: "a-options",
+            role: "agent",
+            blocks: [
+              {
+                kind: "options",
+                id: "toolu_question:q0",
+                prompt: "How should I format the output?",
+                options: [
+                  { id: "Summary", label: "Summary", description: "Brief overview" },
+                  { id: "Detailed", label: "Detailed", description: "Full explanation" },
+                ],
+              },
+            ],
+          },
+        ]}
+      />,
+    );
+
+    fireEvent.click(screen.getByText("Summary"));
+
+    expect(screen.getByRole("button", { name: "Подтвердить" })).toBeDisabled();
+    expect(screen.queryByText("Выбрано: Summary")).not.toBeInTheDocument();
+    expect(screen.getByText("Ошибка выбора: У этого вопроса нет серверного обработчика сохранения.")).toBeInTheDocument();
+  });
+
   it("keeps an approval pending when the decision handler fails", async () => {
     const onApprovalDecision = vi.fn().mockRejectedValue(new Error("permission bridge is unavailable"));
 

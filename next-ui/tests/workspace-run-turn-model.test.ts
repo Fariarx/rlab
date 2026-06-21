@@ -16,7 +16,7 @@ function conversation(patch: Partial<ConversationSummary> = {}): ConversationSum
 }
 
 function userMessage(id: string, text: string): ChatMessage {
-  return { id, role: "user", text, time: "12:00" };
+  return { id, role: "user", text, time: "12:00", createdAtMs: 120_000 };
 }
 
 function agentMessage(id: string, text: string): ChatMessage {
@@ -40,7 +40,8 @@ describe("prepareWorkspaceRunTurn", () => {
       activeRunId: "run-1",
       status: "running",
       snippet: "Build the feature",
-      time: "12:02",
+      time: "12:00",
+      updatedAtMs: 120_000,
       unread: false,
       costUsd: undefined,
       usage: { totalTokens: 100, contextTokens: 0 },

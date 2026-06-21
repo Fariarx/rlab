@@ -26,6 +26,7 @@ export const OptionSelect = observer(function OptionSelect({
   const { selected, setSelected, confirmed, setConfirmed, pending, setPending, selectionError, setSelectionError } = store;
   const [customAnswer, setCustomAnswer] = useState("");
   const { t } = useI18n();
+  const canPersistSelection = Boolean(block.id && onSelection);
 
   useEffect(() => {
     if ((block.selected?.length ?? 0) === 0) {
@@ -54,8 +55,7 @@ export const OptionSelect = observer(function OptionSelect({
       return;
     }
     if (!block.id || !onSelection) {
-      setSelected(labels);
-      setConfirmed(true);
+      setSelectionError(t("optionSelectionUnavailable"));
       return;
     }
     setPending(true);
@@ -170,7 +170,7 @@ export const OptionSelect = observer(function OptionSelect({
           <InputBase
             value={customAnswer}
             onChange={(event) => setCustomAnswer(event.target.value)}
-            disabled={pending}
+            disabled={pending || !canPersistSelection}
             placeholder={t("customAnswerPlaceholder")}
             sx={{
               flex: 1,
@@ -188,7 +188,7 @@ export const OptionSelect = observer(function OptionSelect({
             type="submit"
             tone="subtle"
             aria-label={t("sendCustomAnswer")}
-            disabled={customAnswer.trim().length === 0 || pending}
+            disabled={customAnswer.trim().length === 0 || pending || !canPersistSelection}
             sx={{ flex: "0 0 auto", width: 38, height: 38, borderRadius: (t) => `${t.custom.radii.sm}px` }}
           >
             <SendRoundedIcon sx={{ fontSize: 18 }} />
@@ -200,13 +200,13 @@ export const OptionSelect = observer(function OptionSelect({
         {confirmed ? (
           <StatusNote level="ok">{t("selectedOptions", { items: chosenLabels.join(", ") })}</StatusNote>
         ) : (
-          <Button variant="contained" size="small" disabled={selected.length === 0 || pending} onClick={confirm}>
+          <Button variant="contained" size="small" disabled={selected.length === 0 || pending || !canPersistSelection} onClick={confirm}>
             {block.multi && selected.length > 0 ? t("confirmSelectionCount", { count: selected.length }) : t("confirm")}
           </Button>
         )}
-        {selectionError && (
+        {(selectionError || (!canPersistSelection && !confirmed)) && (
           <Box sx={{ mt: 1 }}>
-            <StatusNote level="error">{t("optionSelectionError", { error: selectionError })}</StatusNote>
+            <StatusNote level="error">{t("optionSelectionError", { error: selectionError ?? t("optionSelectionUnavailable") })}</StatusNote>
           </Box>
         )}
       </Box>

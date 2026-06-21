@@ -355,7 +355,7 @@ const AgentMessage = observer(function AgentMessage({
           )}
           {blockModel.detailBlocks.length > 0 && (
             <Box sx={{ minWidth: 0, maxWidth: "100%", ...rise(delay + 40) }}>
-              <AgentDetails blocks={blockModel.detailBlocks} actions={actions} autoExpand={displayPrefs.reasoningAutoExpand ?? false} live={live} showSpinner={showDetailSpinner} hasResultAfter={blockModel.answerBlocks.length > 0} startedAtMs={message.startedAtMs} />
+              <AgentDetails blocks={blockModel.detailBlocks} actions={actions} autoExpand={(displayPrefs.reasoningAutoExpand ?? false) && blockModel.answerBlocks.length === 0} live={live} showSpinner={showDetailSpinner} hasResultAfter={blockModel.answerBlocks.length > 0} startedAtMs={message.startedAtMs} />
             </Box>
           )}
           {/* Plan stays pinned and visible under the message, even mid-run. */}

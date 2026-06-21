@@ -12,6 +12,8 @@ import { WebSocketServer } from "ws";
 import { AsyncOperationQueue } from "./async-operation-queue";
 import { createTerminalIoOutputState, type TerminalIoOutputState } from "./terminal-io-output-state";
 
+export type TerminalWebSocketGuard = (request: IncomingMessage) => { readonly statusCode: number; readonly message: string } | null;
+
 export interface TerminalSessionCreateRequest {
   readonly cwd: string;
   readonly cols?: number;
@@ -406,7 +408,7 @@ export class PtyTerminalManager {
   }
 }
 
-export function attachPtyTerminalWebSockets(server: Server, terminalManager: PtyTerminalManager): () => Promise<void> {
+export function attachPtyTerminalWebSockets(server: Server, terminalManager: PtyTerminalManager, guard?: TerminalWebSocketGuard): () => Promise<void> {
   const terminalStreamStates = new Map<string, TerminalStreamState>();
   const ioServer = new WebSocketServer({ noServer: true });
   const controlServer = new WebSocketServer({ noServer: true });
@@ -492,6 +494,13 @@ export function attachPtyTerminalWebSockets(server: Server, terminalManager: Pty
     const isIo = url.pathname === "/api/terminal/io";
     const isControl = url.pathname === "/api/terminal/control";
     if (!isIo && !isControl) {
+      return;
+    }
+    const blocked = guard?.(request);
+    if (blocked) {
+      const reason = blocked.statusCode === 400 ? "Bad Request" : "Forbidden";
+      socket.write(`HTTP/1.1 ${blocked.statusCode} ${reason}\r\nConnection: close\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n${blocked.message}`);
+      socket.destroy();
       return;
     }
     const terminalId = url.searchParams.get("id")?.trim() ?? "";

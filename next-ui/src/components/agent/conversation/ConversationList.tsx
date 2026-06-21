@@ -1,3 +1,4 @@
+import ArchiveOutlinedIcon from "@mui/icons-material/ArchiveOutlined";
 import FolderOpenRoundedIcon from "@mui/icons-material/FolderOpenRounded";
 import FolderRoundedIcon from "@mui/icons-material/FolderRounded";
 import ForumOutlinedIcon from "@mui/icons-material/ForumOutlined";
@@ -206,6 +207,14 @@ const ConversationRow = observer(function ConversationRow({
     setMenuAnchor(e.currentTarget);
   };
   const closeMenu = () => setMenuAnchor(null);
+  const togglePin = (e: MouseEvent<HTMLElement>) => {
+    e.stopPropagation();
+    actions.onTogglePin(conversation.id);
+  };
+  const archiveConversation = (e: MouseEvent<HTMLElement>) => {
+    e.stopPropagation();
+    actions.onArchive(conversation.id);
+  };
 
   const startRename = () => {
     setDraft(conversation.title);
@@ -333,6 +342,8 @@ const ConversationRow = observer(function ConversationRow({
             top: 6,
             right: 6,
             display: "flex",
+            gap: 0.25,
+            p: 0.125,
             borderRadius: (t) => `${t.custom.radii.sm}px`,
             backgroundColor: (t) => t.custom.surfaces.s3,
             opacity: menuOpen ? 1 : 0,
@@ -340,6 +351,16 @@ const ConversationRow = observer(function ConversationRow({
             "&:hover": { backgroundColor: (t) => t.custom.surfaces.s4 },
           }}
         >
+          <Tooltip title={conversation.pinned ? t("unpin") : t("pin")}>
+            <IconButton aria-label={conversation.pinned ? t("unpin") : t("pin")} onClick={togglePin} sx={{ p: 0.25 }}>
+              {conversation.pinned ? <PushPinRoundedIcon sx={{ fontSize: 16 }} /> : <PushPinOutlinedIcon sx={{ fontSize: 16 }} />}
+            </IconButton>
+          </Tooltip>
+          <Tooltip title={t("archive")}>
+            <IconButton aria-label={t("archive")} onClick={archiveConversation} sx={{ p: 0.25 }}>
+              <ArchiveOutlinedIcon sx={{ fontSize: 16 }} />
+            </IconButton>
+          </Tooltip>
           <IconButton aria-label={t("conversationActions")} onClick={openMenu} sx={{ p: 0.25 }}>
             <MoreHorizIcon sx={{ fontSize: 16 }} />
           </IconButton>
@@ -348,22 +369,6 @@ const ConversationRow = observer(function ConversationRow({
 
       <Menu anchorEl={menuAnchor} open={menuOpen} onClose={closeMenu} onClick={(e) => e.stopPropagation()} disableRestoreFocus>
         <MenuItem onClick={startRename}>{t("rename")}</MenuItem>
-        <MenuItem
-          onClick={() => {
-            closeMenu();
-            actions.onTogglePin(conversation.id);
-          }}
-        >
-          {conversation.pinned ? t("unpin") : t("pin")}
-        </MenuItem>
-        <MenuItem
-          onClick={() => {
-            closeMenu();
-            actions.onArchive(conversation.id);
-          }}
-        >
-          {t("archive")}
-        </MenuItem>
         <MenuItem
           onClick={() => {
             closeMenu();
@@ -592,6 +597,9 @@ export const ConversationList = observer(function ConversationList({
         minOverscanItemCount={{ bottom: 8, top: 4 }}
         style={{ height: "100%", scrollbarGutter: "stable both-edges" }}
         itemContent={(index, item) => {
+          if (!item) {
+            return null;
+          }
           const isFirst = index === 0;
           if (item.kind === "empty") {
             return (

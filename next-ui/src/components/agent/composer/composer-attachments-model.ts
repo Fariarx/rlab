@@ -2,6 +2,11 @@ import type { ComposerAttachmentDraft } from "../core/types";
 import { attachmentBlock, isImageMime, PASTE_AS_FILE_CHARS } from "./composer-utils";
 
 let pastedFileNameSeq = 0;
+const PASTE_INPUT_TYPES = new Set(["insertFromPaste", "insertFromPasteAsQuotation"]);
+
+type BeforeInputEventWithDataTransfer = InputEvent & {
+  readonly dataTransfer?: DataTransfer | null;
+};
 
 export function mergeComposerAttachments(
   existing: readonly ComposerAttachmentDraft[],
@@ -42,4 +47,22 @@ export function clipboardFilesForComposer(clipboard: DataTransfer): File[] {
 
 export function pastedTextFileForComposer(text: string): File | null {
   return text.length > PASTE_AS_FILE_CHARS ? new File([text], `pasted-${text.length}.txt`, { type: "text/plain" }) : null;
+}
+
+export function isLargePasteInputType(inputType: string | null): boolean {
+  return inputType === null || inputType === "insertText" || PASTE_INPUT_TYPES.has(inputType);
+}
+
+function beforeInputText(event: InputEvent): string {
+  const dataTransfer = (event as BeforeInputEventWithDataTransfer).dataTransfer;
+  const clipboardText = dataTransfer?.getData("text/plain") ?? "";
+  if (clipboardText.length > 0) {
+    return clipboardText;
+  }
+  return event.data ?? "";
+}
+
+export function pastedTextFileFromBeforeInput(event: InputEvent): File | null {
+  const inputType = event.inputType || null;
+  return isLargePasteInputType(inputType) ? pastedTextFileForComposer(beforeInputText(event)) : null;
 }

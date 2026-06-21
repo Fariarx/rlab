@@ -18,6 +18,7 @@ export type WorkspaceMutation =
   | { readonly type: "deleteComposerDraft"; readonly conversationId: string }
   | { readonly type: "upsertMessage"; readonly conversationId: string; readonly message: ChatMessage }
   | { readonly type: "upsertMessages"; readonly conversationId: string; readonly messages: readonly ChatMessage[] }
+  | { readonly type: "restartUserTurn"; readonly conversationId: string; readonly userMessage: ChatMessage }
   | { readonly type: "replaceConversationThread"; readonly conversationId: string; readonly messages: readonly ChatMessage[] };
 
 export interface WorkspaceMutationRequest {
@@ -36,6 +37,7 @@ export const workspaceMutationBadRequestMessages = new Set([
   "Invalid workspace draft mutation.",
   "Invalid workspace message mutation.",
   "Invalid workspace thread mutation.",
+  "Full thread replacement is disabled.",
 ]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -153,11 +155,13 @@ export function parseWorkspaceMutation(mutation: unknown): WorkspaceMutation {
         throw new Error("Invalid workspace message mutation.");
       }
       return { type: mutation.type, conversationId: mutation.conversationId, messages: mutation.messages };
-    case "replaceConversationThread":
-      if (typeof mutation.conversationId !== "string" || mutation.conversationId.length === 0 || !Array.isArray(mutation.messages) || !mutation.messages.every(isChatMessageMutationValue)) {
-        throw new Error("Invalid workspace thread mutation.");
+    case "restartUserTurn":
+      if (typeof mutation.conversationId !== "string" || mutation.conversationId.length === 0 || !isChatMessageMutationValue(mutation.userMessage) || mutation.userMessage.role !== "user") {
+        throw new Error("Invalid workspace message mutation.");
       }
-      return { type: mutation.type, conversationId: mutation.conversationId, messages: mutation.messages };
+      return { type: mutation.type, conversationId: mutation.conversationId, userMessage: mutation.userMessage };
+    case "replaceConversationThread":
+      throw new Error("Full thread replacement is disabled.");
     default:
       throw new Error("Invalid workspace mutation.");
   }
@@ -345,6 +349,29 @@ export function applyWorkspaceMutationToState(state: WorkspaceState, mutation: W
           : state;
       }
       return mutation.messages.reduce((current, message) => applyWorkspaceMutationToState(current, { type: "upsertMessage", conversationId: mutation.conversationId, message }), state);
+    case "restartUserTurn": {
+      const thread = state.threads[mutation.conversationId] ?? [];
+      const userIndex = thread.findIndex((message) => message.id === mutation.userMessage.id && message.role === "user");
+      if (userIndex < 0) {
+        if (thread.some((message) => message.id === mutation.userMessage.id)) {
+          return state;
+        }
+        return {
+          ...state,
+          threads: {
+            ...state.threads,
+            [mutation.conversationId]: [...thread, mutation.userMessage],
+          },
+        };
+      }
+      return {
+        ...state,
+        threads: {
+          ...state.threads,
+          [mutation.conversationId]: [...thread.slice(0, userIndex), mutation.userMessage],
+        },
+      };
+    }
     case "replaceConversationThread":
       return { ...state, threads: { ...state.threads, [mutation.conversationId]: [...mutation.messages] } };
   }

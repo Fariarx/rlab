@@ -54,6 +54,9 @@ const Probe = observer(function Probe() {
       <button type="button" onClick={() => workspace.updateComposerDraft(workspace.selectedId, { text: "ab", attachments: [] })}>
         draft-ab
       </button>
+      <button type="button" onClick={() => workspace.updateComposerDraft(workspace.selectedId, { text: "", attachments: [] })}>
+        draft-empty
+      </button>
       <button type="button" onClick={() => workspace.stopRun(workspace.selectedId)}>
         stop
       </button>
@@ -277,7 +280,14 @@ describe("useWorkspace", () => {
           });
         }
         if (url === "/api/run") {
-          runRequests.push(JSON.parse(String(init?.body ?? "{}")) as RunRequestRecord);
+          const request = JSON.parse(String(init?.body ?? "{}")) as RunRequestRecord;
+          runRequests.push(request);
+          if (request.conversationId && request.serverPrompt?.userMessage) {
+            state = applyWorkspaceMutationsToState(state, [
+              { type: "restartUserTurn", conversationId: request.conversationId, userMessage: request.serverPrompt.userMessage },
+            ]);
+            serverRevision += 1;
+          }
           activeRunSignal = init?.signal as AbortSignal | undefined;
           const stream = new ReadableStream<Uint8Array>({
             start(controller) {
@@ -681,6 +691,33 @@ describe("useWorkspace", () => {
     expect(savesAfter).toHaveLength(savesBefore + 1);
     expect(state.composerDrafts["chat-2"]?.text).toBe("ab");
     expect(localStorageSetItem).not.toHaveBeenCalledWith(expect.stringContaining("rlab-workspace"), expect.any(String));
+  });
+
+  it("persists composer draft deletion immediately", async () => {
+    vi.useFakeTimers();
+    state = {
+      ...state,
+      composerDrafts: {
+        ...state.composerDrafts,
+        "chat-2": { text: "already sent", attachments: [] },
+      },
+    };
+    render(<Probe />);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByText("chat-2")).toBeInTheDocument();
+    const savesBefore = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace/mutations" && init?.method === "POST").length;
+
+    await act(async () => {
+      screen.getByRole("button", { name: "draft-empty" }).click();
+      await Promise.resolve();
+    });
+
+    const savesAfter = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace/mutations" && init?.method === "POST");
+    expect(savesAfter).toHaveLength(savesBefore + 1);
+    expect(state.composerDrafts["chat-2"]).toBeUndefined();
   });
 
   it("retries transient workspace save failures and clears the save error after success", async () => {
@@ -1591,7 +1628,8 @@ describe("useWorkspace", () => {
             agentMessageId: "test-agent-message",
             status: "done",
             snippet: "finished",
-            time: "14:01",
+            time: "14:00",
+            agentMessageTime: "14:01",
             done: true,
             blocks: [{ kind: "text", text: "finished" }],
           },
@@ -1688,7 +1726,8 @@ describe("useWorkspace", () => {
             agentMessageId: "test-agent-message",
             status: "waiting",
             snippet: "Waiting for input",
-            time: "14:01",
+            time: "14:00",
+            agentMessageTime: "14:01",
             done: false,
             blocks: [{ kind: "tool", name: "Bash", summary: "systemctl is-active rlab", state: "pending" }],
           },
@@ -1732,7 +1771,8 @@ describe("useWorkspace", () => {
             agentMessageId: "test-agent-message",
             status: "running",
             snippet: "streamed token",
-            time: "14:01",
+            time: "14:00",
+            agentMessageTime: "14:01",
             done: false,
             blocks: [{ kind: "text", text: "streamed token", streaming: true }],
           },
@@ -1778,7 +1818,8 @@ describe("useWorkspace", () => {
             agentMessageId: "a-repeat",
             status: "running",
             snippet: "streamed token",
-            time: "14:02",
+            time: "14:00",
+            agentMessageTime: "14:02",
             done: false,
             blocks: [{ kind: "text", text: "streamed token", streaming: true }],
           },
@@ -1936,7 +1977,8 @@ describe("useWorkspace", () => {
             agentMessageId: "test-agent-message",
             status: "done",
             snippet: "attached finished",
-            time: "14:01",
+            time: "14:00",
+            agentMessageTime: "14:01",
             done: true,
             blocks: [{ kind: "text", text: "attached finished" }],
           },
@@ -2051,6 +2093,8 @@ describe("useWorkspace", () => {
 
     await screen.findByText("chat-2");
     screen.getByRole("button", { name: "retry" }).click();
+    await waitFor(() => expect(runRequests).toHaveLength(1));
+    expect(runRequests[0].serverPrompt?.userMessage?.text).toBe("Собери черновик release notes для 0.1.69 по merged PR.");
 
     await waitFor(() => {
       // Re-run keeps a single copy of the user turn (the stale reply is dropped
@@ -2058,6 +2102,24 @@ describe("useWorkspace", () => {
       const repeated = state.threads["chat-2"].filter((message) => message.text === "Собери черновик release notes для 0.1.69 по merged PR.");
       expect(repeated).toHaveLength(1);
     });
+  });
+
+  it("edits and resends a user message with the updated bound server prompt", async () => {
+    render(<Probe />);
+
+    await screen.findByText("chat-2");
+    screen.getByRole("button", { name: "edit-resend" }).click();
+
+    await waitFor(() => expect(runRequests).toHaveLength(1));
+    expect(runRequests[0].serverPrompt?.userMessage).toMatchObject({
+      role: "user",
+      text: "Edited resend text",
+    });
+    await waitFor(() => {
+      const edited = state.threads["chat-2"].filter((message) => message.text === "Edited resend text");
+      expect(edited).toHaveLength(1);
+    });
+    expect(state.threads["chat-2"].some((message) => message.text === "Собери черновик release notes для 0.1.69 по merged PR.")).toBe(false);
   });
 
   it("forks a conversation from an agent message without reusing the parent native session", async () => {

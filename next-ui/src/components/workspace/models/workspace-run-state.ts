@@ -331,7 +331,7 @@ export function patchActiveRunUpdate(state: WorkspaceState, update: ActiveRunUpd
   const message: ChatMessage = {
     id: update.agentMessageId,
     role: "agent",
-    time: update.time,
+    time: update.agentMessageTime,
     ...(update.startedAtMs === undefined ? {} : { startedAtMs: update.startedAtMs }),
     profile,
     blocks,
@@ -349,6 +349,7 @@ export function patchActiveRunUpdate(state: WorkspaceState, update: ActiveRunUpd
     status: update.status,
     ...(snippet ? { snippet } : {}),
     time: update.time,
+    ...(update.updatedAtMs === undefined ? {} : { updatedAtMs: update.updatedAtMs }),
     ...(update.costUsd === undefined ? {} : { costUsd: update.costUsd }),
     ...(update.usage === undefined ? {} : { usage: update.usage }),
   });

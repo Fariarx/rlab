@@ -1,13 +1,39 @@
 import type { ChatMessage } from "../../agent";
-import { conversationPreviewSnippet } from "../../../lib/conversation-preview";
 import type { WorkspaceState } from "../../../lib/workspace-state";
-import { isLiveRunStatus, settleThreadLiveBlocks } from "./workspace-run-state";
+import { isLiveRunStatus } from "./workspace-run-state";
 import { findConversation, patchConversation, serializableEqual, workspaceConversations } from "./workspace-state-utils";
 
 export function hasUntrackedPersistedActiveRuns(state: WorkspaceState, trackedRuns: ReadonlyMap<string, unknown>): boolean {
   return workspaceConversations(state).some(
     (conversation) => Boolean(conversation.activeRunId) && !trackedRuns.has(conversation.id) && isLiveRunStatus(conversation.status),
   );
+}
+
+interface TrackedRunIdentity {
+  readonly runId: string;
+}
+
+export function trackedPersistedActiveRunsMissingOnServer(
+  state: WorkspaceState,
+  trackedRuns: ReadonlyMap<string, TrackedRunIdentity>,
+  activeRunIds: ReadonlySet<string>,
+  activeConversationIds: ReadonlySet<string> = new Set(),
+): string[] {
+  return workspaceConversations(state)
+    .filter((conversation) => {
+      const tracked = trackedRuns.get(conversation.id);
+      if (!tracked) {
+        return false;
+      }
+      return (
+        Boolean(conversation.activeRunId) &&
+        conversation.activeRunId === tracked.runId &&
+        isLiveRunStatus(conversation.status) &&
+        !activeRunIds.has(tracked.runId) &&
+        !activeConversationIds.has(conversation.id)
+      );
+    })
+    .map((conversation) => conversation.id);
 }
 
 export interface MergeBackgroundRunStateInput {
@@ -41,12 +67,6 @@ export function mergeBackgroundRunState({ current, loaded, activeRunIds, tracked
       loadedConversation.activeRunId === currentConversation.activeRunId &&
       isLiveRunStatus(loadedConversation.status)
     ) {
-      const snippet = conversationPreviewSnippet(loadedThread, 60);
-      next = patchConversation(settleThreadLiveBlocks(next, id), id, {
-        activeRunId: undefined,
-        status: "error",
-        ...(snippet ? { snippet } : {}),
-      });
       continue;
     }
     if (!serializableEqual(currentConversation, loadedConversation)) {

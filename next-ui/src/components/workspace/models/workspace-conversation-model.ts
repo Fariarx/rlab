@@ -324,6 +324,14 @@ export function cloneComposerDraft(draft: ComposerDraft): ComposerDraft {
 
 export function putComposerDraftState(state: WorkspaceState, conversationId: string, draft: ComposerDraft): WorkspaceState {
   const nextDraft = cloneComposerDraft(draft);
+  if (isEmptyComposerDraft(nextDraft)) {
+    if (!state.composerDrafts[conversationId]) {
+      return state;
+    }
+    const composerDrafts = { ...state.composerDrafts };
+    delete composerDrafts[conversationId];
+    return { ...state, composerDrafts };
+  }
   const currentDraft = state.composerDrafts[conversationId] ?? { text: "", attachments: [] };
   if (serializableEqual(currentDraft, nextDraft)) {
     return state;
@@ -338,7 +346,9 @@ export function putComposerDraftState(state: WorkspaceState, conversationId: str
 }
 
 export function composerDraftMutation(conversationId: string, draft: ComposerDraft): WorkspaceMutation {
-  return draft.text.trim().length === 0 && draft.attachments.length === 0
-    ? { type: "deleteComposerDraft", conversationId }
-    : { type: "setComposerDraft", conversationId, draft };
+  return isEmptyComposerDraft(draft) ? { type: "deleteComposerDraft", conversationId } : { type: "setComposerDraft", conversationId, draft };
+}
+
+function isEmptyComposerDraft(draft: ComposerDraft): boolean {
+  return draft.text.trim().length === 0 && draft.attachments.length === 0;
 }

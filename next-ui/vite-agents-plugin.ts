@@ -4,7 +4,7 @@ import { appendFileSync, chmodSync, closeSync, copyFileSync, existsSync, mkdirSy
 import { readdir, readFile } from "node:fs/promises";
 import { request as httpRequest, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
 import { homedir, tmpdir } from "node:os";
-import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import Anthropic from "@anthropic-ai/sdk";
@@ -20,6 +20,7 @@ import { conversationPreviewSnippet, previewSnippet } from "./src/lib/conversati
 import { formatClock24, formatDateTime24 } from "./src/lib/time-format";
 import {
   accumulateRunEvent,
+  applyRunEventOptionSelection,
   createRunEventAccumulator,
   runEventAccumulatorHasOutput,
   runEventBlocks,
@@ -28,6 +29,7 @@ import {
 } from "./src/lib/run-event-accumulator";
 import { attachPtyTerminalWebSockets, PtyTerminalManager } from "./src/server/pty-terminal";
 import { attachExactApiRoutes, methodOnly, type ApiHandler, type ExactApiRoute } from "./src/server/api-router";
+import { validateRlabRequest } from "./src/server/request-security";
 import {
   cloneAppSettings,
   defaultAppSettings,
@@ -46,6 +48,7 @@ import {
   patchMessageBlockById,
   readConversation,
   readMessage,
+  readMessageBlockById,
   readMessageBlocks,
   readPendingTurnQueue,
   readSelectedConversationId,
@@ -56,6 +59,7 @@ import {
   releasePendingTurn,
   removePendingTurn,
   resetDispatchingPendingTurns,
+  restartUserTurn,
   searchConversationIds,
   setPendingTurnQueuePaused,
   updateConversationData,
@@ -93,6 +97,7 @@ import {
   type ComposerDraft,
   type ConversationSummary,
   type ConversationStatus,
+  type ConversationView,
   type DiffBlock,
   type PlanBlock,
   type Project,
@@ -139,12 +144,35 @@ const { DatabaseSync: NodeSqliteDatabaseSync } = process.getBuiltinModule("node:
 type AgentStatus = "available" | "running" | "needs-setup" | "unavailable" | "unsupported";
 
 const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url));
+
+function resolveDataDirPath(value: string, cwd: string): string {
+  return isAbsolute(value) ? value : resolve(cwd, value);
+}
+
+function isProdDataDir(path: string): boolean {
+  return basename(path) === ".rlab-prod";
+}
+
+function fallbackDataDirForNodeEnv(nodeEnv: string | undefined, pluginDir: string): string {
+  return join(pluginDir, nodeEnv === "test" ? ".data-test" : ".data-dev");
+}
+
+export function resolveWorkspaceStateDir(env: NodeJS.ProcessEnv, cwd: string, pluginDir = PLUGIN_DIR): string {
+  const configured = env.RLAB_DATA_DIR;
+  if (!configured) {
+    return join(pluginDir, ".data");
+  }
+  const resolved = resolveDataDirPath(configured, cwd);
+  if (env.NODE_ENV !== "production" && env.RLAB_ALLOW_PROD_DATA_IN_DEV !== "1" && isProdDataDir(resolved)) {
+    return fallbackDataDirForNodeEnv(env.NODE_ENV, pluginDir);
+  }
+  return resolved;
+}
+
 // Persisted workspace state lives under `.data/` next to the plugin by default.
 // `RLAB_DATA_DIR` relocates it — useful when running the prod server as a
-// service (point it at a writable data volume) and for isolating e2e runs.
-const WORKSPACE_STATE_DIR = process.env.RLAB_DATA_DIR
-  ? (isAbsolute(process.env.RLAB_DATA_DIR) ? process.env.RLAB_DATA_DIR : resolve(process.cwd(), process.env.RLAB_DATA_DIR))
-  : join(PLUGIN_DIR, ".data");
+// service (point it at a writable data volume) and for isolating e2e/dev runs.
+const WORKSPACE_STATE_DIR = resolveWorkspaceStateDir(process.env, process.cwd());
 const WORKSPACE_DB_FILE = join(WORKSPACE_STATE_DIR, "workspace.db");
 const RUN_AUDIT_FILE = join(WORKSPACE_STATE_DIR, "run-audit.ndjson");
 const SCHEDULED_WAKEUPS_FILE = join(WORKSPACE_STATE_DIR, "scheduled-wakeups.json");
@@ -155,6 +183,10 @@ const AMP_READ_ONLY_SETTINGS_FILE = join(WORKSPACE_STATE_DIR, "amp-read-only-set
 const AGENT_LIMITS_FILE = join(WORKSPACE_STATE_DIR, "agent-limits.json");
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 export const MAX_JSON_BODY_BYTES = 40 * 1024 * 1024;
+const MAX_WORKSPACE_MUTATION_BODY_BYTES = 8 * 1024 * 1024;
+const MAX_WORKSPACE_MUTATIONS_PER_REQUEST = 200;
+const MAX_WORKSPACE_MESSAGES_PER_MUTATION = 500;
+const MAX_WORKSPACE_MESSAGE_BYTES = 5 * 1024 * 1024;
 export const JSON_CONTENT_TYPE = "application/json; charset=utf-8";
 export const BROWSER_ACTION_TIMEOUT_MS = 5000;
 const BROWSER_EVAL_SCRIPT_MAX_CHARS = 8000;
@@ -1034,7 +1066,7 @@ export function jsonBodyReadErrorStatus(error: unknown): 413 | 500 {
   return /^JSON request body exceeds \d+ bytes\.$/.test(errorMessage(error)) ? 413 : 500;
 }
 
-function readJsonBody(req: IncomingMessage, res: ServerResponse, onDone: (body: string) => void): void {
+function readJsonBody(req: IncomingMessage, res: ServerResponse, onDone: (body: string) => void, maxBytes = MAX_JSON_BODY_BYTES): void {
   let accumulator: JsonBodyAccumulator = { body: "", bytes: 0 };
   let finished = false;
   req.on("data", (chunk: Buffer | string) => {
@@ -1042,7 +1074,7 @@ function readJsonBody(req: IncomingMessage, res: ServerResponse, onDone: (body: 
       return;
     }
     try {
-      accumulator = appendJsonBodyChunk(accumulator, chunk);
+      accumulator = appendJsonBodyChunk(accumulator, chunk, maxBytes);
     } catch (error) {
       finished = true;
       sendJson(res, jsonBodyReadErrorStatus(error), { error: errorMessage(error) });
@@ -2245,7 +2277,13 @@ function reconcileConversationRun(conversation: WorkspaceConversation, activeRun
   if (!conversation.activeRunId || activeRunIds.has(conversation.activeRunId)) {
     return conversation;
   }
-  if (conversation.status !== "running" && conversation.status !== "waiting") {
+  if (conversation.status === "waiting") {
+    return {
+      ...conversation,
+      activeRunId: undefined,
+    };
+  }
+  if (conversation.status !== "running") {
     return conversation;
   }
   return {
@@ -2307,13 +2345,15 @@ function settleInterruptedThread(messages: readonly ChatMessage[], locale: Local
 export function reconcileStaleBackgroundRuns(state: WorkspaceState, activeRunIds: ReadonlySet<string>): WorkspaceState {
   let changed = false;
   const locale = state.settings.general.locale;
-  const staleConversationIds = new Set<string>();
+  const interruptedConversationIds = new Set<string>();
   const reconcile = (conversation: WorkspaceConversation): WorkspaceConversation => {
     const snippet = conversationPreviewSnippet(state.threads[conversation.id] ?? [], 60);
     const reconciled = reconcileConversationRun(conversation, activeRunIds, snippet);
     if (reconciled !== conversation) {
       changed = true;
-      staleConversationIds.add(conversation.id);
+      if (conversation.status === "running") {
+        interruptedConversationIds.add(conversation.id);
+      }
     }
     return reconciled;
   };
@@ -2326,7 +2366,7 @@ export function reconcileStaleBackgroundRuns(state: WorkspaceState, activeRunIds
     return state;
   }
   const threads = { ...state.threads };
-  for (const conversationId of staleConversationIds) {
+  for (const conversationId of interruptedConversationIds) {
     if (Object.prototype.hasOwnProperty.call(state.threads, conversationId)) {
       threads[conversationId] = settleInterruptedThread(threads[conversationId] ?? [], locale);
     }
@@ -2443,6 +2483,256 @@ function readWorkspaceShellForClient(): WorkspaceState {
   return reconcileStaleBackgroundRuns(normalizedShell, activeRunIds);
 }
 
+function safeRealpath(path: string): string | null {
+  try {
+    return realpathSync(path);
+  } catch {
+    return null;
+  }
+}
+
+function pathIsWithinRoot(path: string, root: string): boolean {
+  const child = resolve(path);
+  const parent = resolve(root);
+  const pathFromRoot = relative(parent, child);
+  return pathFromRoot === "" || (pathFromRoot.length > 0 && !pathFromRoot.startsWith("..") && !isAbsolute(pathFromRoot));
+}
+
+function registeredWorkspaceRoots(options: { readonly includeAttachments?: boolean } = {}): readonly string[] {
+  const roots = new Set<string>();
+  if (options.includeAttachments !== false) {
+    const attachmentsRoot = safeRealpath(ATTACHMENTS_DIR);
+    roots.add(attachmentsRoot ?? resolve(ATTACHMENTS_DIR));
+  }
+  const state = readWorkspaceShellForClient();
+  for (const project of state.projects) {
+    if (project.path) {
+      const root = safeRealpath(project.path);
+      if (root) {
+        roots.add(root);
+      }
+    }
+    for (const conversation of project.conversations) {
+      if (conversation.worktreePath) {
+        const root = safeRealpath(conversation.worktreePath);
+        if (root) {
+          roots.add(root);
+        }
+      }
+    }
+  }
+  for (const conversation of state.chats) {
+    if (conversation.worktreePath) {
+      const root = safeRealpath(conversation.worktreePath);
+      if (root) {
+        roots.add(root);
+      }
+    }
+  }
+  return [...roots];
+}
+
+function validateRegisteredWorkspacePath(path: string, label: string, options: { readonly includeAttachments?: boolean } = {}): string | null {
+  const realPath = safeRealpath(path);
+  if (!realPath) {
+    return `${label} does not exist: ${path}`;
+  }
+  const roots = registeredWorkspaceRoots(options);
+  if (roots.some((root) => pathIsWithinRoot(realPath, root))) {
+    return null;
+  }
+  return `${label} is outside registered workspace roots: ${path}`;
+}
+
+const CLIENT_CONVERSATION_VIEWS = new Set<ConversationView>(["chat", "git", "resources", "preview", "terminal"]);
+
+function sanitizeClientConversationView(value: ConversationSummary["view"]): ConversationSummary["view"] {
+  return value !== undefined && CLIENT_CONVERSATION_VIEWS.has(value) ? value : undefined;
+}
+
+function sanitizeClientCompaction(value: ConversationSummary["compaction"]): ConversationSummary["compaction"] {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  const auto = typeof value.auto === "boolean" ? value.auto : undefined;
+  const window = typeof value.window === "number" && Number.isFinite(value.window) && value.window > 0 ? Math.floor(value.window) : undefined;
+  return auto === undefined && window === undefined ? undefined : { ...(auto !== undefined ? { auto } : {}), ...(window !== undefined ? { window } : {}) };
+}
+
+function sanitizeOptionalTimestamp(value: unknown, fallback?: number): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+function conversationProjectPath(state: WorkspaceState, conversationId: string): string | undefined {
+  return state.projects.find((project) => project.conversations.some((conversation) => conversation.id === conversationId))?.path;
+}
+
+function sanitizeClientWorktreePath(state: WorkspaceState, existing: ConversationSummary, incoming: ConversationSummary): string | undefined {
+  const value = incoming.worktreePath?.trim();
+  if (!value) {
+    return undefined;
+  }
+  if (value === existing.worktreePath) {
+    return existing.worktreePath;
+  }
+  const requested = resolve(value);
+  if (!existsSync(requested) || !statSync(requested).isDirectory()) {
+    throw new Error(`Worktree path does not exist: ${value}`);
+  }
+  const existingRootError = validateRegisteredWorkspacePath(requested, "Worktree path", { includeAttachments: false });
+  if (!existingRootError) {
+    return requested;
+  }
+  const basePath = conversationProjectPath(state, existing.id);
+  if (!basePath) {
+    throw new Error(`Worktree path is outside registered workspace roots: ${value}`);
+  }
+  const allowedWorktreeRoot = resolve(dirname(basePath), `${basename(basePath)}.worktrees`);
+  const realRequested = safeRealpath(requested) ?? requested;
+  if (!pathIsWithinRoot(realRequested, allowedWorktreeRoot)) {
+    throw new Error(`Worktree path is outside registered workspace roots: ${value}`);
+  }
+  return requested;
+}
+
+function sanitizeClientConversationCreate(conversation: ConversationSummary): ConversationSummary {
+  const compaction = sanitizeClientCompaction(conversation.compaction);
+  const view = sanitizeClientConversationView(conversation.view);
+  return {
+    id: conversation.id,
+    title: conversation.title,
+    snippet: conversation.snippet,
+    time: conversation.time,
+    updatedAtMs: sanitizeOptionalTimestamp(conversation.updatedAtMs),
+    status: "idle",
+    agent: conversation.agent,
+    profile: normalizeAgentProfile(conversation.profile, conversation.agent),
+    ...(compaction ? { compaction } : {}),
+    ...(view ? { view } : {}),
+    ...(conversation.unread !== undefined ? { unread: Boolean(conversation.unread) } : {}),
+    ...(conversation.pinned !== undefined ? { pinned: Boolean(conversation.pinned) } : {}),
+    ...(conversation.archived !== undefined ? { archived: Boolean(conversation.archived) } : {}),
+  };
+}
+
+function sanitizeClientConversationUpdate(state: WorkspaceState, existing: ConversationSummary, incoming: ConversationSummary): ConversationSummary {
+  const compaction = sanitizeClientCompaction(incoming.compaction);
+  const view = sanitizeClientConversationView(incoming.view);
+  const worktreePath = sanitizeClientWorktreePath(state, existing, incoming);
+  return {
+    ...existing,
+    title: incoming.title,
+    snippet: incoming.snippet,
+    time: incoming.time,
+    updatedAtMs: sanitizeOptionalTimestamp(incoming.updatedAtMs, existing.updatedAtMs),
+    ...(compaction ? { compaction } : { compaction: undefined }),
+    ...(view ? { view } : { view: undefined }),
+    ...(incoming.unread !== undefined ? { unread: Boolean(incoming.unread) } : { unread: undefined }),
+    ...(incoming.pinned !== undefined ? { pinned: Boolean(incoming.pinned) } : { pinned: undefined }),
+    ...(incoming.archived !== undefined ? { archived: Boolean(incoming.archived) } : { archived: undefined }),
+    ...(worktreePath ? { worktreePath } : { worktreePath: undefined }),
+  };
+}
+
+function sanitizeClientProjectMutation(state: WorkspaceState, project: Extract<WorkspaceDbMutation, { readonly type: "upsertProject" }>): WorkspaceDbMutation {
+  const existing = state.projects.find((item) => item.id === project.project.id);
+  const requestedPath = project.project.path?.trim();
+  if (existing) {
+    return { type: "upsertProject", project: { ...project.project, path: existing.path }, insertAtFront: project.insertAtFront };
+  }
+  if (!requestedPath || !existsSync(requestedPath) || !statSync(requestedPath).isDirectory()) {
+    throw new Error(`Project directory does not exist: ${requestedPath ?? ""}`);
+  }
+  return { type: "upsertProject", project: { ...project.project, path: resolve(requestedPath) }, insertAtFront: project.insertAtFront };
+}
+
+function assertClientMessageMutationAllowed(conversationId: string, message: ChatMessage, options: { readonly allowUserOverwrite?: boolean } = {}): void {
+  const bytes = Buffer.byteLength(JSON.stringify(message), "utf8");
+  if (bytes > MAX_WORKSPACE_MESSAGE_BYTES) {
+    throw new Error(`Workspace message payload exceeds ${MAX_WORKSPACE_MESSAGE_BYTES} bytes.`);
+  }
+  const existing = readMessage(message.id);
+  if (!existing) {
+    return;
+  }
+  if (existing.role !== message.role) {
+    throw new Error(`Client cannot change message ${message.id} role.`);
+  }
+  if (!options.allowUserOverwrite && existing.role === "user" && JSON.stringify(existing) !== JSON.stringify(message)) {
+    throw new Error(`Client cannot overwrite existing user message ${message.id}; use restartUserTurn.`);
+  }
+  const existingConversation = readWorkspaceStateFromDb(new Set([conversationId])).threads[conversationId]?.some((item) => item.id === message.id);
+  if (!existingConversation) {
+    throw new Error(`Message ${message.id} already belongs to a different conversation.`);
+  }
+}
+
+export function sanitizeClientWorkspaceMutations(mutations: readonly WorkspaceDbMutation[]): readonly WorkspaceDbMutation[] {
+  if (mutations.length > MAX_WORKSPACE_MUTATIONS_PER_REQUEST) {
+    throw new Error(`Workspace mutation request contains too many mutations: ${mutations.length}.`);
+  }
+  const state = readWorkspaceShellForClient();
+  const pendingConversations = new Map(workspaceConversationMap(state));
+  const sanitized: WorkspaceDbMutation[] = [];
+  for (const mutation of mutations) {
+    switch (mutation.type) {
+      case "upsertProject":
+        sanitized.push(sanitizeClientProjectMutation(state, mutation));
+        break;
+      case "upsertConversation": {
+        if (pendingConversations.has(mutation.conversation.id)) {
+          throw new Error(`Client cannot upsert existing conversation ${mutation.conversation.id}; use updateConversation.`);
+        }
+        const conversation = sanitizeClientConversationCreate(mutation.conversation);
+        pendingConversations.set(conversation.id, conversation);
+        sanitized.push({ ...mutation, conversation });
+        break;
+      }
+      case "updateConversation": {
+        const existing = pendingConversations.get(mutation.conversation.id) ?? readConversation(mutation.conversation.id);
+        if (!existing) {
+          throw new Error(`Conversation ${mutation.conversation.id} does not exist.`);
+        }
+        const conversation = sanitizeClientConversationUpdate(state, existing, mutation.conversation);
+        pendingConversations.set(conversation.id, conversation);
+        sanitized.push({ type: "updateConversation", conversation });
+        break;
+      }
+      case "deleteConversation": {
+        const existing = pendingConversations.get(mutation.conversationId) ?? readConversation(mutation.conversationId);
+        if (!existing) {
+          throw new Error(`Conversation ${mutation.conversationId} does not exist.`);
+        }
+        const conversation = { ...existing, archived: true, pinned: false };
+        pendingConversations.set(conversation.id, conversation);
+        sanitized.push({ type: "updateConversation", conversation });
+        break;
+      }
+      case "upsertMessage":
+        assertClientMessageMutationAllowed(mutation.conversationId, mutation.message);
+        sanitized.push(mutation);
+        break;
+      case "upsertMessages":
+        if (mutation.messages.length > MAX_WORKSPACE_MESSAGES_PER_MUTATION) {
+          throw new Error(`Workspace message mutation contains too many messages: ${mutation.messages.length}.`);
+        }
+        for (const message of mutation.messages) {
+          assertClientMessageMutationAllowed(mutation.conversationId, message);
+        }
+        sanitized.push(mutation);
+        break;
+      case "restartUserTurn":
+        assertClientMessageMutationAllowed(mutation.conversationId, mutation.userMessage, { allowUserOverwrite: true });
+        sanitized.push(mutation);
+        break;
+      default:
+        sanitized.push(mutation);
+        break;
+    }
+  }
+  return sanitized;
+}
+
 const DEFAULT_THREAD_PAGE_LIMIT = 15;
 
 function parsedThreadPageLimit(value: string | null): number {
@@ -2473,12 +2763,16 @@ function readClientThread(
   return readThreadPageFromDb(conversationId, options);
 }
 
+export function threadWithBoundUserMessage(thread: readonly ChatMessage[], userMessage: ChatMessage): ChatMessage[] {
+  const userIndex = thread.findIndex((message) => message.id === userMessage.id && message.role === "user");
+  return userIndex < 0 ? [...thread, userMessage] : [...thread.slice(0, userIndex), userMessage];
+}
+
 function promptFromPersistedThread(binding: BackgroundRunBinding, userMessage: ChatMessage, resume: string | undefined): string {
   ensureWorkspaceDb();
   const persistedThread = readThreadFromDb(binding.conversationId);
-  const persistedUserMessage = persistedThread.find((message) => message.id === userMessage.id);
-  const thread = persistedUserMessage ? persistedThread : [...persistedThread, userMessage];
-  return promptForUserTurn(thread, persistedUserMessage ?? userMessage, Boolean(resume), undefined);
+  const thread = threadWithBoundUserMessage(persistedThread, userMessage);
+  return promptForUserTurn(thread, userMessage, Boolean(resume), undefined);
 }
 
 let atomicJsonWriteSeq = 0;
@@ -2818,10 +3112,20 @@ export function workspacePutErrorStatus(error: unknown): 400 | 500 {
     return 400;
   }
   if (
+    message.startsWith("Workspace mutation request contains too many mutations: ") ||
+    message.startsWith("Workspace message mutation contains too many messages: ") ||
+    message.startsWith("Workspace message payload exceeds ") ||
+    message.startsWith("Project directory does not exist: ") ||
+    message.startsWith("Worktree path does not exist: ") ||
     (message.startsWith("Conversation ") && message.endsWith(" does not exist.")) ||
     (message.startsWith("Project ") && message.endsWith(" does not exist.")) ||
     (message.startsWith("Message ") && message.includes(" already belongs to conversation ")) ||
-    message.startsWith("Duplicate message id ")
+    message.startsWith("Duplicate message id ") ||
+    message.startsWith("User message ") ||
+    message.endsWith(" is not a user message.") ||
+    message === "Only user messages can restart a turn." ||
+    message.includes(" with a partial thread page.") ||
+    message.includes(" with a reordered thread.")
   ) {
     return 400;
   }
@@ -3703,7 +4007,7 @@ function handleWorkspaceMutations(req: IncomingMessage, res: ServerResponse): vo
     try {
       ensureWorkspaceDb();
       const { mutations, baseRevision } = parseWorkspaceMutationRequestBody(body);
-      const revision = applyWorkspaceDbMutations(mutations, { expectedRevision: baseRevision });
+      const revision = applyWorkspaceDbMutations(sanitizeClientWorkspaceMutations(mutations), { expectedRevision: baseRevision });
       sendJson(res, 200, { ok: true, revision });
     } catch (error) {
       if (error instanceof WorkspaceRevisionConflictError) {
@@ -3716,9 +4020,15 @@ function handleWorkspaceMutations(req: IncomingMessage, res: ServerResponse): vo
         });
         return;
       }
-      sendJson(res, workspacePutErrorStatus(error), { error: errorMessage(error) });
+      const message = errorMessage(error);
+      if (message.startsWith("Client cannot") || message.includes("outside registered workspace roots")) {
+        sendJson(res, 403, { error: message, retryable: false });
+        return;
+      }
+      const status = workspacePutErrorStatus(error);
+      sendJson(res, status, { error: errorMessage(error), ...(status === 400 ? { retryable: false } : {}) });
     }
-  });
+  }, MAX_WORKSPACE_MUTATION_BODY_BYTES);
 }
 
 function handleConversationSearch(req: IncomingMessage, res: ServerResponse): void {
@@ -3805,6 +4115,11 @@ function handleProjectFiles(req: IncomingMessage, res: ServerResponse): void {
         sendJson(res, 400, { error: `Project directory does not exist: ${cwd}` });
         return;
       }
+      const accessError = validateRegisteredWorkspacePath(cwd, "Project directory", { includeAttachments: false });
+      if (accessError) {
+        sendJson(res, workspacePathErrorStatus(accessError), { error: accessError });
+        return;
+      }
       sendJson(res, 200, { files: listMentionableFilesFromDisk(cwd) });
     } catch (error) {
       sendJson(res, projectDirectoryErrorStatus(error), { error: errorMessage(error) });
@@ -3871,6 +4186,11 @@ function handleLocalFile(req: IncomingMessage, res: ServerResponse): void {
     const stat = statSync(realPath);
     if (!stat.isFile()) {
       sendJson(res, 400, { error: "Not a file." });
+      return;
+    }
+    const accessError = validateRegisteredWorkspacePath(realPath, "File");
+    if (accessError) {
+      sendJson(res, workspacePathErrorStatus(accessError), { error: accessError });
       return;
     }
     if (stat.size > MAX_ATTACHMENT_BYTES) {
@@ -4401,17 +4721,60 @@ function handleRunApproval(req: IncomingMessage, res: ServerResponse): void {
   });
 }
 
+function stringArraysEqual(left: readonly string[] | undefined, right: readonly string[]): boolean {
+  if (!left || left.length !== right.length) {
+    return false;
+  }
+  return left.every((item, index) => item === right[index]);
+}
+
+function patchRunInputSelectionBlock(selection: RunInputSelection): readonly string[] {
+  return patchMessageBlockById(selection.id, (block) => {
+    if (block.kind !== "options" || block.id !== selection.id || stringArraysEqual(block.selected, selection.selected)) {
+      return block;
+    }
+    return { ...block, selected: [...selection.selected] };
+  });
+}
+
+function patchActiveBackgroundRunInputSelection(selection: RunInputSelection, requirePersistedSnapshot: boolean): boolean {
+  for (const handle of backgroundRunHandles.values()) {
+    const accumulator = handle.accumulator;
+    if (!accumulator || !applyRunEventOptionSelection(accumulator, selection)) {
+      continue;
+    }
+    if (!persistBackgroundRunSnapshot(handle.binding, accumulator)) {
+      if (requirePersistedSnapshot) {
+        throw new Error(`Could not persist input selection for ${selection.id}.`);
+      }
+      continue;
+    }
+    notifyBackgroundRunUpdate(handle.binding, false);
+    return true;
+  }
+  return false;
+}
+
+function persistedRunInputSelectionMatches(selection: RunInputSelection): boolean {
+  const block = readMessageBlockById(selection.id);
+  return block?.kind === "options" && block.id === selection.id && stringArraysEqual(block.selected, selection.selected);
+}
+
+export function persistRunInputSelection(selection: RunInputSelection): void {
+  const changedConversationIds = patchRunInputSelectionBlock(selection);
+  const changedAccumulator = patchActiveBackgroundRunInputSelection(selection, changedConversationIds.length === 0);
+  if (changedConversationIds.length === 0 && !changedAccumulator && !persistedRunInputSelectionMatches(selection)) {
+    throw new Error(`Could not persist input selection for ${selection.id}.`);
+  }
+}
+
 function handleRunInput(req: IncomingMessage, res: ServerResponse): void {
   readJsonBody(req, res, (body) => {
     try {
       const selection = parseRunInputPayload(body);
-      const resolved = resolvePendingRunInput(selection);
-      patchMessageBlockById(resolved.id, (block) => {
-        if (block.kind !== "options" || block.id !== resolved.id || JSON.stringify(block.selected ?? []) === JSON.stringify(resolved.selected)) {
-          return block;
-        }
-        return { ...block, selected: [...resolved.selected] };
-      });
+      const validated = validatePendingRunInput(selection);
+      persistRunInputSelection(validated);
+      const resolved = resolvePendingRunInput(validated);
       sendJson(res, 200, resolved);
     } catch (error) {
       sendJson(res, runControlErrorStatus(error), { error: errorMessage(error) });
@@ -4425,7 +4788,7 @@ function handleGitStatus(req: IncomingMessage, res: ServerResponse): void {
       const { cwd } = parseGitCwdPayload(body);
       const validation = validateGitCwd(cwd);
       if (validation) {
-        sendJson(res, 400, { error: validation });
+        sendJson(res, workspacePathErrorStatus(validation), { error: validation });
         return;
       }
 
@@ -4443,7 +4806,7 @@ function handleGitTree(req: IncomingMessage, res: ServerResponse): void {
         const { cwd } = parseGitCwdPayload(body);
         const validation = validateGitCwd(cwd);
         if (validation) {
-          sendJson(res, 400, { error: validation });
+          sendJson(res, workspacePathErrorStatus(validation), { error: validation });
           return;
         }
 
@@ -4482,7 +4845,15 @@ function validateGitCwd(cwd: string): string | null {
   if (!existsSync(cwd) || !statSync(cwd).isDirectory()) {
     return `Project directory does not exist: ${cwd}`;
   }
+  const accessError = validateRegisteredWorkspacePath(cwd, "Project directory", { includeAttachments: false });
+  if (accessError) {
+    return accessError;
+  }
   return null;
+}
+
+function workspacePathErrorStatus(message: string): 400 | 403 {
+  return message.includes("outside registered workspace roots") ? 403 : 400;
 }
 
 function validateGitPath(path: string): string | null {
@@ -4789,7 +5160,7 @@ function handleGitWorktreeCreate(req: IncomingMessage, res: ServerResponse): voi
         const cwd = typeof parsed.cwd === "string" ? parsed.cwd : "";
         const cwdError = validateGitCwd(cwd);
         if (cwdError) {
-          sendJson(res, 400, { error: cwdError });
+          sendJson(res, workspacePathErrorStatus(cwdError), { error: cwdError });
           return;
         }
         const leaf = `wt-${Date.now().toString(36)}`;
@@ -4819,12 +5190,12 @@ function handleGitWorktreeMerge(req: IncomingMessage, res: ServerResponse): void
         const worktreePath = typeof parsed.worktreePath === "string" ? parsed.worktreePath : "";
         const baseError = validateGitCwd(base);
         if (baseError) {
-          sendJson(res, 400, { error: baseError });
+          sendJson(res, workspacePathErrorStatus(baseError), { error: baseError });
           return;
         }
         const wtError = validateGitCwd(worktreePath);
         if (wtError) {
-          sendJson(res, 400, { error: wtError });
+          sendJson(res, workspacePathErrorStatus(wtError), { error: wtError });
           return;
         }
         const branchResult = await runGitP(worktreePath, ["rev-parse", "--abbrev-ref", "HEAD"]);
@@ -4866,7 +5237,7 @@ function handleGitCheckout(req: IncomingMessage, res: ServerResponse): void {
         const { cwd, branch } = parseGitCheckoutPayload(body);
         const cwdError = validateGitCwd(cwd);
         if (cwdError) {
-          sendJson(res, 400, { error: cwdError });
+          sendJson(res, workspacePathErrorStatus(cwdError), { error: cwdError });
           return;
         }
         const statusResult = await runGitP(cwd, ["status", "--porcelain=v1"]);
@@ -4908,7 +5279,7 @@ function runGitCommitAction(
         const { cwd, hash, mode } = parseGitCommitActionPayload(body);
         const cwdError = validateGitCwd(cwd);
         if (cwdError) {
-          sendJson(res, 400, { error: cwdError });
+          sendJson(res, workspacePathErrorStatus(cwdError), { error: cwdError });
           return;
         }
         if (options.requireCleanTreeForHardReset) {
@@ -4954,7 +5325,7 @@ function handleGitDiff(req: IncomingMessage, res: ServerResponse): void {
       const { cwd, path, mode } = parseGitFilePayload(body);
       const cwdError = validateGitCwd(cwd);
       if (cwdError) {
-        sendJson(res, 400, { error: cwdError });
+        sendJson(res, workspacePathErrorStatus(cwdError), { error: cwdError });
         return;
       }
       const args = mode === "staged" ? ["diff", "--cached", "--", path] : ["diff", "--", path];
@@ -4977,7 +5348,7 @@ function handleGitStage(req: IncomingMessage, res: ServerResponse): void {
       const { cwd, path } = parseGitFilePayload(body);
       const cwdError = validateGitCwd(cwd);
       if (cwdError) {
-        sendJson(res, 400, { error: cwdError });
+        sendJson(res, workspacePathErrorStatus(cwdError), { error: cwdError });
         return;
       }
       runGit(cwd, ["add", "--", path], (result) => {
@@ -4999,7 +5370,7 @@ function handleGitUnstage(req: IncomingMessage, res: ServerResponse): void {
       const { cwd, path } = parseGitFilePayload(body);
       const cwdError = validateGitCwd(cwd);
       if (cwdError) {
-        sendJson(res, 400, { error: cwdError });
+        sendJson(res, workspacePathErrorStatus(cwdError), { error: cwdError });
         return;
       }
       runGit(cwd, ["restore", "--staged", "--", path], (result) => {
@@ -5021,7 +5392,7 @@ function handleGitCommit(req: IncomingMessage, res: ServerResponse): void {
       const { cwd, message } = parseGitCommitPayload(body);
       const cwdError = validateGitCwd(cwd);
       if (cwdError) {
-        sendJson(res, 400, { error: cwdError });
+        sendJson(res, workspacePathErrorStatus(cwdError), { error: cwdError });
         return;
       }
       const args = buildGitCommitArgs(message);
@@ -5044,7 +5415,7 @@ function handleGitInit(req: IncomingMessage, res: ServerResponse): void {
       const { cwd } = parseGitCwdPayload(body);
       const cwdError = validateGitCwd(cwd);
       if (cwdError) {
-        sendJson(res, 400, { error: cwdError });
+        sendJson(res, workspacePathErrorStatus(cwdError), { error: cwdError });
         return;
       }
       // `git init` is idempotent — initialises a repo with Git's defaults.
@@ -5067,7 +5438,7 @@ function handleGitPush(req: IncomingMessage, res: ServerResponse): void {
       const { cwd } = parseGitCwdPayload(body);
       const cwdError = validateGitCwd(cwd);
       if (cwdError) {
-        sendJson(res, 400, { error: cwdError });
+        sendJson(res, workspacePathErrorStatus(cwdError), { error: cwdError });
         return;
       }
       runGit(cwd, buildGitPushArgs(), (result) => {
@@ -5129,7 +5500,7 @@ function handleTerminalSession(req: IncomingMessage, res: ServerResponse): void 
     ({ cwd, cols, rows } = parseTerminalSessionRequest(req));
     const cwdError = validateGitCwd(cwd);
     if (cwdError) {
-      sendJson(res, 400, { error: cwdError });
+      sendJson(res, workspacePathErrorStatus(cwdError), { error: cwdError });
       return;
     }
   } catch (error) {
@@ -5195,6 +5566,9 @@ interface RunRequest {
   readonly tools?: readonly RlabChatToolId[];
   /** Extra user-configured system instruction for this run. */
   readonly systemPrompt?: string;
+  /** The exact user message bound to this run. Used by persisted background
+   *  lifecycle so retry/edit cannot resurrect an older DB copy by id. */
+  readonly boundUserMessage?: ChatMessage;
 }
 
 interface RunServerPromptRequest {
@@ -5964,6 +6338,8 @@ export interface ActiveBackgroundRunUpdate {
   readonly startedAtMs?: number;
   readonly status: ConversationStatus;
   readonly time: string;
+  readonly agentMessageTime: string;
+  readonly updatedAtMs?: number;
   readonly done: boolean;
   readonly blocks: readonly AgentBlock[];
   readonly costUsd?: number;
@@ -5976,6 +6352,7 @@ export interface BackgroundRunHandle {
   readonly binding: BackgroundRunBinding;
   readonly startedAt: string;
   readonly cancel: () => void;
+  readonly accumulator?: BackgroundRunAccumulator;
   subscribers?: Set<BackgroundRunSubscriber>;
 }
 
@@ -7084,6 +7461,85 @@ function toolToSearchEvent(
   return { type: "search", id, query, state, results: searchResultsFromUnknown(output) };
 }
 
+const MAX_SEARCH_RESULTS = 6;
+
+type SearchResult = SearchBlock["results"][number];
+
+function trimSearchUrl(value: string): string {
+  return value.trim().replace(/[),.;:!?]+$/g, "");
+}
+
+function searchResultTitle(value: string): string {
+  return clip(value.replace(/\s+/g, " ").trim(), 140);
+}
+
+function searchTitleFromUrl(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "") || url;
+  } catch {
+    return url;
+  }
+}
+
+function pushSearchResult(results: SearchResult[], seen: Set<string>, result: SearchResult): void {
+  if (results.length >= MAX_SEARCH_RESULTS) {
+    return;
+  }
+  const url = trimSearchUrl(result.url);
+  if (!url || seen.has(url)) {
+    return;
+  }
+  seen.add(url);
+  results.push({ title: searchResultTitle(result.title || searchTitleFromUrl(url)), url });
+}
+
+function searchResultFromRecord(item: Record<string, unknown>): SearchResult | null {
+  const url = firstString(item, ["url", "link", "href", "uri", "sourceUrl", "source_url", "pageUrl", "page_url"]);
+  if (!url) {
+    return null;
+  }
+  const title = firstString(item, ["title", "name", "label", "pageTitle", "page_title"]) ?? searchTitleFromUrl(url);
+  return { title, url };
+}
+
+function titleFromTextLine(line: string, url: string, urlIndex: number): string {
+  const before = line
+    .slice(0, urlIndex)
+    .replace(/^\s*(?:[-*]|\d+[.)])\s*/, "")
+    .replace(/\s*(?:[-:(]|\[|\bat\b|\burl\b)\s*$/i, "")
+    .trim();
+  return before || searchTitleFromUrl(url);
+}
+
+function searchResultsFromText(value: string, results: SearchResult[], seen: Set<string>): void {
+  const markdownLink = /\[([^\]\n]{1,220})\]\((https?:\/\/[^)\s]+)\)/gi;
+  for (const match of value.matchAll(markdownLink)) {
+    const title = match[1];
+    const url = match[2];
+    if (title && url) {
+      pushSearchResult(results, seen, { title, url });
+    }
+  }
+
+  const urlPattern = /https?:\/\/[^\s<>"')\]]+/gi;
+  for (const line of value.split(/\r?\n/)) {
+    for (const match of line.matchAll(urlPattern)) {
+      const rawUrl = match[0];
+      const index = match.index ?? line.indexOf(rawUrl);
+      const url = trimSearchUrl(rawUrl);
+      pushSearchResult(results, seen, { title: titleFromTextLine(line, url, index), url });
+    }
+  }
+}
+
+function parseJsonUnknown(value: string): unknown | null {
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return null;
+  }
+}
+
 function toolToOptionsEvents(id: string | undefined, name: string, input: Record<string, unknown> | undefined): Array<Extract<RunEvent, { type: "options" }>> {
   const normalizedName = normalizedToolName(name);
   if (normalizedName !== "askuserquestion" && normalizedName !== "question") {
@@ -7107,10 +7563,15 @@ function toolToOptionsEvents(id: string | undefined, name: string, input: Record
 }
 
 function searchResultsFromUnknown(value: unknown): SearchBlock["results"] {
-  const parsed = typeof value === "string" ? parseJsonRecord(value) ?? value : value;
-  const results: Array<{ readonly title: string; readonly url: string }> = [];
+  const parsed = typeof value === "string" ? parseJsonUnknown(value) ?? value : value;
+  const results: SearchResult[] = [];
+  const seen = new Set<string>();
   const visit = (item: unknown): void => {
-    if (results.length >= 6) {
+    if (results.length >= MAX_SEARCH_RESULTS) {
+      return;
+    }
+    if (typeof item === "string") {
+      searchResultsFromText(item, results, seen);
       return;
     }
     if (Array.isArray(item)) {
@@ -7122,12 +7583,11 @@ function searchResultsFromUnknown(value: unknown): SearchBlock["results"] {
     if (!isRecord(item)) {
       return;
     }
-    const url = firstString(item, ["url", "link", "href"]);
-    const title = firstString(item, ["title", "name", "label"]) ?? url;
-    if (url && title) {
-      results.push({ title, url });
+    const directResult = searchResultFromRecord(item);
+    if (directResult) {
+      pushSearchResult(results, seen, directResult);
     }
-    for (const key of ["results", "items", "sources", "citations"]) {
+    for (const key of ["results", "items", "sources", "citations", "content", "contentItems", "output", "result", "data", "documents", "action", "text"]) {
       visit(item[key]);
     }
   };
@@ -7345,20 +7805,13 @@ function runInputAnswers(group: PendingRunInputGroup): Record<string, string | r
 }
 
 export function resolvePendingRunInput(selection: RunInputSelection): RunInputSelection {
-  const pending = pendingRunInputs.get(selection.id);
-  if (!pending) {
-    throw new Error(`No pending input request for ${selection.id}.`);
+  const resolved = validatePendingRunInput(selection);
+  const pending = pendingRunInputs.get(resolved.id);
+  const question = pending?.questions.find((item) => item.id === resolved.id);
+  if (!pending || !question) {
+    throw new Error(`No pending input request for ${resolved.id}.`);
   }
-  const question = pending.questions.find((item) => item.id === selection.id);
-  if (!question) {
-    throw new Error(`No pending input request for ${selection.id}.`);
-  }
-  const allowedLabels = new Set(question.question.options.map((option) => option.label));
-  const selected = selection.selected.every((label) => allowedLabels.has(label)) ? selection.selected : selection.selected.length === 1 ? selection.selected : [];
-  if (selected.length === 0) {
-    throw new Error("Selected options do not match the pending question.");
-  }
-  question.selected = selected;
+  question.selected = resolved.selected;
 
   if (pending.questions.every((item) => item.selected && item.selected.length > 0)) {
     pending.dispose();
@@ -7372,6 +7825,23 @@ export function resolvePendingRunInput(selection: RunInputSelection): RunInputSe
     });
   }
 
+  return resolved;
+}
+
+export function validatePendingRunInput(selection: RunInputSelection): RunInputSelection {
+  const pending = pendingRunInputs.get(selection.id);
+  if (!pending) {
+    throw new Error(`No pending input request for ${selection.id}.`);
+  }
+  const question = pending.questions.find((item) => item.id === selection.id);
+  if (!question) {
+    throw new Error(`No pending input request for ${selection.id}.`);
+  }
+  const allowedLabels = new Set(question.question.options.map((option) => option.label));
+  const selected = selection.selected.every((label) => allowedLabels.has(label)) ? selection.selected : selection.selected.length === 1 ? selection.selected : [];
+  if (selected.length === 0) {
+    throw new Error("Selected options do not match the pending question.");
+  }
   return { id: selection.id, selected };
 }
 
@@ -7638,6 +8108,7 @@ export function queuedTurnRunBody(record: PendingTurnRecord, runId: string): Rec
     autoConfirm: profile.autoConfirm ?? false,
     ...(profile.tools !== undefined ? { tools: profile.tools } : {}),
     prompt,
+    serverPrompt: { userMessage: record.message },
     ...(cwd ? { cwd } : {}),
     accessMode: accessModeForAgentProfile(profile),
     ...(resume ? { resume } : {}),
@@ -8291,6 +8762,7 @@ function buildActiveRunUpdate(conversation: WorkspaceConversation, agentMessage:
   const costUsd = conversation.costUsd ?? agentMessage?.costUsd;
   const usage = conversation.usage ?? agentMessage?.usage;
   const startedAtMs = agentMessage?.startedAtMs ?? backgroundRunStartedAtMs(binding);
+  const updatedAtMs = binding.userMessageCreatedAtMs ?? conversation.updatedAtMs;
   return {
     runId: binding.runId,
     conversationId: binding.conversationId,
@@ -8299,6 +8771,8 @@ function buildActiveRunUpdate(conversation: WorkspaceConversation, agentMessage:
     ...(startedAtMs === undefined ? {} : { startedAtMs }),
     status: conversation.status,
     time: conversation.time,
+    agentMessageTime: binding.agentMessageTime,
+    ...(updatedAtMs === undefined ? {} : { updatedAtMs }),
     done,
     blocks,
     ...(costUsd === undefined ? {} : { costUsd }),
@@ -8451,12 +8925,29 @@ export function applyRunInputSelectionState(state: WorkspaceState, selection: Ru
   });
 }
 
-function ensureBackgroundUserMessage(state: WorkspaceState, binding: BackgroundRunBinding, prompt: string): WorkspaceState {
+function backgroundUserMessage(binding: BackgroundRunBinding, prompt: string, userMessage: ChatMessage | undefined): ChatMessage {
+  return userMessage && userMessage.id === binding.userMessageId && userMessage.role === "user"
+    ? {
+        ...userMessage,
+        time: userMessage.time ?? binding.userMessageTime,
+        ...(userMessage.createdAtMs === undefined && binding.userMessageCreatedAtMs !== undefined ? { createdAtMs: binding.userMessageCreatedAtMs } : {}),
+      }
+    : { id: binding.userMessageId, role: "user", text: prompt, time: binding.userMessageTime, createdAtMs: binding.userMessageCreatedAtMs };
+}
+
+function ensureBackgroundUserMessage(state: WorkspaceState, binding: BackgroundRunBinding, prompt: string, userMessage?: ChatMessage): WorkspaceState {
   const existing = state.threads[binding.conversationId] ?? [];
-  if (existing.some((message) => message.id === binding.userMessageId)) {
-    return state;
+  const message = backgroundUserMessage(binding, prompt, userMessage);
+  const existingIndex = existing.findIndex((item) => item.id === binding.userMessageId && item.role === "user");
+  if (existingIndex >= 0) {
+    return {
+      ...state,
+      threads: {
+        ...state.threads,
+        [binding.conversationId]: [...existing.slice(0, existingIndex), message, ...existing.slice(existingIndex + 1)],
+      },
+    };
   }
-  const message: ChatMessage = { id: binding.userMessageId, role: "user", text: prompt, time: binding.userMessageTime, createdAtMs: binding.userMessageCreatedAtMs };
   return {
     ...state,
     threads: {
@@ -8600,11 +9091,12 @@ function startBackgroundRunState(state: WorkspaceState, binding: BackgroundRunBi
   const agent = isAgentId(request.agent) ? request.agent : undefined;
   accumulator.agent = agent;
   accumulator.sessionId = request.sessionId;
-  const withUserMessage = ensureBackgroundUserMessage(state, binding, request.prompt);
+  const withUserMessage = ensureBackgroundUserMessage(state, binding, request.prompt, request.boundUserMessage);
+  const snippetText = request.boundUserMessage?.text ?? request.prompt;
   const started = patchWorkspaceConversation(withUserMessage, binding.conversationId, {
     activeRunId: binding.runId,
     status: "running",
-    snippet: previewSnippet(request.prompt, 60),
+    snippet: previewSnippet(snippetText, 60),
     time: binding.userMessageTime,
     unread: false,
     costUsd: undefined,
@@ -8656,6 +9148,9 @@ function minimalRunState(conversation: WorkspaceConversation | undefined, conver
 function startPersistedBackgroundRun(binding: BackgroundRunBinding, request: RunRequest): BackgroundRunAccumulator {
   const accumulator = createBackgroundAccumulator();
   ensureWorkspaceDb();
+  if (request.boundUserMessage && request.boundUserMessage.id === binding.userMessageId && request.boundUserMessage.role === "user") {
+    restartUserTurn(binding.conversationId, request.boundUserMessage);
+  }
   const existing = [readMessage(binding.userMessageId), readMessage(binding.agentMessageId)].filter((message): message is ChatMessage => message !== undefined);
   const minimal = minimalRunState(readConversation(binding.conversationId), binding.conversationId, existing);
   persistConversationDelta(startBackgroundRunState(minimal, binding, request, accumulator), binding.conversationId, binding);
@@ -8681,9 +9176,13 @@ export function backgroundRunStatusPatch(
   binding: BackgroundRunBinding,
   blocks: readonly AgentBlock[],
 ): Partial<WorkspaceState["chats"][number]> {
+  const activity = {
+    time: binding.userMessageTime,
+    ...(binding.userMessageCreatedAtMs === undefined ? {} : { updatedAtMs: binding.userMessageCreatedAtMs }),
+  };
   const base = blocksNeedInput(blocks)
-    ? { status: "waiting" as const, activeRunId: binding.runId, time: binding.agentMessageTime }
-    : { status: "running" as const, activeRunId: binding.runId, time: binding.agentMessageTime };
+    ? { status: "waiting" as const, activeRunId: binding.runId, ...activity }
+    : { status: "running" as const, activeRunId: binding.runId, ...activity };
   const snippet = agentBlocksPreviewSnippet(blocks);
   return snippet ? { ...base, snippet } : base;
 }
@@ -8717,17 +9216,21 @@ export function finishBackgroundRunState(state: WorkspaceState, binding: Backgro
   const waiting = !canceled && !failed && blocksNeedInput(blocks);
   const withMessage = putBackgroundAgentMessage(state, binding, blocks, { costUsd: accumulator.costUsd, usage: accumulator.usage });
   const snippet = conversationPreviewSnippet(withMessage.threads[binding.conversationId] ?? [], 60);
+  const activity = {
+    time: binding.userMessageTime,
+    ...(binding.userMessageCreatedAtMs === undefined ? {} : { updatedAtMs: binding.userMessageCreatedAtMs }),
+  };
   const patch = canceled
-    ? { activeRunId: undefined, status: "idle" as const, snippet, time: binding.agentMessageTime }
+    ? { activeRunId: undefined, status: "idle" as const, snippet, ...activity }
     : failed
-      ? { activeRunId: undefined, status: "error" as const, snippet, time: binding.agentMessageTime }
+      ? { activeRunId: undefined, status: "error" as const, snippet, ...activity }
       : waiting
-        ? { status: "waiting" as const, snippet, time: binding.agentMessageTime }
+        ? { activeRunId: undefined, status: "waiting" as const, snippet, ...activity }
         : {
             activeRunId: undefined,
             status: "done" as const,
             snippet,
-            time: binding.agentMessageTime,
+            ...activity,
             ...(accumulator.costUsd === undefined ? {} : { costUsd: accumulator.costUsd }),
             ...(accumulator.usage === undefined ? {} : { usage: accumulator.usage }),
           };
@@ -10440,6 +10943,7 @@ async function runClaudeSdk(
     backgroundRunHandles.set(binding.runId, {
       binding,
       startedAt: new Date().toISOString(),
+      ...(accumulator ? { accumulator } : {}),
       cancel: () => {
         if (!abortController.signal.aborted) {
           abortController.abort();
@@ -10646,6 +11150,7 @@ async function runOpenCodeServer(
     backgroundRunHandles.set(binding.runId, {
       binding,
       startedAt: new Date().toISOString(),
+      ...(accumulator ? { accumulator } : {}),
       cancel: () => {
         if (!abortController.signal.aborted) {
           abortController.abort();
@@ -10914,8 +11419,11 @@ export function codexAppServerItemEvents(item: Record<string, unknown>, complete
       return events;
     }
     case "webSearch": {
-      const query = firstString(item, ["query"]) ?? "";
-      return [{ type: "search", id, query, state: completed ? "ok" : "running" }];
+      const action = isRecord(item.action) ? item.action : undefined;
+      const queries = Array.isArray(action?.queries) ? action.queries.filter((query): query is string => typeof query === "string" && query.trim().length > 0) : [];
+      const query = firstString(item, ["query"]) ?? firstString(action, ["query", "url", "pattern"]) ?? queries[0] ?? "";
+      const results = searchResultsFromUnknown(item);
+      return [{ type: "search", id, query, state: completed ? "ok" : "running", ...(results.length > 0 ? { results } : {}) }];
     }
     default:
       return [];
@@ -10981,6 +11489,7 @@ async function runCodexAppServer(
     backgroundRunHandles.set(binding.runId, {
       binding,
       startedAt: new Date().toISOString(),
+      ...(accumulator ? { accumulator } : {}),
       cancel: () => {
         if (!abortController.signal.aborted) {
           abortController.abort();
@@ -11667,11 +12176,17 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
     let cwd = join(tmpdir(), "rlab-agent-scratch");
     if (requestedCwd) {
       try {
-        if (!existsSync(requestedCwd) || !statSync(requestedCwd).isDirectory()) {
+        const resolvedRequestedCwd = resolve(requestedCwd);
+        if (!existsSync(resolvedRequestedCwd) || !statSync(resolvedRequestedCwd).isDirectory()) {
           sendJson(res, 400, { error: `Project directory does not exist: ${requestedCwd}` });
           return;
         }
-        cwd = requestedCwd;
+        const accessError = validateRegisteredWorkspacePath(resolvedRequestedCwd, "Project directory", { includeAttachments: false });
+        if (accessError) {
+          sendJson(res, workspacePathErrorStatus(accessError), { error: accessError });
+          return;
+        }
+        cwd = resolvedRequestedCwd;
       } catch (error) {
         sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
         return;
@@ -11788,6 +12303,7 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
       compactWindow,
       ...(tools !== undefined ? { tools } : {}),
       ...(systemPrompt ? { systemPrompt } : {}),
+      ...(serverPrompt ? { boundUserMessage: serverPrompt.userMessage } : {}),
     };
     requestForWakeups = request;
     if (assignedSessionId) {
@@ -11861,6 +12377,7 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
       backgroundRunHandles.set(binding.runId, {
         binding,
         startedAt: new Date().toISOString(),
+        ...(accumulator ? { accumulator } : {}),
         cancel: () => {
           canceled = true;
           if (child.exitCode === null) {
@@ -12058,8 +12575,16 @@ function attach(server: ViteDevServer | PreviewServer): void {
   ensureScheduledWakeupsStarted();
   if (server.httpServer && !terminalWebSocketServers.has(server.httpServer)) {
     terminalWebSocketServers.add(server.httpServer);
-    attachPtyTerminalWebSockets(server.httpServer as unknown as HttpServer, terminalManager);
+    attachPtyTerminalWebSockets(server.httpServer as unknown as HttpServer, terminalManager, validateRlabRequest);
   }
+  server.middlewares.use((req, res, next) => {
+    const blocked = validateRlabRequest(req);
+    if (blocked) {
+      sendJson(res, blocked.statusCode, { error: blocked.message });
+      return;
+    }
+    next();
+  });
   server.middlewares.use(PREVIEW_PROXY_PREFIX, handlePreviewProxy);
   const routes: ExactApiRoute[] = [
     {

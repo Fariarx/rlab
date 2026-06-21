@@ -4,8 +4,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { useComposerLayoutController } from "../src/components/agent/composer/use-composer-layout-controller";
 
 const originalResizeObserver = globalThis.ResizeObserver;
+const originalClientHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientHeight");
+const originalClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientWidth");
 const originalOffsetHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetHeight");
 const originalScrollHeight = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "scrollHeight");
+const originalScrollWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollWidth");
 const originalGetBoundingClientRect = HTMLElement.prototype.getBoundingClientRect;
 
 interface CapturedController {
@@ -86,8 +89,17 @@ describe("useComposerLayoutController", () => {
     if (originalOffsetHeight) {
       Object.defineProperty(HTMLElement.prototype, "offsetHeight", originalOffsetHeight);
     }
+    if (originalClientHeight) {
+      Object.defineProperty(HTMLElement.prototype, "clientHeight", originalClientHeight);
+    }
+    if (originalClientWidth) {
+      Object.defineProperty(HTMLElement.prototype, "clientWidth", originalClientWidth);
+    }
     if (originalScrollHeight) {
       Object.defineProperty(HTMLTextAreaElement.prototype, "scrollHeight", originalScrollHeight);
+    }
+    if (originalScrollWidth) {
+      Object.defineProperty(HTMLElement.prototype, "scrollWidth", originalScrollWidth);
     }
     HTMLElement.prototype.getBoundingClientRect = originalGetBoundingClientRect;
     vi.restoreAllMocks();
@@ -128,9 +140,32 @@ describe("useComposerLayoutController", () => {
       />,
     );
 
-    expect(setExpanded).toHaveBeenCalledWith(true);
+    expect(setExpanded).not.toHaveBeenCalled();
     expect(setOverlayLift).toHaveBeenCalledWith(28);
     expect(onOverlayLiftChange).toHaveBeenCalledWith(28);
+  });
+
+  it("uses the rendered row height as baseline for long wrapped text", () => {
+    Object.defineProperties(HTMLElement.prototype, {
+      clientHeight: { configurable: true, get: () => 24 },
+      clientWidth: { configurable: true, get: () => 180 },
+      scrollWidth: { configurable: true, get: () => 180 },
+    });
+    Object.defineProperty(HTMLTextAreaElement.prototype, "scrollHeight", {
+      configurable: true,
+      get: () => 120,
+    });
+    const setExpanded = vi.fn();
+
+    render(
+      <Harness
+        composerValue="single long prompt that wraps into several visual rows on mobile"
+        expanded={false}
+        setExpanded={setExpanded}
+      />,
+    );
+
+    expect(setExpanded).toHaveBeenCalledWith(true);
   });
 
   it("updates and clears composer border hover variables", async () => {

@@ -1,6 +1,6 @@
 import { applyWorkspaceMutationsToState, type WorkspaceMutation } from "../../../lib/workspace-mutations";
 import { cloneWorkspaceState, type WorkspaceState } from "../../../lib/workspace-state";
-import { saveWorkspaceMutations, WorkspaceMutationConflictError } from "../../../client/api/workspace-api";
+import { saveWorkspaceMutations, WorkspaceMutationConflictError, WorkspaceMutationRejectedError } from "../../../client/api/workspace-api";
 import { mergeRemoteWorkspaceShell } from "../models/workspace-server-sync-model";
 import type { RemoteWorkspaceShellMerge } from "../models/workspace-server-sync-model";
 import type { RunMessageHandle } from "../models/workspace-run-state";
@@ -114,16 +114,71 @@ export class WorkspaceSaveQueue {
     this.startSaveRetryTimer();
   }
 
-  private handleSaveFailure(error: unknown, mutations: readonly WorkspaceMutation[]): void {
+  private rejectedSaveMessage(messages: readonly string[]): string {
+    const uniqueMessages = [...new Set(messages)];
+    if (uniqueMessages.length === 0) {
+      return "Workspace save rejected.";
+    }
+    if (uniqueMessages.length === 1) {
+      return `Workspace save rejected: ${uniqueMessages[0]}`;
+    }
+    return `Workspace save rejected ${uniqueMessages.length} mutations: ${uniqueMessages.join("; ")}`;
+  }
+
+  private async salvageRejectedMutations(error: WorkspaceMutationRejectedError, mutations: readonly WorkspaceMutation[]): Promise<boolean> {
+    if (mutations.length <= 1) {
+      this.host.setLoadError(this.rejectedSaveMessage([error.message]));
+      this.pendingSaveUrgent = false;
+      return true;
+    }
+    const rejectedMessages: string[] = [];
+    for (let index = 0; index < mutations.length; index += 1) {
+      const mutation = mutations[index];
+      if (!mutation) {
+        continue;
+      }
+      try {
+        const revision = await saveWorkspaceMutations([mutation], this.host.getRevision());
+        if (revision !== undefined) {
+          this.host.setRevision(revision);
+        }
+      } catch (salvageError) {
+        if (salvageError instanceof WorkspaceMutationRejectedError) {
+          rejectedMessages.push(salvageError.message);
+          continue;
+        }
+        const remainingMutations = [mutation, ...mutations.slice(index + 1)];
+        if (salvageError instanceof WorkspaceMutationConflictError) {
+          this.rebaseAfterConflict(salvageError, remainingMutations);
+          return false;
+        }
+        const message = salvageError instanceof Error ? salvageError.message : String(salvageError);
+        this.host.setLoadError(message.startsWith("Workspace save failed") ? message : `Workspace save failed: ${message}`);
+        this.pendingMutations = [...remainingMutations, ...this.pendingMutations];
+        this.pendingSaveUrgent = false;
+        this.startSaveRetryTimer();
+        return false;
+      }
+    }
+    this.host.setLoadError(this.rejectedSaveMessage(rejectedMessages.length > 0 ? rejectedMessages : [error.message]));
+    this.pendingSaveUrgent = false;
+    return true;
+  }
+
+  private async handleSaveFailure(error: unknown, mutations: readonly WorkspaceMutation[]): Promise<boolean> {
     if (error instanceof WorkspaceMutationConflictError) {
       this.rebaseAfterConflict(error, mutations);
-      return;
+      return false;
+    }
+    if (error instanceof WorkspaceMutationRejectedError) {
+      return this.salvageRejectedMutations(error, mutations);
     }
     const message = error instanceof Error ? error.message : String(error);
     this.host.setLoadError(message.startsWith("Workspace save failed") ? message : `Workspace save failed: ${message}`);
     this.pendingMutations = [...mutations, ...this.pendingMutations];
     this.pendingSaveUrgent = false;
     this.startSaveRetryTimer();
+    return false;
   }
 
   private async flush(): Promise<void> {
@@ -157,7 +212,9 @@ export class WorkspaceSaveQueue {
       }
     } catch (error) {
       saveFailed = true;
-      this.handleSaveFailure(error, mutations);
+      if (await this.handleSaveFailure(error, mutations)) {
+        saveFailed = false;
+      }
     } finally {
       this.saveInFlight = false;
       if (this.pendingMutations.length > 0) {

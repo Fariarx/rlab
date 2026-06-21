@@ -171,6 +171,29 @@ describe("Message", () => {
     expect(within(screen.getByTestId("agent-details-body")).queryByText("7с")).not.toBeInTheDocument();
   });
 
+  it("collapses heavy live details once user input cards are visible", () => {
+    const message: ChatMessage = {
+      id: "agent-live-options",
+      role: "agent",
+      blocks: [
+        { kind: "reasoning", text: "Проверяю контекст", active: true },
+        { kind: "tool", name: "Read", summary: "huge-file.md", state: "ok", output: "very large tool output" },
+        {
+          kind: "options",
+          id: "question-1",
+          prompt: "Что выбрать?",
+          options: [{ id: "A", label: "A", description: "Первый вариант" }],
+        },
+      ],
+    };
+
+    renderMessage(message);
+
+    expect(screen.getByRole("button", { name: /размышление/i })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByText("Что выбрать?")).toBeInTheDocument();
+    expect(screen.queryByText("very large tool output")).not.toBeInTheDocument();
+  });
+
   it("does not invent elapsed time when a live start timestamp is missing", () => {
     const message: ChatMessage = {
       id: "agent-live-persisted",

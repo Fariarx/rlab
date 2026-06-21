@@ -24,6 +24,13 @@ export class WorkspaceMutationConflictError extends Error {
   }
 }
 
+export class WorkspaceMutationRejectedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "WorkspaceMutationRejectedError";
+  }
+}
+
 export async function loadWorkspaceState(): Promise<WorkspaceStatePayload> {
   const response = await fetch("/api/workspace", { method: "GET", cache: "no-store" });
   if (!response.ok) {
@@ -54,14 +61,17 @@ export async function saveWorkspaceMutations(mutations: readonly WorkspaceMutati
     body: JSON.stringify({ mutations, baseRevision }),
   });
   if (!response.ok) {
-    if (response.status === 409) {
-      const payload = (await response.json().catch(() => null)) as unknown;
-      if (isRecord(payload) && typeof payload.revision === "number" && isRecord(payload.workspace)) {
-        const message = typeof payload.error === "string" && payload.error.trim().length > 0 ? payload.error.trim() : "Workspace revision conflict.";
-        throw new WorkspaceMutationConflictError(message, payload.revision, payload.workspace as unknown as WorkspaceState);
-      }
+    const payload = (await response.json().catch(() => null)) as unknown;
+    if (response.status === 409 && isRecord(payload) && typeof payload.revision === "number" && isRecord(payload.workspace)) {
+      const message = typeof payload.error === "string" && payload.error.trim().length > 0 ? payload.error.trim() : "Workspace revision conflict.";
+      throw new WorkspaceMutationConflictError(message, payload.revision, payload.workspace as unknown as WorkspaceState);
     }
-    throw new Error(await responseErrorMessage(response, `Workspace save failed (${response.status})`));
+    if (isRecord(payload) && payload.retryable === false) {
+      const message = typeof payload.error === "string" && payload.error.trim().length > 0 ? payload.error.trim() : `Workspace save rejected (${response.status})`;
+      throw new WorkspaceMutationRejectedError(message);
+    }
+    const message = isRecord(payload) && typeof payload.error === "string" && payload.error.trim().length > 0 ? payload.error.trim() : `Workspace save failed (${response.status})`;
+    throw new Error(message);
   }
   const payload = (await response.json().catch(() => null)) as unknown;
   return isRecord(payload) && typeof payload.revision === "number" ? payload.revision : undefined;

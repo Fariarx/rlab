@@ -33,6 +33,14 @@ interface UseComposerLayoutControllerResult {
   readonly updateOptionsMenuPosition: () => void;
 }
 
+function singleRowHeight(el: HTMLTextAreaElement): number {
+  if (el.clientHeight > 0) {
+    return el.clientHeight;
+  }
+  const lineHeight = Number.parseFloat(window.getComputedStyle(el).lineHeight);
+  return Number.isFinite(lineHeight) && lineHeight > 0 ? lineHeight : el.scrollHeight;
+}
+
 export function useComposerLayoutController({
   composerValue,
   composerFocused,
@@ -65,13 +73,15 @@ export function useComposerLayoutController({
       return;
     }
     if (singleRowRef.current === 0 && !expanded) {
-      singleRowRef.current = el.scrollHeight;
+      singleRowRef.current = singleRowHeight(el);
     }
     const baseline = singleRowRef.current || 24;
     const hasHorizontalOverflow = el.scrollWidth > el.clientWidth + 1;
     const hasVerticalOverflow = el.scrollHeight > el.clientHeight + 1;
     const needsMultiline = composerValue.length > 0 && (composerValue.includes("\n") || el.scrollHeight > baseline * 1.5 || (composerFocused && (hasHorizontalOverflow || hasVerticalOverflow)));
-    setExpanded(needsMultiline);
+    if (expanded !== needsMultiline) {
+      setExpanded(needsMultiline);
+    }
     const root = rootRef.current;
     let nextLift = 0;
     if (needsMultiline && expanded && root) {

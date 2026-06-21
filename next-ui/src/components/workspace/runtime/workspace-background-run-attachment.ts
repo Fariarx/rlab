@@ -8,6 +8,7 @@ export interface RunHandle {
   readonly runId: string;
   readonly userMessageId: string;
   readonly agentMessageId: string;
+  lastUpdateAtMs: number;
   serverOwned: boolean;
   canceled: boolean;
 }
@@ -44,6 +45,7 @@ export function attachWorkspaceBackgroundRun({
     runId: run.runId,
     userMessageId: run.userMessageId,
     agentMessageId: run.agentMessageId,
+    lastUpdateAtMs: Date.now(),
     serverOwned: true,
     canceled: false,
   };
@@ -98,6 +100,7 @@ export function attachWorkspaceBackgroundRun({
         return;
       }
       terminalUpdateReceived = terminalUpdateReceived || update.done || !isLiveRunStatus(update.status);
+      runHandle.lastUpdateAtMs = Date.now();
       applyUpdate(update);
       if (terminalUpdateReceived) {
         clearSilenceTimer();

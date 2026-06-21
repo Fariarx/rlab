@@ -547,6 +547,7 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
           measure the full floating height. */}
       <Box
         ref={tagsRef}
+        data-testid="composer-floating-accessories"
         sx={{
           position: "absolute",
           left: 0,

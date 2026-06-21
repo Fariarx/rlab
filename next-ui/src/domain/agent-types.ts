@@ -226,8 +226,8 @@ export interface ConversationSummary {
   readonly title: string;
   readonly snippet: string;
   readonly time: string;
-  /** Epoch ms of the last activity (creation, sent message, run update). Drives
-   *  newest→oldest sidebar ordering; `time` is only the display label. */
+  /** Epoch ms of the latest user turn. Drives newest→oldest sidebar ordering;
+   *  `time` is the matching display label. Agent run updates must not bump it. */
   readonly updatedAtMs?: number;
   /** Epoch ms of the last persisted thread/message mutation. Summary-only
    *  changes must not invalidate cached thread pages. */

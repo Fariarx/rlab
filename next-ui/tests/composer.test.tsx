@@ -574,6 +574,61 @@ describe("Composer", () => {
     });
   });
 
+  it("converts large mobile paste input into a text attachment", async () => {
+    const onSend = vi.fn();
+    renderWithTheme(<Composer placeholder="Написать" onSend={onSend} />);
+    const input = screen.getByPlaceholderText("Написать");
+    const pasted = "x".repeat(1501);
+
+    fireEvent.input(input, { target: { value: pasted }, inputType: "insertFromPaste" });
+
+    expect(input).toHaveValue("");
+    expect(await screen.findByText("pasted-1501.txt")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+
+    await waitFor(() => {
+      expect(onSend).toHaveBeenCalledWith(
+        [
+          "<attachment name=\"pasted-1501.txt\" type=\"text/plain\">",
+          pasted,
+          "</attachment>",
+        ].join("\n"),
+      );
+    });
+  });
+
+  it("converts large mobile beforeinput paste into a text attachment before textarea insertion", async () => {
+    const onSend = vi.fn();
+    renderWithTheme(<Composer placeholder="Написать" onSend={onSend} />);
+    const input = screen.getByPlaceholderText("Написать");
+    const pasted = "y".repeat(1501);
+    const event = new InputEvent("beforeinput", {
+      bubbles: true,
+      cancelable: true,
+      data: pasted,
+      inputType: "insertFromPaste",
+    });
+
+    fireEvent(input, event);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(input).toHaveValue("");
+    expect(await screen.findByText("pasted-1501.txt")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+
+    await waitFor(() => {
+      expect(onSend).toHaveBeenCalledWith(
+        [
+          "<attachment name=\"pasted-1501.txt\" type=\"text/plain\">",
+          pasted,
+          "</attachment>",
+        ].join("\n"),
+      );
+    });
+  });
+
   it("inserts a mentioned project file into the prompt", () => {
     renderWithTheme(<Composer placeholder="Написать" mentionableFiles={["src/auth.ts", "README.md"]} />);
 
@@ -1049,7 +1104,7 @@ describe("Composer", () => {
     expect(screen.queryByTestId("agent-limit-warning")).not.toBeInTheDocument();
   });
 
-  it("renders composer floating controls as compact, width-capped tags", () => {
+  it("renders composer floating controls as compact, width-capped tags", async () => {
     renderWithTheme(
       <Composer
         placeholder="Написать"
@@ -1074,6 +1129,38 @@ describe("Composer", () => {
         activeMode="review"
       />,
     );
+
+    const floatingAccessories = screen.getByTestId("composer-floating-accessories");
+    const root = floatingAccessories.parentElement;
+    const inputArea = screen.getByTestId("composer-input-area");
+    expect(root).not.toBeNull();
+    vi.spyOn(root as HTMLElement, "getBoundingClientRect").mockReturnValue({
+      x: 36,
+      y: 1000,
+      left: 36,
+      top: 1000,
+      right: 886,
+      bottom: 1058,
+      width: 850,
+      height: 58,
+      toJSON: () => ({}),
+    });
+    vi.spyOn(inputArea, "getBoundingClientRect").mockReturnValue({
+      x: 130,
+      y: 1010,
+      left: 130,
+      top: 1010,
+      right: 714,
+      bottom: 1048,
+      width: 584,
+      height: 38,
+      toJSON: () => ({}),
+    });
+    await act(async () => {
+      window.dispatchEvent(new Event("resize"));
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    });
+    expect(floatingAccessories).toHaveStyle({ paddingLeft: "94px", paddingRight: "172px" });
 
     // The wakeup is a compact tag (like an attachment), not a 76px square, and
     // its label is width-capped so a long schedule string can't blow out the row.

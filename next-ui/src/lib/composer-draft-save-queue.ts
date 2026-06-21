@@ -25,6 +25,11 @@ export class ComposerDraftSaveQueue {
   }
 
   schedule(conversationId: string, draft: ComposerDraft): void {
+    if (isEmptyComposerDraft(draft)) {
+      this.discard(conversationId);
+      this.saveDraft(conversationId, cloneComposerDraft(draft));
+      return;
+    }
     this.drafts.set(conversationId, cloneComposerDraft(draft));
     this.cancelTimer(conversationId);
     this.timers.set(conversationId, this.setTimer(() => this.flush(conversationId), this.delayMs));
@@ -67,4 +72,8 @@ function cloneComposerDraft(draft: ComposerDraft): ComposerDraft {
     text: draft.text,
     attachments: draft.attachments.map((attachment) => ({ ...attachment })),
   };
+}
+
+function isEmptyComposerDraft(draft: ComposerDraft): boolean {
+  return draft.text.trim().length === 0 && draft.attachments.length === 0;
 }

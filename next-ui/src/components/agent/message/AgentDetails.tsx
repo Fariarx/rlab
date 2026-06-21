@@ -49,7 +49,7 @@ export const AgentDetails = observer(function AgentDetails({
   const doneSeconds = reasoningDuration ? Number.parseInt(reasoningDuration, 10) : Number.NaN;
 
   useEffect(() => {
-    if (previousLive.current && !live && hasResultAfter) {
+    if (hasResultAfter) {
       setOpen(false);
     }
     previousLive.current = live;

@@ -76,7 +76,7 @@ describe("applyWorkspaceAgentBlocks", () => {
 
     expect(update.shouldPersistBlocks).toBe(true);
     expect(update.shouldFlush).toBe(true);
-    expect(update.state.chats[0]).toMatchObject({ status: "waiting", time: "12:01" });
+    expect(update.state.chats[0]).toMatchObject({ status: "waiting", time: "11:00" });
   });
 
   it("does not revive a canceled conversation into waiting", () => {
@@ -126,7 +126,9 @@ describe("applyWorkspaceAgentBlocks", () => {
         userMessageId: "u1",
         agentMessageId: "a1",
         status: "running",
-        time: "12:02",
+        time: "12:00",
+        agentMessageTime: "12:02",
+        updatedAtMs: 120_000,
         done: false,
         blocks: [{ kind: "reasoning", text: "Inspecting", active: true }],
       },

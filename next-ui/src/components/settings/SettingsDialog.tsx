@@ -520,11 +520,10 @@ function SystemPromptSection({ settings, onSettingsChange }: Pick<SettingsDialog
         multiline
         minRows={9}
         maxRows={16}
-        label={t("systemPrompt")}
         value={settings.general.systemPrompt}
         placeholder={t("systemPromptPlaceholder")}
         onChange={(event) => onSettingsChange(generalSystemPromptPatch(event.target.value))}
-        slotProps={{ htmlInput: { spellCheck: true } }}
+        slotProps={{ htmlInput: { "aria-label": t("systemPrompt"), spellCheck: true } }}
         sx={{
           "& .MuiInputBase-root": {
             alignItems: "flex-start",

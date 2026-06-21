@@ -169,6 +169,7 @@ describe("SettingsDialog agent configuration", () => {
     );
 
     fireEvent.click(screen.getByRole("tab", { name: "Системный промпт" }));
+    expect(screen.queryByText("Системный промпт", { selector: "label" })).toBeNull();
     fireEvent.change(screen.getByLabelText("Системный промпт"), { target: { value: "Отвечай кратко." } });
 
     expect(onSettingsChange).toHaveBeenCalledWith({ general: { systemPrompt: "Отвечай кратко." } });

@@ -62,6 +62,7 @@ curl -s -X POST http://127.0.0.1:4280/api/run -H "Content-Type: application/json
 
 ### Dev loop
 edit → `npm run typecheck` → `npm test` → (if you touched `src/`) `npm run build` → `sudo systemctl restart rlab` → `curl …/api/agents` and reload the page to verify. Do not commit unless asked.
+- Agent shell commands launched from the production chat inherit prod env (`RLAB_DATA_DIR=/home/kanban/.rlab-prod`, `PORT=4280`, `NODE_ENV=production`). Keep dev/test scripts explicitly pinned to non-prod data dirs (currently `.data-dev` / `.data-test`) and do not run raw `vite`/`vitest` from an rlab chat without setting `RLAB_DATA_DIR`, or the dev process can read/write prod SQLite/agent-limit files.
 
 ## Prod
 - systemd unit `rlab`: `User=kanban` (NOT root), `HOST=127.0.0.1`, `PORT=4280`, `RLAB_DATA_DIR=/home/kanban/.rlab-prod`, `NODE_ENV=production`, runs `bin/rlab.mjs`. `RLAB_DEMO=1` seeds demo data.

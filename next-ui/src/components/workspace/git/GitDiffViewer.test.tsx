@@ -78,6 +78,43 @@ describe("GitDiffLines", () => {
     );
   });
 
+  it("converts large mobile beforeinput paste in review comments into a text attachment", async () => {
+    const lines: readonly DiffViewerLine[] = [{ kind: "add", text: "+needsRefactor" }];
+    const { onAddComment } = renderGitDiffLines({ lines });
+
+    fireEvent.click(screen.getByText("needsRefactor"));
+    const input = await screen.findByTestId("git-comment-input");
+    const pasted = "z".repeat(1501);
+    const event = new InputEvent("beforeinput", {
+      bubbles: true,
+      cancelable: true,
+      data: pasted,
+      inputType: "insertFromPaste",
+    });
+
+    fireEvent(input, event);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(input).toHaveValue("");
+    expect(within(await screen.findByTestId("git-comment-attachments")).getByTestId("attachment-tag")).toHaveTextContent("pasted-1501.txt");
+
+    fireEvent.change(input, { target: { value: "см. файл" } });
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить" }));
+
+    await waitFor(() => expect(onAddComment).toHaveBeenCalledTimes(1));
+    expect(onAddComment).toHaveBeenCalledWith(
+      1,
+      "needsRefactor",
+      [
+        "см. файл",
+        "",
+        "<attachment name=\"pasted-1501.txt\" type=\"text/plain\">",
+        pasted,
+        "</attachment>",
+      ].join("\n"),
+    );
+  });
+
   it("renders saved review comment attachments as tags", () => {
     renderGitDiffLines({
       lines: [{ kind: "add", text: "+needsRefactor" }],

@@ -11,6 +11,8 @@ playwright-report
 !.env.example
 next-ui/.dev-server.*.log
 next-ui/.data
+next-ui/.data-dev
+next-ui/.data-test
 next-ui/.e2e-data
 next-ui/dist
 next-ui/dist-dev

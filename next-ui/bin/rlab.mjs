@@ -12,7 +12,24 @@ process.chdir(packageRoot);
 process.env.NODE_ENV ||= "production";
 
 const port = Number.parseInt(process.env.PORT ?? "", 10) || 4280;
-const host = process.env.HOST ?? "0.0.0.0";
+const host = process.env.HOST ?? "127.0.0.1";
+
+function normalizedHostname(value) {
+  const trimmed = String(value ?? "").trim().toLowerCase();
+  if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+
+function isLoopbackBindHost(value) {
+  return ["localhost", "127.0.0.1", "::1"].includes(normalizedHostname(value));
+}
+
+if (!isLoopbackBindHost(host) && process.env.RLAB_ALLOW_PUBLIC_BIND !== "1") {
+  console.error(`[rlab] Refusing to bind to ${host}. Set RLAB_ALLOW_PUBLIC_BIND=1 and RLAB_ALLOWED_HOSTS to the public host if this is intentional.`);
+  process.exit(1);
+}
 
 if (!existsSync(resolve(packageRoot, "dist/index.html"))) {
   console.log("[rlab] No build found — building the app once (this can take a moment)...");

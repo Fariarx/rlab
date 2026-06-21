@@ -21,7 +21,7 @@ export type RunEvent =
   | { type: "search"; id?: string; query: string; state: RunState; results?: SearchBlock["results"] }
   | { type: "suggested"; actions: SuggestedActionsBlock["actions"] }
   | { type: "approval"; id: string; title: string; detail?: string }
-  | { type: "options"; id: string; prompt: string; multi?: boolean; options: ReadonlyArray<{ readonly id: string; readonly label: string; readonly description?: string }> }
+  | { type: "options"; id: string; prompt: string; multi?: boolean; options: ReadonlyArray<{ readonly id: string; readonly label: string; readonly description?: string }>; selected?: readonly string[] }
   | { type: "status"; level: "info" | "ok" | "warn" | "error"; text: string }
   | { type: "error"; text: string }
   | { type: "session"; id: string }
@@ -48,6 +48,14 @@ interface StreamingSearch {
 interface StreamingPlan {
   id?: string;
   steps: PlanBlock["steps"];
+}
+
+export interface AccumulatedOptionsQuestion {
+  id: string;
+  prompt: string;
+  multi?: boolean;
+  options: ReadonlyArray<{ readonly id: string; readonly label: string; readonly description?: string }>;
+  selected?: readonly string[];
 }
 
 interface RunTimelineReasoning {
@@ -90,7 +98,7 @@ export interface RunEventAccumulator {
   readonly searches: StreamingSearch[];
   readonly suggested: SuggestedActionsBlock[];
   readonly approvals: Array<{ id: string; title: string; detail?: string }>;
-  readonly options: Array<{ id: string; prompt: string; multi?: boolean; options: ReadonlyArray<{ readonly id: string; readonly label: string; readonly description?: string }> }>;
+  readonly options: AccumulatedOptionsQuestion[];
   readonly statuses: Array<{ level: "ok" | "warn" | "error"; text: string }>;
   costUsd?: number;
   usage?: RunUsage;
@@ -230,8 +238,11 @@ export function accumulateRunEvent(accumulator: RunEventAccumulator, event: RunE
         existing.prompt = event.prompt;
         existing.multi = event.multi;
         existing.options = event.options;
+        if (event.selected !== undefined) {
+          existing.selected = [...event.selected];
+        }
       } else {
-        accumulator.options.push({ id: event.id, prompt: event.prompt, multi: event.multi, options: event.options });
+        accumulator.options.push({ id: event.id, prompt: event.prompt, multi: event.multi, options: event.options, ...(event.selected === undefined ? {} : { selected: [...event.selected] }) });
       }
       break;
     }
@@ -253,6 +264,18 @@ export function accumulateRunEvent(accumulator: RunEventAccumulator, event: RunE
     case "cancel_wakeup":
       break;
   }
+}
+
+export function applyRunEventOptionSelection(
+  accumulator: RunEventAccumulator,
+  selection: { readonly id: string; readonly selected: readonly string[] },
+): boolean {
+  const option = accumulator.options.find((item) => item.id === selection.id);
+  if (!option) {
+    return false;
+  }
+  option.selected = [...selection.selected];
+  return true;
 }
 
 export function runEventBlocks(accumulator: RunEventAccumulator, options: RunEventBlocksOptions = {}): AgentBlock[] {
@@ -304,7 +327,14 @@ export function runEventBlocks(accumulator: RunEventAccumulator, options: RunEve
     blocks.push({ kind: "approval", id: approval.id, title: approval.title, detail: approval.detail });
   }
   for (const option of accumulator.options) {
-    blocks.push({ kind: "options", id: option.id, prompt: option.prompt, multi: option.multi, options: option.options });
+    blocks.push({
+      kind: "options",
+      id: option.id,
+      prompt: option.prompt,
+      multi: option.multi,
+      options: option.options,
+      ...(option.selected === undefined ? {} : { selected: [...option.selected] }),
+    });
   }
   for (const status of accumulator.statuses) {
     blocks.push({ kind: "status", level: status.level, text: status.text });

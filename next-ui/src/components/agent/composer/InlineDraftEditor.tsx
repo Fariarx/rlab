@@ -11,7 +11,7 @@ import type { ComposerAttachmentDraft, ComposerDraft } from "../core/types";
 import { Button, IconButton, ImageLightbox, Tooltip, type ButtonProps } from "../../ui";
 import { AttachmentTile } from "./AttachmentTile";
 import { VoiceRecordingStrip, VOICE_IDLE_LEVELS } from "./ComposerVoice";
-import { clipboardFilesForComposer, composerSendPayload, mergeComposerAttachments, pastedTextFileForComposer } from "./composer-attachments-model";
+import { clipboardFilesForComposer, composerSendPayload, mergeComposerAttachments, pastedTextFileForComposer, pastedTextFileFromBeforeInput } from "./composer-attachments-model";
 import { ComposerStore } from "./composer-store";
 import { fileToAttachmentDraft, isImageMime } from "./composer-utils";
 import { useComposerShared } from "./composer-shared-context";
@@ -152,6 +152,7 @@ export const InlineDraftEditor = observer(function InlineDraftEditor({
   }, [maxHeight, minHeight]);
 
   useLayoutEffect(() => {
+    void value;
     autosizeTextarea();
   }, [autosizeTextarea, value]);
 
@@ -180,6 +181,27 @@ export const InlineDraftEditor = observer(function InlineDraftEditor({
       setAttachments(mergeComposerAttachments(latestDraftRef.current.attachments, ready));
     }
   }, [setAttachments, shared, t]);
+
+  useLayoutEffect(() => {
+    // Mobile Chrome exposes large paste data on the native beforeinput event;
+    // React's synthetic onBeforeInput does not consistently surface it.
+    const el = textareaRef.current;
+    if (!el) {
+      return;
+    }
+    const handleNativeBeforeInput = (event: InputEvent) => {
+      const pastedTextFile = pastedTextFileFromBeforeInput(event);
+      if (!pastedTextFile) {
+        return;
+      }
+      event.preventDefault();
+      void addFiles([pastedTextFile]);
+    };
+    el.addEventListener("beforeinput", handleNativeBeforeInput);
+    return () => {
+      el.removeEventListener("beforeinput", handleNativeBeforeInput);
+    };
+  });
 
   const submit = useCallback(() => {
     const draft = latestDraftRef.current;

@@ -60,6 +60,7 @@ import {
   parseTerminalSessionRequest,
   gitErrorStatus,
   gitPushRequestErrorStatus,
+  persistRunInputSelection,
   isPersistedBackgroundRunActive,
   isBrowserPreviewTempSharedObjectName,
   isNoChangesGitCommitResult,
@@ -97,25 +98,28 @@ import {
   resolveLaunchCommand,
   resolvePendingRunApproval,
   resolvePendingRunInput,
+  resolveWorkspaceStateDir,
   runControlErrorStatus,
   settleEarlyBackgroundRunState,
   shouldUseShellForBin,
   storageHealthSnapshot,
+  threadWithBoundUserMessage,
   validateRunAccessModeForAgent,
   withStorageFileLock,
   windowsCommandLine,
   writeJsonFileAtomic,
   writeAgentSecretConfig,
   workspacePutErrorStatus,
+  validatePendingRunInput,
   type BackgroundRunBinding,
   type BackgroundRunHandle,
   visibleAgentDetectionIds,
   readRunAuditEvents,
 } from "../vite-agents-plugin";
 import { MAX_AGENT_TOOL_OUTPUT_CHARS } from "../src/lib/agent-output";
-import { accumulateRunEvent, createRunEventAccumulator } from "../src/lib/run-event-accumulator";
+import { accumulateRunEvent, applyRunEventOptionSelection, createRunEventAccumulator, runEventBlocks } from "../src/lib/run-event-accumulator";
 import { buildEmptyWorkspaceState, buildInitialWorkspaceState } from "../src/lib/workspace-state";
-import { closeWorkspaceDb, initializeWorkspaceStateInDb, initWorkspaceDb, type PendingTurnRecord } from "../workspace-db";
+import { closeWorkspaceDb, initializeWorkspaceStateInDb, initWorkspaceDb, readMessageBlockById, type PendingTurnRecord } from "../workspace-db";
 
 describe("vite agents plugin", () => {
   it("does not import client UI modules into the dev-server runtime", () => {
@@ -125,6 +129,17 @@ describe("vite agents plugin", () => {
     expect(source).not.toContain('from "./src/components/workspace/workspace-state"');
     expect(source).not.toContain('from "./src/components/workspace/sample-data"');
     expect(source).not.toContain('from "./src/i18n/I18nProvider"');
+  });
+
+  it("keeps inherited prod data dirs out of development and test runs", () => {
+    const cwd = "/workspace/rlab/next-ui";
+    const pluginDir = "/workspace/rlab/next-ui";
+    const prodDataDir = "/home/kanban/.rlab-prod";
+
+    expect(resolveWorkspaceStateDir({ NODE_ENV: "production", RLAB_DATA_DIR: prodDataDir }, cwd, pluginDir)).toBe(prodDataDir);
+    expect(resolveWorkspaceStateDir({ NODE_ENV: "development", RLAB_DATA_DIR: prodDataDir }, cwd, pluginDir)).toBe(resolve(pluginDir, ".data-dev"));
+    expect(resolveWorkspaceStateDir({ NODE_ENV: "test", RLAB_DATA_DIR: prodDataDir }, cwd, pluginDir)).toBe(resolve(pluginDir, ".data-test"));
+    expect(resolveWorkspaceStateDir({ NODE_ENV: "development", RLAB_DATA_DIR: prodDataDir, RLAB_ALLOW_PROD_DATA_IN_DEV: "1" }, cwd, pluginDir)).toBe(prodDataDir);
   });
 
   it("uses the loopback HTTP origin for browser bridge prompts behind the production proxy", () => {
@@ -187,6 +202,7 @@ describe("vite agents plugin", () => {
         userMessageCreatedAtMs: 123,
         resume: "gemini-session",
         cwd: "/tmp/queued-worktree",
+        serverPrompt: { userMessage: { id: "u-queued", role: "user", text: "Queued server turn", time: "12:05" } },
       });
       expect(String(body.prompt)).toContain("Queued server turn");
     } finally {
@@ -1057,6 +1073,68 @@ Built-in agents:
     expect(accumulator.tools[0]?.output).not.toBe("rlab accepted the request");
   });
 
+  it("keeps selected AskUserQuestion options in accumulated run blocks", () => {
+    const accumulator = createRunEventAccumulator();
+
+    accumulateRunEvent(accumulator, {
+      type: "options",
+      id: "run-question:tool:q0",
+      prompt: "Pick a format",
+      options: [
+        { id: "summary", label: "Summary" },
+        { id: "detailed", label: "Detailed" },
+      ],
+    });
+
+    expect(applyRunEventOptionSelection(accumulator, { id: "run-question:tool:q0", selected: ["Summary"] })).toBe(true);
+    expect(runEventBlocks(accumulator)).toEqual(
+      expect.arrayContaining([
+        {
+          kind: "options",
+          id: "run-question:tool:q0",
+          prompt: "Pick a format",
+          multi: undefined,
+          options: [
+            { id: "summary", label: "Summary" },
+            { id: "detailed", label: "Detailed" },
+          ],
+          selected: ["Summary"],
+        },
+      ]),
+    );
+  });
+
+  it("can accumulate already-selected AskUserQuestion options from a snapshot event", () => {
+    const accumulator = createRunEventAccumulator();
+
+    accumulateRunEvent(accumulator, {
+      type: "options",
+      id: "run-question:tool:q0",
+      prompt: "Pick a format",
+      options: [
+        { id: "summary", label: "Summary" },
+        { id: "detailed", label: "Detailed" },
+      ],
+      selected: ["Detailed"],
+    });
+
+    expect(runEventBlocks(accumulator)).toEqual(
+      expect.arrayContaining([
+        {
+          kind: "options",
+          id: "run-question:tool:q0",
+          prompt: "Pick a format",
+          multi: undefined,
+          options: [
+            { id: "summary", label: "Summary" },
+            { id: "detailed", label: "Detailed" },
+          ],
+          selected: ["Detailed"],
+        },
+      ]),
+    );
+  });
+
   it("translates script wakeup tool input without requiring a timer-only trigger", () => {
     const translate = createClaudeStreamTranslator();
 
@@ -1200,6 +1278,52 @@ Built-in agents:
         query: "vite kanban agent protocol",
         state: "ok",
         results: [{ title: "Vibe Kanban", url: "https://github.com/BloopAI/vibe-kanban" }],
+      },
+    ]);
+
+    expect(
+      translate(
+        JSON.stringify({
+          type: "assistant",
+          message: {
+            content: [
+              {
+                type: "tool_use",
+                id: "search-plain",
+                name: "WebSearch",
+                input: { query: "design to code tools" },
+              },
+            ],
+          },
+        }),
+      ),
+    ).toEqual([{ type: "search", id: "search-plain", query: "design to code tools", state: "running", results: [] }]);
+
+    expect(
+      translate(
+        JSON.stringify({
+          type: "user",
+          message: {
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "search-plain",
+                content: "Found results:\n- [Figma Make](https://www.figma.com/make/)\n- Builder.io Visual Copilot: https://www.builder.io/m/visual-copilot",
+              },
+            ],
+          },
+        }),
+      ),
+    ).toEqual([
+      {
+        type: "search",
+        id: "search-plain",
+        query: "design to code tools",
+        state: "ok",
+        results: [
+          { title: "Figma Make", url: "https://www.figma.com/make/" },
+          { title: "Builder.io Visual Copilot", url: "https://www.builder.io/m/visual-copilot" },
+        ],
       },
     ]);
   });
@@ -1755,6 +1879,26 @@ Built-in agents:
     ]);
     // webSearch -> search
     expect(codexAppServerItemEvents({ type: "webSearch", id: "w1", query: "rust" }, true)).toEqual([{ type: "search", id: "w1", query: "rust", state: "ok" }]);
+    expect(
+      codexAppServerItemEvents(
+        {
+          type: "webSearch",
+          id: "w2",
+          query: "design to code",
+          results: [{ title: "Figma Make", url: "https://www.figma.com/make/" }],
+        },
+        true,
+      ),
+    ).toEqual([{ type: "search", id: "w2", query: "design to code", state: "ok", results: [{ title: "Figma Make", url: "https://www.figma.com/make/" }] }]);
+    expect(codexAppServerItemEvents({ type: "webSearch", id: "w3", action: { type: "openPage", url: "https://example.com/research" } }, true)).toEqual([
+      {
+        type: "search",
+        id: "w3",
+        query: "https://example.com/research",
+        state: "ok",
+        results: [{ title: "example.com", url: "https://example.com/research" }],
+      },
+    ]);
   });
 
   it("maps Codex app-server token usage (total breakdown) to RunUsage", () => {
@@ -3167,6 +3311,16 @@ Built-in agents:
     });
   });
 
+  it("replaces a persisted bound user turn with the request copy before server prompt replay", () => {
+    const oldUser = { id: "u1", role: "user" as const, text: "old prompt", time: "10:00" };
+    const oldReply = { id: "a1", role: "agent" as const, blocks: [{ kind: "text" as const, text: "old answer" }], time: "10:01" };
+    const priorUser = { id: "u0", role: "user" as const, text: "prior", time: "09:00" };
+    const editedUser = { ...oldUser, text: "edited prompt", time: "10:05" };
+
+    expect(threadWithBoundUserMessage([priorUser, oldUser, oldReply], editedUser)).toEqual([priorUser, editedUser]);
+    expect(threadWithBoundUserMessage([priorUser], editedUser)).toEqual([priorUser, editedUser]);
+  });
+
   it("rejects removed read-write run requests", () => {
     expect(parseRunRequestPayload(JSON.stringify({ agent: "codex", accessMode: "read-write", prompt: "hello" }))).toMatchObject({
       ok: true,
@@ -3315,6 +3469,11 @@ Built-in agents:
       },
     ]);
 
+    expect(validatePendingRunInput({ id: "toolu_question:q0", selected: ["Summary"] })).toEqual({
+      id: "toolu_question:q0",
+      selected: ["Summary"],
+    });
+    expect(resolved).toBe(false);
     expect(resolvePendingRunInput({ id: "toolu_question:q0", selected: ["Summary"] })).toEqual({
       id: "toolu_question:q0",
       selected: ["Summary"],
@@ -3447,6 +3606,46 @@ Built-in agents:
         expect.objectContaining({ kind: "options", id: "toolu_question:q0", selected: ["Summary"] }),
       ]),
     );
+  });
+
+  it("persists run input selections to SQLite before the pending request resolves", () => {
+    const dir = mkdtempSync(join(tmpdir(), "rlab-run-input-"));
+    try {
+      closeWorkspaceDb();
+      initWorkspaceDb(join(dir, "workspace.db"));
+      initializeWorkspaceStateInDb({
+        ...buildEmptyWorkspaceState(),
+        chats: [{ id: "chat-input", title: "Input", snippet: "", time: "10:00", status: "waiting", agent: "claude-code" }],
+        threads: {
+          "chat-input": [
+            {
+              id: "a-input",
+              role: "agent",
+              time: "10:01",
+              blocks: [
+                {
+                  kind: "options",
+                  id: "run-input:tool:q0",
+                  prompt: "Pick one",
+                  options: [
+                    { id: "summary", label: "Summary" },
+                    { id: "detailed", label: "Detailed" },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+        selectedId: "chat-input",
+      });
+
+      persistRunInputSelection({ id: "run-input:tool:q0", selected: ["Summary"] });
+      expect(readMessageBlockById("run-input:tool:q0")).toEqual(expect.objectContaining({ kind: "options", id: "run-input:tool:q0", selected: ["Summary"] }));
+      expect(() => persistRunInputSelection({ id: "run-input:missing:q0", selected: ["Summary"] })).toThrow("Could not persist input selection for run-input:missing:q0.");
+    } finally {
+      closeWorkspaceDb();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("classifies workspace PUT payload errors separately from server persistence errors", () => {
@@ -3835,6 +4034,61 @@ Built-in agents:
     expect(blocks).not.toEqual(expect.arrayContaining([expect.objectContaining({ text: "Запуск остановлен" })]));
   });
 
+  it("clears active ownership when a background run finishes in waiting state", () => {
+    const state = buildInitialWorkspaceState();
+    const binding = {
+      conversationId: "chat-2",
+      runId: "run-question",
+      userMessageId: "u-question",
+      userMessageTime: "10:00",
+      agentMessageId: "a-question",
+      agentMessageTime: "10:01",
+    };
+    const runningState = {
+      ...state,
+      chats: state.chats.map((conversation) =>
+        conversation.id === "chat-2"
+          ? {
+              ...conversation,
+              activeRunId: "run-question",
+              status: "running" as const,
+              time: "10:00",
+            }
+          : conversation,
+      ),
+      threads: {
+        ...state.threads,
+        "chat-2": [
+          ...state.threads["chat-2"],
+          { id: "u-question", role: "user" as const, text: "ask me", time: "10:00" },
+        ],
+      },
+    };
+    const accumulator = { ...createRunEventAccumulator(Date.now()), lastPersistedAt: 0, persistTimer: null };
+    accumulateRunEvent(accumulator, {
+      type: "options",
+      id: "run-question:tool:q0",
+      prompt: "Что выбрать?",
+      options: [{ id: "A", label: "A" }],
+    });
+
+    const finished = finishBackgroundRunState(runningState, binding, accumulator, false);
+
+    expect(finished.chats.find((conversation) => conversation.id === "chat-2")).toMatchObject({
+      activeRunId: undefined,
+      status: "waiting",
+      updatedAtMs: expect.any(Number),
+    });
+    expect(finished.threads["chat-2"].find((message) => message.id === "a-question")?.blocks).toEqual([
+      {
+        kind: "options",
+        id: "run-question:tool:q0",
+        prompt: "Что выбрать?",
+        options: [{ id: "A", label: "A" }],
+      },
+    ]);
+  });
+
   it("keeps server-owned background conversations that are missing from a stale workspace PUT", () => {
     const current = buildInitialWorkspaceState();
     const serverState = {
@@ -4051,6 +4305,52 @@ Built-in agents:
     });
   });
 
+  it("clears stale waiting background run ownership without marking the saved input as interrupted", () => {
+    const state = buildInitialWorkspaceState();
+    const reconciled = reconcileStaleBackgroundRuns(
+      {
+        ...state,
+        chats: state.chats.map((conversation) =>
+          conversation.id === "chat-2" ? { ...conversation, activeRunId: "run-waiting", status: "waiting", snippet: "Ждёт ввод" } : conversation,
+        ),
+        threads: {
+          ...state.threads,
+          "chat-2": [
+            ...state.threads["chat-2"],
+            {
+              id: "a-waiting",
+              role: "agent",
+              blocks: [
+                {
+                  kind: "options",
+                  id: "run-waiting:question:q0",
+                  prompt: "Что выбрать?",
+                  options: [{ id: "A", label: "A" }],
+                },
+              ],
+            },
+          ],
+        },
+      },
+      new Set(),
+    );
+
+    expect(reconciled.chats.find((conversation) => conversation.id === "chat-2")).toMatchObject({
+      activeRunId: undefined,
+      status: "waiting",
+      snippet: "Ждёт ввод",
+    });
+    const waitingBlocks = reconciled.threads["chat-2"].find((message) => message.id === "a-waiting")?.blocks;
+    expect(waitingBlocks).toEqual([
+      {
+        kind: "options",
+        id: "run-waiting:question:q0",
+        prompt: "Что выбрать?",
+        options: [{ id: "A", label: "A" }],
+      },
+    ]);
+  });
+
   it("does not materialize an empty thread while reconciling an unloaded stale background run", () => {
     const state = buildInitialWorkspaceState();
     const partialState = {
@@ -4105,14 +4405,14 @@ Built-in agents:
     // not an empty patch — otherwise a prior "interrupted" reconcile leaves it
     // stuck at "error" while the agent keeps working.
     const streaming = backgroundRunStatusPatch(binding, [{ kind: "text", text: "working" }]);
-    expect(streaming).toEqual({ status: "running", activeRunId: "run-live", snippet: "working", time: "2026-06-06T14:00:01.000Z" });
+    expect(streaming).toEqual({ status: "running", activeRunId: "run-live", snippet: "working", time: "2026-06-06T14:00:00.000Z" });
 
     const toolOnly = backgroundRunStatusPatch(binding, [{ kind: "tool", name: "Shell", summary: "npm run dev", state: "running" }]);
-    expect(toolOnly).toEqual({ status: "running", activeRunId: "run-live", time: "2026-06-06T14:00:01.000Z" });
+    expect(toolOnly).toEqual({ status: "running", activeRunId: "run-live", time: "2026-06-06T14:00:00.000Z" });
 
     // A block awaiting input pins it to "waiting" but still keeps the runId.
     const waiting = backgroundRunStatusPatch(binding, [{ kind: "approval", title: "Run cmd" }]);
-    expect(waiting).toEqual({ status: "waiting", activeRunId: "run-live", time: "2026-06-06T14:00:01.000Z" });
+    expect(waiting).toEqual({ status: "waiting", activeRunId: "run-live", time: "2026-06-06T14:00:00.000Z" });
   });
 
   it("serializes active background run handles for browser reconnects", () => {
@@ -4219,7 +4519,7 @@ Built-in agents:
               activeRunId: binding.runId,
               status: "running" as const,
               snippet: "Working",
-              time: binding.agentMessageTime,
+              time: binding.userMessageTime,
             }
           : chat,
       ),
@@ -4238,7 +4538,9 @@ Built-in agents:
       userMessageId: binding.userMessageId,
       agentMessageId: binding.agentMessageId,
       status: "running",
-      time: binding.agentMessageTime,
+      time: binding.userMessageTime,
+      agentMessageTime: binding.agentMessageTime,
+      updatedAtMs: expect.any(Number),
       done: false,
       blocks: [{ kind: "text", text: "live" }],
     });
@@ -4263,7 +4565,7 @@ Built-in agents:
               activeRunId: binding.runId,
               status: "running" as const,
               snippet: "Working",
-              time: binding.agentMessageTime,
+              time: binding.userMessageTime,
             }
           : chat,
       ),

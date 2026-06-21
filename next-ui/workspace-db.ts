@@ -195,6 +195,7 @@ type ProjectMeta = Omit<Project, "conversations">;
 type MessageRow = { readonly conversationId: string; readonly data: string };
 type MessagePageRow = { readonly position: number; readonly data: string };
 type MessageWithIdRow = { readonly id: string; readonly conversationId: string; readonly data: string };
+type ExistingThreadMessageRow = { readonly id: string; readonly position: number };
 type LatestUserMessageRow = { readonly conversationId: string; readonly data: string };
 
 export type WorkspaceDbMutation = WorkspaceMutation;
@@ -256,7 +257,7 @@ function messageCreatedAtMs(message: ChatMessage): number | undefined {
   if (typeof message.createdAtMs === "number" && Number.isFinite(message.createdAtMs)) {
     return message.createdAtMs;
   }
-  return inferConversationUpdatedAtMs(message.time);
+  return undefined;
 }
 
 function messageThreadUpdatedAtMs(message: ChatMessage): number | undefined {
@@ -384,7 +385,7 @@ function sortConversationsByLatestUserMessage<T extends ConversationSummary>(
     .map((conversation, index) => ({
       conversation,
       index,
-      activityAtMs: latestUserMessageCreatedAtMs.get(conversation.id) ?? normalizeConversationUpdatedAtMs(conversation.time, conversation.updatedAtMs),
+      activityAtMs: latestUserMessageCreatedAtMs.get(conversation.id) ?? Number.NEGATIVE_INFINITY,
     }))
     .sort((left, right) => right.activityAtMs - left.activityAtMs || left.index - right.index)
     .map((entry) => entry.conversation);
@@ -637,8 +638,44 @@ function upsertMessageInTransaction(handle: DatabaseHandle, conversationId: stri
   handle.prepare("INSERT INTO messages(id, conversation_id, position, data) VALUES(?, ?, ?, ?)").run(message.id, conversationId, position, JSON.stringify(message));
 }
 
+function restartUserTurnInTransaction(handle: DatabaseHandle, conversationId: string, userMessage: ChatMessage): void {
+  ensureConversationExists(handle, conversationId);
+  if (userMessage.role !== "user") {
+    throw new Error("Only user messages can restart a turn.");
+  }
+  const existing = handle.prepare("SELECT conversation_id AS conversationId, position, data FROM messages WHERE id = ?").get(userMessage.id) as
+    | { conversationId: string; position: number; data: string }
+    | undefined;
+  if (!existing) {
+    upsertMessageInTransaction(handle, conversationId, userMessage);
+    return;
+  }
+  if (existing.conversationId !== conversationId) {
+    throw new Error(`Message ${userMessage.id} already belongs to conversation ${existing.conversationId}.`);
+  }
+  const previous = JSON.parse(existing.data) as ChatMessage;
+  if (previous.role !== "user") {
+    throw new Error(`Message ${userMessage.id} is not a user message.`);
+  }
+  handle.prepare("UPDATE messages SET data = ? WHERE id = ?").run(JSON.stringify(userMessage), userMessage.id);
+  handle.prepare("DELETE FROM messages WHERE conversation_id = ? AND position > ?").run(conversationId, existing.position);
+}
+
+export function restartUserTurn(conversationId: string, userMessage: ChatMessage): void {
+  const handle = database();
+  transaction(() => {
+    restartUserTurnInTransaction(handle, conversationId, userMessage);
+    touchConversationThreadInTransaction(handle, conversationId);
+    bumpWorkspaceRevisionInTransaction(handle);
+  });
+}
+
 function replaceConversationThreadInTransaction(handle: DatabaseHandle, conversationId: string, messages: readonly ChatMessage[]): void {
   ensureConversationExists(handle, conversationId);
+  const existingRows = handle.prepare("SELECT id, position FROM messages WHERE conversation_id = ? ORDER BY position").all(conversationId) as ExistingThreadMessageRow[];
+  const existingPositions = new Map(existingRows.map((row) => [row.id, row.position] as const));
+  const incomingIds = new Set(messages.map((message) => message.id));
+  const incomingExistingIds = messages.filter((message) => existingPositions.has(message.id)).map((message) => message.id);
   const seen = new Set<string>();
   for (const message of messages) {
     if (seen.has(message.id)) {
@@ -648,6 +685,20 @@ function replaceConversationThreadInTransaction(handle: DatabaseHandle, conversa
     const existing = handle.prepare("SELECT conversation_id AS conversationId FROM messages WHERE id = ?").get(message.id) as { conversationId: string } | undefined;
     if (existing && existing.conversationId !== conversationId) {
       throw new Error(`Message ${message.id} already belongs to conversation ${existing.conversationId}.`);
+    }
+  }
+  if (existingRows.length > 0) {
+    if (messages[0]?.id !== existingRows[0]?.id) {
+      throw new Error(`Refusing to replace conversation ${conversationId} with a partial thread page.`);
+    }
+    for (const row of existingRows) {
+      if (!incomingIds.has(row.id)) {
+        throw new Error(`Refusing to replace conversation ${conversationId} with a partial thread page.`);
+      }
+    }
+    const existingIds = existingRows.map((row) => row.id);
+    if (incomingExistingIds.length !== existingIds.length || incomingExistingIds.some((id, index) => id !== existingIds[index])) {
+      throw new Error(`Refusing to replace conversation ${conversationId} with a reordered thread.`);
     }
   }
   handle.prepare("DELETE FROM messages WHERE conversation_id = ?").run(conversationId);
@@ -728,6 +779,10 @@ export function applyWorkspaceDbMutations(
             touchConversationThreadInTransaction(handle, mutation.conversationId);
           }
           break;
+        case "restartUserTurn":
+          restartUserTurnInTransaction(handle, mutation.conversationId, mutation.userMessage);
+          touchConversationThreadInTransaction(handle, mutation.conversationId);
+          break;
         case "replaceConversationThread":
           replaceConversationThreadInTransaction(handle, mutation.conversationId, mutation.messages);
           touchConversationThreadInTransaction(handle, mutation.conversationId);
@@ -750,6 +805,21 @@ export function readMessageBlocks(messageId: string): readonly AgentBlock[] | un
 export function readMessage(messageId: string): ChatMessage | undefined {
   const row = database().prepare("SELECT data FROM messages WHERE id = ?").get(messageId) as { data: string } | undefined;
   return row ? (JSON.parse(row.data) as ChatMessage) : undefined;
+}
+
+/** Read one interactive message block by its block id without loading the whole workspace. */
+export function readMessageBlockById(blockIdToRead: string): AgentBlock | undefined {
+  const rows = database()
+    .prepare("SELECT data FROM messages WHERE data LIKE ? ESCAPE '\\'")
+    .all(`%${escapeSqlLike(blockIdToRead)}%`) as Array<{ readonly data: string }>;
+  for (const row of rows) {
+    const message = JSON.parse(row.data) as ChatMessage;
+    const block = message.blocks?.find((item) => blockId(item) === blockIdToRead);
+    if (block) {
+      return block;
+    }
+  }
+  return undefined;
 }
 
 /** Upsert one message row (the streaming hot path). New messages append at the

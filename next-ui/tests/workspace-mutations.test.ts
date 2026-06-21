@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ConversationSummary, Project } from "../src/domain/agent-types";
 import type { AgentProfile } from "../src/components/agent";
-import { applyWorkspaceMutationsToState } from "../src/lib/workspace-mutations";
+import { applyWorkspaceMutationsToState, parseWorkspaceMutation } from "../src/lib/workspace-mutations";
 import { buildEmptyWorkspaceState, type WorkspaceState } from "../src/lib/workspace-state";
 
 function conversation(id: string, title = id): ConversationSummary {
@@ -84,6 +84,46 @@ describe("workspace mutation reducer", () => {
     expect(next.selectedId).toBe(newConversation.id);
     expect(next.chats[0]?.id).toBe(newConversation.id);
     expect(next.threads[newConversation.id]).toEqual([]);
+  });
+
+  it("restarts a user turn without dropping earlier messages", () => {
+    const state = workspace({
+      chats: [conversation("c1")],
+      threads: {
+        c1: [
+          { id: "u1", role: "user", text: "first", time: "12:00" },
+          { id: "a1", role: "agent", blocks: [{ kind: "text", text: "old answer" }] },
+          { id: "u2", role: "user", text: "second", time: "12:01" },
+          { id: "a2", role: "agent", blocks: [{ kind: "text", text: "second answer" }] },
+        ],
+      },
+    });
+
+    const next = applyWorkspaceMutationsToState(state, [
+      { type: "restartUserTurn", conversationId: "c1", userMessage: { id: "u2", role: "user", text: "edited second", time: "12:02" } },
+    ]);
+
+    expect(next.threads.c1?.map((message) => message.id)).toEqual(["u1", "a1", "u2"]);
+    expect(next.threads.c1?.at(-1)).toMatchObject({ role: "user", text: "edited second" });
+  });
+
+  it("appends a missing restarted user turn instead of no-oping during rebase", () => {
+    const state = workspace({
+      chats: [conversation("c1")],
+      threads: {
+        c1: [{ id: "u1", role: "user", text: "first", time: "12:00" }],
+      },
+    });
+
+    const next = applyWorkspaceMutationsToState(state, [
+      { type: "restartUserTurn", conversationId: "c1", userMessage: { id: "u2", role: "user", text: "second", time: "12:01" } },
+    ]);
+
+    expect(next.threads.c1?.map((message) => message.id)).toEqual(["u1", "u2"]);
+  });
+
+  it("rejects full thread replacement from parsed client mutations", () => {
+    expect(() => parseWorkspaceMutation({ type: "replaceConversationThread", conversationId: "c1", messages: [] })).toThrow("Full thread replacement is disabled.");
   });
 
   it("preserves a user-picked profile when a stale run metadata update arrives", () => {

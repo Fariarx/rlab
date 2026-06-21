@@ -87,4 +87,18 @@ describe("ComposerDraftSaveQueue", () => {
 
     expect(saveDraft).not.toHaveBeenCalled();
   });
+
+  it("saves empty drafts immediately and cancels pending text", () => {
+    vi.useFakeTimers();
+    const saveDraft = vi.fn();
+    const queue = new ComposerDraftSaveQueue({ delayMs: 350, saveDraft });
+    const emptyDraft: ComposerDraft = { text: "", attachments: [] };
+
+    queue.schedule("chat-1", draft("pending"));
+    queue.schedule("chat-1", emptyDraft);
+    vi.advanceTimersByTime(350);
+
+    expect(saveDraft).toHaveBeenCalledTimes(1);
+    expect(saveDraft).toHaveBeenCalledWith("chat-1", emptyDraft);
+  });
 });

@@ -56,20 +56,37 @@ describe("ConversationList pinning", () => {
     expect(screen.queryByRole("button", { name: /Закреплённые/ })).not.toBeInTheDocument();
   });
 
-  it("offers Pin in the row menu and calls onTogglePin", () => {
+  it("offers Pin as a row icon and calls onTogglePin", () => {
     const actions = render([{ ...base, id: "plain", title: "Plain chat" }]);
 
-    fireEvent.click(screen.getByRole("button", { name: "Действия с диалогом" }));
-    fireEvent.click(screen.getByRole("menuitem", { name: "Закрепить" }));
+    fireEvent.click(screen.getByRole("button", { name: "Закрепить" }));
 
     expect(actions.onTogglePin).toHaveBeenCalledWith("plain");
   });
 
-  it("offers Unpin for an already pinned conversation", () => {
+  it("offers Unpin as a row icon for an already pinned conversation", () => {
     render([{ ...base, id: "pinned", title: "Pinned chat", pinned: true }]);
 
+    expect(screen.getByRole("button", { name: "Открепить" })).toBeInTheDocument();
+  });
+
+  it("offers Archive as a row icon and calls onArchive", () => {
+    const actions = render([{ ...base, id: "plain", title: "Plain chat" }]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Архивировать" }));
+
+    expect(actions.onArchive).toHaveBeenCalledWith("plain");
+  });
+
+  it("keeps Pin and Archive out of the overflow menu", () => {
+    render([{ ...base, id: "plain", title: "Plain chat" }]);
+
     fireEvent.click(screen.getByRole("button", { name: "Действия с диалогом" }));
-    expect(screen.getByRole("menuitem", { name: "Открепить" })).toBeInTheDocument();
+
+    expect(screen.queryByRole("menuitem", { name: "Закрепить" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Архивировать" })).not.toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Переименовать" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Удалить" })).toBeInTheDocument();
   });
 });
 

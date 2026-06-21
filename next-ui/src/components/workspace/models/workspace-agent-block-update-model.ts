@@ -60,6 +60,6 @@ export function applyWorkspaceAgentBlocks({
     message,
     shouldFlush,
     shouldPersistBlocks,
-    state: patchConversation(nextState, conversationId, { status: "waiting", ...(snippet ? { snippet } : {}), time: agentMessage.time }),
+    state: patchConversation(nextState, conversationId, { status: "waiting", ...(snippet ? { snippet } : {}) }),
   };
 }

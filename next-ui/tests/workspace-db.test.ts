@@ -16,6 +16,7 @@ import {
   initWorkspaceDb,
   patchMessageBlockById,
   readConversation,
+  readMessageBlockById,
   readMessageBlocks,
   readPendingTurnQueue,
   readThreadPageFromDb,
@@ -25,6 +26,7 @@ import {
   releasePendingTurn,
   removePendingTurn,
   resetDispatchingPendingTurns,
+  restartUserTurn,
   searchConversationIds,
   setPendingTurnQueuePaused,
   updateConversationData,
@@ -158,7 +160,10 @@ describe("workspace-db", () => {
     // Conversation row updates in place, other rows untouched.
     const current = readConversation("c1");
     expect(current?.status).toBe("running");
-    updateConversationData({ ...current!, status: "done", snippet: "answer" });
+    if (!current) {
+      throw new Error("Expected conversation c1 to exist.");
+    }
+    updateConversationData({ ...current, status: "done", snippet: "answer" });
     const after = readWorkspaceStateFromDb();
     expect(after.chats[0].status).toBe("done");
     expect(after.chats[0].snippet).toBe("next");
@@ -272,6 +277,8 @@ describe("workspace-db", () => {
 
     const c1 = readWorkspaceStateFromDb().threads.c1[0];
     expect(c1.blocks).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "options", id: "question-1", selected: ["A"] })]));
+    expect(readMessageBlockById("question-1")).toEqual(expect.objectContaining({ kind: "options", id: "question-1", selected: ["A"] }));
+    expect(readMessageBlockById("missing-question")).toBeUndefined();
     expect(readConversation("c1")?.status).toBe("running");
     expect(readThreadFromDb("c2").map((message) => message.id)).toEqual(["a2"]);
   });
@@ -312,6 +319,100 @@ describe("workspace-db", () => {
     expect(read.threads.c3).toBeUndefined(); // deleted conversation → messages dropped
   });
 
+  it("rejects replacing an existing conversation with a partial thread page", () => {
+    initializeWorkspaceStateInDb({
+      ...buildEmptyWorkspaceState(),
+      chats: [conv("c1")],
+      threads: {
+        c1: [userMsg("u1", "first"), msg("a1", "first answer"), userMsg("u2", "second"), msg("a2", "second answer")],
+      },
+      selectedId: "c1",
+    });
+
+    expect(() =>
+      applyWorkspaceDbMutations([
+        {
+          type: "replaceConversationThread",
+          conversationId: "c1",
+          messages: [userMsg("u2", "second"), msg("a2", "second answer")],
+        },
+      ]),
+    ).toThrow("partial thread page");
+    expect(readWorkspaceStateFromDb().threads.c1.map((message) => message.id)).toEqual(["u1", "a1", "u2", "a2"]);
+  });
+
+  it("rejects replacing an existing conversation when any existing middle message is missing", () => {
+    initializeWorkspaceStateInDb({
+      ...buildEmptyWorkspaceState(),
+      chats: [conv("c1")],
+      threads: {
+        c1: [userMsg("u1", "first"), msg("a1", "first answer"), userMsg("u2", "second"), msg("a2", "second answer")],
+      },
+      selectedId: "c1",
+    });
+
+    expect(() =>
+      applyWorkspaceDbMutations([
+        {
+          type: "replaceConversationThread",
+          conversationId: "c1",
+          messages: [userMsg("u1", "first"), userMsg("u2", "second"), msg("a2", "second answer")],
+        },
+      ]),
+    ).toThrow("partial thread page");
+    expect(readWorkspaceStateFromDb().threads.c1.map((message) => message.id)).toEqual(["u1", "a1", "u2", "a2"]);
+  });
+
+  it("restarts a user turn by updating it and deleting only later messages", () => {
+    initializeWorkspaceStateInDb({
+      ...buildEmptyWorkspaceState(),
+      chats: [conv("c1")],
+      threads: {
+        c1: [userMsg("u1", "first"), msg("a1", "first answer"), userMsg("u2", "second"), msg("a2", "second answer")],
+      },
+      selectedId: "c1",
+    });
+
+    applyWorkspaceDbMutations([{ type: "restartUserTurn", conversationId: "c1", userMessage: userMsg("u2", "edited second", { createdAtMs: 1234 }) }]);
+
+    const thread = readWorkspaceStateFromDb().threads.c1;
+    expect(thread.map((message) => message.id)).toEqual(["u1", "a1", "u2"]);
+    expect(thread[2]).toMatchObject({ role: "user", text: "edited second", createdAtMs: 1234 });
+  });
+
+  it("appends a missing restarted user turn instead of rejecting the whole mutation batch", () => {
+    initializeWorkspaceStateInDb({
+      ...buildEmptyWorkspaceState(),
+      chats: [conv("c1")],
+      threads: {
+        c1: [userMsg("u1", "first"), msg("a1", "first answer")],
+      },
+      selectedId: "c1",
+    });
+
+    applyWorkspaceDbMutations([{ type: "restartUserTurn", conversationId: "c1", userMessage: userMsg("u2", "second") }]);
+
+    expect(readWorkspaceStateFromDb().threads.c1.map((message) => message.id)).toEqual(["u1", "a1", "u2"]);
+  });
+
+  it("persists a server-bound restarted user turn before inserting the new agent reply", () => {
+    initializeWorkspaceStateInDb({
+      ...buildEmptyWorkspaceState(),
+      chats: [conv("c1")],
+      threads: {
+        c1: [userMsg("u1", "old prompt"), msg("a-old", "old answer")],
+      },
+      selectedId: "c1",
+    });
+
+    restartUserTurn("c1", userMsg("u1", "edited prompt"));
+    upsertAgentMessageForUserTurn("c1", "u1", msg("a-new", "new answer"));
+
+    const thread = readWorkspaceStateFromDb().threads.c1;
+    expect(thread.map((message) => message.id)).toEqual(["u1", "a-new"]);
+    expect(thread[0]).toMatchObject({ role: "user", text: "edited prompt" });
+  });
+
   it("front-inserts conversations without transient position collisions", () => {
     initializeWorkspaceStateInDb({ ...buildEmptyWorkspaceState(), selectedId: "" });
 
@@ -328,6 +429,8 @@ describe("workspace-db", () => {
     initializeWorkspaceStateInDb({
       ...buildEmptyWorkspaceState(),
       chats: [
+        conv("root-no-exact-user", { updatedAtMs: 10_000 }),
+        conv("root-no-user", { updatedAtMs: 9000 }),
         conv("root-old", { updatedAtMs: 9000 }),
         conv("root-new", { updatedAtMs: 1000 }),
         conv("root-middle", { updatedAtMs: 2000 }),
@@ -337,6 +440,8 @@ describe("workspace-db", () => {
           id: "p1",
           name: "Project",
           conversations: [
+            conv("project-no-exact-user", { updatedAtMs: 10_000 }),
+            conv("project-no-user", { updatedAtMs: 9000 }),
             conv("project-old", { updatedAtMs: 9000 }),
             conv("project-new", { updatedAtMs: 1000 }),
             conv("project-middle", { updatedAtMs: 2000 }),
@@ -347,17 +452,27 @@ describe("workspace-db", () => {
         "root-old": [userMsg("u-root-old", "old", { createdAtMs: 1000 }), msg("a-root-old", "agent update")],
         "root-new": [userMsg("u-root-new", "new", { createdAtMs: 3000 })],
         "root-middle": [userMsg("u-root-middle", "middle", { createdAtMs: 2000 })],
+        "root-no-exact-user": [userMsg("u-root-no-exact", "legacy user without exact timestamp")],
+        "root-no-user": [msg("a-root-no-user", "agent-only update")],
         "project-old": [userMsg("u-project-old", "old", { createdAtMs: 1000 }), msg("a-project-old", "agent update")],
         "project-new": [userMsg("u-project-new", "new", { createdAtMs: 3000 })],
         "project-middle": [userMsg("u-project-middle", "middle", { createdAtMs: 2000 })],
+        "project-no-exact-user": [userMsg("u-project-no-exact", "legacy user without exact timestamp")],
+        "project-no-user": [msg("a-project-no-user", "agent-only update")],
       },
       selectedId: "root-old",
     });
 
     const read = readWorkspaceStateFromDb(new Set<string>());
 
-    expect(read.chats.map((conversation) => conversation.id)).toEqual(["root-new", "root-middle", "root-old"]);
-    expect(read.projects[0]?.conversations.map((conversation) => conversation.id)).toEqual(["project-new", "project-middle", "project-old"]);
+    expect(read.chats.map((conversation) => conversation.id)).toEqual(["root-new", "root-middle", "root-old", "root-no-exact-user", "root-no-user"]);
+    expect(read.projects[0]?.conversations.map((conversation) => conversation.id)).toEqual([
+      "project-new",
+      "project-middle",
+      "project-old",
+      "project-no-exact-user",
+      "project-no-user",
+    ]);
   });
 
   it("front-inserts projects without transient position collisions", () => {

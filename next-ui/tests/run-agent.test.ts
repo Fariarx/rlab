@@ -764,6 +764,7 @@ describe("runConversation", () => {
       agentMessageId: "agent-1",
       status: "done",
       time: "10:00",
+      agentMessageTime: "10:01",
       done: true,
       blocks: [{ kind: "text", text: "done", streaming: false }],
       usage: { totalTokens: 77 },

@@ -131,6 +131,63 @@ describe("WorkspaceSaveQueue", () => {
     expect(revisionRef.current).toBe(7);
   });
 
+  it("does not retry non-retryable rejected mutations", async () => {
+    const stateRef = { current: buildInitialWorkspaceState() };
+    const revisionRef = { current: 3 };
+    const setLoadError = vi.fn();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        mutationRequests.push(JSON.parse(String(init?.body ?? "{}")) as { baseRevision: number; mutations: WorkspaceMutation[] });
+        return Response.json({ error: "Full thread replacement is disabled.", retryable: false }, { status: 400 });
+      }),
+    );
+    const queue = new WorkspaceSaveQueue({ ...hostFor(stateRef, revisionRef), setLoadError });
+
+    queue.enqueue({ type: "replaceConversationThread", conversationId: "chat-1", messages: [] });
+    await vi.advanceTimersByTimeAsync(250);
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(2_000);
+    await flushMicrotasks();
+
+    expect(mutationRequests).toHaveLength(1);
+    expect(setLoadError).toHaveBeenCalledWith("Workspace save rejected: Full thread replacement is disabled.");
+  });
+
+  it("salvages valid mutations from a mixed non-retryable rejected batch", async () => {
+    const stateRef = { current: buildInitialWorkspaceState() };
+    const revisionRef = { current: 3 };
+    const setLoadError = vi.fn();
+    const rejectedMutation: WorkspaceMutation = { type: "replaceConversationThread", conversationId: "chat-1", messages: [] };
+    const validMutation: WorkspaceMutation = { type: "setSelectedConversation", conversationId: "" };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const request = JSON.parse(String(init?.body ?? "{}")) as { baseRevision: number; mutations: WorkspaceMutation[] };
+        mutationRequests.push(request);
+        if (request.mutations.length > 1 || request.mutations[0]?.type === "replaceConversationThread") {
+          return Response.json({ error: "Full thread replacement is disabled.", retryable: false }, { status: 400 });
+        }
+        return Response.json({ ok: true, revision: request.baseRevision + 1 });
+      }),
+    );
+    const queue = new WorkspaceSaveQueue({ ...hostFor(stateRef, revisionRef), setLoadError });
+
+    queue.enqueue(rejectedMutation, validMutation);
+    await vi.advanceTimersByTimeAsync(250);
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(2_000);
+    await flushMicrotasks();
+
+    expect(mutationRequests).toEqual([
+      { baseRevision: 3, mutations: [rejectedMutation, validMutation] },
+      { baseRevision: 3, mutations: [rejectedMutation] },
+      { baseRevision: 3, mutations: [validMutation] },
+    ]);
+    expect(revisionRef.current).toBe(4);
+    expect(setLoadError).toHaveBeenCalledWith("Workspace save rejected: Full thread replacement is disabled.");
+  });
+
   it("keeps a locally created empty conversation known after conflict rebase", async () => {
     const serverState = buildInitialWorkspaceState();
     const newConversation: ConversationSummary = {

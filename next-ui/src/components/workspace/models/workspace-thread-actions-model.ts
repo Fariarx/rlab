@@ -16,7 +16,11 @@ export function appendUserMessageState(state: WorkspaceState, conversationId: st
       threads: { ...state.threads, [conversationId]: [...(state.threads[conversationId] ?? []), message] },
     },
     conversationId,
-    { archived: false, ...(updatedAtMs === undefined ? {} : { updatedAtMs }) },
+    {
+      archived: false,
+      ...(message.time === undefined ? {} : { time: message.time }),
+      ...(updatedAtMs === undefined ? {} : { updatedAtMs }),
+    },
   );
 }
 

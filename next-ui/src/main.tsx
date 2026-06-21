@@ -2,6 +2,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import "./theme/fonts";
 import { App } from "./App";
+import { RootErrorBoundary } from "./RootErrorBoundary";
 
 const rootElement = document.getElementById("root");
 
@@ -11,6 +12,8 @@ if (!rootElement) {
 
 createRoot(rootElement).render(
   <StrictMode>
-    <App />
+    <RootErrorBoundary>
+      <App />
+    </RootErrorBoundary>
   </StrictMode>,
 );

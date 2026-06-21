@@ -449,6 +449,9 @@ describe("workspace-conversation-model", () => {
     expect(next.composerDrafts["chat-1"]).toEqual(sourceDraft);
     expect(next.composerDrafts["chat-1"]?.attachments[0]).not.toBe(sourceAttachment);
     expect(putComposerDraftState(next, "chat-1", sourceDraft)).toBe(next);
+    const cleared = putComposerDraftState(next, "chat-1", { text: "  ", attachments: [] });
+    expect(cleared.composerDrafts["chat-1"]).toBeUndefined();
+    expect(putComposerDraftState(cleared, "chat-1", { text: "", attachments: [] })).toBe(cleared);
 
     expect(composerDraftMutation("chat-1", { text: "  ", attachments: [] })).toEqual({ type: "deleteComposerDraft", conversationId: "chat-1" });
     expect(composerDraftMutation("chat-1", sourceDraft)).toEqual({ type: "setComposerDraft", conversationId: "chat-1", draft: sourceDraft });

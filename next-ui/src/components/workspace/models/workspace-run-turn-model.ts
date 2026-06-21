@@ -42,11 +42,13 @@ export function prepareWorkspaceRunTurn({
   const text = userMessage.text ?? "";
   const resume = conversationSessionId(conversation, profile.agent);
   const prompt = promptForUserTurn(thread, userMessage, Boolean(resume), options?.promptOverride);
+  const userMessageUpdatedAtMs = typeof userMessage.createdAtMs === "number" && Number.isFinite(userMessage.createdAtMs) ? userMessage.createdAtMs : undefined;
   const runningPatch: Partial<ConversationSummary> = {
     activeRunId: runId,
     status: "running",
     snippet: previewSnippet(text, 60),
-    time: agentMessageTime,
+    ...(userMessage.time === undefined ? {} : { time: userMessage.time }),
+    ...(userMessageUpdatedAtMs === undefined ? {} : { updatedAtMs: userMessageUpdatedAtMs }),
     unread: false,
     costUsd: undefined,
     usage: options?.initialContextTokens === undefined

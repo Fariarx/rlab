@@ -1,7 +1,7 @@
 import type { ChangeEvent, ClipboardEvent, FormEvent, KeyboardEvent, RefObject } from "react";
 import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import type { I18nApi } from "../../../i18n/I18nProvider";
-import { clipboardFilesForComposer, composerSendPayload, mergeComposerAttachments, pastedTextFileForComposer } from "./composer-attachments-model";
+import { clipboardFilesForComposer, composerSendPayload, isLargePasteInputType, mergeComposerAttachments, pastedTextFileForComposer, pastedTextFileFromBeforeInput } from "./composer-attachments-model";
 import { emptyComposerHistoryState, navigateComposerHistory, resetComposerHistoryState, type ComposerHistoryState } from "./composer-history-model";
 import { applyComposerSuggestion, type ComposerSuggestion } from "./composer-suggestions-model";
 import {
@@ -56,6 +56,30 @@ interface UseComposerTextControllerResult {
   readonly setComposerAttachments: (nextAttachments: readonly ComposerAttachmentDraft[]) => void;
   readonly setComposerValue: (nextValue: string) => void;
   readonly updateDraft: (draft: ComposerDraft) => void;
+}
+
+function changeEventInputType(event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>): string | null {
+  const nativeEvent = event.nativeEvent as Event & { readonly inputType?: unknown };
+  return typeof nativeEvent.inputType === "string" ? nativeEvent.inputType : null;
+}
+
+function insertedTextFromChange(previous: string, next: string): string {
+  if (next.length <= previous.length) {
+    return "";
+  }
+  let prefixLength = 0;
+  while (prefixLength < previous.length && prefixLength < next.length && previous[prefixLength] === next[prefixLength]) {
+    prefixLength += 1;
+  }
+  let suffixLength = 0;
+  while (
+    suffixLength < previous.length - prefixLength
+    && suffixLength < next.length - prefixLength
+    && previous[previous.length - 1 - suffixLength] === next[next.length - 1 - suffixLength]
+  ) {
+    suffixLength += 1;
+  }
+  return next.slice(prefixLength, next.length - suffixLength);
 }
 
 export function useComposerTextController({
@@ -239,8 +263,57 @@ export function useComposerTextController({
     setSending(false);
   }, [armStaleSubmitChangeGuard, onBeforeSend, onSend, onSendReview, reviewCount, setSending, updateDraft]);
 
+  const addFiles = useCallback(async (files: readonly File[]) => {
+    if (files.length === 0) {
+      return;
+    }
+    const results = await Promise.allSettled(files.map(fileToAttachmentDraft));
+    const ready: ComposerAttachmentDraft[] = [];
+    results.forEach((result, index) => {
+      if (result.status === "fulfilled") {
+        ready.push(result.value);
+      } else {
+        onAttachmentError?.(t("attachmentFailed", { name: files[index].name }));
+      }
+    });
+    if (ready.length > 0) {
+      setComposerAttachments(mergeComposerAttachments(latestDraftRef.current.attachments, ready));
+    }
+  }, [onAttachmentError, setComposerAttachments, t]);
+
+  useLayoutEffect(() => {
+    // The textarea node can swap when composer overlays mount, so bind to the
+    // current DOM node rather than relying on React's synthetic beforeinput.
+    const el = textareaRef.current;
+    if (!el) {
+      return;
+    }
+    const handleNativeBeforeInput = (event: InputEvent) => {
+      const pastedTextFile = pastedTextFileFromBeforeInput(event);
+      if (!pastedTextFile) {
+        return;
+      }
+      event.preventDefault();
+      clearStaleSubmitChangeGuard();
+      void addFiles([pastedTextFile]);
+    };
+    el.addEventListener("beforeinput", handleNativeBeforeInput);
+    return () => {
+      el.removeEventListener("beforeinput", handleNativeBeforeInput);
+    };
+  });
+
   const handleComposerChange = useCallback((event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     const nextValue = event.target.value;
+    const insertedText = insertedTextFromChange(composerValue, nextValue);
+    const inputType = changeEventInputType(event);
+    const pastedTextFile = insertedText.length > 0 && isLargePasteInputType(inputType) ? pastedTextFileForComposer(insertedText) : null;
+    if (pastedTextFile) {
+      event.target.value = composerValue;
+      clearStaleSubmitChangeGuard();
+      void addFiles([pastedTextFile]);
+      return;
+    }
     const staleSubmittedText = staleSubmitChangeGuardRef.current;
     if (staleSubmittedText) {
       const normalizedNextValue = nextValue.trim();
@@ -256,10 +329,17 @@ export function useComposerTextController({
       return;
     }
     setComposerValue(nextValue);
-  }, [clearStaleSubmitChangeGuard, composerValue, pluginTokenRanges, setComposerValue]);
+  }, [addFiles, clearStaleSubmitChangeGuard, composerValue, pluginTokenRanges, setComposerValue]);
 
   const handleBeforeInput = useCallback((event: FormEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     const nativeEvent = event.nativeEvent as InputEvent;
+    const pastedTextFile = pastedTextFileFromBeforeInput(nativeEvent);
+    if (pastedTextFile) {
+      event.preventDefault();
+      clearStaleSubmitChangeGuard();
+      void addFiles([pastedTextFile]);
+      return;
+    }
     if (nativeEvent.inputType === "deleteContentBackward" && deleteComposerPluginToken("Backspace")) {
       event.preventDefault();
       return;
@@ -267,7 +347,7 @@ export function useComposerTextController({
     if (nativeEvent.inputType === "deleteContentForward" && deleteComposerPluginToken("Delete")) {
       event.preventDefault();
     }
-  }, [deleteComposerPluginToken]);
+  }, [addFiles, clearStaleSubmitChangeGuard, deleteComposerPluginToken]);
 
   const handleKeyDown = useCallback((event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (suggestionsOpen) {
@@ -334,24 +414,6 @@ export function useComposerTextController({
     suggestionsOpen,
     textareaRef,
   ]);
-
-  const addFiles = useCallback(async (files: readonly File[]) => {
-    if (files.length === 0) {
-      return;
-    }
-    const results = await Promise.allSettled(files.map(fileToAttachmentDraft));
-    const ready: ComposerAttachmentDraft[] = [];
-    results.forEach((result, index) => {
-      if (result.status === "fulfilled") {
-        ready.push(result.value);
-      } else {
-        onAttachmentError?.(t("attachmentFailed", { name: files[index].name }));
-      }
-    });
-    if (ready.length > 0) {
-      setComposerAttachments(mergeComposerAttachments(latestDraftRef.current.attachments, ready));
-    }
-  }, [onAttachmentError, setComposerAttachments, t]);
 
   const handlePaste = useCallback((event: ClipboardEvent<HTMLDivElement>) => {
     const clipboard = event.clipboardData;

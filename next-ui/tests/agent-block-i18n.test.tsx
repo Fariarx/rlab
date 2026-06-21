@@ -6,7 +6,7 @@ import { Toast } from "../src/components/ui";
 import { renderWithTheme } from "./util/render-with-theme";
 
 describe("agent block i18n", () => {
-  it("renders agent block chrome in Russian by default", () => {
+  it("renders agent block chrome in Russian by default", async () => {
     renderWithTheme(
       <>
         <AgentBlockRenderer block={{ kind: "reasoning", text: "checking constraints", active: true }} />
@@ -17,9 +17,11 @@ describe("agent block i18n", () => {
         <AgentBlockRenderer
           block={{
             kind: "options",
+            id: "question-1",
             prompt: "Выберите стратегию",
             options: [{ id: "a", label: "Вариант A" }],
           }}
+          actions={{ onOptionSelection: () => undefined }}
         />
       </>,
     );
@@ -34,7 +36,7 @@ describe("agent block i18n", () => {
     fireEvent.click(screen.getByText("Вариант A"));
     fireEvent.click(screen.getByRole("button", { name: "Подтвердить" }));
 
-    expect(screen.getByText("Выбрано: Вариант A")).toBeInTheDocument();
+    expect(await screen.findByText("Выбрано: Вариант A")).toBeInTheDocument();
   });
 
   it("renders shared chrome labels in Russian by default", () => {
@@ -47,5 +49,12 @@ describe("agent block i18n", () => {
 
     expect(screen.getByText("ВЫ")).toBeInTheDocument();
     expect(screen.getByLabelText("Закрыть уведомление")).toBeInTheDocument();
+  });
+
+  it("does not render an empty search disclosure for zero results", () => {
+    const { container } = renderWithTheme(<AgentBlockRenderer block={{ kind: "search", query: "empty", state: "ok", results: [] }} />);
+
+    expect(screen.getByText("Результатов: 0")).toBeInTheDocument();
+    expect(container.querySelector('[data-testid="KeyboardArrowDownIcon"]')).not.toBeInTheDocument();
   });
 });

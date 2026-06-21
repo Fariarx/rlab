@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AgentBlock, ChatMessage, ConversationSummary } from "../src/components/agent";
-import { hasUntrackedPersistedActiveRuns, mergeBackgroundRunState } from "../src/components/workspace/models/workspace-background-runs-model";
+import { hasUntrackedPersistedActiveRuns, mergeBackgroundRunState, trackedPersistedActiveRunsMissingOnServer } from "../src/components/workspace/models/workspace-background-runs-model";
 import { buildEmptyWorkspaceState, type WorkspaceState } from "../src/lib/workspace-state";
 
 function conversation(id: string, patch: Partial<ConversationSummary> = {}): ConversationSummary {
@@ -45,7 +45,28 @@ describe("workspace-background-runs-model", () => {
     expect(hasUntrackedPersistedActiveRuns(workspace({ chats: [conversation("tracked", { activeRunId: "run-tracked", status: "running" })] }), trackedRuns)).toBe(false);
   });
 
-  it("settles orphaned persisted runs when the server no longer lists the run id", () => {
+  it("detects tracked live runs that disappeared from the server", () => {
+    const state = workspace({
+      chats: [
+        conversation("stale", { activeRunId: "run-stale", status: "running" }),
+        conversation("still-live", { activeRunId: "run-live", status: "running" }),
+        conversation("done", { activeRunId: undefined, status: "done" }),
+        conversation("mismatch", { activeRunId: "run-new", status: "running" }),
+        conversation("same-conversation-live", { activeRunId: "run-local", status: "running" }),
+      ],
+    });
+    const trackedRuns = new Map([
+      ["stale", { runId: "run-stale" }],
+      ["still-live", { runId: "run-live" }],
+      ["done", { runId: "run-done" }],
+      ["mismatch", { runId: "run-old" }],
+      ["same-conversation-live", { runId: "run-local" }],
+    ]);
+
+    expect(trackedPersistedActiveRunsMissingOnServer(state, trackedRuns, new Set(["run-live", "run-server"]), new Set(["same-conversation-live"]))).toEqual(["stale"]);
+  });
+
+  it("does not synthesize an interruption from a stale live snapshot", () => {
     const runningBlock: AgentBlock = { kind: "reasoning", text: "working", active: true };
     const current = workspace({
       chats: [conversation("chat-1", { activeRunId: "run-1", status: "running" })],
@@ -67,8 +88,32 @@ describe("workspace-background-runs-model", () => {
       trackedRuns: new Map(),
     });
 
-    expect(next.chats[0]).toMatchObject({ id: "chat-1", activeRunId: undefined, status: "error", snippet: "server answer" });
-    expect(next.threads["chat-1"]?.[1]?.blocks).toEqual([{ kind: "reasoning", text: "working", active: false }]);
+    expect(next).toBe(current);
+  });
+
+  it("adopts the loaded terminal result after the server finishes a missing run", () => {
+    const current = workspace({
+      chats: [conversation("chat-1", { activeRunId: "run-1", status: "running", snippet: "working" })],
+      threads: {
+        "chat-1": [userMessage("u1", "question"), agentMessage("a1", [{ kind: "reasoning", text: "working", active: true }])],
+      },
+    });
+    const loaded = workspace({
+      chats: [conversation("chat-1", { activeRunId: undefined, status: "done", snippet: "server answer" })],
+      threads: {
+        "chat-1": [userMessage("u1", "question"), agentMessage("a1", [{ kind: "text", text: "server answer" }])],
+      },
+    });
+
+    const next = mergeBackgroundRunState({
+      current,
+      loaded,
+      activeRunIds: new Set(),
+      trackedRuns: new Map(),
+    });
+
+    expect(next.chats[0]).toMatchObject({ id: "chat-1", activeRunId: undefined, status: "done", snippet: "server answer" });
+    expect(next.threads["chat-1"]?.[1]?.blocks).toEqual([{ kind: "text", text: "server answer" }]);
   });
 
   it("adopts the loaded conversation and thread while the server still owns the run", () => {
