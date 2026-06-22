@@ -16,6 +16,7 @@ import {
   codexAppServerItemEvents,
   codexRlabDynamicTools,
   codexAppServerUsage,
+  createScheduledWakeupDispatch,
   buildGeminiRunArgs,
   buildGitCommitArgs,
   buildGitPushArgs,
@@ -77,6 +78,7 @@ import {
   mergeWorkspacePutState,
   npmPackageNameFromInstallSpec,
   listMentionableFiles,
+  normalizeWakeupTrigger,
   reconcileStaleBackgroundRuns,
   hasGeminiStoredAuthAt,
   installCommandForAgent,
@@ -93,6 +95,8 @@ import {
   prepareAgentPrompt,
   prioritizeBrowserPreviewDomTargets,
   queuedTurnRunBody,
+  readScheduledWakeupRecords,
+  retryScheduledWakeupDispatchRecord,
   resolveAgentInstallLaunch,
   resolveBinOnPath,
   resolveLaunchCommand,
@@ -115,11 +119,43 @@ import {
   type BackgroundRunHandle,
   visibleAgentDetectionIds,
   readRunAuditEvents,
+  scheduledWakeupDueAction,
+  scheduledWakeupInvalidRecordsFile,
+  scheduledWakeupTargetMs,
+  WAKEUP_DISPATCH_RETRY_DELAY_MS,
+  wakeupTimerDelay,
+  writeScheduledWakeupRecords,
 } from "../vite-agents-plugin";
 import { MAX_AGENT_TOOL_OUTPUT_CHARS } from "../src/lib/agent-output";
 import { accumulateRunEvent, applyRunEventOptionSelection, createRunEventAccumulator, runEventBlocks } from "../src/lib/run-event-accumulator";
 import { buildEmptyWorkspaceState, buildInitialWorkspaceState } from "../src/lib/workspace-state";
 import { closeWorkspaceDb, initializeWorkspaceStateInDb, initWorkspaceDb, readMessageBlockById, type PendingTurnRecord } from "../workspace-db";
+
+type ScheduledWakeupRecordForTest = Parameters<typeof writeScheduledWakeupRecords>[0][number];
+
+function scheduledWakeupRecordForTest(
+  trigger: ScheduledWakeupRecordForTest["trigger"],
+  patch: Partial<ScheduledWakeupRecordForTest> = {},
+): ScheduledWakeupRecordForTest {
+  return {
+    id: "wakeup-test",
+    createdAtMs: 1_000,
+    origin: "http://127.0.0.1:4280",
+    cwd: "/tmp",
+    conversationId: "chat-wakeup",
+    sourceRunId: "run-source",
+    trigger,
+    request: {
+      agent: "codex",
+      model: "default",
+      reasoning: "default",
+      mode: "default",
+      prompt: "wake up",
+      accessMode: "read-only",
+    },
+    ...patch,
+  };
+}
 
 describe("vite agents plugin", () => {
   it("does not import client UI modules into the dev-server runtime", () => {
@@ -226,6 +262,119 @@ describe("vite agents plugin", () => {
     expect(withTools).toContain('TaskWakeup with action="list"');
     expect(withTools).toContain("{ prompt, script, intervalSeconds, reason }");
     expect(appendRlabChatToolsPrompt(withTools).match(/<rlab-chat-tools>/g)).toHaveLength(1);
+  });
+
+  it("loads persisted cron and script-cron wakeups on restart", () => {
+    const dir = mkdtempSync(join(tmpdir(), "rlab-wakeups-"));
+    const file = join(dir, "scheduled-wakeups.json");
+    try {
+      const records = [
+        scheduledWakeupRecordForTest({ type: "cron", cron: "*/5 * * * *", nextFireMs: 10_000 }),
+        scheduledWakeupRecordForTest(
+          { type: "script", script: "exit 1", cron: "*/10 * * * *", nextCheckMs: 20_000 },
+          { id: "wakeup-script-cron" },
+        ),
+      ];
+
+      writeScheduledWakeupRecords(records, file);
+
+      expect(readScheduledWakeupRecords(file).map((record) => record.trigger)).toEqual(records.map((record) => record.trigger));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("quarantines invalid persisted wakeup records without dropping valid records", () => {
+    const dir = mkdtempSync(join(tmpdir(), "rlab-wakeups-invalid-"));
+    const file = join(dir, "scheduled-wakeups.json");
+    try {
+      const valid = scheduledWakeupRecordForTest({ type: "time", fireAtMs: 10_000 });
+      const invalid = { ...scheduledWakeupRecordForTest({ type: "time", fireAtMs: 20_000 }, { id: "wakeup-invalid" }), trigger: { type: "cron", cron: "*/5 * * * *" } };
+      writeFileSync(file, JSON.stringify([valid, invalid]));
+
+      expect(readScheduledWakeupRecords(file)).toEqual([valid]);
+      const quarantined = readFileSync(scheduledWakeupInvalidRecordsFile(file), "utf8")
+        .trim()
+        .split(/\r?\n/)
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(quarantined).toEqual([expect.objectContaining({ sourceFile: file, index: 1, reason: "Invalid scheduled wakeup record." })]);
+      expect(JSON.parse(readFileSync(file, "utf8"))).toEqual([valid, invalid]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("materializes wakeup delay targets as absolute fire times across restart", () => {
+    const dir = mkdtempSync(join(tmpdir(), "rlab-wakeups-delay-"));
+    const file = join(dir, "scheduled-wakeups.json");
+    try {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-06-22T10:00:00.000Z"));
+      const trigger = normalizeWakeupTrigger({ type: "wakeup", prompt: "wake later", delaySeconds: 600 } as Parameters<typeof normalizeWakeupTrigger>[0]);
+      const record = scheduledWakeupRecordForTest(trigger);
+      writeScheduledWakeupRecords([record], file);
+
+      vi.setSystemTime(new Date("2026-06-22T10:05:00.000Z"));
+      const restartedRecord = readScheduledWakeupRecords(file)[0];
+
+      expect(restartedRecord?.trigger).toEqual({ type: "time", fireAtMs: Date.parse("2026-06-22T10:10:00.000Z") });
+      expect(scheduledWakeupTargetMs(restartedRecord as ScheduledWakeupRecordForTest, Date.now())).toBe(Date.parse("2026-06-22T10:10:00.000Z"));
+    } finally {
+      vi.useRealTimers();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("clamps only the current wakeup timer chunk", () => {
+    expect(wakeupTimerDelay(10_000, 4_000)).toBe(6_000);
+    expect(wakeupTimerDelay(10_000, 12_000)).toBe(0);
+    expect(wakeupTimerDelay(3_000_000_000, 0)).toBe(2_147_483_647);
+  });
+
+  it("persists dispatching wakeup ids so restart does not regenerate the run", () => {
+    const dir = mkdtempSync(join(tmpdir(), "rlab-wakeups-dispatch-"));
+    const file = join(dir, "scheduled-wakeups.json");
+    try {
+      const dispatch = createScheduledWakeupDispatch(123_000, "12:30");
+      const record = scheduledWakeupRecordForTest({ type: "time", fireAtMs: 10_000 }, { dispatch });
+
+      writeScheduledWakeupRecords([record], file);
+
+      expect(readScheduledWakeupRecords(file)[0]?.dispatch).toEqual(dispatch);
+      expect(dispatch.runId).toMatch(/^run-/);
+      expect(dispatch.userMessageId).toMatch(/^u-/);
+      expect(dispatch.agentMessageId).toMatch(/^a-/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not rerun a script wakeup after dispatch was persisted", () => {
+    const dispatch = createScheduledWakeupDispatch(123_000, "12:30");
+    const record = scheduledWakeupRecordForTest(
+      { type: "script", script: "test -f /tmp/ready", intervalSeconds: 10, nextCheckMs: 120_000 },
+      { dispatch },
+    );
+
+    expect(scheduledWakeupDueAction(record)).toBe("fire");
+    expect(scheduledWakeupTargetMs(record, 130_000)).toBe(130_000);
+  });
+
+  it("keeps dispatch ids and schedules retry after wakeup run dispatch failure", () => {
+    const dispatch = createScheduledWakeupDispatch(123_000, "12:30");
+    const record = scheduledWakeupRecordForTest({ type: "time", fireAtMs: 100_000 }, { dispatch });
+
+    const retryRecord = retryScheduledWakeupDispatchRecord(record, new Error("HTTP 503 unavailable"), 200_000);
+
+    expect(retryRecord.dispatch).toEqual({
+      ...dispatch,
+      attempt: 1,
+      lastError: "HTTP 503 unavailable",
+      lastFailedAtMs: 200_000,
+      retryAtMs: 200_000 + WAKEUP_DISPATCH_RETRY_DELAY_MS,
+    });
+    expect(scheduledWakeupTargetMs(retryRecord, 210_000)).toBe(200_000 + WAKEUP_DISPATCH_RETRY_DELAY_MS);
+    expect(scheduledWakeupDueAction(retryRecord)).toBe("fire");
   });
 
   it("omits disabled rlab chat tools from the agent prompt", () => {

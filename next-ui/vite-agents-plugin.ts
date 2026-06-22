@@ -176,6 +176,7 @@ const WORKSPACE_STATE_DIR = resolveWorkspaceStateDir(process.env, process.cwd())
 const WORKSPACE_DB_FILE = join(WORKSPACE_STATE_DIR, "workspace.db");
 const RUN_AUDIT_FILE = join(WORKSPACE_STATE_DIR, "run-audit.ndjson");
 const SCHEDULED_WAKEUPS_FILE = join(WORKSPACE_STATE_DIR, "scheduled-wakeups.json");
+const SCHEDULED_WAKEUPS_INVALID_SUFFIX = ".invalid.ndjson";
 const ATTACHMENTS_DIR = join(WORKSPACE_STATE_DIR, "attachments");
 const AMP_READ_ONLY_SETTINGS_FILE = join(WORKSPACE_STATE_DIR, "amp-read-only-settings.json");
 // Account rate-limit snapshots survive restarts here so the composer keeps
@@ -3076,15 +3077,51 @@ function isScheduledWakeupTrigger(value: unknown): value is ScheduledWakeupTrigg
   if (value.type === "time") {
     return typeof value.fireAtMs === "number" && Number.isFinite(value.fireAtMs);
   }
+  if (value.type === "cron") {
+    return (
+      typeof value.cron === "string" &&
+      value.cron.trim().length > 0 &&
+      typeof value.nextFireMs === "number" &&
+      Number.isFinite(value.nextFireMs)
+    );
+  }
+  if (value.type === "script") {
+    const hasInterval =
+      typeof value.intervalSeconds === "number" &&
+      Number.isFinite(value.intervalSeconds) &&
+      value.intervalSeconds > 0;
+    const hasCron = typeof value.cron === "string" && value.cron.trim().length > 0;
+    return (
+      typeof value.script === "string" &&
+      value.script.trim().length > 0 &&
+      (hasInterval || hasCron) &&
+      typeof value.nextCheckMs === "number" &&
+      Number.isFinite(value.nextCheckMs) &&
+      (value.lastCheckedAtMs === undefined || (typeof value.lastCheckedAtMs === "number" && Number.isFinite(value.lastCheckedAtMs))) &&
+      (value.lastExitCode === undefined || (typeof value.lastExitCode === "number" && Number.isFinite(value.lastExitCode))) &&
+      (value.lastError === undefined || typeof value.lastError === "string")
+    );
+  }
+  return false;
+}
+
+function isScheduledWakeupDispatch(value: unknown): value is ScheduledWakeupDispatch {
   return (
-    value.type === "script" &&
-    typeof value.script === "string" &&
-    value.script.trim().length > 0 &&
-    typeof value.intervalSeconds === "number" &&
-    Number.isFinite(value.intervalSeconds) &&
-    value.intervalSeconds > 0 &&
-    typeof value.nextCheckMs === "number" &&
-    Number.isFinite(value.nextCheckMs)
+    isRecord(value) &&
+    value.state === "dispatching" &&
+    typeof value.startedAtMs === "number" &&
+    Number.isFinite(value.startedAtMs) &&
+    typeof value.runId === "string" &&
+    typeof value.userMessageId === "string" &&
+    typeof value.userMessageTime === "string" &&
+    typeof value.userMessageCreatedAtMs === "number" &&
+    Number.isFinite(value.userMessageCreatedAtMs) &&
+    typeof value.agentMessageId === "string" &&
+    typeof value.agentMessageTime === "string" &&
+    (value.attempt === undefined || (typeof value.attempt === "number" && Number.isFinite(value.attempt) && value.attempt >= 0)) &&
+    (value.lastError === undefined || typeof value.lastError === "string") &&
+    (value.lastFailedAtMs === undefined || (typeof value.lastFailedAtMs === "number" && Number.isFinite(value.lastFailedAtMs))) &&
+    (value.retryAtMs === undefined || (typeof value.retryAtMs === "number" && Number.isFinite(value.retryAtMs)))
   );
 }
 
@@ -3104,23 +3141,77 @@ function isScheduledWakeupRecord(value: unknown): value is ScheduledWakeupRecord
     typeof value.request.mode === "string" &&
     typeof value.request.prompt === "string" &&
     typeof value.request.accessMode === "string" &&
-    isScheduledWakeupTrigger(value.trigger)
+    isScheduledWakeupTrigger(value.trigger) &&
+    (value.dispatch === undefined || isScheduledWakeupDispatch(value.dispatch))
   );
 }
 
-function readScheduledWakeupRecords(file = SCHEDULED_WAKEUPS_FILE): ScheduledWakeupRecord[] {
+export function readScheduledWakeupRecords(file = SCHEDULED_WAKEUPS_FILE): ScheduledWakeupRecord[] {
   if (!existsSync(file)) {
     return [];
   }
-  const parsed = JSON.parse(readFileSync(file, "utf8").replace(/^\uFEFF/, "")) as unknown;
-  if (!Array.isArray(parsed)) {
-    throw new Error(`${file} must contain an array of scheduled wakeups.`);
+  const raw = readFileSync(file, "utf8").replace(/^\uFEFF/, "");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch (error) {
+    quarantineInvalidScheduledWakeups(file, [{ reason: `Invalid scheduled wakeup JSON: ${errorMessage(error)}`, raw }]);
+    return [];
   }
-  return parsed.filter(isScheduledWakeupRecord);
+  if (!Array.isArray(parsed)) {
+    quarantineInvalidScheduledWakeups(file, [{ reason: "Scheduled wakeup file must contain an array.", value: parsed }]);
+    return [];
+  }
+  const records: ScheduledWakeupRecord[] = [];
+  const invalidRecords: ScheduledWakeupInvalidRecord[] = [];
+  parsed.forEach((record, index) => {
+    if (!isScheduledWakeupRecord(record)) {
+      invalidRecords.push({ index, reason: "Invalid scheduled wakeup record.", value: record });
+      return;
+    }
+    records.push(record);
+  });
+  quarantineInvalidScheduledWakeups(file, invalidRecords);
+  return records;
 }
 
-function writeScheduledWakeupRecords(records: readonly ScheduledWakeupRecord[], file = SCHEDULED_WAKEUPS_FILE): void {
+export function writeScheduledWakeupRecords(records: readonly ScheduledWakeupRecord[], file = SCHEDULED_WAKEUPS_FILE): void {
   writeJsonFileAtomic(file, records, 0o600, false);
+}
+
+interface ScheduledWakeupInvalidRecord {
+  readonly index?: number;
+  readonly reason: string;
+  readonly value?: unknown;
+  readonly raw?: string;
+}
+
+export function scheduledWakeupInvalidRecordsFile(file = SCHEDULED_WAKEUPS_FILE): string {
+  return `${file}${SCHEDULED_WAKEUPS_INVALID_SUFFIX}`;
+}
+
+function quarantineInvalidScheduledWakeups(file: string, invalidRecords: readonly ScheduledWakeupInvalidRecord[]): void {
+  if (invalidRecords.length === 0) {
+    return;
+  }
+  const quarantineFile = scheduledWakeupInvalidRecordsFile(file);
+  mkdirSync(dirname(quarantineFile), { recursive: true });
+  const timestamp = new Date().toISOString();
+  const lines = invalidRecords.map((record) => JSON.stringify({ timestamp, sourceFile: file, ...record }));
+  appendFileSync(quarantineFile, `${lines.join("\n")}\n`, "utf8");
+  try {
+    chmodSync(quarantineFile, 0o600);
+  } catch {
+    // Best effort: the wakeup file is preserved even if chmod is unsupported.
+  }
+  if (file === SCHEDULED_WAKEUPS_FILE) {
+    appendRunAuditEvent(RUN_AUDIT_FILE, {
+      type: "scheduled_wakeup_records_quarantined",
+      file,
+      count: invalidRecords.length,
+      indexes: invalidRecords.map((record) => record.index).filter((index) => typeof index === "number"),
+    });
+  }
 }
 
 function scheduledWakeupSummaries(conversationId?: string): ScheduledWakeupSummary[] {
@@ -5697,7 +5788,7 @@ interface RunServerPromptRequest {
   readonly userMessage: ChatMessage;
 }
 
-type ScheduledWakeupTrigger =
+export type ScheduledWakeupTrigger =
   | { readonly type: "time"; readonly fireAtMs: number }
   | { readonly type: "cron"; readonly cron: string; readonly nextFireMs: number }
   | {
@@ -5711,7 +5802,22 @@ type ScheduledWakeupTrigger =
       readonly lastError?: string;
     };
 
-interface ScheduledWakeupRecord {
+export interface ScheduledWakeupDispatch {
+  readonly state: "dispatching";
+  readonly startedAtMs: number;
+  readonly runId: string;
+  readonly userMessageId: string;
+  readonly userMessageTime: string;
+  readonly userMessageCreatedAtMs: number;
+  readonly agentMessageId: string;
+  readonly agentMessageTime: string;
+  readonly attempt?: number;
+  readonly lastError?: string;
+  readonly lastFailedAtMs?: number;
+  readonly retryAtMs?: number;
+}
+
+export interface ScheduledWakeupRecord {
   readonly id: string;
   readonly createdAtMs: number;
   readonly origin: string;
@@ -5721,6 +5827,7 @@ interface ScheduledWakeupRecord {
   readonly sourceToolId?: string;
   readonly reason?: string;
   readonly trigger: ScheduledWakeupTrigger;
+  readonly dispatch?: ScheduledWakeupDispatch;
   readonly request: RunRequest;
 }
 
@@ -8175,9 +8282,21 @@ const scheduledWakeupTimers = new Map<string, ReturnType<typeof setTimeout>>();
 let scheduledWakeupsStarted = false;
 const MAX_WAKEUP_TIMER_DELAY_MS = 2_147_483_647;
 const SCRIPT_WAKEUP_TIMEOUT_MS = 30_000;
+export const WAKEUP_DISPATCH_RETRY_DELAY_MS = 60_000;
 
-function wakeupTimerDelay(targetMs: number): number {
-  return Math.max(0, Math.min(MAX_WAKEUP_TIMER_DELAY_MS, targetMs - Date.now()));
+export function wakeupTimerDelay(targetMs: number, nowMs = Date.now()): number {
+  return Math.max(0, Math.min(MAX_WAKEUP_TIMER_DELAY_MS, targetMs - nowMs));
+}
+
+export function scheduledWakeupTargetMs(record: ScheduledWakeupRecord, nowMs = Date.now()): number {
+  if (record.dispatch) {
+    return record.dispatch.retryAtMs ?? nowMs;
+  }
+  return record.trigger.type === "time" ? record.trigger.fireAtMs : record.trigger.type === "cron" ? record.trigger.nextFireMs : record.trigger.nextCheckMs;
+}
+
+export function scheduledWakeupDueAction(record: ScheduledWakeupRecord): "fire" | "check-script" {
+  return record.dispatch || record.trigger.type !== "script" ? "fire" : "check-script";
 }
 
 function serverNowLabel(): string {
@@ -8190,6 +8309,33 @@ function scheduledWakeupId(): string {
 
 function scheduledRunId(prefix: "run" | "u" | "a"): string {
   return `${prefix}-${Date.now()}-${randomUUID().slice(0, 8)}`;
+}
+
+export function createScheduledWakeupDispatch(nowMs = Date.now(), nowLabel = serverNowLabel()): ScheduledWakeupDispatch {
+  return {
+    state: "dispatching",
+    startedAtMs: nowMs,
+    runId: scheduledRunId("run"),
+    userMessageId: scheduledRunId("u"),
+    userMessageTime: nowLabel,
+    userMessageCreatedAtMs: nowMs,
+    agentMessageId: scheduledRunId("a"),
+    agentMessageTime: nowLabel,
+  };
+}
+
+export function retryScheduledWakeupDispatchRecord(record: ScheduledWakeupRecord, error: unknown, nowMs = Date.now()): ScheduledWakeupRecord {
+  const dispatch = record.dispatch ?? createScheduledWakeupDispatch(nowMs);
+  return {
+    ...record,
+    dispatch: {
+      ...dispatch,
+      attempt: (dispatch.attempt ?? 0) + 1,
+      lastError: clip(errorMessage(error), 300),
+      lastFailedAtMs: nowMs,
+      retryAtMs: nowMs + WAKEUP_DISPATCH_RETRY_DELAY_MS,
+    },
+  };
 }
 
 const serverQueueDrainInFlight = new Set<string>();
@@ -8508,32 +8654,34 @@ function wakeupRequestWithLatestSession(record: ScheduledWakeupRecord): RunReque
 }
 
 async function fireScheduledWakeup(record: ScheduledWakeupRecord): Promise<void> {
-  removeScheduledWakeupRecord(record.id);
-  const request = wakeupRequestWithLatestSession(record);
-  const runId = scheduledRunId("run");
-  const userMessageCreatedAtMs = Date.now();
-  const userMessageTime = serverNowLabel();
+  const dispatch = record.dispatch ?? createScheduledWakeupDispatch();
+  const dispatchingRecord: ScheduledWakeupRecord = record.dispatch ? record : { ...record, dispatch };
+  if (!record.dispatch) {
+    updateScheduledWakeupRecord(dispatchingRecord);
+  }
+  const request = wakeupRequestWithLatestSession(dispatchingRecord);
   const body = {
     ...request,
-    cwd: record.cwd,
-    conversationId: record.conversationId,
-    runId,
-    userMessageId: scheduledRunId("u"),
-    userMessageTime,
-    userMessageCreatedAtMs,
-    agentMessageId: scheduledRunId("a"),
-    agentMessageTime: userMessageTime,
+    cwd: dispatchingRecord.cwd,
+    conversationId: dispatchingRecord.conversationId,
+    runId: dispatch.runId,
+    userMessageId: dispatch.userMessageId,
+    userMessageTime: dispatch.userMessageTime,
+    userMessageCreatedAtMs: dispatch.userMessageCreatedAtMs,
+    agentMessageId: dispatch.agentMessageId,
+    agentMessageTime: dispatch.agentMessageTime,
   };
   appendRunAuditEvent(RUN_AUDIT_FILE, {
     type: "wakeup_fired",
-    wakeupId: record.id,
-    sourceRunId: record.sourceRunId,
-    runId,
-    conversationId: record.conversationId,
+    wakeupId: dispatchingRecord.id,
+    sourceRunId: dispatchingRecord.sourceRunId,
+    runId: dispatch.runId,
+    conversationId: dispatchingRecord.conversationId,
     agent: request.agent,
   });
+  let response: Response;
   try {
-    const response = await fetch(`${record.origin}/api/run`, {
+    response = await fetch(`${dispatchingRecord.origin}/api/run`, {
       method: "POST",
       headers: { "Content-Type": JSON_CONTENT_TYPE },
       body: JSON.stringify(body),
@@ -8542,10 +8690,25 @@ async function fireScheduledWakeup(record: ScheduledWakeupRecord): Promise<void>
       const text = await response.text().catch(() => "");
       throw new Error(`HTTP ${response.status}${text ? ` ${clip(text, 300)}` : ""}`);
     }
-    const reader = response.body?.getReader();
-    if (!reader) {
-      return;
-    }
+  } catch (error) {
+    const retryRecord = retryScheduledWakeupDispatchRecord(dispatchingRecord, error);
+    updateScheduledWakeupRecord(retryRecord);
+    armScheduledWakeup(retryRecord);
+    appendRunAuditEvent(RUN_AUDIT_FILE, {
+      type: "wakeup_run_failed",
+      wakeupId: dispatchingRecord.id,
+      sourceRunId: dispatchingRecord.sourceRunId,
+      conversationId: dispatchingRecord.conversationId,
+      error: errorMessage(error),
+    });
+    return;
+  }
+  removeScheduledWakeupRecord(dispatchingRecord.id);
+  const reader = response.body?.getReader();
+  if (!reader) {
+    return;
+  }
+  try {
     for (;;) {
       const { done } = await reader.read();
       if (done) {
@@ -8554,16 +8717,20 @@ async function fireScheduledWakeup(record: ScheduledWakeupRecord): Promise<void>
     }
   } catch (error) {
     appendRunAuditEvent(RUN_AUDIT_FILE, {
-      type: "wakeup_run_failed",
-      wakeupId: record.id,
-      sourceRunId: record.sourceRunId,
-      conversationId: record.conversationId,
+      type: "wakeup_stream_failed",
+      wakeupId: dispatchingRecord.id,
+      sourceRunId: dispatchingRecord.sourceRunId,
+      conversationId: dispatchingRecord.conversationId,
       error: errorMessage(error),
     });
   }
 }
 
 async function checkScriptWakeup(record: ScheduledWakeupRecord): Promise<void> {
+  if (record.dispatch) {
+    await fireScheduledWakeup(record);
+    return;
+  }
   if (record.trigger.type !== "script") {
     await fireScheduledWakeup(record);
     return;
@@ -8589,12 +8756,16 @@ async function checkScriptWakeup(record: ScheduledWakeupRecord): Promise<void> {
 
 function armScheduledWakeup(record: ScheduledWakeupRecord): void {
   clearScheduledWakeupTimer(record.id);
-  const target = record.trigger.type === "time" ? record.trigger.fireAtMs : record.trigger.type === "cron" ? record.trigger.nextFireMs : record.trigger.nextCheckMs;
+  const target = scheduledWakeupTargetMs(record);
   scheduledWakeupTimers.set(
     record.id,
     setTimeout(() => {
       scheduledWakeupTimers.delete(record.id);
-      void (record.trigger.type === "script" ? checkScriptWakeup(record) : fireScheduledWakeup(record));
+      if (Date.now() < target) {
+        armScheduledWakeup(record);
+        return;
+      }
+      void (scheduledWakeupDueAction(record) === "check-script" ? checkScriptWakeup(record) : fireScheduledWakeup(record));
     }, wakeupTimerDelay(target)),
   );
 }
@@ -8609,7 +8780,7 @@ function ensureScheduledWakeupsStarted(): void {
   }
 }
 
-function normalizeWakeupTrigger(event: Extract<RunEvent, { type: "wakeup" }>): ScheduledWakeupTrigger {
+export function normalizeWakeupTrigger(event: Extract<RunEvent, { type: "wakeup" }>): ScheduledWakeupTrigger {
   const now = Date.now();
   if (event.script) {
     const scriptError = shellScriptSyntaxError(event.script);
