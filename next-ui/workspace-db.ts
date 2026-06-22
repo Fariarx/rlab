@@ -4,6 +4,7 @@ import process from "node:process";
 import type { AgentBlock, ChatMessage, ComposerDraft, ConversationSummary, Project } from "./src/domain/agent-types";
 import type { AgentProfile } from "./src/lib/agent-catalog";
 import { conversationPreviewSnippet, messagePreviewText, previewSnippet } from "./src/lib/conversation-preview";
+import { collectMessageResources, type ConversationResource } from "./src/lib/conversation-resources";
 import { inferConversationUpdatedAtMs, normalizeConversationUpdatedAtMs } from "./src/lib/time-format";
 import { mergeConversationUpdate, type WorkspaceMutation } from "./src/lib/workspace-mutations";
 import type { WorkspaceState } from "./src/lib/workspace-state";
@@ -28,6 +29,7 @@ type DatabaseHandle = InstanceType<typeof DatabaseSync>;
 
 let db: DatabaseHandle | null = null;
 const WORKSPACE_REVISION_KEY = "workspaceRevision";
+const CONVERSATION_RESOURCES_BACKFILLED_KEY = "conversationResourcesBackfilled";
 const PREVIEW_SNIPPET_LOOKBACK_MESSAGES = 20;
 
 const TABLE_SCHEMA = `
@@ -47,6 +49,19 @@ CREATE TABLE IF NOT EXISTS messages (
   conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
   position INTEGER NOT NULL,
   data TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS conversation_resources (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  message_position INTEGER NOT NULL,
+  resource_index INTEGER NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('image', 'link', 'file')),
+  url TEXT NOT NULL,
+  label TEXT NOT NULL,
+  time TEXT,
+  origin TEXT NOT NULL CHECK (origin IN ('user', 'agent')),
+  UNIQUE(message_id, resource_index)
 );
 CREATE TABLE IF NOT EXISTS composer_drafts (
   conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
@@ -80,6 +95,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_project_position ON conversa
 CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, position);
 CREATE INDEX IF NOT EXISTS idx_messages_conversation_desc ON messages(conversation_id, position DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_conversation_position ON messages(conversation_id, position);
+CREATE INDEX IF NOT EXISTS idx_conversation_resources_conversation ON conversation_resources(conversation_id, message_position, resource_index);
+CREATE INDEX IF NOT EXISTS idx_conversation_resources_message ON conversation_resources(message_id);
 CREATE INDEX IF NOT EXISTS idx_pending_turns_conversation ON pending_turns(conversation_id, state, position);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_turns_conversation_position ON pending_turns(conversation_id, position);
 `;
@@ -102,12 +119,12 @@ function assertForeignKeyIntegrity(handle: DatabaseHandle): void {
 }
 
 function assertCurrentSchema(handle: DatabaseHandle): void {
-  for (const table of ["projects", "conversations", "messages", "composer_drafts", "pending_queue_state", "pending_turns", "kv"]) {
+  for (const table of ["projects", "conversations", "messages", "conversation_resources", "composer_drafts", "pending_queue_state", "pending_turns", "kv"]) {
     if (!tableExists(handle, table)) {
       throw new Error(`Workspace database schema is incomplete: missing ${table}. Reset the workspace database.`);
     }
   }
-  for (const table of ["conversations", "messages", "composer_drafts", "pending_queue_state", "pending_turns"]) {
+  for (const table of ["conversations", "messages", "conversation_resources", "composer_drafts", "pending_queue_state", "pending_turns"]) {
     if (!tableHasForeignKeys(handle, table)) {
       throw new Error(`Workspace database schema is outdated: ${table} has no declared foreign keys. Reset the workspace database.`);
     }
@@ -131,6 +148,7 @@ export function initWorkspaceDb(file: string): void {
     handle.exec(INDEX_SCHEMA);
     assertCurrentSchema(handle);
     assertForeignKeyIntegrity(handle);
+    backfillConversationResourcesIfNeeded(handle);
     db = handle;
   } catch (error) {
     handle.close();
@@ -194,9 +212,16 @@ export function readWorkspaceRevision(): number {
 type ProjectMeta = Omit<Project, "conversations">;
 type MessageRow = { readonly conversationId: string; readonly data: string };
 type MessagePageRow = { readonly position: number; readonly data: string };
-type MessageWithIdRow = { readonly id: string; readonly conversationId: string; readonly data: string };
+type MessageWithIdRow = { readonly id: string; readonly conversationId: string; readonly position: number; readonly data: string };
 type ExistingThreadMessageRow = { readonly id: string; readonly position: number };
 type LatestUserMessageRow = { readonly conversationId: string; readonly data: string };
+type ConversationResourceRow = {
+  readonly kind: ConversationResource["kind"];
+  readonly url: string;
+  readonly label: string;
+  readonly time: string | null;
+  readonly origin: ConversationResource["origin"];
+};
 
 export type WorkspaceDbMutation = WorkspaceMutation;
 
@@ -251,6 +276,86 @@ function projectMeta(project: Project): ProjectMeta {
 
 function messageFromRow(row: MessageRow): ChatMessage {
   return JSON.parse(row.data) as ChatMessage;
+}
+
+function insertMessageResourcesInTransaction(
+  handle: DatabaseHandle,
+  conversationId: string,
+  messageId: string,
+  messagePosition: number,
+  message: ChatMessage,
+): void {
+  const resources = collectMessageResources(message);
+  if (resources.length === 0) {
+    return;
+  }
+  const insResource = handle.prepare(
+    "INSERT INTO conversation_resources(conversation_id, message_id, message_position, resource_index, kind, url, label, time, origin) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  );
+  resources.forEach((resource, index) => {
+    insResource.run(conversationId, messageId, messagePosition, index, resource.kind, resource.url, resource.label, resource.time ?? null, resource.origin);
+  });
+}
+
+function replaceMessageResourcesInTransaction(
+  handle: DatabaseHandle,
+  conversationId: string,
+  messageId: string,
+  messagePosition: number,
+  message: ChatMessage,
+): void {
+  handle.prepare("DELETE FROM conversation_resources WHERE message_id = ?").run(messageId);
+  insertMessageResourcesInTransaction(handle, conversationId, messageId, messagePosition, message);
+}
+
+function rebuildConversationResourcesInTransaction(handle: DatabaseHandle, conversationId: string): void {
+  handle.prepare("DELETE FROM conversation_resources WHERE conversation_id = ?").run(conversationId);
+  const rows = handle.prepare("SELECT id, position, data FROM messages WHERE conversation_id = ? ORDER BY position").all(conversationId) as Array<{
+    readonly id: string;
+    readonly position: number;
+    readonly data: string;
+  }>;
+  for (const row of rows) {
+    insertMessageResourcesInTransaction(handle, conversationId, row.id, row.position, JSON.parse(row.data) as ChatMessage);
+  }
+}
+
+function conversationResourceBackfillComplete(handle: DatabaseHandle): boolean {
+  const row = handle.prepare("SELECT value FROM kv WHERE key = ?").get(CONVERSATION_RESOURCES_BACKFILLED_KEY) as { value: string } | undefined;
+  return row?.value === "true";
+}
+
+function writeConversationResourceBackfillComplete(handle: DatabaseHandle): void {
+  handle
+    .prepare("INSERT INTO kv(key, value) VALUES(?, 'true') ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+    .run(CONVERSATION_RESOURCES_BACKFILLED_KEY);
+}
+
+function backfillConversationResourcesIfNeeded(handle: DatabaseHandle): void {
+  if (conversationResourceBackfillComplete(handle)) {
+    return;
+  }
+  const messageCount = (handle.prepare("SELECT COUNT(*) AS count FROM messages").get() as { count: number }).count;
+  if (messageCount === 0) {
+    return;
+  }
+  handle.exec("BEGIN");
+  try {
+    handle.prepare("DELETE FROM conversation_resources").run();
+    const conversationRows = handle.prepare("SELECT id FROM conversations").all() as Array<{ readonly id: string }>;
+    for (const row of conversationRows) {
+      rebuildConversationResourcesInTransaction(handle, row.id);
+    }
+    writeConversationResourceBackfillComplete(handle);
+    handle.exec("COMMIT");
+  } catch (error) {
+    try {
+      handle.exec("ROLLBACK");
+    } catch {
+      // ignore rollback failure; surface the original error
+    }
+    throw error;
+  }
 }
 
 function messageCreatedAtMs(message: ChatMessage): number | undefined {
@@ -467,13 +572,17 @@ export function initializeWorkspaceStateInDb(state: WorkspaceState): number {
       );
     });
     for (const [conversationId, messages] of Object.entries(state.threads)) {
-      messages.forEach((message, index) => insMsg.run(message.id, conversationId, index, JSON.stringify(message)));
+      messages.forEach((message, index) => {
+        insMsg.run(message.id, conversationId, index, JSON.stringify(message));
+        insertMessageResourcesInTransaction(handle, conversationId, message.id, index, message);
+      });
     }
     for (const [conversationId, draft] of Object.entries(state.composerDrafts)) {
       insDraft.run(conversationId, JSON.stringify(draft));
     }
     insKv.run("selectedId", JSON.stringify(state.selectedId));
     insKv.run("settings", JSON.stringify(state.settings));
+    writeConversationResourceBackfillComplete(handle);
     writeWorkspaceRevision(handle, nextRevision);
   });
   return nextRevision;
@@ -632,10 +741,12 @@ function upsertMessageInTransaction(handle: DatabaseHandle, conversationId: stri
       throw new Error(`Message ${message.id} already belongs to conversation ${existing.conversationId}.`);
     }
     handle.prepare("UPDATE messages SET data = ? WHERE id = ?").run(JSON.stringify(message), message.id);
+    replaceMessageResourcesInTransaction(handle, conversationId, message.id, existing.position, message);
     return;
   }
   const position = (handle.prepare("SELECT COALESCE(MAX(position), -1) + 1 AS next FROM messages WHERE conversation_id = ?").get(conversationId) as { next: number }).next;
   handle.prepare("INSERT INTO messages(id, conversation_id, position, data) VALUES(?, ?, ?, ?)").run(message.id, conversationId, position, JSON.stringify(message));
+  insertMessageResourcesInTransaction(handle, conversationId, message.id, position, message);
 }
 
 function restartUserTurnInTransaction(handle: DatabaseHandle, conversationId: string, userMessage: ChatMessage): void {
@@ -659,6 +770,7 @@ function restartUserTurnInTransaction(handle: DatabaseHandle, conversationId: st
   }
   handle.prepare("UPDATE messages SET data = ? WHERE id = ?").run(JSON.stringify(userMessage), userMessage.id);
   handle.prepare("DELETE FROM messages WHERE conversation_id = ? AND position > ?").run(conversationId, existing.position);
+  rebuildConversationResourcesInTransaction(handle, conversationId);
 }
 
 export function restartUserTurn(conversationId: string, userMessage: ChatMessage): void {
@@ -703,7 +815,10 @@ function replaceConversationThreadInTransaction(handle: DatabaseHandle, conversa
   }
   handle.prepare("DELETE FROM messages WHERE conversation_id = ?").run(conversationId);
   const insMsg = handle.prepare("INSERT INTO messages(id, conversation_id, position, data) VALUES(?, ?, ?, ?)");
-  messages.forEach((message, index) => insMsg.run(message.id, conversationId, index, JSON.stringify(message)));
+  messages.forEach((message, index) => {
+    insMsg.run(message.id, conversationId, index, JSON.stringify(message));
+    insertMessageResourcesInTransaction(handle, conversationId, message.id, index, message);
+  });
 }
 
 export function applyWorkspaceDbMutations(
@@ -839,7 +954,7 @@ export function upsertMessage(conversationId: string, message: ChatMessage): voi
 export function patchMessageBlockById(blockIdToPatch: string, updateBlock: (block: AgentBlock) => AgentBlock): readonly string[] {
   const handle = database();
   const rows = handle
-    .prepare("SELECT id, conversation_id AS conversationId, data FROM messages WHERE data LIKE ? ESCAPE '\\'")
+    .prepare("SELECT id, conversation_id AS conversationId, position, data FROM messages WHERE data LIKE ? ESCAPE '\\'")
     .all(`%${escapeSqlLike(blockIdToPatch)}%`) as MessageWithIdRow[];
   const changedConversationIds = new Set<string>();
   transaction(() => {
@@ -860,7 +975,9 @@ export function patchMessageBlockById(blockIdToPatch: string, updateBlock: (bloc
       if (!changed) {
         continue;
       }
-      handle.prepare("UPDATE messages SET data = ? WHERE id = ?").run(JSON.stringify({ ...message, blocks }), row.id);
+      const nextMessage = { ...message, blocks };
+      handle.prepare("UPDATE messages SET data = ? WHERE id = ?").run(JSON.stringify(nextMessage), row.id);
+      replaceMessageResourcesInTransaction(handle, row.conversationId, row.id, row.position, nextMessage);
       changedConversationIds.add(row.conversationId);
     }
     for (const conversationId of changedConversationIds) {
@@ -916,6 +1033,7 @@ export function upsertAgentMessageForUserTurn(conversationId: string, userMessag
       }
     }
     handle.prepare("INSERT INTO messages(id, conversation_id, position, data) VALUES(?, ?, ?, ?)").run(message.id, conversationId, userRow.position + 1, JSON.stringify(message));
+    rebuildConversationResourcesInTransaction(handle, conversationId);
     touchConversationThreadInTransaction(handle, conversationId);
     bumpWorkspaceRevisionInTransaction(handle);
   });
@@ -1058,6 +1176,40 @@ export function readThreadFromDb(conversationId: string): ChatMessage[] {
   return (database().prepare("SELECT data FROM messages WHERE conversation_id = ? ORDER BY position").all(conversationId) as Array<{ data: string }>).map(
     (row) => JSON.parse(row.data) as ChatMessage,
   );
+}
+
+/** Read precomputed conversation resources without loading or parsing message bodies. */
+export function readConversationResourcesFromDb(conversationId: string): ConversationResource[] {
+  const handle = database();
+  ensureConversationExists(handle, conversationId);
+  const rows = handle
+    .prepare(
+      `
+SELECT kind, url, label, time, origin
+FROM conversation_resources
+WHERE conversation_id = ?
+ORDER BY message_position, resource_index, id
+`,
+    )
+    .all(conversationId) as ConversationResourceRow[];
+  const seen = new Set<string>();
+  const resources: ConversationResource[] = [];
+  for (const row of rows) {
+    const key = `${row.kind}:${row.url}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    resources.push({
+      id: `res-${resources.length + 1}`,
+      kind: row.kind,
+      url: row.url,
+      label: row.label,
+      origin: row.origin,
+      ...(row.time === null ? {} : { time: row.time }),
+    });
+  }
+  return resources;
 }
 
 export function readThreadPageFromDb(conversationId: string, options: { readonly before?: number; readonly limit: number }): ConversationThreadPage {

@@ -119,6 +119,7 @@ import {
   type BackgroundRunHandle,
   visibleAgentDetectionIds,
   readRunAuditEvents,
+  readClientResources,
   scheduledWakeupDueAction,
   scheduledWakeupInvalidRecordsFile,
   scheduledWakeupTargetMs,
@@ -190,6 +191,15 @@ describe("vite agents plugin", () => {
     expect(browserBridgeOrigin(req)).toBe("http://127.0.0.1:4280");
   });
 
+  it("dispatches server-owned queue and wakeup runs without HTTP self-fetch", () => {
+    const source = readFileSync("vite-agents-plugin.ts", "utf8");
+
+    expect(source).toContain("startServerRunFromPayload(body, record.origin");
+    expect(source).toContain("startServerRunFromPayload(body, dispatchingRecord.origin");
+    expect(source).not.toContain("fetch(`${record.origin}/api/run`");
+    expect(source).not.toContain("fetch(`${dispatchingRecord.origin}/api/run`");
+  });
+
   it("builds queued turn run bodies from the current persisted conversation profile", () => {
     const dir = mkdtempSync(join(tmpdir(), "rlab-queued-turn-"));
     try {
@@ -241,6 +251,32 @@ describe("vite agents plugin", () => {
         serverPrompt: { userMessage: { id: "u-queued", role: "user", text: "Queued server turn", time: "12:05" } },
       });
       expect(String(body.prompt)).toContain("Queued server turn");
+    } finally {
+      closeWorkspaceDb();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reads resources from the persisted resources index", () => {
+    const dir = mkdtempSync(join(tmpdir(), "rlab-resources-"));
+    try {
+      closeWorkspaceDb();
+      initWorkspaceDb(join(dir, "workspace.db"));
+      initializeWorkspaceStateInDb({
+        ...buildEmptyWorkspaceState(),
+        chats: [{ id: "chat-resources", title: "Resources", snippet: "", time: "12:00", status: "idle", agent: "codex" }],
+        threads: {
+          "chat-resources": [
+            { id: "u-old", role: "user", text: "Earlier link https://example.com/old", time: "11:00" },
+            { id: "a-new", role: "agent", text: "Later image ![plot](/tmp/plot.png)", time: "12:00" },
+          ],
+        },
+        selectedId: "chat-resources",
+      });
+
+      const resources = readClientResources("chat-resources").resources;
+
+      expect(resources.map((resource) => `${resource.kind}:${resource.url}`)).toEqual(["link:https://example.com/old", "image:/tmp/plot.png"]);
     } finally {
       closeWorkspaceDb();
       rmSync(dir, { recursive: true, force: true });
@@ -3175,7 +3211,8 @@ Built-in agents:
   });
 
   it("validates run cancel payloads", () => {
-    expect(parseRunCancelPayload(JSON.stringify({ runId: "run-1" }))).toEqual({ runId: "run-1" });
+    expect(parseRunCancelPayload(JSON.stringify({ runId: "run-1" }))).toEqual({ runId: "run-1", pauseQueue: true });
+    expect(parseRunCancelPayload(JSON.stringify({ runId: "run-1", pauseQueue: false }))).toEqual({ runId: "run-1", pauseQueue: false });
     expect(() => parseRunCancelPayload(JSON.stringify({ runId: "" }))).toThrow("Run id is required.");
   });
 

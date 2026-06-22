@@ -252,8 +252,8 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
 ) {
   const editChrome = variant === "edit";
   const [composerStore] = useState(() => new ComposerStore(initialValue, initialAttachments, VOICE_IDLE_LEVELS));
-  const stopVoiceInputRef = useRef<() => void>(() => undefined);
-  const stopVoiceInputBeforeSend = useCallback(() => stopVoiceInputRef.current(), []);
+  const finishVoiceInputRef = useRef<() => Promise<void>>(() => Promise.resolve());
+  const finishVoiceInputBeforeSend = useCallback(() => (composerStore.voiceState === "recording" ? finishVoiceInputRef.current() : undefined), [composerStore]);
   const {
     internalValue,
     setInternalValue,
@@ -370,11 +370,12 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
     attachmentsControlled: attachments !== undefined,
     composerAttachments,
     composerValue,
+    canSendWithoutPayload: composerStore.voiceState === "recording",
     history,
     initialAttachments,
     initialValue,
     onAttachmentError,
-    onBeforeSend: stopVoiceInputBeforeSend,
+    onBeforeSend: finishVoiceInputBeforeSend,
     onDraftChange,
     onSend,
     onSendReview: editChrome ? undefined : onSendReview,
@@ -396,8 +397,8 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
   });
 
   const {
+    finishVoiceInput,
     setVoiceLevelCountForWidth,
-    stopVoiceInput,
     toggleVoiceInput,
     voiceAmbient,
     voiceAvailable,
@@ -414,9 +415,9 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
     updateDraft,
     voiceProvider: editChrome ? undefined : voiceProvider,
   });
-  stopVoiceInputRef.current = stopVoiceInput;
+  finishVoiceInputRef.current = finishVoiceInput;
   const visualExpanded = expanded || voiceState === "recording";
-  const effectiveOverlayLift = voiceState === "recording" ? Math.max(overlayLift, 48) : overlayLift;
+  const effectiveOverlayLift = voiceState === "recording" ? Math.max(overlayLift, 38) : overlayLift;
   const floatingAttachments = editChrome ? [] : composerAttachments;
   const hasInlineAttachments = editChrome && composerAttachments.length > 0;
   const hasFloatingTags = (!editChrome && scheduledWakeups.length > 0) || (!editChrome && effectiveReviewCount > 0) || floatingAttachments.length > 0;
@@ -467,7 +468,7 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
     setActiveSuggestion(0);
   }, [setActiveSuggestion, suggestionKey]);
 
-  const showAgentStopButton = !editChrome && running && !hasComposerPayload && effectiveReviewCount === 0;
+  const showAgentStopButton = !editChrome && running && !hasComposerPayload && effectiveReviewCount === 0 && !voiceInputActive;
   const sendLabel = effectiveReviewCount > 0 ? t("reviewSendComments") : t("send");
   const inputEventProps = {
     onBeforeInput: handleBeforeInput,
@@ -927,6 +928,42 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
               </Stack>
             </Box>
           )}
+          <InputBase
+            inputRef={textareaRef}
+            value={composerValue}
+            onChange={handleComposerChange}
+            onKeyDown={handleKeyDown}
+            onPaste={handlePaste}
+            placeholder={inputPlaceholder}
+            inputProps={{ "aria-label": inputPlaceholder, "data-testid": "composer-input", spellCheck: false, autoCorrect: "off", autoCapitalize: "none", autoComplete: "off", ...inputEventProps }}
+            multiline
+            minRows={1}
+            maxRows={expanded ? 8 : 1}
+            sx={{
+              width: "100%",
+              fontSize: "0.84rem",
+              lineHeight: 1.45,
+              py: 0.25,
+              ...hiddenNativePlaceholderSx,
+              ...(expanded && {
+                position: "absolute",
+                left: 0,
+                right: 0,
+                bottom: 0,
+                zIndex: 5,
+                px: 1,
+                py: 0.75,
+                borderRadius: (t) => `${t.custom.radii.md}px`,
+                backgroundColor: (t) => t.custom.surfaces.s2,
+                border: (t) => `1px solid ${t.custom.borders.strong}`,
+                boxShadow: "0 -10px 28px rgba(0, 0, 0, 0.45)",
+              }),
+              ...(voiceState === "recording" && {
+                opacity: 0,
+                pointerEvents: "none",
+              }),
+            }}
+          />
           {voiceState === "recording" ? (
             <Box
               data-testid="composer-voice-input-panel"
@@ -934,75 +971,15 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
                 position: "absolute",
                 left: 0,
                 right: 0,
-                bottom: 0,
-                zIndex: 5,
-                display: "flex",
-                flexDirection: "column",
-                gap: 0.75,
-                px: 1,
-                py: 0.75,
-                borderRadius: (t) => `${t.custom.radii.md}px`,
-                backgroundColor: (t) => t.custom.surfaces.s2,
-                border: (t) => `1px solid ${t.custom.borders.strong}`,
-                boxShadow: "0 -10px 28px rgba(0, 0, 0, 0.45)",
+                top: "50%",
+                transform: "translateY(-50%)",
+                zIndex: 6,
+                pointerEvents: "none",
               }}
             >
-              <InputBase
-                inputRef={textareaRef}
-                value={composerValue}
-                onChange={handleComposerChange}
-                onKeyDown={handleKeyDown}
-                onPaste={handlePaste}
-                placeholder={inputPlaceholder}
-                inputProps={{ "aria-label": inputPlaceholder, "data-testid": "composer-input", spellCheck: false, autoCorrect: "off", autoCapitalize: "none", autoComplete: "off", ...inputEventProps }}
-                multiline
-                minRows={1}
-                maxRows={7}
-                sx={{
-                  width: "100%",
-                  fontSize: "0.84rem",
-                  lineHeight: 1.45,
-                  py: 0.25,
-                  ...hiddenNativePlaceholderSx,
-                }}
-              />
-              {showPlaceholderHint && placeholderModel.visualLabel ? <ComposerPlaceholderHint label={placeholderModel.visualLabel} panel /> : null}
               <VoiceRecordingStrip label={voiceLabel} duration={voiceDuration} levels={voiceLevels} ambient={voiceAmbient} onLevelCountChange={setVoiceLevelCountForWidth} dockBottom />
             </Box>
-          ) : (
-            <InputBase
-              inputRef={textareaRef}
-              value={composerValue}
-              onChange={handleComposerChange}
-              onKeyDown={handleKeyDown}
-              onPaste={handlePaste}
-              placeholder={inputPlaceholder}
-              inputProps={{ "aria-label": inputPlaceholder, "data-testid": "composer-input", spellCheck: false, autoCorrect: "off", autoCapitalize: "none", autoComplete: "off", ...inputEventProps }}
-              multiline
-              minRows={1}
-              maxRows={expanded ? 8 : 1}
-              sx={{
-                width: "100%",
-                fontSize: "0.84rem",
-                lineHeight: 1.45,
-                py: 0.25,
-                ...hiddenNativePlaceholderSx,
-                ...(expanded && {
-                  position: "absolute",
-                  left: 0,
-                  right: 0,
-                  bottom: 0,
-                  zIndex: 5,
-                  px: 1,
-                  py: 0.75,
-                  borderRadius: (t) => `${t.custom.radii.md}px`,
-                  backgroundColor: (t) => t.custom.surfaces.s2,
-                  border: (t) => `1px solid ${t.custom.borders.strong}`,
-                  boxShadow: "0 -10px 28px rgba(0, 0, 0, 0.45)",
-                }),
-              }}
-            />
-          )}
+          ) : null}
           {voiceState !== "recording" && showPlaceholderHint && placeholderModel.visualLabel ? <ComposerPlaceholderHint label={placeholderModel.visualLabel} /> : null}
         </Box>
         <Stack direction="row" spacing={0.5} sx={{ alignItems: "center", flex: "0 0 auto" }}>
@@ -1037,36 +1014,34 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
               </span>
             </Tooltip>
           )}
-          {!voiceInputActive && (
-            showAgentStopButton ? (
-              <IconButton
-                data-testid="composer-stop-button"
-                aria-label={t("stopRun")}
-                tone="danger"
-                onClick={onStop}
-                sx={{ width: 30, height: 30, borderRadius: (theme) => `${theme.custom.radii.md}px` }}
-              >
-                <StopCircleIcon sx={{ fontSize: 18 }} />
-              </IconButton>
-            ) : (
-              <Button
-                variant="contained"
-                onClick={() => void send()}
-                disabled={!canSend}
-                sx={{
-                  height: 30,
-                  width: 30,
-                  minWidth: 30,
-                  px: 0,
-                  py: 0,
-                  borderRadius: (t) => `${t.custom.radii.md}px`,
-                }}
-                aria-label={sendLabel}
-                data-testid="composer-send-button"
-              >
-                <SendIcon sx={{ fontSize: 16 }} />
-              </Button>
-            )
+          {showAgentStopButton ? (
+            <IconButton
+              data-testid="composer-stop-button"
+              aria-label={t("stopRun")}
+              tone="danger"
+              onClick={onStop}
+              sx={{ width: 30, height: 30, borderRadius: (theme) => `${theme.custom.radii.md}px` }}
+            >
+              <StopCircleIcon sx={{ fontSize: 18 }} />
+            </IconButton>
+          ) : (
+            <Button
+              variant="contained"
+              onClick={() => void send()}
+              disabled={!canSend || voiceState === "transcribing"}
+              sx={{
+                height: 30,
+                width: 30,
+                minWidth: 30,
+                px: 0,
+                py: 0,
+                borderRadius: (t) => `${t.custom.radii.md}px`,
+              }}
+              aria-label={sendLabel}
+              data-testid="composer-send-button"
+            >
+              <SendIcon sx={{ fontSize: 16 }} />
+            </Button>
           )}
         </Stack>
       </Box>

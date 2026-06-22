@@ -137,3 +137,7 @@ export function collectResources(messages: readonly ChatMessage[]): readonly Con
   }
   return out.items;
 }
+
+export function collectMessageResources(message: ChatMessage): readonly ConversationResource[] {
+  return collectResources([message]);
+}

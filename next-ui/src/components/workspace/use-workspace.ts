@@ -1259,13 +1259,13 @@ export class WorkspaceStore implements Workspace {
     let cancelPromise: Promise<void> = Promise.resolve();
     if (active) {
       active.canceled = true;
-      cancelPromise = cancelRun(active.runId);
+      cancelPromise = cancelRun(active.runId, { pauseQueue: options.pauseQueue });
       active.controller.abort();
       this.runs.delete(id);
     } else {
       const activeRunId = this.find(id)?.activeRunId;
       if (activeRunId) {
-        cancelPromise = cancelRun(activeRunId);
+        cancelPromise = cancelRun(activeRunId, { pauseQueue: options.pauseQueue });
       }
     }
     // Reset the conversation even when there is no live run handle (e.g. a

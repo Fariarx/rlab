@@ -3,18 +3,18 @@ import ImageOutlinedIcon from "@mui/icons-material/ImageOutlined";
 import InsertDriveFileOutlinedIcon from "@mui/icons-material/InsertDriveFileOutlined";
 import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
 import LinkIcon from "@mui/icons-material/Link";
-import { Box, ButtonBase, Collapse, Stack, Typography } from "@mui/material";
+import { Box, ButtonBase, CircularProgress, Collapse, Stack, Typography } from "@mui/material";
 import { observer } from "mobx-react-lite";
-import { type ReactNode, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import type { TranslationKey } from "../../i18n/I18nProvider";
-import { type ConversationResource, type ResourceKind, collectResources } from "../../lib/conversation-resources";
+import { loadConversationResources } from "../../client/api/workspace-api";
+import type { ConversationResource, ResourceKind } from "../../lib/conversation-resources";
 import { localFileUrl } from "../../lib/external-url";
 import { normalizeClockLabel } from "../../lib/time-format";
-import type { ChatMessage } from "../agent";
 import { EmptyState, ImageLightbox } from "../ui";
 import { useWorkspaceUi } from "../../lib/workspace-ui";
-import { ImageBannerStore, ResourceGroupStore, ResourcesPanelStore } from "./stores/workspace-local-stores";
+import { ImageBannerStore, ResourcesPanelStore } from "./stores/workspace-local-stores";
 
 function KindIcon({ kind }: { readonly kind: ConversationResource["kind"] }) {
   const Icon = kind === "image" ? ImageOutlinedIcon : kind === "link" ? LinkIcon : DescriptionOutlinedIcon;
@@ -94,15 +94,25 @@ function ResourceCard({ resource, onClick }: { readonly resource: ConversationRe
   );
 }
 
-/** A collapsible section per resource type; open by default so each type shows
- *  at least its first entry without a click. */
-const ResourceGroup = observer(function ResourceGroup({ title, count, children }: { readonly title: string; readonly count: number; readonly children: ReactNode }) {
-  const [store] = useState(() => new ResourceGroupStore());
-  const { open, setOpen } = store;
+/** A collapsible section per resource type. The parent owns expansion so only
+ *  one resource category is open at a time. */
+const ResourceGroup = observer(function ResourceGroup({
+  title,
+  count,
+  open,
+  onToggle,
+  children,
+}: {
+  readonly title: string;
+  readonly count: number;
+  readonly open: boolean;
+  readonly onToggle: () => void;
+  readonly children: ReactNode;
+}) {
   return (
     <Box sx={{ borderRadius: (theme) => `${theme.custom.radii.md}px`, backgroundColor: (theme) => theme.custom.surfaces.s1, overflow: "hidden" }}>
       <ButtonBase
-        onClick={() => setOpen((value) => !value)}
+        onClick={onToggle}
         aria-expanded={open}
         sx={{ width: "100%", display: "flex", alignItems: "center", gap: 1, px: 1.25, py: 0.875, textAlign: "left", "&:hover": { backgroundColor: (theme) => theme.custom.surfaces.s3 } }}
       >
@@ -128,16 +138,71 @@ const RESOURCE_GROUPS: ReadonlyArray<{ readonly kind: ResourceKind; readonly lab
 ];
 
 /**
- * Resources tab — files, links, and images referenced in the open thread,
- * grouped into collapsible sections by type (newest first within each). Images
- * open a viewer, links open in the browser Preview, files download or jump to Git.
+ * Resources tab — files, links, and images referenced in the full persisted
+ * thread, grouped into collapsible sections by type (newest first within each).
+ * Images open a viewer, links open in the browser Preview, files download or
+ * jump to Git.
  */
-export const ResourcesPanel = observer(function ResourcesPanel({ messages, bottomInset = 0 }: { readonly messages: readonly ChatMessage[]; readonly bottomInset?: number }) {
+export const ResourcesPanel = observer(function ResourcesPanel({
+  conversationId,
+  resourceRevision,
+  bottomInset = 0,
+}: {
+  readonly conversationId: string | undefined;
+  readonly resourceRevision?: number;
+  readonly bottomInset?: number;
+}) {
   const { t } = useI18n();
   const ui = useWorkspaceUi();
   const [store] = useState(() => new ResourcesPanelStore());
-  const { lightbox, setLightbox } = store;
-  const resources = useMemo(() => collectResources(messages), [messages]);
+  const {
+    clearResources,
+    failResourceLoad,
+    finishResourceLoad,
+    lightbox,
+    openResourceKind,
+    resources,
+    resourcesLoadError,
+    resourcesLoading,
+    setLightbox,
+    startResourceLoad,
+    syncResourceKinds,
+    toggleResourceKind,
+  } = store;
+  const revisionKey = typeof resourceRevision === "number" && Number.isFinite(resourceRevision) ? String(resourceRevision) : "unversioned";
+  const resourceGroups = useMemo(
+    () =>
+      RESOURCE_GROUPS.map(({ kind, labelKey }) => ({
+        kind,
+        labelKey,
+        items: resources.filter((resource) => resource.kind === kind).reverse(),
+      })).filter((group) => group.items.length > 0),
+    [resources],
+  );
+
+  useEffect(() => {
+    syncResourceKinds(resourceGroups.map((group) => group.kind));
+  }, [resourceGroups, syncResourceKinds]);
+
+  useEffect(() => {
+    if (!conversationId) {
+      clearResources();
+      return;
+    }
+    const controller = new AbortController();
+    startResourceLoad(conversationId, revisionKey);
+    void loadConversationResources(conversationId, { signal: controller.signal })
+      .then((loadedResources) => {
+        finishResourceLoad(conversationId, revisionKey, loadedResources);
+      })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted || (error instanceof Error && error.name === "AbortError")) {
+          return;
+        }
+        failResourceLoad(conversationId, revisionKey, error instanceof Error ? error.message : String(error));
+      });
+    return () => controller.abort();
+  }, [clearResources, conversationId, failResourceLoad, finishResourceLoad, revisionKey, startResourceLoad]);
 
   const isAbsolutePath = (value: string): boolean => value.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(value);
 
@@ -169,21 +234,26 @@ export const ResourcesPanel = observer(function ResourcesPanel({ messages, botto
         </Typography>
       </Stack>
 
-      {resources.length === 0 ? (
+      {resourcesLoading && resources.length === 0 ? (
+        <Stack sx={{ flex: 1, minHeight: 0, justifyContent: "center", alignItems: "center", px: 3 }}>
+          <CircularProgress size={22} />
+        </Stack>
+      ) : resourcesLoadError && resources.length === 0 ? (
+        <Stack sx={{ flex: 1, minHeight: 0, justifyContent: "center", alignItems: "center", px: 3 }}>
+          <Typography role="alert" sx={{ maxWidth: 420, textAlign: "center", fontSize: "0.78rem", color: "error.main" }}>
+            {resourcesLoadError}
+          </Typography>
+        </Stack>
+      ) : resourceGroups.length === 0 ? (
         <Stack sx={{ flex: 1, minHeight: 0, justifyContent: "center", alignItems: "center", px: 3 }}>
           <EmptyState icon={<InsertDriveFileOutlinedIcon />} title={t("resourcesEmptyTitle")} description={t("resourcesEmptyDescription")} />
         </Stack>
       ) : (
         <Box sx={{ flex: 1, minHeight: 0, overflow: "auto", px: 1.5, pt: 1.5, pb: `${16 + bottomInset}px` }}>
           <Stack spacing={1}>
-            {RESOURCE_GROUPS.map(({ kind, labelKey }) => {
-              // Newest-first within each type group.
-              const items = resources.filter((resource) => resource.kind === kind).reverse();
-              if (items.length === 0) {
-                return null;
-              }
+            {resourceGroups.map(({ kind, labelKey, items }) => {
               return (
-                <ResourceGroup key={kind} title={t(labelKey)} count={items.length}>
+                <ResourceGroup key={kind} title={t(labelKey)} count={items.length} open={openResourceKind === kind} onToggle={() => toggleResourceKind(kind)}>
                   <Box sx={{ display: "grid", gap: 1, gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))", alignItems: "stretch" }}>
                     {items.map((resource) => (
                       <ResourceCard key={resource.id} resource={resource} onClick={onResourceClick(resource)} />

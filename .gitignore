@@ -15,6 +15,7 @@ next-ui/.data-dev
 next-ui/.data-test
 next-ui/.e2e-data
 next-ui/dist
+next-ui/dist-check
 next-ui/dist-dev
 next-ui/test-results
 next-ui/playwright-report

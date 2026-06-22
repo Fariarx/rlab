@@ -23,11 +23,12 @@ interface UseComposerTextControllerInput {
   readonly attachmentsControlled: boolean;
   readonly composerAttachments: readonly ComposerAttachmentDraft[];
   readonly composerValue: string;
+  readonly canSendWithoutPayload?: boolean;
   readonly history: readonly string[];
   readonly initialAttachments: readonly ComposerAttachmentDraft[];
   readonly initialValue: string;
   readonly onAttachmentError?: (message: string) => void;
-  readonly onBeforeSend?: () => void;
+  readonly onBeforeSend?: () => void | Promise<void>;
   readonly onDraftChange?: (draft: ComposerDraft) => void;
   readonly onSend?: (value: string) => void;
   readonly onSendReview?: () => void;
@@ -114,6 +115,7 @@ export function useComposerTextController({
   attachmentsControlled,
   composerAttachments,
   composerValue,
+  canSendWithoutPayload = false,
   history,
   initialAttachments,
   initialValue,
@@ -278,25 +280,34 @@ export function useComposerTextController({
   }, [updateDraft]);
 
   const send = useCallback(async () => {
-    onBeforeSend?.();
-    const draft = latestDraftRef.current;
-    const trimmed = draft.text.trim();
-    const hasInput = trimmed.length > 0 || draft.attachments.length > 0;
-    if (!hasInput && reviewCount === 0) {
+    if (sending) {
       return;
     }
     setSending(true);
-    if (hasInput) {
-      const payload = composerSendPayload(trimmed, draft.attachments);
-      armStaleSubmitChangeGuard(draft.text);
-      updateDraft({ text: "", attachments: [] });
-      onSend?.(payload);
+    try {
+      const beforeSend = onBeforeSend?.();
+      if (beforeSend && typeof beforeSend.then === "function") {
+        await beforeSend;
+      }
+      const draft = latestDraftRef.current;
+      const trimmed = draft.text.trim();
+      const hasInput = trimmed.length > 0 || draft.attachments.length > 0;
+      if (!hasInput && reviewCount === 0) {
+        return;
+      }
+      if (hasInput) {
+        const payload = composerSendPayload(trimmed, draft.attachments);
+        armStaleSubmitChangeGuard(draft.text);
+        updateDraft({ text: "", attachments: [] });
+        onSend?.(payload);
+      }
+      if (reviewCount > 0) {
+        onSendReview?.();
+      }
+    } finally {
+      setSending(false);
     }
-    if (reviewCount > 0) {
-      onSendReview?.();
-    }
-    setSending(false);
-  }, [armStaleSubmitChangeGuard, onBeforeSend, onSend, onSendReview, reviewCount, setSending, updateDraft]);
+  }, [armStaleSubmitChangeGuard, onBeforeSend, onSend, onSendReview, reviewCount, sending, setSending, updateDraft]);
 
   const addFiles = useCallback(async (files: readonly File[]) => {
     if (files.length === 0) {
@@ -479,7 +490,7 @@ export function useComposerTextController({
   return {
     addFiles,
     applySuggestion,
-    canSend: (hasComposerPayload || reviewCount > 0) && !sending,
+    canSend: (hasComposerPayload || reviewCount > 0 || canSendWithoutPayload) && !sending,
     handleBeforeInput,
     handleComposerChange,
     handleKeyDown,

@@ -16,6 +16,7 @@ import {
   initWorkspaceDb,
   patchMessageBlockById,
   readConversation,
+  readConversationResourcesFromDb,
   readMessageBlockById,
   readMessageBlocks,
   readPendingTurnQueue,
@@ -170,6 +171,36 @@ describe("workspace-db", () => {
     expect(after.threads.c1).toHaveLength(2);
   });
 
+  it("materializes conversation resources during workspace initialization", () => {
+    initializeWorkspaceStateInDb({
+      ...buildEmptyWorkspaceState(),
+      chats: [conv("c1")],
+      threads: {
+        c1: [
+          userMsg("u1", "Earlier link https://example.com/old", { time: "11:00" }),
+          msg("a1", "Later image ![plot](/tmp/plot.png)"),
+        ],
+      },
+      selectedId: "c1",
+    });
+
+    expect(readConversationResourcesFromDb("c1").map((resource) => `${resource.kind}:${resource.url}`)).toEqual([
+      "link:https://example.com/old",
+      "image:/tmp/plot.png",
+    ]);
+  });
+
+  it("updates materialized resources when a streamed message is upserted", () => {
+    initializeWorkspaceStateInDb({ ...buildEmptyWorkspaceState(), chats: [conv("c1")], threads: { c1: [] }, selectedId: "c1" });
+
+    upsertMessage("c1", msg("a1", "old https://old.example"));
+    expect(readConversationResourcesFromDb("c1").map((resource) => resource.url)).toEqual(["https://old.example"]);
+
+    upsertMessage("c1", msg("a1", "new https://new.example"));
+
+    expect(readConversationResourcesFromDb("c1").map((resource) => resource.url)).toEqual(["https://new.example"]);
+  });
+
   it("upserts a bound agent reply after its user turn and deletes stale replies", () => {
     initializeWorkspaceStateInDb({
       ...buildEmptyWorkspaceState(),
@@ -187,6 +218,26 @@ describe("workspace-db", () => {
     const thread = readThreadFromDb("c1");
     expect(thread.map((message) => message.id)).toEqual(["u1", "a-new", "u2", "a-later"]);
     expect(thread[1].blocks).toEqual([{ kind: "text", text: "final answer" }]);
+  });
+
+  it("rebuilds materialized resources when a bound agent reply replaces stale replies", () => {
+    initializeWorkspaceStateInDb({
+      ...buildEmptyWorkspaceState(),
+      chats: [conv("c1")],
+      threads: {
+        c1: [
+          userMsg("u1", "try again"),
+          msg("a-stale", "old https://stale.example"),
+          userMsg("u2", "later"),
+          msg("a-later", "later https://later.example"),
+        ],
+      },
+      selectedId: "c1",
+    });
+
+    upsertAgentMessageForUserTurn("c1", "u1", msg("a-new", "new https://new.example"));
+
+    expect(readConversationResourcesFromDb("c1").map((resource) => resource.url)).toEqual(["https://new.example", "https://later.example"]);
   });
 
   it("inserts a bound agent reply before an immediate next user turn", () => {
@@ -281,6 +332,29 @@ describe("workspace-db", () => {
     expect(readMessageBlockById("missing-question")).toBeUndefined();
     expect(readConversation("c1")?.status).toBe("running");
     expect(readThreadFromDb("c2").map((message) => message.id)).toEqual(["a2"]);
+  });
+
+  it("updates materialized resources when patching a single message block", () => {
+    initializeWorkspaceStateInDb({
+      ...buildEmptyWorkspaceState(),
+      chats: [conv("c1", { status: "waiting" })],
+      threads: {
+        c1: [
+          {
+            id: "a1",
+            role: "agent",
+            blocks: [{ kind: "options", id: "resource-block", prompt: "Pick", options: [{ id: "A", label: "A" }] }],
+          },
+        ],
+      },
+      selectedId: "c1",
+    });
+
+    patchMessageBlockById("resource-block", (block) =>
+      block.kind === "options" ? { kind: "search", query: "docs", state: "ok", results: [{ title: "Docs", url: "https://docs.example/path" }] } : block,
+    );
+
+    expect(readConversationResourcesFromDb("c1").map((resource) => `${resource.kind}:${resource.url}`)).toEqual(["link:https://docs.example/path"]);
   });
 
   it("searches conversations server-side and returns ids only", () => {

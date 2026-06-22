@@ -483,7 +483,7 @@ describe("Composer", () => {
     expect(onVoiceError).toHaveBeenCalledWith("Речь не распознана.");
   });
 
-  it("shows only the dictation stop action while voice input is active", async () => {
+  it("keeps send visible while voice input is active", async () => {
     class FakeSpeechRecognition {
       static current: FakeSpeechRecognition | null = null;
       lang = "";
@@ -520,7 +520,7 @@ describe("Composer", () => {
     expect(screen.getByTestId("composer-voice-recording-strip")).toHaveAttribute("data-layout", "inline");
     expect(screen.queryByText("⏎")).not.toBeInTheDocument();
     expect(screen.getByTestId("composer-voice-button")).toHaveStyle({ height: "30px" });
-    expect(screen.queryByTestId("composer-send-button")).not.toBeInTheDocument();
+    expect(screen.getByTestId("composer-send-button")).toBeEnabled();
     expect(screen.queryByTestId("composer-stop-button")).not.toBeInTheDocument();
   });
 
@@ -593,6 +593,184 @@ describe("Composer", () => {
     });
     expect(FakeSpeechRecognition.current?.stop).toHaveBeenCalledTimes(1);
     expect(screen.queryByTestId("composer-voice-recording-strip")).not.toBeInTheDocument();
+  });
+
+  it("waits for browser voice input before sending from the send button", async () => {
+    const onSend = vi.fn();
+    class FakeSpeechRecognition {
+      static current: FakeSpeechRecognition | null = null;
+      lang = "";
+      continuous = false;
+      interimResults = false;
+      onresult: ((event: { readonly resultIndex: number; readonly results: { readonly length: number; readonly 0: { readonly length: number; readonly isFinal: boolean; readonly 0: { readonly transcript: string } } } }) => void) | null = null;
+      onerror: ((event: { readonly error?: string; readonly message?: string }) => void) | null = null;
+      onend: (() => void) | null = null;
+      interim = "";
+      stop = vi.fn(() => {
+        if (this.interim) {
+          this.onresult?.({
+            resultIndex: 0,
+            results: {
+              length: 1,
+              0: { length: 1, isFinal: true, 0: { transcript: this.interim } },
+            },
+          });
+        }
+        this.onend?.();
+      });
+
+      constructor() {
+        FakeSpeechRecognition.current = this;
+      }
+
+      start(): void {}
+
+      emitInterim(text: string): void {
+        this.interim = text;
+        this.onresult?.({
+          resultIndex: 0,
+          results: {
+            length: 1,
+            0: { length: 1, isFinal: false, 0: { transcript: text } },
+          },
+        });
+      }
+    }
+    vi.stubGlobal("SpeechRecognition", FakeSpeechRecognition);
+    installVoiceCaptureMocks();
+
+    renderWithTheme(
+      <Composer
+        placeholder="Написать"
+        onSend={onSend}
+        voiceProvider={{ id: "web-speech", name: "Browser Web Speech", kind: "browser", language: "ru-RU", configured: true }}
+      />,
+    );
+
+    fireEvent.click(await screen.findByTestId("composer-voice-button"));
+    await waitFor(() => {
+      expect(FakeSpeechRecognition.current).not.toBeNull();
+    });
+    act(() => {
+      FakeSpeechRecognition.current?.emitInterim("текст через кнопку");
+    });
+
+    fireEvent.click(screen.getByTestId("composer-send-button"));
+
+    await waitFor(() => {
+      expect(onSend).toHaveBeenCalledWith("текст через кнопку");
+    });
+    expect(FakeSpeechRecognition.current?.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancels cloud voice input without sending audio for transcription", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    class FakeMediaRecorder {
+      static current: FakeMediaRecorder | null = null;
+      static isTypeSupported(): boolean {
+        return true;
+      }
+
+      state: RecordingState = "inactive";
+      readonly mimeType = "audio/webm";
+      ondataavailable: ((event: BlobEvent) => void) | null = null;
+      onerror: ((event: { readonly error: Error }) => void) | null = null;
+      onstop: (() => void) | null = null;
+
+      constructor() {
+        FakeMediaRecorder.current = this;
+      }
+
+      start(): void {
+        this.state = "recording";
+      }
+
+      stop(): void {
+        this.state = "inactive";
+        this.ondataavailable?.({ data: new Blob(["voice"], { type: this.mimeType }) } as BlobEvent);
+        this.onstop?.();
+      }
+    }
+    vi.stubGlobal("MediaRecorder", FakeMediaRecorder);
+    installVoiceCaptureMocks();
+
+    renderWithTheme(
+      <Composer
+        placeholder="Написать"
+        voiceProvider={{ id: "openai", name: "OpenAI", kind: "cloud", language: "ru", configured: true }}
+      />,
+    );
+
+    fireEvent.click(await screen.findByTestId("composer-voice-button"));
+    await waitFor(() => {
+      expect(FakeMediaRecorder.current?.state).toBe("recording");
+    });
+
+    fireEvent.click(screen.getByTestId("composer-voice-button"));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("composer-voice-recording-strip")).not.toBeInTheDocument();
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(screen.getByPlaceholderText("Написать")).toHaveValue("");
+  });
+
+  it("waits for cloud transcription before sending from the send button", async () => {
+    const onSend = vi.fn();
+    const fetchMock = vi.fn().mockResolvedValue(Response.json({ text: "облачный текст" }));
+    vi.stubGlobal("fetch", fetchMock);
+    class FakeMediaRecorder {
+      static current: FakeMediaRecorder | null = null;
+      static isTypeSupported(): boolean {
+        return true;
+      }
+
+      state: RecordingState = "inactive";
+      readonly mimeType = "audio/webm";
+      ondataavailable: ((event: BlobEvent) => void) | null = null;
+      onerror: ((event: { readonly error: Error }) => void) | null = null;
+      onstop: (() => void) | null = null;
+
+      constructor() {
+        FakeMediaRecorder.current = this;
+      }
+
+      start(): void {
+        this.state = "recording";
+      }
+
+      stop(): void {
+        this.state = "inactive";
+        this.ondataavailable?.({ data: new Blob(["voice"], { type: this.mimeType }) } as BlobEvent);
+        this.onstop?.();
+      }
+    }
+    vi.stubGlobal("MediaRecorder", FakeMediaRecorder);
+    installVoiceCaptureMocks();
+
+    renderWithTheme(
+      <Composer
+        placeholder="Написать"
+        onSend={onSend}
+        voiceProvider={{ id: "openai", name: "OpenAI", kind: "cloud", language: "ru", configured: true }}
+      />,
+    );
+
+    fireEvent.click(await screen.findByTestId("composer-voice-button"));
+    await waitFor(() => {
+      expect(FakeMediaRecorder.current?.state).toBe("recording");
+    });
+
+    fireEvent.click(screen.getByTestId("composer-send-button"));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/voice/transcribe",
+        expect.objectContaining({ method: "POST" }),
+      );
+      expect(onSend).toHaveBeenCalledWith("облачный текст");
+    });
   });
 
 
@@ -813,7 +991,7 @@ describe("Composer", () => {
     expect(FakeSpeechRecognition.current?.startCount).toBe(1);
   });
 
-  it("commits browser speech interim text when Android reports aborted during manual stop", async () => {
+  it("cancels browser speech interim text when Android reports aborted during dictation cancel", async () => {
     class FakeSpeechRecognition {
       static current: FakeSpeechRecognition | null = null;
       lang = "";
@@ -868,7 +1046,8 @@ describe("Composer", () => {
     });
     fireEvent.click(screen.getByTestId("composer-voice-button"));
 
-    expect(screen.getByPlaceholderText("Написать")).toHaveValue("ручная остановка");
+    expect(screen.getByPlaceholderText("Написать")).toHaveValue("");
+    expect(screen.queryByTestId("composer-voice-recording-strip")).not.toBeInTheDocument();
   });
 
   it("attaches files handed in by the parent drop zone", async () => {

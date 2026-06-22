@@ -33,6 +33,7 @@
   "scripts": {
     "dev": "cross-env NODE_ENV=development RLAB_DATA_DIR=.data-dev vite --host 127.0.0.1",
     "build": "tsc --noEmit && vite build",
+    "build:check": "tsc --noEmit && vite build --outDir dist-check --emptyOutDir",
     "preview": "cross-env NODE_ENV=production vite preview --host 127.0.0.1",
     "serve": "cross-env NODE_ENV=production vite preview --host 127.0.0.1",
     "start": "node bin/rlab.mjs",

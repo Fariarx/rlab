@@ -278,11 +278,11 @@ export async function attachRunUpdates(opts: {
   readFinalNdjsonLine(buffer, readLine);
 }
 
-export async function cancelRun(runId: string): Promise<void> {
+export async function cancelRun(runId: string, options: { readonly pauseQueue?: boolean } = {}): Promise<void> {
   const response = await fetch("/api/run-cancel", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ runId }),
+    body: JSON.stringify({ runId, ...(options.pauseQueue === undefined ? {} : { pauseQueue: options.pauseQueue }) }),
   });
   if (!response.ok && response.status !== 404) {
     throw new Error(await responseErrorMessage(response, `Run cancel failed (${response.status})`));

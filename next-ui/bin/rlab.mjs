@@ -13,6 +13,18 @@ process.env.NODE_ENV ||= "production";
 
 const port = Number.parseInt(process.env.PORT ?? "", 10) || 4280;
 const host = process.env.HOST ?? "127.0.0.1";
+const packageDistDir = resolve(packageRoot, "dist");
+
+function configuredDistDir() {
+  const explicitDistDir = process.env.RLAB_DIST_DIR?.trim();
+  if (explicitDistDir) {
+    return resolve(explicitDistDir);
+  }
+  const dataDir = process.env.RLAB_DATA_DIR?.trim();
+  return dataDir ? resolve(dataDir, "dist") : packageDistDir;
+}
+
+const distDir = configuredDistDir();
 
 function normalizedHostname(value) {
   const trimmed = String(value ?? "").trim().toLowerCase();
@@ -31,13 +43,17 @@ if (!isLoopbackBindHost(host) && process.env.RLAB_ALLOW_PUBLIC_BIND !== "1") {
   process.exit(1);
 }
 
-if (!existsSync(resolve(packageRoot, "dist/index.html"))) {
-  console.log("[rlab] No build found — building the app once (this can take a moment)...");
-  await build();
+const distExists = existsSync(resolve(distDir, "index.html"));
+const isolatedDist = distDir !== packageDistDir;
+if (isolatedDist || !distExists) {
+  const reason = distExists ? "Isolated production build" : "No build found";
+  console.log(`[rlab] ${reason} in ${distDir} — building the app (this can take a moment)...`);
+  await build({ root: packageRoot, build: { outDir: distDir, emptyOutDir: true } });
 }
 
 const server = await preview({
   root: packageRoot,
+  build: { outDir: distDir },
   preview: { host, port, strictPort: true },
 });
 

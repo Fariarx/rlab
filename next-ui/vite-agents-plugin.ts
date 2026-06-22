@@ -47,6 +47,7 @@ import {
   initializeWorkspaceStateInDb,
   patchMessageBlockById,
   readConversation,
+  readConversationResourcesFromDb,
   readMessage,
   readMessageBlockById,
   readMessageBlocks,
@@ -2826,6 +2827,10 @@ function readClientThread(
     return { messages: readThreadFromDb(conversationId), hasMoreBefore: false };
   }
   return readThreadPageFromDb(conversationId, options);
+}
+
+export function readClientResources(conversationId: string) {
+  return { resources: readConversationResourcesFromDb(conversationId) };
 }
 
 export function threadWithBoundUserMessage(thread: readonly ChatMessage[], userMessage: ChatMessage): ChatMessage[] {
@@ -5751,6 +5756,7 @@ interface RunInputSelection {
 
 interface RunCancelRequest {
   readonly runId: string;
+  readonly pauseQueue: boolean;
 }
 
 interface RunRequest {
@@ -8079,7 +8085,10 @@ export function parseRunCancelPayload(body: string): RunCancelRequest {
   if (!isRecord(parsed) || typeof parsed.runId !== "string" || parsed.runId.trim().length === 0) {
     throw new Error("Run id is required.");
   }
-  return { runId: parsed.runId.trim() };
+  return {
+    runId: parsed.runId.trim(),
+    pauseQueue: parsed.pauseQueue === false ? false : true,
+  };
 }
 
 function createRunInputHandler(input: Record<string, unknown>, context: Parameters<CanUseTool>[2], send: (event: RunEvent) => void, scopeId?: string): Promise<PermissionResult> | null {
@@ -8416,26 +8425,11 @@ async function startQueuedTurn(record: PendingTurnRecord, runId: string, onAccep
     userMessageId: record.message.id,
     agent: body.agent,
   });
-  const response = await fetch(`${record.origin}/api/run`, {
-    method: "POST",
-    headers: { "Content-Type": JSON_CONTENT_TYPE },
-    body: JSON.stringify(body),
-  });
-  if (!response.ok) {
-    const text = await response.text().catch(() => "");
-    throw new Error(`HTTP ${response.status}${text ? ` ${clip(text, 300)}` : ""}`);
+  const result = startServerRunFromPayload(body, record.origin, createDetachedRunEventSender());
+  if (!result.ok) {
+    throw new Error(`Run dispatch rejected (${result.status}): ${result.error}`);
   }
   onAccepted();
-  const reader = response.body?.getReader();
-  if (!reader) {
-    return;
-  }
-  for (;;) {
-    const { done } = await reader.read();
-    if (done) {
-      return;
-    }
-  }
 }
 
 function drainServerQueue(conversationId: string): void {
@@ -8679,16 +8673,10 @@ async function fireScheduledWakeup(record: ScheduledWakeupRecord): Promise<void>
     conversationId: dispatchingRecord.conversationId,
     agent: request.agent,
   });
-  let response: Response;
   try {
-    response = await fetch(`${dispatchingRecord.origin}/api/run`, {
-      method: "POST",
-      headers: { "Content-Type": JSON_CONTENT_TYPE },
-      body: JSON.stringify(body),
-    });
-    if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      throw new Error(`HTTP ${response.status}${text ? ` ${clip(text, 300)}` : ""}`);
+    const result = startServerRunFromPayload(body, dispatchingRecord.origin, createDetachedRunEventSender());
+    if (!result.ok) {
+      throw new Error(`Run dispatch rejected (${result.status}): ${result.error}`);
     }
   } catch (error) {
     const retryRecord = retryScheduledWakeupDispatchRecord(dispatchingRecord, error);
@@ -8704,26 +8692,6 @@ async function fireScheduledWakeup(record: ScheduledWakeupRecord): Promise<void>
     return;
   }
   removeScheduledWakeupRecord(dispatchingRecord.id);
-  const reader = response.body?.getReader();
-  if (!reader) {
-    return;
-  }
-  try {
-    for (;;) {
-      const { done } = await reader.read();
-      if (done) {
-        break;
-      }
-    }
-  } catch (error) {
-    appendRunAuditEvent(RUN_AUDIT_FILE, {
-      type: "wakeup_stream_failed",
-      wakeupId: dispatchingRecord.id,
-      sourceRunId: dispatchingRecord.sourceRunId,
-      conversationId: dispatchingRecord.conversationId,
-      error: errorMessage(error),
-    });
-  }
 }
 
 async function checkScriptWakeup(record: ScheduledWakeupRecord): Promise<void> {
@@ -11130,7 +11098,15 @@ function publicRunEvent(event: RunEvent): RunEvent {
   return publicEvent;
 }
 
-function createRunEventSender(res: ServerResponse): { readonly send: (event: RunEvent) => void; readonly sendDone: () => void; readonly end: () => void; readonly isClosed: () => boolean } {
+interface RunEventSender {
+  readonly send: (event: RunEvent) => void;
+  readonly sendDone: () => void;
+  readonly end: () => void;
+  readonly isClosed: () => boolean;
+  readonly onClose: (listener: () => void) => void;
+}
+
+function createRunEventSender(res: ServerResponse): RunEventSender {
   let doneSent = false;
   let closed = false;
   const stopHeartbeat = startNdjsonHeartbeat(res);
@@ -11159,6 +11135,101 @@ function createRunEventSender(res: ServerResponse): { readonly send: (event: Run
       }
     },
     isClosed: () => closed || res.writableEnded,
+    onClose: (listener) => {
+      res.on("close", listener);
+    },
+  };
+}
+
+function createDetachedRunEventSender(): RunEventSender {
+  let doneSent = false;
+  let closed = false;
+  const send = (event: RunEvent) => {
+    if (event.type === "done") {
+      if (doneSent) {
+        return;
+      }
+      doneSent = true;
+    }
+  };
+  return {
+    send,
+    sendDone: () => send({ type: "done" }),
+    end: () => {
+      closed = true;
+    },
+    isClosed: () => closed,
+    onClose: () => undefined,
+  };
+}
+
+interface DeferredRunEventSender extends RunEventSender {
+  readonly attach: (target: RunEventSender) => void;
+  readonly emitClose: () => void;
+}
+
+function createDeferredRunEventSender(): DeferredRunEventSender {
+  let target: RunEventSender | null = null;
+  let ended = false;
+  let closed = false;
+  const buffered: RunEvent[] = [];
+  const closeListeners: Array<() => void> = [];
+  return {
+    send: (event) => {
+      if (target) {
+        target.send(event);
+        return;
+      }
+      buffered.push(event);
+    },
+    sendDone: () => {
+      if (target) {
+        target.sendDone();
+        return;
+      }
+      buffered.push({ type: "done" });
+    },
+    end: () => {
+      if (target) {
+        target.end();
+        return;
+      }
+      ended = true;
+    },
+    isClosed: () => target?.isClosed() ?? (closed || ended),
+    onClose: (listener) => {
+      if (target) {
+        target.onClose(listener);
+        return;
+      }
+      closeListeners.push(listener);
+    },
+    attach: (nextTarget) => {
+      if (target) {
+        throw new Error("Deferred run event sender is already attached.");
+      }
+      target = nextTarget;
+      for (const listener of closeListeners) {
+        nextTarget.onClose(listener);
+      }
+      closeListeners.length = 0;
+      for (const event of buffered) {
+        nextTarget.send(event);
+      }
+      buffered.length = 0;
+      if (ended) {
+        nextTarget.end();
+      }
+    },
+    emitClose: () => {
+      if (closed) {
+        return;
+      }
+      closed = true;
+      for (const listener of closeListeners.splice(0)) {
+        listener();
+      }
+    },
   };
 }
 
@@ -11221,7 +11292,7 @@ async function runClaudeSdk(
   request: RunRequest,
   cwd: string,
   runEnv: NodeJS.ProcessEnv,
-  res: ServerResponse,
+  events: Pick<RunEventSender, "onClose">,
   send: (event: RunEvent) => void,
   sendDone: () => void,
   end: () => void,
@@ -11242,7 +11313,7 @@ async function runClaudeSdk(
     timeoutErrorSent = true;
     send({ type: "error", text: agentRunTimeoutText(request.agent, runTimeout.timeoutMs) });
   };
-  res.on("close", () => {
+  events.onClose(() => {
     if (!binding && !abortController.signal.aborted) {
       abortController.abort();
     }
@@ -11440,7 +11511,7 @@ function openCodeServerErrorText(error: unknown): string {
 async function runOpenCodeServer(
   request: RunRequest,
   cwd: string,
-  res: ServerResponse,
+  events: Pick<RunEventSender, "onClose">,
   send: (event: RunEvent) => void,
   sendDone: () => void,
   end: () => void,
@@ -11449,7 +11520,7 @@ async function runOpenCodeServer(
   runEnv: NodeJS.ProcessEnv,
 ): Promise<void> {
   const abortController = new AbortController();
-  res.on("close", () => {
+  events.onClose(() => {
     if (!binding && !abortController.signal.aborted) {
       abortController.abort();
     }
@@ -11780,7 +11851,7 @@ export function buildCodexThreadParams(request: RunRequest): {
 async function runCodexAppServer(
   request: RunRequest,
   cwd: string,
-  res: ServerResponse,
+  events: Pick<RunEventSender, "onClose">,
   send: (event: RunEvent) => void,
   sendDone: () => void,
   end: () => void,
@@ -11788,7 +11859,7 @@ async function runCodexAppServer(
   accumulator: BackgroundRunAccumulator | null,
 ): Promise<void> {
   const abortController = new AbortController();
-  res.on("close", () => {
+  events.onClose(() => {
     if (!binding && !abortController.signal.aborted) {
       abortController.abort();
     }
@@ -12132,7 +12203,7 @@ function handleRunCancel(req: IncomingMessage, res: ServerResponse): void {
       if (!handle) {
         if (canceled.canceled) {
           persistWorkspaceDelta(currentState, canceled.state);
-          if (conversationToPause) {
+          if (request.pauseQueue && conversationToPause) {
             pauseQueueForStoppedRun(conversationToPause.id);
           }
           sendJson(res, 200, { runId: request.runId, canceled: true, detached: true });
@@ -12143,7 +12214,9 @@ function handleRunCancel(req: IncomingMessage, res: ServerResponse): void {
       }
       handle.cancel();
       persistWorkspaceDelta(currentState, canceled.state);
-      pauseQueueForStoppedRun(handle.binding.conversationId);
+      if (request.pauseQueue) {
+        pauseQueueForStoppedRun(handle.binding.conversationId);
+      }
       sendJson(res, 200, { runId: request.runId, canceled: true });
     } catch (error) {
       sendJson(res, runControlErrorStatus(error), { error: errorMessage(error) });
@@ -12216,6 +12289,412 @@ function handleRunAttach(req: IncomingMessage, res: ServerResponse): void {
     backgroundRunHandles.delete(runId);
     res.end();
   }
+}
+
+interface ServerRunStartError {
+  readonly ok: false;
+  readonly status: number;
+  readonly error: string;
+}
+
+interface ServerRunStartAccepted {
+  readonly ok: true;
+}
+
+type ServerRunStartResult = ServerRunStartError | ServerRunStartAccepted;
+
+function serverRunStartError(status: number, error: string): ServerRunStartError {
+  return { ok: false, status, error };
+}
+
+function startServerRunFromPayload(payload: Record<string, unknown>, origin: string, sender: RunEventSender): ServerRunStartResult {
+  const parsedPayload = parseRunRequestPayload(JSON.stringify(payload));
+  return parsedPayload.ok ? startServerRunFromParsedPayload(parsedPayload, origin, sender) : serverRunStartError(400, parsedPayload.error);
+}
+
+function startServerRunFromParsedPayload(parsedPayload: ParsedRunRequestSuccess, origin: string, sender: RunEventSender): ServerRunStartResult {
+  const {
+    agent,
+    model,
+    reasoning,
+    mode,
+    fast,
+    prompt: parsedPrompt,
+    requestedCwd,
+    accessMode,
+    resume,
+    autoConfirm,
+    autoCompact,
+    compactWindow,
+    tools,
+    systemPrompt,
+    serverPrompt,
+    accessModeValid,
+    profileValid,
+    profileError,
+    bindingInvalid,
+  } = parsedPayload;
+  const binding: BackgroundRunBinding | null = parsedPayload.binding;
+  let prompt = parsedPrompt;
+  const browserPreviewEnabled = rlabChatToolEnabled(tools, "BrowserPreview");
+
+  if (serverPrompt) {
+    if (!binding) {
+      return serverRunStartError(400, "Server prompt mode requires a background run binding.");
+    }
+    try {
+      prompt = promptFromPersistedThread(binding, serverPrompt.userMessage, resume);
+    } catch (error) {
+      return serverRunStartError(500, `Failed to build server prompt: ${errorMessage(error)}`);
+    }
+  }
+
+  if (!prompt) {
+    return serverRunStartError(400, "Empty prompt");
+  }
+  if (bindingInvalid) {
+    return serverRunStartError(400, "Invalid background run binding.");
+  }
+  if (!accessModeValid) {
+    return serverRunStartError(400, "Invalid accessMode. Expected read-only or unrestricted.");
+  }
+  if (!profileValid) {
+    return serverRunStartError(400, profileError);
+  }
+
+  const spec = RUN[agent];
+  const usesSdkRuntime = agent === "claude-code";
+  const resolvedBin = spec && !usesSdkRuntime ? resolveBinOnPath(spec.bin) : null;
+  if (!spec || !isAgentId(agent)) {
+    return serverRunStartError(400, `Running ${agent || "this agent"} is not wired yet.`);
+  }
+  if (!usesSdkRuntime && !resolvedBin) {
+    return serverRunStartError(503, `${spec.bin} is not installed on this machine.`);
+  }
+  const requestedProfileErrorMessage = requestedProfileError(agent, model, reasoning, mode);
+  if (requestedProfileErrorMessage) {
+    return serverRunStartError(400, requestedProfileErrorMessage);
+  }
+  const accessModeError = validateRunAccessModeForAgent(agent, accessMode);
+  if (accessModeError) {
+    return serverRunStartError(400, accessModeError);
+  }
+  const config = readAgentSecretConfig();
+  const runEnv = {
+    ...process.env,
+    ...config.env,
+    ...rlabAgentMcpRunEnv(agent, tools),
+    ...(binding && browserPreviewEnabled
+      ? {
+          RLAB_BROWSER_BASE_URL: origin,
+          RLAB_BROWSER_SESSION_ID: binding.conversationId,
+        }
+      : {}),
+  };
+  const detect = DETECT[agent];
+  if (spec.env && detect && !hasConfiguredAgentAuth(detect, config, runEnv)) {
+    return serverRunStartError(503, `${agent} needs setup: set one of ${spec.env.join(", ")}.`);
+  }
+
+  // Use the requested working directory when it's a real directory (so the
+  // agent reads/operates on real project files); otherwise a temp scratch dir.
+  // Default permission mode is kept (read tools work; edits/bash are denied),
+  // so pointing at a real repo stays safe.
+  let cwd = join(tmpdir(), "rlab-agent-scratch");
+  if (requestedCwd) {
+    try {
+      const resolvedRequestedCwd = resolve(requestedCwd);
+      if (!existsSync(resolvedRequestedCwd) || !statSync(resolvedRequestedCwd).isDirectory()) {
+        return serverRunStartError(400, `Project directory does not exist: ${requestedCwd}`);
+      }
+      const accessError = validateRegisteredWorkspacePath(resolvedRequestedCwd, "Project directory", { includeAttachments: false });
+      if (accessError) {
+        return serverRunStartError(workspacePathErrorStatus(accessError), accessError);
+      }
+      cwd = resolvedRequestedCwd;
+    } catch (error) {
+      return serverRunStartError(400, error instanceof Error ? error.message : String(error));
+    }
+  }
+  try {
+    mkdirSync(cwd, { recursive: true });
+  } catch (error) {
+    return serverRunStartError(500, error instanceof Error ? error.message : String(error));
+  }
+
+  let accumulator: BackgroundRunAccumulator | null = null;
+  let requestForWakeups: RunRequest | null = null;
+  const send = (event: RunEvent) => {
+    if (event.type === "done") {
+      for (const entry of usageDebugEntries(event.usageDebug)) {
+        appendRunAuditEvent(RUN_AUDIT_FILE, {
+          type: "agent_usage_raw",
+          agent,
+          model,
+          runId: binding?.runId,
+          conversationId: binding?.conversationId,
+          source: entry.source,
+          payload: usageAuditPayload(entry.payload),
+        });
+      }
+    }
+    if (event.type === "wakeup") {
+      const publicEvents: RunEvent[] = requestForWakeups
+        ? (() => {
+            try {
+              const record = scheduleWakeupFromRunEvent(event, requestForWakeups, cwd, origin, binding);
+              const resultText = wakeupScheduleToolResultText(record, cachedWorkspaceLocale);
+              return [
+                ...(event.toolId ? [{ type: "tool_result" as const, id: event.toolId, ok: true, output: resultText }] : []),
+                { type: "status" as const, level: "ok" as const, text: wakeupStatusText(record, cachedWorkspaceLocale) },
+              ];
+            } catch (error) {
+              return [{ type: "error", text: errorMessage(error) }];
+            }
+          })()
+        : [{ type: "error", text: "Wakeup scheduling failed: run request is not initialised." }];
+      for (const publicEvent of publicEvents) {
+        sender.send(publicEvent);
+        if (binding && accumulator) {
+          applyBackgroundRunEvent(binding, accumulator, publicEvent);
+        }
+      }
+      return;
+    }
+    if (event.type === "cancel_wakeup") {
+      const publicEvents: RunEvent[] = binding
+        ? (() => {
+            const canceled = cancelScheduledWakeups({ conversationId: binding.conversationId, wakeupId: event.wakeupId, all: event.all ?? !event.wakeupId });
+            if (canceled === 0) {
+              return [{ type: "status", level: "warn", text: cachedWorkspaceLocale === "ru" ? "Wakeup не найден." : "Wakeup not found." }];
+            }
+            appendRunAuditEvent(RUN_AUDIT_FILE, {
+              type: "wakeup_canceled",
+              wakeupId: event.wakeupId,
+              sourceRunId: binding.runId,
+              conversationId: binding.conversationId,
+              count: canceled,
+              reason: event.reason,
+            });
+            const resultText = wakeupCancelToolResultText(canceled, binding.conversationId, cachedWorkspaceLocale);
+            return [
+              ...(event.toolId ? [{ type: "tool_result" as const, id: event.toolId, ok: true, output: resultText }] : []),
+              { type: "status" as const, level: "ok" as const, text: wakeupCancelStatusText(canceled, cachedWorkspaceLocale) },
+            ];
+          })()
+        : [{ type: "error", text: "Wakeup cancellation requires a conversation-bound run." }];
+      for (const publicEvent of publicEvents) {
+        sender.send(publicEvent);
+        if (binding && accumulator) {
+          applyBackgroundRunEvent(binding, accumulator, publicEvent);
+        }
+      }
+      return;
+    }
+    sender.send(event);
+    if (binding && accumulator) {
+      applyBackgroundRunEvent(binding, accumulator, event);
+    }
+  };
+  const sendDone = sender.sendDone;
+  const finishAndEnd = () => {
+    if (binding && accumulator) {
+      finishPersistedBackgroundRun(binding, accumulator, false);
+    }
+    sendDone();
+    sender.end();
+  };
+
+  // Gemini lets us set a session id for a NEW session; assign one so the client
+  // can resume it later. Claude/Codex/OpenCode mint their own and report it back
+  // via a "session" event from their stream translators.
+  const assignedSessionId = !resume && agent === "gemini" ? randomUUID() : undefined;
+  const request: RunRequest = {
+    agent,
+    model,
+    reasoning,
+    mode,
+    fast,
+    prompt,
+    accessMode,
+    resume,
+    sessionId: assignedSessionId,
+    autoConfirm,
+    autoCompact,
+    compactWindow,
+    ...(tools !== undefined ? { tools } : {}),
+    ...(systemPrompt ? { systemPrompt } : {}),
+    ...(serverPrompt ? { boundUserMessage: serverPrompt.userMessage } : {}),
+  };
+  requestForWakeups = request;
+  if (assignedSessionId) {
+    send({ type: "session", id: assignedSessionId });
+  }
+  const executionRequest: RunRequest = {
+    ...request,
+    prompt: prepareAgentPrompt(request.prompt, binding, origin, tools),
+  };
+  if (binding) {
+    accumulator = startPersistedBackgroundRun(binding, request);
+  }
+
+  send({ type: "start" });
+  if (cwd !== join(tmpdir(), "rlab-agent-scratch")) {
+    send({ type: "status", level: "info", text: `cwd · ${cwd}` });
+  }
+  send({ type: "status", level: "info", text: `access · ${accessMode}` });
+  try {
+    appendRunAuditEvent(RUN_AUDIT_FILE, {
+      type: "run_started",
+      agent,
+      model,
+      reasoning,
+      mode,
+      autoConfirm,
+      accessMode,
+      cwd,
+      runId: binding?.runId,
+      conversationId: binding?.conversationId,
+      prompt,
+    });
+  } catch (error) {
+    send({ type: "error", text: `Failed to write run audit event: ${errorMessage(error)}` });
+    finishAndEnd();
+    return { ok: true };
+  }
+
+  if (agent === "claude-code") {
+    void runClaudeSdk(executionRequest, cwd, runEnv, sender, send, sendDone, sender.end, binding, accumulator);
+    return { ok: true };
+  }
+
+  if (agent === "opencode") {
+    void runOpenCodeServer(executionRequest, cwd, sender, send, sendDone, sender.end, binding, accumulator, runEnv);
+    return { ok: true };
+  }
+
+  if (agent === "codex") {
+    void runCodexAppServer(executionRequest, cwd, sender, send, sendDone, sender.end, binding, accumulator);
+    return { ok: true };
+  }
+
+  // stdin = /dev/null so the CLI doesn't wait for piped input (it otherwise
+  // stalls ~3s: "no stdin data received").
+  let child: ReturnType<typeof spawn>;
+  try {
+    if (!resolvedBin) {
+      send({ type: "error", text: `${spec.bin} is not installed on this machine.` });
+      finishAndEnd();
+      return { ok: true };
+    }
+    child = spawnResolvedBin(resolvedBin, spec.args(executionRequest), agentProcessSpawnOptions({ cwd, env: runEnv, stdio: ["ignore", "pipe", "pipe"] }));
+  } catch (error) {
+    send({ type: "error", text: error instanceof Error ? `Failed to launch ${spec.bin}: ${error.message}` : `Failed to launch ${spec.bin}` });
+    finishAndEnd();
+    return { ok: true };
+  }
+  let canceled = false;
+  if (binding) {
+    backgroundRunHandles.set(binding.runId, {
+      binding,
+      startedAt: new Date().toISOString(),
+      ...(accumulator ? { accumulator } : {}),
+      cancel: () => {
+        canceled = true;
+        if (child.exitCode === null) {
+          terminateAgentProcessTree(child);
+        }
+      },
+    });
+  }
+  let pendingDoneEvent: RunEvent | null = null;
+  const sendFinalDone = () => {
+    if (pendingDoneEvent) {
+      send(pendingDoneEvent);
+    } else {
+      sendDone();
+    }
+  };
+  const runTimeout = startAgentRunTimeout(() => {
+    if (child.exitCode === null) {
+      terminateAgentProcessTree(child);
+    }
+  });
+  let timeoutErrorSent = false;
+  const sendTimeoutError = () => {
+    if (timeoutErrorSent || runTimeout.timeoutMs === null) {
+      return;
+    }
+    timeoutErrorSent = true;
+    send({ type: "error", text: agentRunTimeoutText(agent, runTimeout.timeoutMs) });
+  };
+  let finalized = false;
+  const finishCliRun = (finishCanceled: boolean) => {
+    if (finalized) {
+      return;
+    }
+    finalized = true;
+    runTimeout.clear();
+    if (binding && accumulator) {
+      finishPersistedBackgroundRun(binding, accumulator, finishCanceled);
+      notifyBackgroundRunUpdate(binding, true);
+      finishBackgroundHandle(binding, finishCanceled);
+    }
+    // Flush the buffered terminal `done` (it carries usage/cost) on normal exit;
+    // a bare sendDone() here dropped token/cost stats for codex & gemini.
+    sendFinalDone();
+    sender.end();
+  };
+  const translate = spec.createTranslator();
+
+  let buffer = "";
+  let stderr = "";
+  child.stdout?.on("data", (chunk: Buffer) => {
+    buffer += chunk.toString();
+    let nl: number;
+    while ((nl = buffer.indexOf("\n")) >= 0) {
+      const line = buffer.slice(0, nl).trim();
+      buffer = buffer.slice(nl + 1);
+      if (line) {
+        for (const event of translate(line)) {
+          if (event.type === "done") {
+            pendingDoneEvent = event;
+          } else {
+            send(event);
+          }
+        }
+      }
+    }
+  });
+  child.stderr?.on("data", (chunk) => {
+    stderr = appendLimitedText(stderr, chunk.toString("utf8"), STDERR_TAIL_LIMIT_CHARS);
+  });
+  child.on("error", (err) => {
+    if (runTimeout.timedOut()) {
+      sendTimeoutError();
+    } else if (!canceled) {
+      send({ type: "error", text: `Failed to launch ${spec.bin}: ${err.message}` });
+    }
+    finishCliRun(canceled && !runTimeout.timedOut());
+  });
+  child.on("close", (code) => {
+    if (runTimeout.timedOut()) {
+      sendTimeoutError();
+    } else if (!canceled && code !== 0 && stderr) {
+      send({ type: "error", text: clip(stderr, 400) });
+    }
+    finishCliRun(canceled && !runTimeout.timedOut());
+  });
+
+  // Abort the child if the client disconnects. A detached server job always has
+  // a binding and keeps running independently of browser streams.
+  sender.onClose(() => {
+    if (!binding && child.exitCode === null) {
+      terminateAgentProcessTree(child);
+    }
+  });
+
+  return { ok: true };
 }
 
 function handleWakeups(req: IncomingMessage, res: ServerResponse): void {
@@ -12382,82 +12861,6 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
       sendJson(res, 400, { error: parsedPayload.error });
       return;
     }
-    const {
-      agent,
-      model,
-      reasoning,
-      mode,
-      fast,
-      prompt: parsedPrompt,
-      requestedCwd,
-      accessMode,
-      resume,
-      autoConfirm,
-      autoCompact,
-      compactWindow,
-      tools,
-      systemPrompt,
-      serverPrompt,
-      accessModeValid,
-      profileValid,
-      profileError,
-      bindingInvalid,
-    } = parsedPayload;
-    let binding: BackgroundRunBinding | null = parsedPayload.binding;
-    let prompt = parsedPrompt;
-    const browserPreviewEnabled = rlabChatToolEnabled(tools, "BrowserPreview");
-
-    if (serverPrompt) {
-      if (!binding) {
-        sendJson(res, 400, { error: "Server prompt mode requires a background run binding." });
-        return;
-      }
-      try {
-        prompt = promptFromPersistedThread(binding, serverPrompt.userMessage, resume);
-      } catch (error) {
-        sendJson(res, 500, { error: `Failed to build server prompt: ${errorMessage(error)}` });
-        return;
-      }
-    }
-
-    if (!prompt) {
-      sendJson(res, 400, { error: "Empty prompt" });
-      return;
-    }
-    if (bindingInvalid) {
-      sendJson(res, 400, { error: "Invalid background run binding." });
-      return;
-    }
-    if (!accessModeValid) {
-      sendJson(res, 400, { error: "Invalid accessMode. Expected read-only or unrestricted." });
-      return;
-    }
-    if (!profileValid) {
-      sendJson(res, 400, { error: profileError });
-      return;
-    }
-
-    const spec = RUN[agent];
-    const usesSdkRuntime = agent === "claude-code";
-    const resolvedBin = spec && !usesSdkRuntime ? resolveBinOnPath(spec.bin) : null;
-    if (!spec || !isAgentId(agent)) {
-      sendJson(res, 400, { error: `Running ${agent || "this agent"} is not wired yet.` });
-      return;
-    }
-    if (!usesSdkRuntime && !resolvedBin) {
-      sendJson(res, 503, { error: `${spec.bin} is not installed on this machine.` });
-      return;
-    }
-    const requestedProfileErrorMessage = requestedProfileError(agent, model, reasoning, mode);
-    if (requestedProfileErrorMessage) {
-      sendJson(res, 400, { error: requestedProfileErrorMessage });
-      return;
-    }
-    const accessModeError = validateRunAccessModeForAgent(agent, accessMode);
-    if (accessModeError) {
-      sendJson(res, 400, { error: accessModeError });
-      return;
-    }
     let origin: string;
     try {
       origin = browserBridgeOrigin(req);
@@ -12465,327 +12868,23 @@ function handleRun(req: IncomingMessage, res: ServerResponse): void {
       sendJson(res, 500, { error: errorMessage(error) });
       return;
     }
-    const config = readAgentSecretConfig();
-    const runEnv = {
-      ...process.env,
-      ...config.env,
-      ...rlabAgentMcpRunEnv(agent, tools),
-      ...(binding && browserPreviewEnabled
-        ? {
-            RLAB_BROWSER_BASE_URL: origin,
-            RLAB_BROWSER_SESSION_ID: binding.conversationId,
-          }
-        : {}),
-    };
-    const detect = DETECT[agent];
-    if (spec.env && detect && !hasConfiguredAgentAuth(detect, config, runEnv)) {
-      sendJson(res, 503, { error: `${agent} needs setup: set one of ${spec.env.join(", ")}.` });
-      return;
-    }
 
-    // Use the requested working directory when it's a real directory (so the
-    // agent reads/operates on real project files); otherwise a temp scratch dir.
-    // Default permission mode is kept (read tools work; edits/bash are denied),
-    // so pointing at a real repo stays safe.
-    let cwd = join(tmpdir(), "rlab-agent-scratch");
-    if (requestedCwd) {
-      try {
-        const resolvedRequestedCwd = resolve(requestedCwd);
-        if (!existsSync(resolvedRequestedCwd) || !statSync(resolvedRequestedCwd).isDirectory()) {
-          sendJson(res, 400, { error: `Project directory does not exist: ${requestedCwd}` });
-          return;
-        }
-        const accessError = validateRegisteredWorkspacePath(resolvedRequestedCwd, "Project directory", { includeAttachments: false });
-        if (accessError) {
-          sendJson(res, workspacePathErrorStatus(accessError), { error: accessError });
-          return;
-        }
-        cwd = resolvedRequestedCwd;
-      } catch (error) {
-        sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
-        return;
+    const deferredSender = createDeferredRunEventSender();
+    let streamAttached = false;
+    res.once("close", () => {
+      if (!streamAttached) {
+        deferredSender.emitClose();
       }
-    }
-    try {
-      mkdirSync(cwd, { recursive: true });
-    } catch (error) {
-      sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) });
+    });
+    const result = startServerRunFromParsedPayload(parsedPayload, origin, deferredSender);
+    if (!result.ok) {
+      sendJson(res, result.status, { error: result.error });
       return;
     }
-
     setNdjsonStreamHeaders(res);
-    const sender = createRunEventSender(res);
-    let accumulator: BackgroundRunAccumulator | null = null;
-    let requestForWakeups: RunRequest | null = null;
-    const send = (event: RunEvent) => {
-      if (event.type === "done") {
-        for (const entry of usageDebugEntries(event.usageDebug)) {
-          appendRunAuditEvent(RUN_AUDIT_FILE, {
-            type: "agent_usage_raw",
-            agent,
-            model,
-            runId: binding?.runId,
-            conversationId: binding?.conversationId,
-            source: entry.source,
-            payload: usageAuditPayload(entry.payload),
-          });
-        }
-      }
-      if (event.type === "wakeup") {
-        const publicEvents: RunEvent[] = requestForWakeups
-          ? (() => {
-              try {
-                const record = scheduleWakeupFromRunEvent(event, requestForWakeups, cwd, origin, binding);
-                const resultText = wakeupScheduleToolResultText(record, cachedWorkspaceLocale);
-                return [
-                  ...(event.toolId ? [{ type: "tool_result" as const, id: event.toolId, ok: true, output: resultText }] : []),
-                  { type: "status" as const, level: "ok" as const, text: wakeupStatusText(record, cachedWorkspaceLocale) },
-                ];
-              } catch (error) {
-                return [{ type: "error", text: errorMessage(error) }];
-              }
-            })()
-          : [{ type: "error", text: "Wakeup scheduling failed: run request is not initialised." }];
-        for (const publicEvent of publicEvents) {
-          sender.send(publicEvent);
-          if (binding && accumulator) {
-            applyBackgroundRunEvent(binding, accumulator, publicEvent);
-          }
-        }
-        return;
-      }
-      if (event.type === "cancel_wakeup") {
-        const publicEvents: RunEvent[] = binding
-          ? (() => {
-              const canceled = cancelScheduledWakeups({ conversationId: binding.conversationId, wakeupId: event.wakeupId, all: event.all ?? !event.wakeupId });
-              if (canceled === 0) {
-                return [{ type: "status", level: "warn", text: cachedWorkspaceLocale === "ru" ? "Wakeup не найден." : "Wakeup not found." }];
-              }
-              appendRunAuditEvent(RUN_AUDIT_FILE, {
-                type: "wakeup_canceled",
-                wakeupId: event.wakeupId,
-                sourceRunId: binding.runId,
-                conversationId: binding.conversationId,
-                count: canceled,
-                reason: event.reason,
-              });
-              const resultText = wakeupCancelToolResultText(canceled, binding.conversationId, cachedWorkspaceLocale);
-              return [
-                ...(event.toolId ? [{ type: "tool_result" as const, id: event.toolId, ok: true, output: resultText }] : []),
-                { type: "status" as const, level: "ok" as const, text: wakeupCancelStatusText(canceled, cachedWorkspaceLocale) },
-              ];
-            })()
-          : [{ type: "error", text: "Wakeup cancellation requires a conversation-bound run." }];
-        for (const publicEvent of publicEvents) {
-          sender.send(publicEvent);
-          if (binding && accumulator) {
-            applyBackgroundRunEvent(binding, accumulator, publicEvent);
-          }
-        }
-        return;
-      }
-      sender.send(event);
-      if (binding && accumulator) {
-        applyBackgroundRunEvent(binding, accumulator, event);
-      }
-    };
-    const sendDone = sender.sendDone;
-    const finishAndEnd = () => {
-      if (binding && accumulator) {
-        finishPersistedBackgroundRun(binding, accumulator, false);
-      }
-      sendDone();
-      sender.end();
-    };
-
-    // Gemini lets us set a session id for a NEW session; assign one so the client
-    // can resume it later. Claude/Codex/OpenCode mint their own and report it back
-    // via a "session" event from their stream translators.
-    const assignedSessionId = !resume && agent === "gemini" ? randomUUID() : undefined;
-    const request: RunRequest = {
-      agent,
-      model,
-      reasoning,
-      mode,
-      fast,
-      prompt,
-      accessMode,
-      resume,
-      sessionId: assignedSessionId,
-      autoConfirm,
-      autoCompact,
-      compactWindow,
-      ...(tools !== undefined ? { tools } : {}),
-      ...(systemPrompt ? { systemPrompt } : {}),
-      ...(serverPrompt ? { boundUserMessage: serverPrompt.userMessage } : {}),
-    };
-    requestForWakeups = request;
-    if (assignedSessionId) {
-      send({ type: "session", id: assignedSessionId });
-    }
-    const executionRequest: RunRequest = {
-      ...request,
-      prompt: prepareAgentPrompt(request.prompt, binding, origin, tools),
-    };
-    if (binding) {
-      accumulator = startPersistedBackgroundRun(binding, request);
-    }
-
-    send({ type: "start" });
-    if (cwd !== join(tmpdir(), "rlab-agent-scratch")) {
-      send({ type: "status", level: "info", text: `cwd · ${cwd}` });
-    }
-    send({ type: "status", level: "info", text: `access · ${accessMode}` });
-    try {
-      appendRunAuditEvent(RUN_AUDIT_FILE, {
-        type: "run_started",
-        agent,
-        model,
-        reasoning,
-        mode,
-        autoConfirm,
-        accessMode,
-        cwd,
-        runId: binding?.runId,
-        conversationId: binding?.conversationId,
-        prompt,
-      });
-    } catch (error) {
-      send({ type: "error", text: `Failed to write run audit event: ${errorMessage(error)}` });
-      finishAndEnd();
-      return;
-    }
-
-    if (agent === "claude-code") {
-      void runClaudeSdk(executionRequest, cwd, runEnv, res, send, sendDone, sender.end, binding, accumulator);
-      return;
-    }
-
-    if (agent === "opencode") {
-      void runOpenCodeServer(executionRequest, cwd, res, send, sendDone, sender.end, binding, accumulator, runEnv);
-      return;
-    }
-
-    if (agent === "codex") {
-      void runCodexAppServer(executionRequest, cwd, res, send, sendDone, sender.end, binding, accumulator);
-      return;
-    }
-
-    // stdin = /dev/null so the CLI doesn't wait for piped input (it otherwise
-    // stalls ~3s: "no stdin data received").
-    let child: ReturnType<typeof spawn>;
-    try {
-      if (!resolvedBin) {
-        send({ type: "error", text: `${spec.bin} is not installed on this machine.` });
-        finishAndEnd();
-        return;
-      }
-      child = spawnResolvedBin(resolvedBin, spec.args(executionRequest), agentProcessSpawnOptions({ cwd, env: runEnv, stdio: ["ignore", "pipe", "pipe"] }));
-    } catch (error) {
-      send({ type: "error", text: error instanceof Error ? `Failed to launch ${spec.bin}: ${error.message}` : `Failed to launch ${spec.bin}` });
-      finishAndEnd();
-      return;
-    }
-    let canceled = false;
-    if (binding) {
-      backgroundRunHandles.set(binding.runId, {
-        binding,
-        startedAt: new Date().toISOString(),
-        ...(accumulator ? { accumulator } : {}),
-        cancel: () => {
-          canceled = true;
-          if (child.exitCode === null) {
-            terminateAgentProcessTree(child);
-          }
-        },
-      });
-    }
-    let pendingDoneEvent: RunEvent | null = null;
-    const sendFinalDone = () => {
-      if (pendingDoneEvent) {
-        send(pendingDoneEvent);
-      } else {
-        sendDone();
-      }
-    };
-    const runTimeout = startAgentRunTimeout(() => {
-      if (child.exitCode === null) {
-        terminateAgentProcessTree(child);
-      }
-    });
-    let timeoutErrorSent = false;
-    const sendTimeoutError = () => {
-      if (timeoutErrorSent || runTimeout.timeoutMs === null) {
-        return;
-      }
-      timeoutErrorSent = true;
-      send({ type: "error", text: agentRunTimeoutText(agent, runTimeout.timeoutMs) });
-    };
-    let finalized = false;
-    const finishCliRun = (finishCanceled: boolean) => {
-      if (finalized) {
-        return;
-      }
-      finalized = true;
-      runTimeout.clear();
-      if (binding && accumulator) {
-        finishPersistedBackgroundRun(binding, accumulator, finishCanceled);
-        notifyBackgroundRunUpdate(binding, true);
-        finishBackgroundHandle(binding, finishCanceled);
-      }
-      // Flush the buffered terminal `done` (it carries usage/cost) on normal exit;
-      // a bare sendDone() here dropped token/cost stats for codex & gemini.
-      sendFinalDone();
-      sender.end();
-    };
-    const translate = spec.createTranslator();
-
-    let buffer = "";
-    let stderr = "";
-    child.stdout?.on("data", (chunk: Buffer) => {
-      buffer += chunk.toString();
-      let nl: number;
-      while ((nl = buffer.indexOf("\n")) >= 0) {
-        const line = buffer.slice(0, nl).trim();
-        buffer = buffer.slice(nl + 1);
-        if (line) {
-          for (const event of translate(line)) {
-            if (event.type === "done") {
-              pendingDoneEvent = event;
-            } else {
-              send(event);
-            }
-          }
-        }
-      }
-    });
-    child.stderr?.on("data", (chunk: Buffer) => {
-      stderr = appendLimitedText(stderr, chunk.toString("utf8"), STDERR_TAIL_LIMIT_CHARS);
-    });
-    child.on("error", (err) => {
-      if (runTimeout.timedOut()) {
-        sendTimeoutError();
-      } else if (!canceled) {
-        send({ type: "error", text: `Failed to launch ${spec.bin}: ${err.message}` });
-      }
-      finishCliRun(canceled && !runTimeout.timedOut());
-    });
-    child.on("close", (code) => {
-      if (runTimeout.timedOut()) {
-        sendTimeoutError();
-      } else if (!canceled && code !== 0 && stderr) {
-        send({ type: "error", text: clip(stderr, 400) });
-      }
-      finishCliRun(canceled && !runTimeout.timedOut());
-    });
-
-    // Abort the child if the client disconnects. Listen on the RESPONSE, not the
-    // request — `req`'s "close" fires as soon as the POST body is consumed.
-    res.on("close", () => {
-      if (!binding && child.exitCode === null) {
-        terminateAgentProcessTree(child);
-      }
-    });
+    const httpSender = createRunEventSender(res);
+    deferredSender.attach(httpSender);
+    streamAttached = true;
   });
 }
 
@@ -12962,6 +13061,24 @@ function attach(server: ViteDevServer | PreviewServer): void {
     { path: "/api/workspace/mutations", handler: methodOnly("POST", handleWorkspaceMutations) },
     { path: "/api/workspace", handler: handleWorkspace },
     { path: "/api/conversations/search", handler: methodOnly("GET", handleConversationSearch) },
+    {
+      path: "/api/resources",
+      handler: methodOnly("GET", (req, res) => {
+        try {
+          const params = new URL(req.url ?? "/", "http://localhost").searchParams;
+          const conversationId = params.get("conversationId") ?? "";
+          if (!conversationId) {
+            sendJson(res, 400, { error: "Missing conversationId." });
+            return;
+          }
+          ensureWorkspaceDb();
+          sendJson(res, 200, readClientResources(conversationId));
+        } catch (error) {
+          const message = errorMessage(error);
+          sendJson(res, message.includes("does not exist") ? 404 : 500, { error: message });
+        }
+      }),
+    },
     {
       path: "/api/thread",
       handler: methodOnly("GET", (req, res) => {

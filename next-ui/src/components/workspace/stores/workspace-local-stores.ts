@@ -1,5 +1,5 @@
 import { action, makeObservable, observable } from "mobx";
-import type { ConversationResource } from "../../../lib/conversation-resources";
+import type { ConversationResource, ResourceKind } from "../../../lib/conversation-resources";
 
 interface DirectoryListing {
   readonly path: string;
@@ -121,32 +121,104 @@ export class ImageBannerStore {
   }
 }
 
-export class ResourceGroupStore {
-  open = true;
-
-  constructor() {
-    makeObservable(this, {
-      open: observable,
-      setOpen: action.bound,
-    });
-  }
-
-  setOpen(value: StateUpdater<boolean>): void {
-    this.open = resolveState(this.open, value);
-  }
-}
-
 export class ResourcesPanelStore {
   lightbox: ConversationResource | null = null;
+
+  resources: readonly ConversationResource[] = [];
+
+  resourcesConversationId: string | null = null;
+
+  resourcesRevisionKey: string | null = null;
+
+  resourcesLoading = false;
+
+  resourcesLoadError: string | null = null;
+
+  openResourceKind: ResourceKind | null = null;
+
+  resourceAccordionTouched = false;
 
   constructor() {
     makeObservable(this, {
       lightbox: observable.ref,
+      resources: observable.ref,
+      resourcesConversationId: observable,
+      resourcesRevisionKey: observable,
+      resourcesLoading: observable,
+      resourcesLoadError: observable,
+      openResourceKind: observable,
+      resourceAccordionTouched: observable,
+      clearResources: action.bound,
+      failResourceLoad: action.bound,
+      finishResourceLoad: action.bound,
+      startResourceLoad: action.bound,
       setLightbox: action.bound,
+      syncResourceKinds: action.bound,
+      toggleResourceKind: action.bound,
     });
   }
 
   setLightbox(value: StateUpdater<ConversationResource | null>): void {
     this.lightbox = resolveState(this.lightbox, value);
+  }
+
+  clearResources(): void {
+    this.resources = [];
+    this.resourcesConversationId = null;
+    this.resourcesRevisionKey = null;
+    this.resourcesLoading = false;
+    this.resourcesLoadError = null;
+    this.syncResourceKinds([]);
+  }
+
+  startResourceLoad(conversationId: string, revisionKey: string): void {
+    const sameConversation = this.resourcesConversationId === conversationId;
+    this.resourcesConversationId = conversationId;
+    this.resourcesRevisionKey = revisionKey;
+    this.resourcesLoading = true;
+    this.resourcesLoadError = null;
+    if (!sameConversation) {
+      this.resources = [];
+      this.syncResourceKinds([]);
+    }
+  }
+
+  finishResourceLoad(conversationId: string, revisionKey: string, resources: readonly ConversationResource[]): void {
+    if (this.resourcesConversationId !== conversationId || this.resourcesRevisionKey !== revisionKey) {
+      return;
+    }
+    this.resources = resources;
+    this.resourcesLoading = false;
+    this.resourcesLoadError = null;
+    if (resources.length === 0) {
+      this.syncResourceKinds([]);
+    }
+  }
+
+  failResourceLoad(conversationId: string, revisionKey: string, error: string): void {
+    if (this.resourcesConversationId !== conversationId || this.resourcesRevisionKey !== revisionKey) {
+      return;
+    }
+    this.resourcesLoading = false;
+    this.resourcesLoadError = error;
+  }
+
+  syncResourceKinds(kinds: readonly ResourceKind[]): void {
+    if (kinds.length === 0) {
+      this.openResourceKind = null;
+      this.resourceAccordionTouched = false;
+      return;
+    }
+    if (this.openResourceKind && kinds.includes(this.openResourceKind)) {
+      return;
+    }
+    if (!this.resourceAccordionTouched || this.openResourceKind !== null) {
+      this.openResourceKind = kinds[0];
+    }
+  }
+
+  toggleResourceKind(kind: ResourceKind): void {
+    this.resourceAccordionTouched = true;
+    this.openResourceKind = this.openResourceKind === kind ? null : kind;
   }
 }

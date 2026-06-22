@@ -154,6 +154,11 @@ interface QueueRequestRecord {
   readonly text?: string;
 }
 
+interface RunCancelRequestRecord {
+  readonly runId?: string;
+  readonly pauseQueue?: boolean;
+}
+
 function queueFor(queues: Map<string, TestPendingQueue>, conversationId: string): TestPendingQueue {
   const existing = queues.get(conversationId);
   if (existing) {
@@ -184,7 +189,7 @@ describe("useWorkspace", () => {
   let attachRunController: ReadableStreamDefaultController<Uint8Array> | undefined;
   let attachRunRequests: string[] = [];
   let runRequests: RunRequestRecord[] = [];
-  let runCancelRequests: Array<{ readonly runId?: string }> = [];
+  let runCancelRequests: RunCancelRequestRecord[] = [];
   let pendingQueues: Map<string, TestPendingQueue>;
   let queueRequests: QueueRequestRecord[] = [];
   let serverRevision = 1;
@@ -301,7 +306,7 @@ describe("useWorkspace", () => {
           });
         }
         if (url === "/api/run-cancel") {
-          runCancelRequests.push(JSON.parse(String(init?.body ?? "{}")) as { runId?: string });
+          runCancelRequests.push(JSON.parse(String(init?.body ?? "{}")) as RunCancelRequestRecord);
           return Response.json({ canceled: true });
         }
         return new Response("not found", { status: 404 });
@@ -999,7 +1004,7 @@ describe("useWorkspace", () => {
 
     await waitFor(() => {
       expect(activeRunSignal?.aborted).toBe(true);
-      expect(runCancelRequests).toEqual([{ runId: runRequests[0]?.runId }]);
+      expect(runCancelRequests).toEqual([{ runId: runRequests[0]?.runId, pauseQueue: true }]);
       expect(screen.getByTestId("status")).toHaveTextContent("idle");
       expect(state.chats.find((chat) => chat.id === "chat-2")?.snippet).toBe("ok");
     });
@@ -1110,7 +1115,7 @@ describe("useWorkspace", () => {
         });
       }
       if (url === "/api/run-cancel") {
-        runCancelRequests.push(JSON.parse(String(init?.body ?? "{}")) as { runId?: string });
+        runCancelRequests.push(JSON.parse(String(init?.body ?? "{}")) as RunCancelRequestRecord);
         return Response.json({ canceled: true });
       }
       return new Response("not found", { status: 404 });
@@ -1257,7 +1262,7 @@ describe("useWorkspace", () => {
         });
       }
       if (url === "/api/run-cancel") {
-        runCancelRequests.push(JSON.parse(String(init?.body ?? "{}")) as { runId?: string });
+        runCancelRequests.push(JSON.parse(String(init?.body ?? "{}")) as RunCancelRequestRecord);
         return Response.json({ canceled: true });
       }
       return new Response("not found", { status: 404 });
@@ -1393,7 +1398,7 @@ describe("useWorkspace", () => {
         });
       }
       if (url === "/api/run-cancel") {
-        runCancelRequests.push(JSON.parse(String(init?.body ?? "{}")) as { runId?: string });
+        runCancelRequests.push(JSON.parse(String(init?.body ?? "{}")) as RunCancelRequestRecord);
         return Response.json({ canceled: true });
       }
       return new Response("not found", { status: 404 });
@@ -1464,7 +1469,7 @@ describe("useWorkspace", () => {
         return new Response(stream, { headers: { "Content-Type": "application/x-ndjson" } });
       }
       if (url === "/api/run-cancel") {
-        runCancelRequests.push(JSON.parse(String(init?.body ?? "{}")) as { runId?: string });
+        runCancelRequests.push(JSON.parse(String(init?.body ?? "{}")) as RunCancelRequestRecord);
         return Response.json({ canceled: true });
       }
       return new Response("not found", { status: 404 });
@@ -1482,6 +1487,7 @@ describe("useWorkspace", () => {
 
     screen.getByRole("button", { name: "stop" }).click();
     await waitFor(() => expect(runCancelRequests).toHaveLength(1));
+    expect(runCancelRequests[0]).toMatchObject({ pauseQueue: true });
     await waitFor(() => expect(queueRequests).toContainEqual(expect.objectContaining({ action: "setPaused", conversationId: "chat-2", paused: true })));
     expect(screen.getByTestId("queued")).toHaveTextContent("1");
     expect(runRequests).toHaveLength(1);
@@ -1533,7 +1539,7 @@ describe("useWorkspace", () => {
         return new Response(stream, { headers: { "Content-Type": "application/x-ndjson" } });
       }
       if (url === "/api/run-cancel") {
-        runCancelRequests.push(JSON.parse(String(init?.body ?? "{}")) as { runId?: string });
+        runCancelRequests.push(JSON.parse(String(init?.body ?? "{}")) as RunCancelRequestRecord);
         return Response.json({ canceled: true });
       }
       return new Response("not found", { status: 404 });
@@ -1551,6 +1557,7 @@ describe("useWorkspace", () => {
     screen.getByRole("button", { name: "send-queued-now" }).click();
 
     await waitFor(() => expect(runCancelRequests).toHaveLength(1));
+    expect(runCancelRequests[0]).toMatchObject({ pauseQueue: false });
     expect(activeRunSignal?.aborted).toBe(true);
     await waitFor(() => expect(queueRequests).toContainEqual(expect.objectContaining({ action: "sendNext", conversationId: "chat-2" })));
     expect(queueRequests).not.toContainEqual(expect.objectContaining({ action: "setPaused", conversationId: "chat-2", paused: true }));

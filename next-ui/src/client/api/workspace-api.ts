@@ -1,4 +1,5 @@
 import type { ChatMessage } from "../../domain/agent-types";
+import type { ConversationResource, ResourceKind } from "../../lib/conversation-resources";
 import type { WorkspaceMutation } from "../../lib/workspace-mutations";
 import type { WorkspaceState } from "../../lib/workspace-state";
 import { isRecord, responseErrorMessage } from "./http";
@@ -10,6 +11,10 @@ export interface ConversationThreadPagePayload {
   readonly messages: readonly ChatMessage[];
   readonly hasMoreBefore: boolean;
   readonly nextBefore?: number;
+}
+
+export interface ConversationResourcesPayload {
+  readonly resources: readonly ConversationResource[];
 }
 
 export class WorkspaceMutationConflictError extends Error {
@@ -89,6 +94,51 @@ function validateConversationThreadPage(payload: unknown): ConversationThreadPag
   };
 }
 
+function parseResourceKind(value: unknown): ResourceKind | null {
+  return value === "image" || value === "link" || value === "file" ? value : null;
+}
+
+function parseResourceOrigin(value: unknown): ConversationResource["origin"] | null {
+  return value === "user" || value === "agent" ? value : null;
+}
+
+function parseConversationResource(value: unknown, index: number): ConversationResource {
+  if (!isRecord(value)) {
+    throw new Error(`Resource ${index} is not an object.`);
+  }
+  const kind = parseResourceKind(value.kind);
+  const origin = parseResourceOrigin(value.origin);
+  if (!kind) {
+    throw new Error(`Resource ${index} has an invalid kind.`);
+  }
+  if (typeof value.id !== "string" || typeof value.url !== "string" || typeof value.label !== "string") {
+    throw new Error(`Resource ${index} is missing id, url, or label.`);
+  }
+  if (!origin) {
+    throw new Error(`Resource ${index} has an invalid origin.`);
+  }
+  if (value.time !== undefined && typeof value.time !== "string") {
+    throw new Error(`Resource ${index} has an invalid time.`);
+  }
+  return {
+    id: value.id,
+    kind,
+    url: value.url,
+    label: value.label,
+    origin,
+    ...(value.time === undefined ? {} : { time: value.time }),
+  };
+}
+
+function validateConversationResources(payload: unknown): ConversationResourcesPayload {
+  if (!isRecord(payload) || !Array.isArray(payload.resources)) {
+    throw new Error("Resources response is missing resources.");
+  }
+  return {
+    resources: payload.resources.map((resource, index) => parseConversationResource(resource, index)),
+  };
+}
+
 export async function loadConversationThreadPage(
   conversationId: string,
   options: { readonly before?: number; readonly limit?: number } = {},
@@ -114,6 +164,15 @@ export async function loadConversationThread(conversationId: string): Promise<re
     throw new Error(await responseErrorMessage(response, `Thread load failed (${response.status})`));
   }
   return validateConversationThreadPage(await response.json()).messages;
+}
+
+export async function loadConversationResources(conversationId: string, options: { readonly signal?: AbortSignal } = {}): Promise<readonly ConversationResource[]> {
+  const params = new URLSearchParams({ conversationId });
+  const response = await fetch(`/api/resources?${params.toString()}`, { cache: "no-store", signal: options.signal });
+  if (!response.ok) {
+    throw new Error(await responseErrorMessage(response, `Resources load failed (${response.status})`));
+  }
+  return validateConversationResources(await response.json()).resources;
 }
 
 export async function searchConversationIds(query: string): Promise<readonly string[]> {

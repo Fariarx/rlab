@@ -20,8 +20,9 @@ import {
 } from "./ComposerVoice";
 
 export interface ComposerVoiceController {
+  readonly cancelVoiceInput: () => void;
+  readonly finishVoiceInput: () => Promise<void>;
   readonly setVoiceLevelCountForWidth: (levelCount: number) => void;
-  readonly stopVoiceInput: () => void;
   readonly toggleVoiceInput: () => void;
   readonly voiceAmbient: boolean;
   readonly voiceAvailable: boolean;
@@ -31,6 +32,8 @@ export interface ComposerVoiceController {
   readonly voiceLevels: readonly number[];
   readonly voiceState: ComposerStore["voiceState"];
 }
+
+type VoiceStopIntent = "recording" | "finish" | "cancel";
 
 function normalizedDictationText(text: string): string {
   return text.trim().replace(/\s+/g, " ");
@@ -84,6 +87,26 @@ export function useComposerVoice({
   const voiceLevelValuesRef = useRef<readonly number[]>(VOICE_IDLE_LEVELS);
   const voiceLevelLastPaintRef = useRef(0);
   const voiceLevelCountRef = useRef(VOICE_DEFAULT_LEVEL_COUNT);
+  const voiceStopIntentRef = useRef<VoiceStopIntent>("recording");
+  const voiceStopWaiterRef = useRef<{ readonly promise: Promise<void>; readonly resolve: () => void } | null>(null);
+
+  const resolveVoiceStopWaiter = useCallback(() => {
+    const waiter = voiceStopWaiterRef.current;
+    voiceStopWaiterRef.current = null;
+    waiter?.resolve();
+  }, []);
+
+  const voiceStopWaiter = useCallback((): Promise<void> => {
+    if (voiceStopWaiterRef.current) {
+      return voiceStopWaiterRef.current.promise;
+    }
+    let resolveWaiter: () => void = () => undefined;
+    const promise = new Promise<void>((resolve) => {
+      resolveWaiter = resolve;
+    });
+    voiceStopWaiterRef.current = { promise, resolve: resolveWaiter };
+    return promise;
+  }, []);
 
   const setVoiceLevelCountForWidth = useCallback(
     (levelCount: number) => {
@@ -212,12 +235,17 @@ export function useComposerVoice({
 
   useEffect(
     () => () => {
+      voiceStopIntentRef.current = "cancel";
       clearVoiceNoSpeechNotice();
       recognitionRef.current?.stop();
-      mediaRecorderRef.current?.stop();
+      if (mediaRecorderRef.current?.state === "recording") {
+        mediaRecorderRef.current.stop();
+      }
       stopVoiceTracks();
+      setVoiceState("idle");
+      resolveVoiceStopWaiter();
     },
-    [clearVoiceNoSpeechNotice, stopVoiceTracks],
+    [clearVoiceNoSpeechNotice, resolveVoiceStopWaiter, setVoiceState, stopVoiceTracks],
   );
 
   useEffect(() => {
@@ -278,8 +306,12 @@ export function useComposerVoice({
         clearVoiceNoSpeechNotice();
         stopVoiceTracks();
         setVoiceState("idle");
+        resolveVoiceStopWaiter();
       };
       recognition.onresult = (event) => {
+        if (voiceStopIntentRef.current === "cancel") {
+          return;
+        }
         let finalTranscript = "";
         let interimTranscript = "";
         for (let index = event.resultIndex; index < event.results.length; index += 1) {
@@ -312,7 +344,9 @@ export function useComposerVoice({
       };
       recognition.onerror = (event) => {
         if (voiceManualStopRef.current && (event.error === "aborted" || event.error === "no-speech")) {
-          commitBrowserInterimDictation();
+          if (voiceStopIntentRef.current !== "cancel") {
+            commitBrowserInterimDictation();
+          }
           finishRecognition();
           return;
         }
@@ -325,11 +359,13 @@ export function useComposerVoice({
         stopVoiceTracks();
         onVoiceError?.(t("voiceTranscriptionFailed", { error: event.message || event.error || "unknown" }));
         setVoiceState("idle");
+        resolveVoiceStopWaiter();
       };
       recognition.onend = () => {
-        const committed = commitBrowserInterimDictation();
-        const shouldReportNoSpeech = !committed && !voiceManualStopRef.current && !voiceRecognizedRef.current;
-        if (allowAutoRestart && !voiceManualStopRef.current && recognitionRef.current === recognition) {
+        const canceled = voiceStopIntentRef.current === "cancel";
+        const committed = canceled ? false : commitBrowserInterimDictation();
+        const shouldReportNoSpeech = !canceled && !committed && !voiceManualStopRef.current && !voiceRecognizedRef.current;
+        if (!canceled && allowAutoRestart && !voiceManualStopRef.current && recognitionRef.current === recognition) {
           window.setTimeout(() => {
             if (voiceManualStopRef.current || recognitionRef.current !== recognition) {
               return;
@@ -353,6 +389,8 @@ export function useComposerVoice({
         }
       };
       voiceManualStopRef.current = false;
+      voiceStopIntentRef.current = "recording";
+      voiceStopWaiterRef.current = null;
       voiceRecognizedRef.current = false;
       voiceNoSpeechNotifiedRef.current = false;
       voiceBrowserInterimTranscriptRef.current = "";
@@ -368,7 +406,7 @@ export function useComposerVoice({
       setVoiceState("idle");
       onVoiceError?.(t("voiceTranscriptionFailed", { error: error instanceof Error ? error.message : String(error) }));
     }
-  }, [appendDictation, clearVoiceNoSpeechNotice, commitBrowserInterimDictation, latestDraftRef, onVoiceError, scheduleVoiceNoSpeechNotice, setAmbientVoiceLevels, setVoiceRecordingStartedAt, setVoiceState, startVoiceAnalyser, stopVoiceTracks, t, voiceProvider]);
+  }, [appendDictation, clearVoiceNoSpeechNotice, commitBrowserInterimDictation, latestDraftRef, onVoiceError, resolveVoiceStopWaiter, scheduleVoiceNoSpeechNotice, setAmbientVoiceLevels, setVoiceRecordingStartedAt, setVoiceState, startVoiceAnalyser, stopVoiceTracks, t, voiceProvider]);
 
   const startCloudDictation = useCallback(async () => {
     if (voiceProvider?.kind !== "cloud") {
@@ -393,23 +431,38 @@ export function useComposerVoice({
       };
       recorder.onerror = (event) => {
         onVoiceError?.(t("voiceTranscriptionFailed", { error: event.error.message }));
+        mediaRecorderRef.current = null;
+        stopVoiceTracks();
+        setVoiceState("idle");
+        resolveVoiceStopWaiter();
       };
       recorder.onstop = () => {
         const type = recorder.mimeType || mimeType || "audio/webm";
         const audio = new Blob(chunks, { type });
         mediaRecorderRef.current = null;
         stopVoiceTracks();
+        if (voiceStopIntentRef.current === "cancel") {
+          setVoiceState("idle");
+          resolveVoiceStopWaiter();
+          return;
+        }
         if (audio.size === 0) {
           setVoiceState("idle");
           scheduleVoiceNoSpeechNotice();
+          resolveVoiceStopWaiter();
           return;
         }
         setVoiceState("transcribing");
         void transcribeCloudAudio(audio)
           .catch((error: unknown) => onVoiceError?.(t("voiceTranscriptionFailed", { error: error instanceof Error ? error.message : String(error) })))
-          .finally(() => setVoiceState("idle"));
+          .finally(() => {
+            setVoiceState("idle");
+            resolveVoiceStopWaiter();
+          });
       };
       voiceRecognizedRef.current = false;
+      voiceStopIntentRef.current = "recording";
+      voiceStopWaiterRef.current = null;
       voiceNoSpeechNotifiedRef.current = false;
       clearVoiceNoSpeechNotice();
       setVoiceRecordingStartedAt(Date.now());
@@ -421,24 +474,62 @@ export function useComposerVoice({
       setVoiceState("idle");
       onVoiceError?.(t("voiceTranscriptionFailed", { error: error instanceof Error ? error.message : String(error) }));
     }
-  }, [clearVoiceNoSpeechNotice, onVoiceError, scheduleVoiceNoSpeechNotice, setVoiceRecordingStartedAt, setVoiceState, startVoiceAnalyser, stopVoiceTracks, t, transcribeCloudAudio, voiceProvider]);
+  }, [clearVoiceNoSpeechNotice, onVoiceError, resolveVoiceStopWaiter, scheduleVoiceNoSpeechNotice, setVoiceRecordingStartedAt, setVoiceState, startVoiceAnalyser, stopVoiceTracks, t, transcribeCloudAudio, voiceProvider]);
 
-  const stopVoiceInput = useCallback(() => {
-    if (voiceState === "recording") {
-      voiceManualStopRef.current = true;
-      clearVoiceNoSpeechNotice();
-      commitBrowserInterimDictation();
-      recognitionRef.current?.stop();
-      if (mediaRecorderRef.current?.state === "recording") {
-        mediaRecorderRef.current.stop();
-      }
-      stopVoiceTracks();
+  const stopRecording = useCallback((intent: Exclude<VoiceStopIntent, "recording">): Promise<void> => {
+    if (voiceState !== "recording") {
+      return Promise.resolve();
     }
-  }, [clearVoiceNoSpeechNotice, commitBrowserInterimDictation, stopVoiceTracks, voiceState]);
+    voiceStopIntentRef.current = intent;
+    voiceManualStopRef.current = true;
+    clearVoiceNoSpeechNotice();
+    const waitForStop = voiceStopWaiter();
+    let requestedStop = false;
+    const recognition = recognitionRef.current;
+    if (recognition) {
+      requestedStop = true;
+      try {
+        recognition.stop();
+      } catch (error) {
+        recognitionRef.current = null;
+        stopVoiceTracks();
+        setVoiceState("idle");
+        resolveVoiceStopWaiter();
+        onVoiceError?.(t("voiceTranscriptionFailed", { error: error instanceof Error ? error.message : String(error) }));
+      }
+    }
+    const recorder = mediaRecorderRef.current;
+    if (recorder?.state === "recording") {
+      requestedStop = true;
+      try {
+        recorder.stop();
+      } catch (error) {
+        mediaRecorderRef.current = null;
+        stopVoiceTracks();
+        setVoiceState("idle");
+        resolveVoiceStopWaiter();
+        onVoiceError?.(t("voiceTranscriptionFailed", { error: error instanceof Error ? error.message : String(error) }));
+      }
+    }
+    if (!requestedStop) {
+      stopVoiceTracks();
+      setVoiceState("idle");
+      resolveVoiceStopWaiter();
+    }
+    return waitForStop;
+  }, [clearVoiceNoSpeechNotice, onVoiceError, resolveVoiceStopWaiter, setVoiceState, stopVoiceTracks, t, voiceState, voiceStopWaiter]);
+
+  const cancelVoiceInput = useCallback(() => {
+    if (voiceState === "recording") {
+      void stopRecording("cancel");
+    }
+  }, [stopRecording, voiceState]);
+
+  const finishVoiceInput = useCallback(() => stopRecording("finish"), [stopRecording]);
 
   const toggleVoiceInput = useCallback(() => {
     if (voiceState === "recording") {
-      stopVoiceInput();
+      cancelVoiceInput();
       return;
     }
     if (!voiceProvider || voiceState !== "idle") {
@@ -449,7 +540,7 @@ export function useComposerVoice({
       return;
     }
     void startCloudDictation();
-  }, [startBrowserDictation, startCloudDictation, stopVoiceInput, voiceProvider, voiceState]);
+  }, [cancelVoiceInput, startBrowserDictation, startCloudDictation, voiceProvider, voiceState]);
 
   const browserProviderAvailable = voiceProvider?.kind === "browser" && browserVoiceSupported;
   const cloudProviderAvailable =
@@ -461,14 +552,15 @@ export function useComposerVoice({
   const voiceAvailable = browserProviderAvailable || cloudProviderAvailable;
   const voiceLabel =
     voiceState === "recording"
-      ? t("stopVoiceInput")
+      ? t("cancelVoiceInput")
       : voiceState === "transcribing"
         ? t("voiceInputTranscribing")
         : t("startVoiceInput", { provider: voiceProvider?.name ?? "" });
 
   return {
+    cancelVoiceInput,
+    finishVoiceInput,
     setVoiceLevelCountForWidth,
-    stopVoiceInput,
     toggleVoiceInput,
     voiceAmbient,
     voiceAvailable,

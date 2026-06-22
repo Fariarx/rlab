@@ -848,7 +848,7 @@ export const WorkspacePageView = observer(function WorkspacePageView({
                   would duplicate file/link text into the hidden DOM. */}
               {view === "resources" && (
                 <Box sx={{ position: "absolute", inset: 0 }}>
-                  <ResourcesPanel messages={messages} bottomInset={contentBottomInset} />
+                  <ResourcesPanel conversationId={selected?.id} resourceRevision={selected?.threadUpdatedAtMs} bottomInset={contentBottomInset} />
                 </Box>
               )}
               {previewEnabled && (

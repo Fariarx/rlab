@@ -122,8 +122,9 @@ export const InlineDraftEditor = observer(function InlineDraftEditor({
   }, [updateDraft]);
 
   const {
+    cancelVoiceInput,
+    finishVoiceInput,
     setVoiceLevelCountForWidth,
-    stopVoiceInput,
     toggleVoiceInput,
     voiceAmbient,
     voiceAvailable,
@@ -161,8 +162,8 @@ export const InlineDraftEditor = observer(function InlineDraftEditor({
   }, [onInputActivityChange]);
 
   useEffect(() => () => {
-    stopVoiceInput();
-  }, [stopVoiceInput]);
+    cancelVoiceInput();
+  }, [cancelVoiceInput]);
 
   const addFiles = useCallback(async (files: readonly File[]) => {
     if (files.length === 0) {
@@ -203,20 +204,20 @@ export const InlineDraftEditor = observer(function InlineDraftEditor({
     };
   });
 
-  const submit = useCallback(() => {
+  const submit = useCallback(async () => {
+    await finishVoiceInput();
     const draft = latestDraftRef.current;
     const trimmed = draft.text.trim();
     if (trimmed.length === 0 && draft.attachments.length === 0) {
       return;
     }
-    stopVoiceInput();
     onSubmit(composerSendPayload(trimmed, draft.attachments));
-  }, [onSubmit, stopVoiceInput]);
+  }, [finishVoiceInput, onSubmit]);
 
   const cancel = useCallback(() => {
-    stopVoiceInput();
+    cancelVoiceInput();
     onCancel?.();
-  }, [onCancel, stopVoiceInput]);
+  }, [cancelVoiceInput, onCancel]);
 
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.currentTarget.files ?? []);
@@ -265,7 +266,7 @@ export const InlineDraftEditor = observer(function InlineDraftEditor({
     );
   };
 
-  const canSend = (value.trim().length > 0 || attachments.length > 0) && voiceState !== "transcribing";
+  const canSend = (value.trim().length > 0 || attachments.length > 0 || voiceState === "recording") && voiceState !== "transcribing";
 
   return (
     <Stack data-testid={`${testIdPrefix}-editor`} spacing={1.25} sx={rootSx}>
@@ -289,7 +290,7 @@ export const InlineDraftEditor = observer(function InlineDraftEditor({
         onKeyDown={(event: KeyboardEvent<HTMLTextAreaElement>) => {
           if (shouldSubmitFromKey(event)) {
             event.preventDefault();
-            submit();
+            void submit();
           } else if (event.key === "Escape" && onCancel) {
             event.preventDefault();
             cancel();
@@ -365,7 +366,7 @@ export const InlineDraftEditor = observer(function InlineDraftEditor({
             {cancelLabel}
           </Button>
         )}
-        <Button size="small" variant={submitButtonVariant} aria-label={submitAriaLabel} disabled={!canSend} onClick={submit} startIcon={<SendIcon sx={{ fontSize: 15 }} />} sx={actionButtonSx}>
+        <Button size="small" variant={submitButtonVariant} aria-label={submitAriaLabel} disabled={!canSend} onClick={() => void submit()} startIcon={<SendIcon sx={{ fontSize: 15 }} />} sx={actionButtonSx}>
           {submitLabel}
         </Button>
       </Stack>
