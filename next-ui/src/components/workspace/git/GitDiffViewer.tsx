@@ -8,6 +8,7 @@ import { useI18n } from "../../../i18n/I18nProvider";
 import type { DiffBlock, ReviewCommentEntry } from "../../agent";
 import { AttachmentTile } from "../../agent/composer/AttachmentTile";
 import { InlineDraftEditor } from "../../agent/composer/InlineDraftEditor";
+import type { ComposerStore } from "../../agent/composer/composer-store";
 import { parseUserDraft } from "../../agent/message/message-content-model";
 import { IconButton } from "../../ui";
 import { DiffCommentRowStore, GitDiffLinesStore } from "./git-diff-viewer-store";
@@ -289,6 +290,8 @@ const GitDiffLineRow = observer(function GitDiffLineRow({
   readonly onInputActivityChange?: (active: boolean) => void;
 }) {
   const composing = store.activeLine === lineNo;
+  const newCommentDraftStoreKey = `new:${lineNo}:${line.text}`;
+  const newCommentDraftStore = composing ? store.draftStore(newCommentDraftStoreKey) : undefined;
   return (
     <Box component="li">
       <Box
@@ -331,11 +334,16 @@ const GitDiffLineRow = observer(function GitDiffLineRow({
         <DiffCommentThread
           comments={comments}
           composing={composing}
+          newCommentStore={newCommentDraftStore}
           onAdd={(body) => {
             onAddComment?.(lineNo, lineContent(line), body);
+            store.removeDraftStore(newCommentDraftStoreKey);
             store.setActiveLine(null);
           }}
-          onCancel={() => store.setActiveLine(null)}
+          onCancel={() => {
+            store.removeDraftStore(newCommentDraftStoreKey);
+            store.setActiveLine(null);
+          }}
           onUpdate={onUpdateComment}
           onDelete={onDeleteComment}
           onInputActivityChange={onInputActivityChange}
@@ -406,9 +414,11 @@ function DiffCommentThread({
   onUpdate,
   onDelete,
   onInputActivityChange,
+  newCommentStore,
 }: {
   readonly comments: readonly ReviewCommentEntry[];
   readonly composing: boolean;
+  readonly newCommentStore?: ComposerStore;
   readonly onAdd: (body: string) => void;
   readonly onCancel: () => void;
   readonly onUpdate?: (id: string, body: string) => void;
@@ -420,7 +430,7 @@ function DiffCommentThread({
       {comments.map((comment) => (
         <DiffCommentRow key={comment.id} comment={comment} onUpdate={onUpdate} onDelete={onDelete} onInputActivityChange={onInputActivityChange} />
       ))}
-      {composing && <DiffCommentComposer onSubmit={onAdd} onCancel={onCancel} onInputActivityChange={onInputActivityChange} />}
+      {composing && <DiffCommentComposer onSubmit={onAdd} onCancel={onCancel} onInputActivityChange={onInputActivityChange} store={newCommentStore} />}
     </Stack>
   );
 }
@@ -461,15 +471,21 @@ const DiffCommentRow = observer(function DiffCommentRow({
   const { editing, setEditing } = store;
 
   if (editing) {
+    const initialDraft = parseUserDraft(comment.body);
     return (
       <DiffCommentComposer
         initial={comment.body}
         onSubmit={(body) => {
           onUpdate?.(comment.id, body);
+          store.clearDraftStore();
           setEditing(false);
         }}
-        onCancel={() => setEditing(false)}
+        onCancel={() => {
+          store.clearDraftStore();
+          setEditing(false);
+        }}
         onInputActivityChange={onInputActivityChange}
+        store={store.draftStore(initialDraft.text, initialDraft.attachments)}
       />
     );
   }
@@ -496,11 +512,13 @@ const DiffCommentComposer = observer(function DiffCommentComposer({
   onSubmit,
   onCancel,
   onInputActivityChange,
+  store,
 }: {
   readonly initial?: string;
   readonly onSubmit: (body: string) => void;
   readonly onCancel: () => void;
   readonly onInputActivityChange?: (active: boolean) => void;
+  readonly store?: ComposerStore;
 }) {
   const { t } = useI18n();
   const initialDraft = useMemo(() => parseUserDraft(initial), [initial]);
@@ -532,6 +550,7 @@ const DiffCommentComposer = observer(function DiffCommentComposer({
         }}
         actionsSx={{ gap: 0.25 }}
         actionButtonSx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.74rem" }}
+        store={store}
       />
     </Stack>
   );

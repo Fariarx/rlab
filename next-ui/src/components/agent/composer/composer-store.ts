@@ -1,9 +1,23 @@
 import { action, makeObservable, observable } from "mobx";
+import { voiceIdleLevels, type SpeechRecognitionLike } from "./ComposerVoice";
 import type { ComposerAttachmentDraft } from "../core/types";
 
 type StateUpdater<T> = T | ((current: T) => T);
 
 export type ComposerVoiceState = "idle" | "recording" | "transcribing";
+
+export interface ComposerVoiceSelectionRange {
+  readonly text: string;
+  readonly start: number;
+  readonly end: number;
+}
+
+export type ComposerVoiceStopIntent = "recording" | "finish" | "cancel";
+
+export interface ComposerVoiceStopWaiter {
+  readonly promise: Promise<void>;
+  readonly resolve: () => void;
+}
 
 function resolveState<T>(current: T, updater: StateUpdater<T>): T {
   return typeof updater === "function" ? (updater as (value: T) => T)(current) : updater;
@@ -44,10 +58,46 @@ export class ComposerStore {
 
   browserVoiceSupported = false;
 
+  voiceRecognition: SpeechRecognitionLike | null = null;
+
+  voiceMediaRecorder: MediaRecorder | null = null;
+
+  voiceMediaStream: MediaStream | null = null;
+
+  voiceAudioContext: AudioContext | null = null;
+
+  voiceAnalyserFrame: number | null = null;
+
+  voiceNoSpeechTimer: number | null = null;
+
+  voiceNoSpeechNotified = false;
+
+  voiceRecognized = false;
+
+  voiceManualStop = false;
+
+  voiceBrowserInterimTranscript = "";
+
+  voiceCommittedInterimTranscript = "";
+
+  voiceLevelValues: readonly number[];
+
+  voiceLevelLastPaint = 0;
+
+  voiceLevelCount: number;
+
+  voiceStopIntent: ComposerVoiceStopIntent = "recording";
+
+  voiceStopWaiter: ComposerVoiceStopWaiter | null = null;
+
+  voicePendingSelection: ComposerVoiceSelectionRange | null = null;
+
   constructor(initialValue: string, initialAttachments: readonly ComposerAttachmentDraft[], initialVoiceLevels: readonly number[]) {
     this.internalValue = initialValue;
     this.internalAttachments = initialAttachments;
     this.voiceLevels = initialVoiceLevels;
+    this.voiceLevelValues = initialVoiceLevels;
+    this.voiceLevelCount = initialVoiceLevels.length;
     makeObservable(this, {
       internalValue: observable,
       internalAttachments: observable.ref,
@@ -66,6 +116,7 @@ export class ComposerStore {
       voiceLevels: observable.ref,
       voiceAmbient: observable,
       browserVoiceSupported: observable,
+      voicePendingSelection: observable.ref,
       setInternalValue: action.bound,
       setInternalAttachments: action.bound,
       setSending: action.bound,
@@ -83,6 +134,9 @@ export class ComposerStore {
       setVoiceLevels: action.bound,
       setVoiceAmbient: action.bound,
       setBrowserVoiceSupported: action.bound,
+      setVoicePendingSelection: action.bound,
+      cancelVoiceSession: action.bound,
+      clearVoiceRuntimeResources: action.bound,
     });
   }
 
@@ -152,5 +206,64 @@ export class ComposerStore {
 
   setBrowserVoiceSupported(value: StateUpdater<boolean>): void {
     this.browserVoiceSupported = resolveState(this.browserVoiceSupported, value);
+  }
+
+  setVoicePendingSelection(value: StateUpdater<ComposerVoiceSelectionRange | null>): void {
+    this.voicePendingSelection = resolveState(this.voicePendingSelection, value);
+  }
+
+  cancelVoiceSession(): void {
+    this.voiceStopIntent = "cancel";
+    this.voiceManualStop = true;
+    if (this.voiceNoSpeechTimer !== null) {
+      window.clearTimeout(this.voiceNoSpeechTimer);
+      this.voiceNoSpeechTimer = null;
+    }
+    let requestedStop = false;
+    if (this.voiceRecognition) {
+      requestedStop = true;
+      try {
+        this.voiceRecognition.stop();
+      } catch {
+        this.voiceRecognition = null;
+      }
+    }
+    if (this.voiceMediaRecorder?.state === "recording") {
+      requestedStop = true;
+      try {
+        this.voiceMediaRecorder.stop();
+      } catch {
+        this.voiceMediaRecorder = null;
+      }
+    }
+    if (!requestedStop) {
+      this.clearVoiceRuntimeResources();
+    }
+  }
+
+  clearVoiceRuntimeResources(): void {
+    if (this.voiceAnalyserFrame !== null) {
+      cancelAnimationFrame(this.voiceAnalyserFrame);
+      this.voiceAnalyserFrame = null;
+    }
+    const context = this.voiceAudioContext;
+    this.voiceAudioContext = null;
+    if (context && context.state !== "closed") {
+      void context.close();
+    }
+    this.voiceMediaStream?.getTracks().forEach((track) => {
+      track.stop();
+    });
+    this.voiceMediaStream = null;
+    this.voiceMediaRecorder = null;
+    this.voiceRecognition = null;
+    this.voiceState = "idle";
+    this.voiceRecordingStartedAt = null;
+    this.voiceAmbient = false;
+    this.voiceLevelValues = voiceIdleLevels(this.voiceLevelCount);
+    this.voiceLevels = this.voiceLevelValues;
+    const waiter = this.voiceStopWaiter;
+    this.voiceStopWaiter = null;
+    waiter?.resolve();
   }
 }

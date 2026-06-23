@@ -188,6 +188,32 @@ describe("Composer", () => {
     expect(onStop).not.toHaveBeenCalled();
   });
 
+  it("sends the current draft as a queue goal from the options menu", async () => {
+    const onSendAsGoal = vi.fn();
+    renderWithTheme(<Composer placeholder="Написать" onSendAsGoal={onSendAsGoal} />);
+
+    const input = screen.getByPlaceholderText("Написать");
+    fireEvent.change(input, { target: { value: "держать цель до завершения" } });
+    fireEvent.click(screen.getByTestId("composer-options-button"));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Отправить как цель" }));
+
+    await waitFor(() => expect(onSendAsGoal).toHaveBeenCalledWith("держать цель до завершения"));
+    expect(input).toHaveValue("");
+  });
+
+  it("defers the current draft to a paused queue from the options menu", async () => {
+    const onDeferToQueue = vi.fn();
+    renderWithTheme(<Composer placeholder="Написать" onDeferToQueue={onDeferToQueue} />);
+
+    const input = screen.getByPlaceholderText("Написать");
+    fireEvent.change(input, { target: { value: "отложить обычное сообщение" } });
+    fireEvent.click(screen.getByTestId("composer-options-button"));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Отложить в очередь" }));
+
+    await waitFor(() => expect(onDeferToQueue).toHaveBeenCalledWith("отложить обычное сообщение"));
+    expect(input).toHaveValue("");
+  });
+
   it("ignores stale browser change events that reinsert a sent message tail", async () => {
     const onSend = vi.fn();
     renderWithTheme(<Composer placeholder="Написать" onSend={onSend} />);
@@ -1305,6 +1331,27 @@ describe("Composer", () => {
     fireEvent.click(screen.getByRole("button", { name: /Опции/ }));
 
     expect(screen.getByRole("menu").closest(".MuiPaper-root")).toHaveStyle({ marginTop: "-12px" });
+  });
+
+  it("keeps the options menu inside the vertical viewport and scrollable", () => {
+    renderWithTheme(<Composer placeholder="Написать" />);
+
+    const button = screen.getByTestId("composer-options-button");
+    vi.spyOn(button, "getBoundingClientRect").mockReturnValue({
+      x: 24,
+      y: 180,
+      top: 180,
+      right: 58,
+      bottom: 214,
+      left: 24,
+      width: 34,
+      height: 34,
+      toJSON: () => ({}),
+    });
+    fireEvent.click(button);
+
+    const menuPaper = screen.getByRole("menu").closest(".MuiPaper-root");
+    expect(menuPaper).toHaveStyle({ maxHeight: "160px", overflowY: "auto" });
   });
 
   it("shows browser agent activity in the options menu only when provided", () => {

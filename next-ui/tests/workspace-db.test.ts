@@ -17,6 +17,7 @@ import {
   initializeWorkspaceStateInDb,
   initWorkspaceDb,
   patchMessageBlockById,
+  preparePendingQueueForImmediateDispatch,
   readConversation,
   readConversationResourcesFromDb,
   readMessageBlockById,
@@ -27,8 +28,10 @@ import {
   readThreadFromDb,
   readWorkspaceRevision,
   readWorkspaceStateFromDb,
+  releasePendingQueueItem,
   releasePendingTurn,
   movePendingQueueItemAfter,
+  removePendingQueueItem,
   removePendingTurn,
   resetDispatchingPendingTurns,
   restartUserTurn,
@@ -145,6 +148,40 @@ describe("workspace-db", () => {
     const claimed = claimNextPendingQueueItem("c1", "run-goal");
     expect(claimed?.kind).toBe("goal");
     expect(claimed?.id).toBe("goal-1");
+    expect(readPendingTurnQueue("c1").items).toEqual([
+      expect.objectContaining({ id: "goal-1", kind: "goal", state: "dispatching", runId: "run-goal" }),
+      expect.objectContaining({ id: "u-pending", kind: "message", state: "queued" }),
+    ]);
+
+    releasePendingQueueItem("goal-1", { pause: true });
+
+    const queueAfterRelease = readPendingTurnQueue("c1");
+    expect(queueAfterRelease.paused).toBe(true);
+    expect(queueAfterRelease.items[0]).toMatchObject({ id: "goal-1", kind: "goal", state: "queued" });
+    expect(claimNextPendingQueueItem("c1", "run-paused-goal")).toBeNull();
+    setPendingTurnQueuePaused("c1", false);
+    expect(claimNextPendingQueueItem("c1", "run-goal-again")?.id).toBe("goal-1");
+  });
+
+  it("can enqueue message and goal items while atomically pausing the queue", () => {
+    initializeWorkspaceStateInDb({ ...buildEmptyWorkspaceState(), chats: [conv("c1")], threads: { c1: [] }, selectedId: "c1" });
+
+    enqueuePendingTurn(
+      { id: "u-paused", conversationId: "c1", createdAtMs: 100, message: userMsg("u-paused", "later"), origin: "http://127.0.0.1:4280" },
+      { pauseQueue: true },
+    );
+
+    expect(readPendingTurnQueue("c1")).toMatchObject({ paused: true, messages: [expect.objectContaining({ id: "u-paused" })] });
+    expect(claimNextPendingQueueItem("c1", "run-paused-message")).toBeNull();
+
+    setPendingTurnQueuePaused("c1", false);
+    expect(claimNextPendingQueueItem("c1", "run-message")?.id).toBe("u-paused");
+    deletePendingTurn("u-paused");
+
+    enqueuePendingGoal({ id: "goal-paused", conversationId: "c1", createdAtMs: 200, description: "keep improving", origin: "http://127.0.0.1:4280" }, { pauseQueue: true });
+
+    expect(readPendingTurnQueue("c1")).toMatchObject({ paused: true, items: [expect.objectContaining({ id: "goal-paused", kind: "goal" })] });
+    expect(claimNextPendingQueueItem("c1", "run-paused-goal")).toBeNull();
   });
 
   it("represents waiting wakeups as queue head blockers", () => {
@@ -159,7 +196,46 @@ describe("workspace-db", () => {
 
     movePendingQueueItemAfter("c1", "u-pending", null);
 
-    expect(claimNextPendingQueueItem("c1", "run-message")?.id).toBe("u-pending");
+    expect(readPendingTurnQueue("c1").items.map((item) => item.kind)).toEqual(["wakeup", "message"]);
+    expect(claimNextPendingQueueItem("c1", "run-message")).toBeNull();
+    expect(() => movePendingQueueItemAfter("c1", "wakeup-1", "u-pending")).toThrow("Wakeup queue items are pinned.");
+  });
+
+  it("prepares the sendable queue head for immediate dispatch", () => {
+    initializeWorkspaceStateInDb({ ...buildEmptyWorkspaceState(), chats: [conv("c1")], threads: { c1: [] }, selectedId: "c1" });
+    enqueuePendingGoal({ id: "goal-1", conversationId: "c1", createdAtMs: 100, description: "keep improving", origin: "http://127.0.0.1:4280" });
+
+    expect(claimNextPendingQueueItem("c1", "run-goal")?.id).toBe("goal-1");
+    releasePendingQueueItem("goal-1", { pause: true, nextDispatchAtMs: 1_800_000_000_000 });
+
+    expect(readPendingTurnQueue("c1")).toMatchObject({
+      paused: true,
+      items: [expect.objectContaining({ id: "goal-1", kind: "goal", state: "queued", nextDispatchAtMs: 1_800_000_000_000 })],
+    });
+
+    const prepared = preparePendingQueueForImmediateDispatch("c1");
+
+    expect(prepared).toMatchObject({
+      paused: false,
+      items: [expect.objectContaining({ id: "goal-1", kind: "goal", state: "queued" })],
+    });
+    expect(prepared.items[0]?.nextDispatchAtMs).toBeUndefined();
+    expect(claimNextPendingQueueItem("c1", "run-now")?.id).toBe("goal-1");
+  });
+
+  it("does not bypass or unpause a waiting wakeup for immediate dispatch", () => {
+    initializeWorkspaceStateInDb({ ...buildEmptyWorkspaceState(), chats: [conv("c1")], threads: { c1: [] }, selectedId: "c1" });
+    upsertPendingWakeupItem({ id: "wakeup-1", conversationId: "c1", createdAtMs: 100, prompt: "continue later", trigger: { type: "time", fireAtMs: 1_000 } });
+    enqueuePendingTurn(
+      { id: "u-pending", conversationId: "c1", createdAtMs: 200, message: userMsg("u-pending", "after wakeup"), origin: "http://127.0.0.1:4280" },
+      { pauseQueue: true },
+    );
+
+    const prepared = preparePendingQueueForImmediateDispatch("c1");
+
+    expect(prepared.paused).toBe(true);
+    expect(prepared.items.map((item) => item.kind)).toEqual(["wakeup", "message"]);
+    expect(claimNextPendingQueueItem("c1", "run-blocked")).toBeNull();
   });
 
   it("requeues dispatching pending turns after a server restart", () => {
@@ -172,6 +248,34 @@ describe("workspace-db", () => {
     resetDispatchingPendingTurns();
 
     expect(readPendingTurnQueue("c1")).toMatchObject({ paused: true, messages: [expect.objectContaining({ id: "u-pending" })] });
+  });
+
+  it("requeues dispatching goals after a server restart without pausing the queue", () => {
+    initializeWorkspaceStateInDb({ ...buildEmptyWorkspaceState(), chats: [conv("c1")], threads: { c1: [] }, selectedId: "c1" });
+    enqueuePendingGoal({ id: "goal-pending", conversationId: "c1", createdAtMs: 100, description: "keep improving", origin: "http://127.0.0.1:4280" });
+
+    expect(claimNextPendingQueueItem("c1", "run-goal")?.id).toBe("goal-pending");
+    expect(readPendingTurnQueue("c1").items).toEqual([expect.objectContaining({ id: "goal-pending", kind: "goal", state: "dispatching" })]);
+
+    resetDispatchingPendingTurns();
+
+    expect(readPendingTurnQueue("c1")).toMatchObject({ paused: false, items: [expect.objectContaining({ id: "goal-pending", kind: "goal", state: "queued" })] });
+  });
+
+  it("keeps active goals visible and removable while preventing active goal moves", () => {
+    initializeWorkspaceStateInDb({ ...buildEmptyWorkspaceState(), chats: [conv("c1")], threads: { c1: [] }, selectedId: "c1" });
+    enqueuePendingGoal({ id: "goal-active", conversationId: "c1", createdAtMs: 100, description: "active goal", origin: "http://127.0.0.1:4280" });
+    enqueuePendingGoal({ id: "goal-later", conversationId: "c1", createdAtMs: 200, description: "later goal", origin: "http://127.0.0.1:4280" });
+
+    expect(claimNextPendingQueueItem("c1", "run-active")?.id).toBe("goal-active");
+
+    expect(readPendingTurnQueue("c1").items.map((item) => [item.id, item.state])).toEqual([
+      ["goal-active", "dispatching"],
+      ["goal-later", "queued"],
+    ]);
+    expect(() => movePendingQueueItemAfter("c1", "goal-active", "goal-later")).toThrow("Queue item not found.");
+    expect(() => movePendingQueueItemAfter("c1", "goal-later", "goal-active")).toThrow("Queue anchor not found.");
+    expect(removePendingQueueItem("c1", "goal-active").items.map((item) => item.id)).toEqual(["goal-later"]);
   });
 
   it("cascades pending turn queues when a conversation is deleted", () => {

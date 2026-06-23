@@ -15,7 +15,7 @@ import { clipboardFilesForComposer, composerSendPayload, mergeComposerAttachment
 import { ComposerStore } from "./composer-store";
 import { fileToAttachmentDraft, isImageMime } from "./composer-utils";
 import { useComposerShared } from "./composer-shared-context";
-import { useComposerVoice, type ComposerVoiceSelectionRange } from "./use-composer-voice";
+import { useComposerVoice } from "./use-composer-voice";
 
 type SubmitShortcut = "enter" | "mod-enter";
 
@@ -42,6 +42,7 @@ export interface InlineDraftEditorProps {
   readonly actionButtonSx?: SxProps<Theme>;
   readonly submitButtonVariant?: ButtonProps["variant"];
   readonly cancelButtonVariant?: ButtonProps["variant"];
+  readonly store?: ComposerStore;
 }
 
 const hiddenFileInputStyle = { position: "absolute", width: 1, height: 1, opacity: 0, pointerEvents: "none" } as const;
@@ -100,14 +101,16 @@ export const InlineDraftEditor = observer(function InlineDraftEditor({
   actionButtonSx,
   submitButtonVariant = "contained",
   cancelButtonVariant = "subtle",
+  store,
 }: InlineDraftEditorProps) {
   const { t } = useI18n();
   const shared = useComposerShared();
-  const [editorStore] = useState(() => new ComposerStore(initialText, initialAttachments, VOICE_IDLE_LEVELS));
+  const [localEditorStore] = useState(() => new ComposerStore(initialText, initialAttachments, VOICE_IDLE_LEVELS));
+  const editorStore = store ?? localEditorStore;
+  const usesExternalStore = store !== undefined;
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const latestDraftRef = useRef<ComposerDraft>({ text: initialText, attachments: initialAttachments });
-  const voiceSelectionRef = useRef<ComposerVoiceSelectionRange | null>(null);
   const [previewAttachment, setPreviewAttachment] = useState<ComposerAttachmentDraft | null>(null);
   const [editorFocused, setEditorFocused] = useState(false);
   const [voiceStartPending, setVoiceStartPending] = useState(false);
@@ -143,7 +146,7 @@ export const InlineDraftEditor = observer(function InlineDraftEditor({
     textareaRef,
     updateDraft,
     voiceProvider: shared?.voiceProvider,
-    pendingSelectionRef: voiceSelectionRef,
+    cancelOnUnmount: false,
   });
   const inputActivityActive = editorFocused || voiceInputActive || voiceStartPending;
 
@@ -173,12 +176,13 @@ export const InlineDraftEditor = observer(function InlineDraftEditor({
   }, [voiceStartPending, voiceState]);
 
   useEffect(() => () => {
-    onInputActivityChange?.(false);
-  }, [onInputActivityChange]);
-
-  useEffect(() => () => {
-    cancelVoiceInput();
-  }, [cancelVoiceInput]);
+    if (!usesExternalStore) {
+      editorStore.cancelVoiceSession();
+    }
+    if (editorStore.voiceState === "idle") {
+      onInputActivityChange?.(false);
+    }
+  }, [editorStore, onInputActivityChange, usesExternalStore]);
 
   const addFiles = useCallback(async (files: readonly File[]) => {
     if (files.length === 0) {
@@ -253,15 +257,15 @@ export const InlineDraftEditor = observer(function InlineDraftEditor({
   const captureVoiceSelection = useCallback(() => {
     const textarea = textareaRef.current;
     if (!textarea) {
-      voiceSelectionRef.current = null;
+      editorStore.setVoicePendingSelection(null);
       return;
     }
-    voiceSelectionRef.current = {
+    editorStore.setVoicePendingSelection({
       text: latestDraftRef.current.text,
       start: textarea.selectionStart,
       end: textarea.selectionEnd,
-    };
-  }, []);
+    });
+  }, [editorStore]);
 
   const keepTextareaFocusForVoice = useCallback((event: MouseEvent<HTMLButtonElement>) => {
     keepTextareaFocus(event);

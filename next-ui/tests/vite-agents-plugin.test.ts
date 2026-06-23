@@ -23,6 +23,7 @@ import {
   gitHardResetDirtyError,
   buildOpenCodeRunArgs,
   createRunApprovalHandler,
+  conversationHasServerActiveWork,
   createAmpStreamTranslator,
   createClaudeStreamTranslator,
   createCodexStreamTranslator,
@@ -95,6 +96,7 @@ import {
   prepareAgentPrompt,
   prioritizeBrowserPreviewDomTargets,
   queuedTurnRunBody,
+  releaseCanceledQueuedRun,
   readScheduledWakeupRecords,
   retryScheduledWakeupDispatchRecord,
   resolveAgentInstallLaunch,
@@ -130,7 +132,18 @@ import {
 import { MAX_AGENT_TOOL_OUTPUT_CHARS } from "../src/lib/agent-output";
 import { accumulateRunEvent, applyRunEventOptionSelection, createRunEventAccumulator, runEventBlocks } from "../src/lib/run-event-accumulator";
 import { buildEmptyWorkspaceState, buildInitialWorkspaceState } from "../src/lib/workspace-state";
-import { closeWorkspaceDb, initializeWorkspaceStateInDb, initWorkspaceDb, readMessageBlockById, type PendingTurnRecord } from "../workspace-db";
+import {
+  claimNextPendingQueueItem,
+  closeWorkspaceDb,
+  enqueuePendingGoal,
+  initializeWorkspaceStateInDb,
+  initWorkspaceDb,
+  readConversation,
+  readMessageBlockById,
+  readPendingTurnQueue,
+  type PendingQueueDispatchItem,
+  type PendingTurnRecord,
+} from "../workspace-db";
 
 type ScheduledWakeupRecordForTest = Parameters<typeof writeScheduledWakeupRecords>[0][number];
 
@@ -251,6 +264,218 @@ describe("vite agents plugin", () => {
         serverPrompt: { userMessage: { id: "u-queued", role: "user", text: "Queued server turn", time: "12:05" } },
       });
       expect(String(body.prompt)).toContain("Queued server turn");
+    } finally {
+      closeWorkspaceDb();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("builds queued goal run bodies with an agent-facing goal instruction", () => {
+    const dir = mkdtempSync(join(tmpdir(), "rlab-queued-goal-body-"));
+    try {
+      initWorkspaceDb(join(dir, "workspace.db"));
+      initializeWorkspaceStateInDb({
+        ...buildEmptyWorkspaceState(),
+        chats: [
+          {
+            id: "chat-goal",
+            title: "Goal",
+            snippet: "",
+            time: "12:00",
+            status: "idle",
+            agent: "codex",
+            profile: { agent: "codex", model: "default", reasoning: "default", mode: "default" },
+          },
+        ],
+        threads: { "chat-goal": [] },
+        selectedId: "chat-goal",
+      });
+      const record: PendingQueueDispatchItem = {
+        id: "goal-123",
+        conversationId: "chat-goal",
+        position: 0,
+        kind: "goal",
+        createdAtMs: 456,
+        updatedAtMs: 456,
+        state: "dispatching",
+        runId: "run-goal",
+        description: "Keep reviewing the queue UX.",
+        origin: "http://127.0.0.1:4280",
+        dispatchCount: 1,
+      };
+
+      const body = queuedTurnRunBody(record, "run-goal");
+      const goalText = String((body.serverPrompt as { userMessage?: { text?: string } }).userMessage?.text ?? "");
+
+      expect(goalText).toContain('🎯 <rlab-task-goal id="goal-123">');
+      expect(goalText).toContain("<summary>TaskGoal queue item.</summary>");
+      expect(goalText).toContain("<description>Keep reviewing the queue UX.</description>");
+      expect(goalText).toContain('TaskGoal with action="complete" and goalId="goal-123"');
+      expect(goalText).toContain('TaskGoal with action="remove" and goalId="goal-123"');
+      expect(goalText).toContain("</rlab-task-goal>");
+      expect(String(body.prompt)).toContain(goalText);
+    } finally {
+      closeWorkspaceDb();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps TaskGoal enabled for queued goal dispatches", () => {
+    const dir = mkdtempSync(join(tmpdir(), "rlab-queued-goal-tools-"));
+    try {
+      initWorkspaceDb(join(dir, "workspace.db"));
+      initializeWorkspaceStateInDb({
+        ...buildEmptyWorkspaceState(),
+        chats: [
+          {
+            id: "chat-goal-tools",
+            title: "Goal",
+            snippet: "",
+            time: "12:00",
+            status: "idle",
+            agent: "codex",
+            profile: { agent: "codex", model: "default", reasoning: "default", mode: "default", tools: ["AskUserQuestion"] },
+          },
+        ],
+        threads: { "chat-goal-tools": [] },
+        selectedId: "chat-goal-tools",
+      });
+      const record: PendingQueueDispatchItem = {
+        id: "goal-tools",
+        conversationId: "chat-goal-tools",
+        position: 0,
+        kind: "goal",
+        createdAtMs: 456,
+        updatedAtMs: 456,
+        state: "dispatching",
+        runId: "run-goal-tools",
+        description: "Keep reviewing the queue UX.",
+        origin: "http://127.0.0.1:4280",
+        dispatchCount: 1,
+      };
+
+      const body = queuedTurnRunBody(record, "run-goal-tools");
+
+      expect(body.tools).toEqual(["AskUserQuestion", "TaskGoal"]);
+    } finally {
+      closeWorkspaceDb();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("normalizes seed project paths when building queued run bodies", () => {
+    const dir = mkdtempSync(join(tmpdir(), "rlab-queued-seed-path-"));
+    try {
+      initWorkspaceDb(join(dir, "workspace.db"));
+      initializeWorkspaceStateInDb({
+        ...buildEmptyWorkspaceState(),
+        projects: [
+          {
+            id: "web-ui",
+            name: "web-ui",
+            path: "/root/workspace/rlab",
+            conversations: [
+              {
+                id: "chat-seed-path",
+                title: "Queued",
+                snippet: "",
+                time: "12:00",
+                status: "idle",
+                agent: "gemini",
+                profile: { agent: "gemini", model: "default", reasoning: "default", mode: "default" },
+              },
+            ],
+          },
+        ],
+        threads: {
+          "chat-seed-path": [],
+        },
+        selectedId: "chat-seed-path",
+      });
+      const record: PendingTurnRecord = {
+        id: "u-seed-path",
+        conversationId: "chat-seed-path",
+        createdAtMs: 123,
+        message: { id: "u-seed-path", role: "user", text: "Queued server turn", time: "12:05" },
+        origin: "http://127.0.0.1:4280",
+      };
+
+      const body = queuedTurnRunBody(record, "run-seed-path");
+
+      expect(body.cwd).toBe(resolve("."));
+    } finally {
+      closeWorkspaceDb();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reconciles stale persisted active runs before blocking server queue drains", () => {
+    const dir = mkdtempSync(join(tmpdir(), "rlab-stale-queue-active-"));
+    try {
+      initWorkspaceDb(join(dir, "workspace.db"));
+      initializeWorkspaceStateInDb({
+        ...buildEmptyWorkspaceState(),
+        chats: [
+          {
+            id: "chat-stale-active",
+            title: "Stale",
+            snippet: "",
+            time: "12:00",
+            status: "running",
+            activeRunId: "run-stale",
+            agent: "gemini",
+            profile: { agent: "gemini", model: "default", reasoning: "default", mode: "default" },
+          },
+        ],
+        threads: {
+          "chat-stale-active": [],
+        },
+        selectedId: "chat-stale-active",
+      });
+
+      expect(conversationHasServerActiveWork("chat-stale-active")).toBe(false);
+      const reconciled = readConversation("chat-stale-active");
+      expect(reconciled?.activeRunId).toBeUndefined();
+      expect(reconciled?.status).toBe("error");
+    } finally {
+      closeWorkspaceDb();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("requeues canceled dispatching goals immediately", () => {
+    const dir = mkdtempSync(join(tmpdir(), "rlab-canceled-goal-"));
+    try {
+      initWorkspaceDb(join(dir, "workspace.db"));
+      initializeWorkspaceStateInDb({
+        ...buildEmptyWorkspaceState(),
+        chats: [
+          {
+            id: "chat-goal",
+            title: "Goal",
+            snippet: "",
+            time: "12:00",
+            status: "idle",
+            agent: "gemini",
+            profile: { agent: "gemini", model: "default", reasoning: "default", mode: "default" },
+          },
+        ],
+        threads: { "chat-goal": [] },
+        selectedId: "chat-goal",
+      });
+      enqueuePendingGoal({ id: "goal-1", conversationId: "chat-goal", createdAtMs: 100, description: "keep going", origin: "http://127.0.0.1:4281" });
+
+      expect(claimNextPendingQueueItem("chat-goal", "run-goal")?.id).toBe("goal-1");
+      expect(readPendingTurnQueue("chat-goal").items).toEqual([expect.objectContaining({ id: "goal-1", kind: "goal", state: "dispatching" })]);
+
+      const released = releaseCanceledQueuedRun("run-goal");
+
+      expect(released).toMatchObject({ id: "goal-1", kind: "goal", state: "queued" });
+      expect(readPendingTurnQueue("chat-goal")).toMatchObject({
+        paused: true,
+        items: [expect.objectContaining({ id: "goal-1", kind: "goal", state: "queued" })],
+      });
+      expect(claimNextPendingQueueItem("chat-goal", "run-again")).toBeNull();
     } finally {
       closeWorkspaceDb();
       rmSync(dir, { recursive: true, force: true });
@@ -1915,7 +2140,7 @@ Built-in agents:
           inputSchema: expect.objectContaining({
             type: "object",
             properties: expect.objectContaining({
-              action: expect.objectContaining({ enum: ["add", "list", "pause", "resume", "remove", "complete", "update"] }),
+              action: expect.objectContaining({ enum: ["add", "list", "remove", "complete", "update"] }),
               description: expect.objectContaining({ type: "string" }),
               goalId: expect.objectContaining({ type: "string" }),
             }),

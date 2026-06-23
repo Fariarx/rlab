@@ -4,6 +4,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../../../i18n/I18nProvider";
 import { appTheme } from "../../../theme/app-theme";
 import { ComposerSharedProvider, type ComposerSharedProps } from "../composer/composer-shared-context";
+import { InlineDraftEditor } from "../composer/InlineDraftEditor";
+import { VOICE_IDLE_LEVELS } from "../composer/ComposerVoice";
+import { ComposerStore } from "../composer/composer-store";
 import { Message, type MessageDisplayPrefs } from "./Message";
 import type { ChatMessage } from "../core/types";
 
@@ -81,6 +84,37 @@ describe("Message", () => {
     expect(link).toHaveAttribute("href", "rlab-tool:TaskWakeup");
   });
 
+  it("collapses structured TaskGoal user prompts", () => {
+    renderMessage({
+      id: "user-goal",
+      role: "user",
+      text: [
+        '🎯 <rlab-task-goal id="goal-123">',
+        "<summary>TaskGoal queue item.</summary>",
+        "<description>Проверять очередь до зелёного состояния</description>",
+        '<instructions>Work on this standing goal. When it is achieved, call TaskGoal with action="complete" and goalId="goal-123".</instructions>',
+        "</rlab-task-goal>",
+      ].join("\n"),
+    });
+
+    expect(screen.getByTestId("task-goal-user-message")).toHaveTextContent("Цель");
+    expect(screen.getByTestId("task-goal-user-message")).toHaveTextContent("Проверять очередь до зелёного состояния");
+    expect(screen.getByTestId("task-goal-user-message")).not.toHaveTextContent("goal-123");
+    expect(screen.getByTestId("task-goal-user-message")).not.toHaveTextContent("Служебное описание TaskGoal скрыто");
+    expect(screen.queryByText(/TaskGoal with action="complete"/)).not.toBeInTheDocument();
+  });
+
+  it("collapses legacy TaskGoal user prompts", () => {
+    renderMessage({
+      id: "user-goal-legacy",
+      role: "user",
+      text: "🎯 TaskGoal queue item (id: goal-old). Work on this standing goal. When it is achieved, call TaskGoal with action='complete' for this id; to cancel it, call TaskGoal with action='remove'. Goal: Проверять старую цель",
+    });
+
+    expect(screen.getByTestId("task-goal-user-message")).toHaveTextContent("Проверять старую цель");
+    expect(screen.queryByText(/Work on this standing goal/)).not.toBeInTheDocument();
+  });
+
   it("edits user messages with a lightweight multiline editor instead of mounting the dock composer", async () => {
     class FakeSpeechRecognition {
       lang = "";
@@ -124,6 +158,87 @@ describe("Message", () => {
     fireEvent.click(screen.getByRole("button", { name: "Отправить изменённое сообщение" }));
 
     await waitFor(() => expect(onEditAndResend).toHaveBeenCalledWith(message, "updated\n\n<attachment name=\"notes.txt\" type=\"text/plain\">\nhello\n</attachment>"));
+  });
+
+  it("keeps inline edit dictation in the store across editor remounts", async () => {
+    type FakeSpeechResultEvent = {
+      readonly resultIndex: number;
+      readonly results: {
+        readonly length: number;
+        readonly 0: { readonly length: number; readonly isFinal: boolean; readonly 0: { readonly transcript: string } };
+      };
+    };
+    class FakeSpeechRecognition {
+      static current: FakeSpeechRecognition | null = null;
+      lang = "";
+      continuous = false;
+      interimResults = false;
+      onresult: ((event: FakeSpeechResultEvent) => void) | null = null;
+      onerror: ((event: { readonly error?: string; readonly message?: string }) => void) | null = null;
+      onend: (() => void) | null = null;
+
+      constructor() {
+        FakeSpeechRecognition.current = this;
+      }
+
+      start(): void {}
+
+      stop(): void {
+        this.onend?.();
+      }
+
+      emitInterim(text: string): void {
+        this.onresult?.({
+          resultIndex: 0,
+          results: {
+            length: 1,
+            0: { length: 1, isFinal: false, 0: { transcript: text } },
+          },
+        });
+      }
+    }
+    vi.stubGlobal("SpeechRecognition", FakeSpeechRecognition);
+    const editorStore = new ComposerStore("", [], VOICE_IDLE_LEVELS);
+    const onInputActivityChange = vi.fn();
+    const onSubmit = vi.fn();
+    const shared: ComposerSharedProps = {
+      voiceProvider: { id: "web-speech", name: "Browser Web Speech", kind: "browser", language: "ru-RU", configured: true },
+    };
+    const renderEditor = (key: string) => (
+      <ThemeProvider theme={appTheme}>
+        <I18nProvider locale="ru">
+          <ComposerSharedProvider value={shared}>
+            <InlineDraftEditor
+              key={key}
+              ariaLabel="Редактировать"
+              submitLabel="Отправить"
+              onSubmit={onSubmit}
+              onInputActivityChange={onInputActivityChange}
+              testIdPrefix="message-edit"
+              store={editorStore}
+            />
+          </ComposerSharedProvider>
+        </I18nProvider>
+      </ThemeProvider>
+    );
+
+    const view = render(renderEditor("before-remount"));
+    fireEvent.click(await screen.findByTestId("message-edit-voice-button"));
+    await waitFor(() => expect(FakeSpeechRecognition.current).not.toBeNull());
+    await waitFor(() => expect(editorStore.voiceState).toBe("recording"));
+    onInputActivityChange.mockClear();
+
+    act(() => {
+      FakeSpeechRecognition.current?.emitInterim("текст голосом");
+    });
+    view.rerender(renderEditor("after-remount"));
+
+    expect(onInputActivityChange.mock.calls.some(([active]) => active === false)).toBe(false);
+
+    fireEvent.click(await screen.findByTestId("message-edit-voice-button"));
+
+    await waitFor(() => expect(screen.getByTestId("message-edit-input")).toHaveValue("текст голосом"));
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 
   it("renders bare urls in user messages as links", () => {

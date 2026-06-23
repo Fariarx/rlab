@@ -1,6 +1,6 @@
 import type { ChatMessage } from "../../agent";
 import type { ComposerVoiceProvider } from "../../agent/composer/composer-model";
-import type { VoiceConfigSnapshot, WakeupSummary } from "../../../client/api/workspace-page-api";
+import type { PendingQueueWakeupItem, VoiceConfigSnapshot, WakeupSummary } from "../../../client/api/workspace-page-api";
 import { wakeupLabel } from "../../../client/api/workspace-page-api";
 import { getVoiceProvider, type VoiceSettings } from "../../../lib/voice-providers";
 import type { WakeupDetailRow, WakeupTagDetail } from "../../agent/composer/WakeupTile";
@@ -16,7 +16,7 @@ export interface ScheduledWakeupComposerTag {
   readonly detail: WakeupTagDetail;
 }
 
-function wakeupTagDetail(wakeup: WakeupSummary, locale: Locale): WakeupTagDetail {
+export function wakeupTagDetail(wakeup: WakeupSummary, locale: Locale): WakeupTagDetail {
   const ru = locale === "ru";
   const rows: WakeupDetailRow[] = [];
   let script: { readonly label: string; readonly body: string } | undefined;
@@ -50,6 +50,52 @@ function wakeupTagDetail(wakeup: WakeupSummary, locale: Locale): WakeupTagDetail
     rows.push({ label: ru ? "Причина" : "Reason", value: wakeup.reason });
   }
   return { heading, rows, promptLabel: ru ? "Промпт" : "Prompt", prompt: wakeup.prompt, script };
+}
+
+export function pendingQueueWakeupLabel(wakeup: PendingQueueWakeupItem, locale: Locale): string {
+  return wakeupLabel(
+    {
+      id: wakeup.wakeupId,
+      conversationId: wakeup.conversationId,
+      agent: wakeup.agent ?? "agent",
+      prompt: wakeup.prompt,
+      ...(wakeup.reason ? { reason: wakeup.reason } : {}),
+      trigger: wakeup.trigger ?? { type: "time", fireAtMs: wakeup.createdAtMs },
+    },
+    locale,
+  );
+}
+
+function singleLineWakeupPart(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+export function pendingQueueWakeupQueueLabel(wakeup: PendingQueueWakeupItem, locale: Locale): string {
+  const detail = pendingQueueWakeupDetail(wakeup, locale);
+  const agentLabel = locale === "ru" ? "Агент" : "Agent";
+  const reasonLabel = locale === "ru" ? "Причина" : "Reason";
+  const detailRows = detail.rows.filter((row) => row.label === agentLabel || row.label === reasonLabel);
+  return [
+    pendingQueueWakeupLabel(wakeup, locale),
+    ...detailRows.map((row) => `${row.label}: ${singleLineWakeupPart(row.value)}`),
+    `${detail.promptLabel}: ${singleLineWakeupPart(detail.prompt)}`,
+  ]
+    .filter((part) => part.trim().length > 0)
+    .join(" · ");
+}
+
+export function pendingQueueWakeupDetail(wakeup: PendingQueueWakeupItem, locale: Locale): WakeupTagDetail {
+  return wakeupTagDetail(
+    {
+      id: wakeup.wakeupId,
+      conversationId: wakeup.conversationId,
+      agent: wakeup.agent ?? "agent",
+      prompt: wakeup.prompt,
+      ...(wakeup.reason ? { reason: wakeup.reason } : {}),
+      trigger: wakeup.trigger ?? { type: "time", fireAtMs: wakeup.createdAtMs },
+    },
+    locale,
+  );
 }
 
 export function composerMessageHistory(messages: readonly ChatMessage[]): readonly string[] {

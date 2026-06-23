@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { observer } from "mobx-react-lite";
 import { useWorkspace } from "../src/components/workspace/use-workspace";
+import type { PendingQueueItem } from "../src/client/api/workspace-page-api";
 import type { ChatMessage } from "../src/domain/agent-types";
 import { buildInitialWorkspaceState, type WorkspaceState } from "../src/lib/workspace-state";
 import { applyWorkspaceMutationsToState, type WorkspaceMutation } from "../src/lib/workspace-mutations";
@@ -30,11 +31,18 @@ const Probe = observer(function Probe() {
       <div data-testid="usage">{selected?.usage?.totalTokens ?? "none"}</div>
       <div data-testid="context-usage">{selected?.usage?.contextTokens ?? "none"}</div>
       <div data-testid="queued">{workspace.pendingMessageCount(workspace.selectedId)}</div>
+      <div data-testid="queued-items">{workspace.pendingQueueItemCount(workspace.selectedId)}</div>
       <div data-testid="archived">{[...workspace.chats, ...workspace.projects.flatMap((project) => project.conversations)].filter((conversation) => conversation.archived).map((conversation) => conversation.id).join(",")}</div>
       <div data-testid="thread-ids">{(workspace.threads[workspace.selectedId] ?? []).map((message) => message.id).join(",")}</div>
       <div data-testid="agent-blocks">{JSON.stringify((workspace.threads[workspace.selectedId] ?? []).filter((message) => message.role === "agent").map((message) => message.blocks ?? []))}</div>
       <button type="button" onClick={() => workspace.sendMessage(workspace.selectedId, "Persist this message")}>
         send
+      </button>
+      <button type="button" onClick={() => workspace.deferMessageToQueue(workspace.selectedId, "Deferred message")}>
+        defer-message
+      </button>
+      <button type="button" onClick={() => workspace.sendMessageAsGoal(workspace.selectedId, "Persistent goal")}>
+        send-goal
       </button>
       <button type="button" onClick={() => workspace.setConversationProfile(workspace.selectedId, { agent: "claude-code", model: "default", reasoning: "default", mode: "default" })}>
         agent-claude
@@ -145,13 +153,16 @@ interface RunRequestRecord {
 interface TestPendingQueue {
   paused: boolean;
   messages: ChatMessage[];
+  items: PendingQueueItem[];
 }
 
 interface QueueRequestRecord {
   readonly action?: string;
   readonly conversationId?: string;
+  readonly description?: string;
   readonly messageId?: string;
   readonly paused?: boolean;
+  readonly pauseQueue?: boolean;
   readonly text?: string;
 }
 
@@ -165,14 +176,14 @@ function queueFor(queues: Map<string, TestPendingQueue>, conversationId: string)
   if (existing) {
     return existing;
   }
-  const created: TestPendingQueue = { paused: false, messages: [] };
+  const created: TestPendingQueue = { paused: false, messages: [], items: [] };
   queues.set(conversationId, created);
   return created;
 }
 
 function queuePayload(queues: Map<string, TestPendingQueue>, conversationId: string) {
   const queue = queueFor(queues, conversationId);
-  return { queue: { conversationId, paused: queue.paused, messages: queue.messages } };
+  return { queue: { conversationId, paused: queue.paused, messages: queue.messages, items: queue.items } };
 }
 
 function applyWorkspaceMutationRequest(state: WorkspaceState, init: RequestInit | undefined): WorkspaceState {
@@ -215,14 +226,51 @@ describe("useWorkspace", () => {
           text: request.text ?? "",
           time: "12:00",
         };
+        const item: PendingQueueItem = {
+          id: message.id,
+          conversationId,
+          position: queue.items.length,
+          kind: "message",
+          createdAtMs: Date.now(),
+          updatedAtMs: Date.now(),
+          state: "queued",
+          message,
+          origin: "http://localhost",
+        };
         queue.messages = [...queue.messages, message];
+        queue.items = [...queue.items, item];
+        if (request.pauseQueue) {
+          queue.paused = true;
+        }
+      } else if (request.action === "enqueueGoal") {
+        const item: PendingQueueItem = {
+          id: `goal-${queue.items.length + 1}`,
+          conversationId,
+          position: queue.items.length,
+          kind: "goal",
+          createdAtMs: Date.now(),
+          updatedAtMs: Date.now(),
+          state: "queued",
+          description: request.description ?? "",
+          origin: "http://localhost",
+          dispatchCount: 0,
+        };
+        queue.items = [...queue.items, item];
+        if (request.pauseQueue) {
+          queue.paused = true;
+        }
       } else if (request.action === "cancel" && request.messageId) {
         queue.messages = queue.messages.filter((message) => message.id !== request.messageId);
+        queue.items = queue.items.filter((item) => item.id !== request.messageId);
       } else if (request.action === "setPaused") {
         queue.paused = request.paused === true;
       } else if (request.action === "sendNext") {
         queue.paused = false;
-        queue.messages = queue.messages.slice(1);
+        const [firstItem] = queue.items;
+        queue.items = queue.items.slice(1);
+        if (firstItem?.kind === "message") {
+          queue.messages = queue.messages.filter((message) => message.id !== firstItem.message.id);
+        }
       }
       return Response.json(queuePayload(pendingQueues, conversationId));
     }
@@ -1363,6 +1411,36 @@ describe("useWorkspace", () => {
     });
   });
 
+  it("enqueues explicit composer send modes with the server queue paused", async () => {
+    render(<Probe />);
+
+    await screen.findByText("chat-2");
+    screen.getByRole("button", { name: "defer-message" }).click();
+
+    await waitFor(() => {
+      expect(queueRequests).toContainEqual(expect.objectContaining({
+        action: "enqueue",
+        conversationId: "chat-2",
+        pauseQueue: true,
+        text: "Deferred message",
+      }));
+    });
+    expect(queueFor(pendingQueues, "chat-2").paused).toBe(true);
+
+    screen.getByRole("button", { name: "send-goal" }).click();
+
+    await waitFor(() => {
+      expect(queueRequests).toContainEqual(expect.objectContaining({
+        action: "enqueueGoal",
+        conversationId: "chat-2",
+        description: "Persistent goal",
+      }));
+    });
+    expect(queueRequests.find((request) => request.action === "enqueueGoal")).not.toHaveProperty("pauseQueue");
+    expect(queueFor(pendingQueues, "chat-2").paused).toBe(true);
+    await waitFor(() => expect(screen.getByTestId("queued-items")).toHaveTextContent("2"));
+  });
+
   it("queues messages on the server after switching agent during a run", async () => {
     state = {
       ...state,
@@ -1573,6 +1651,48 @@ describe("useWorkspace", () => {
     await waitFor(() => expect(screen.getByTestId("queued")).toHaveTextContent("0"));
     expect(runRequests).toHaveLength(1);
     activeRunController?.close();
+  });
+
+  it("does not send queued items now when the queue is blocked by a wakeup", async () => {
+    pendingQueues.set("chat-2", {
+      paused: true,
+      messages: [],
+      items: [
+        {
+          id: "wakeup-1",
+          conversationId: "chat-2",
+          position: 0,
+          kind: "wakeup",
+          createdAtMs: 100,
+          updatedAtMs: 100,
+          state: "waiting_wakeup",
+          wakeupId: "wakeup-1",
+          prompt: "Continue later",
+        },
+        {
+          id: "queued-1",
+          conversationId: "chat-2",
+          position: 1,
+          kind: "message",
+          createdAtMs: 200,
+          updatedAtMs: 200,
+          state: "queued",
+          message: { id: "queued-1", role: "user", text: "after wakeup" },
+          origin: "http://localhost",
+        },
+      ],
+    });
+
+    render(<Probe />);
+
+    await screen.findByText("chat-2");
+    await waitFor(() => expect(screen.getByTestId("queued-items")).toHaveTextContent("2"));
+
+    screen.getByRole("button", { name: "send-queued-now" }).click();
+
+    expect(queueRequests).not.toContainEqual(expect.objectContaining({ action: "sendNext", conversationId: "chat-2" }));
+    expect(runCancelRequests).toHaveLength(0);
+    expect(screen.getByTestId("queued-items")).toHaveTextContent("2");
   });
 
   it("derives unrestricted run access from the default chat agent mode", async () => {

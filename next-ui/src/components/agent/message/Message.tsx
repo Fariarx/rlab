@@ -3,6 +3,7 @@ import EditIcon from "@mui/icons-material/Edit";
 import AccountTreeIcon from "@mui/icons-material/AccountTree";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import CloseIcon from "@mui/icons-material/Close";
+import FlagRoundedIcon from "@mui/icons-material/FlagRounded";
 import { Box, Stack, Typography } from "@mui/material";
 import { observer } from "mobx-react-lite";
 import { memo, useEffect, useMemo, useState } from "react";
@@ -14,13 +15,15 @@ import { AgentBlockRenderer } from "../blocks/AgentBlockRenderer";
 import { AgentDetails } from "./AgentDetails";
 import { AttachmentTile } from "../composer/AttachmentTile";
 import { InlineDraftEditor } from "../composer/InlineDraftEditor";
+import { VOICE_IDLE_LEVELS } from "../composer/ComposerVoice";
+import { ComposerStore } from "../composer/composer-store";
 import { ChangedFilesAccordion } from "./ChangedFilesAccordion";
 import { AgentMessageStore, MessageShellStore } from "../stores/agent-local-stores";
 import type { AgentProfile } from "../core/agents";
 import { rise } from "../core/anim";
 import { keyedAgentBlocks } from "./message-block-keys";
 import { createAgentMessageBlockModel, isMessageLive } from "./message-block-model";
-import { basename, parseUserDraft, readOnlyImageToolPath, splitUserContent, type MessageAttachment } from "./message-content-model";
+import { basename, parseTaskGoalUserMessage, parseUserDraft, readOnlyImageToolPath, splitUserContent, type MessageAttachment, type TaskGoalUserMessage } from "./message-content-model";
 import { agentMessageProfileLabel, formatElapsedSeconds } from "./message-display-model";
 import type { MessageActionHandlers } from "./message-actions";
 import { AgentAvatar, MessageText, TypingDots, UserAvatar } from "../blocks/parts";
@@ -97,6 +100,35 @@ const revealActionsOnHover = {
   "&:hover .msg-actions, &:focus-within .msg-actions": { opacity: 1 },
 } as const;
 
+function TaskGoalUserMessageCard({ goal }: { readonly goal: TaskGoalUserMessage }) {
+  const { t } = useI18n();
+  return (
+    <Box
+      data-testid="task-goal-user-message"
+      sx={{
+        minWidth: 0,
+        maxWidth: "100%",
+        px: 1.5,
+        py: 1.15,
+        borderRadius: (theme) => `${theme.custom.radii.lg}px`,
+        borderTopRightRadius: (theme) => `${theme.custom.radii.sm}px`,
+        backgroundColor: (theme) => theme.custom.surfaces.s3,
+        border: (theme) => `1px solid ${theme.custom.borders.subtle}`,
+      }}
+    >
+      <Stack spacing={0.75} sx={{ minWidth: 0 }}>
+        <Stack direction="row" spacing={0.75} sx={{ alignItems: "center", minWidth: 0 }}>
+          <FlagRoundedIcon sx={{ flex: "0 0 auto", fontSize: 15, color: (theme) => theme.palette.status.info.main }} />
+          <Typography component="span" sx={{ flex: "0 0 auto", fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.72rem", fontWeight: 700, color: "text.secondary" }}>
+            {t("taskGoalMessageTitle")}
+          </Typography>
+        </Stack>
+        <MessageText text={goal.description} />
+      </Stack>
+    </Box>
+  );
+}
+
 function MessageActionBar({
   message,
   actions,
@@ -151,10 +183,12 @@ const UserMessageEditor = observer(function UserMessageEditor({
   message,
   onResend,
   onCancel,
+  store,
 }: {
   readonly message: ChatMessage;
   readonly onResend: (value: string) => void;
   readonly onCancel: () => void;
+  readonly store: ComposerStore;
 }) {
   const { t } = useI18n();
   const editDraft = useMemo(() => parseUserDraft(message.text ?? ""), [message.text]);
@@ -166,7 +200,15 @@ const UserMessageEditor = observer(function UserMessageEditor({
           <Typography variant="microLabel" sx={{ color: "text.secondary" }}>
             {t("editMessage")}
           </Typography>
-          <Button size="small" variant="text" onClick={onCancel} startIcon={<CloseIcon sx={{ fontSize: 15 }} />}>
+          <Button
+            size="small"
+            variant="text"
+            onClick={() => {
+              store.cancelVoiceSession();
+              onCancel();
+            }}
+            startIcon={<CloseIcon sx={{ fontSize: 15 }} />}
+          >
             {t("cancel")}
           </Button>
         </Stack>
@@ -179,6 +221,7 @@ const UserMessageEditor = observer(function UserMessageEditor({
           submitLabel={t("send")}
           submitAriaLabel={t("sendEditedMessage")}
           testIdPrefix="message-edit"
+          store={store}
         />
       </Stack>
     </Box>
@@ -194,9 +237,12 @@ const UserMessage = observer(function UserMessage({
   readonly delay: number;
   readonly actions?: MessageActionHandlers;
 }) {
-  const { text: displayText, attachments } = splitUserContent(message.text ?? "");
+  const taskGoal = parseTaskGoalUserMessage(message.text ?? "");
+  const { text: displayText, attachments } = taskGoal ? { text: "", attachments: [] } : splitUserContent(message.text ?? "");
   const reviewBlocks = (message.blocks ?? []).filter((block) => block.kind === "review");
   const [store] = useState(() => new MessageShellStore(displayText));
+  const editDraft = useMemo(() => parseUserDraft(message.text ?? ""), [message.text]);
+  const [editComposerStore] = useState(() => new ComposerStore(editDraft.text, editDraft.attachments, VOICE_IDLE_LEVELS));
   const { editing, previewImage, setEditing, setPreviewImage } = store;
   const { t } = useI18n();
 
@@ -213,9 +259,11 @@ const UserMessage = observer(function UserMessage({
               setEditing(false);
             }}
             onCancel={() => setEditing(false)}
+            store={editComposerStore}
           />
         ) : (
           <Stack spacing={0.75} sx={{ alignItems: "flex-end", minWidth: 0, maxWidth: "100%" }}>
+            {taskGoal && <TaskGoalUserMessageCard goal={taskGoal} />}
             {displayText && (
               <Box
                 sx={{

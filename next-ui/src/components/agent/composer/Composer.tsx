@@ -9,6 +9,8 @@ import RuleRoundedIcon from "@mui/icons-material/RuleRounded";
 import SendIcon from "@mui/icons-material/Send";
 import CompressRoundedIcon from "@mui/icons-material/CompressRounded";
 import DriveFileRenameOutlineRoundedIcon from "@mui/icons-material/DriveFileRenameOutlineRounded";
+import FlagRoundedIcon from "@mui/icons-material/FlagRounded";
+import ScheduleSendRoundedIcon from "@mui/icons-material/ScheduleSendRounded";
 import SpeedRoundedIcon from "@mui/icons-material/SpeedRounded";
 import SettingsRoundedIcon from "@mui/icons-material/SettingsRounded";
 import StopCircleIcon from "@mui/icons-material/StopCircle";
@@ -161,6 +163,8 @@ export interface ComposerProps {
   readonly onAutoConfirmChange?: (enabled: boolean) => void;
   readonly onDraftChange?: (draft: ComposerDraft) => void;
   readonly onSend?: (value: string) => void;
+  readonly onSendAsGoal?: (value: string) => void;
+  readonly onDeferToQueue?: (value: string) => void;
   readonly onStop?: () => void;
   readonly onAttachmentError?: (message: string) => void;
   readonly running?: boolean;
@@ -232,6 +236,8 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
     onAutoConfirmChange,
     onDraftChange,
     onSend,
+    onSendAsGoal,
+    onDeferToQueue,
     onStop,
     onAttachmentError,
     running = false,
@@ -376,6 +382,7 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
     hasComposerPayload,
     latestDraftRef,
     send,
+    submitDraft,
     setComposerAttachments,
     updateDraft,
   } = useComposerTextController({
@@ -557,6 +564,12 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
     }
   };
   const limitEmptyMessage = agentId && LIMIT_UNSUPPORTED_AGENTS.has(agentId) ? t("limitsUnavailable") : t("limitsNoData");
+  const showSendModeActions = Boolean(onSendAsGoal || onDeferToQueue);
+  const sendModeActionsDisabled = sending || !hasComposerPayload;
+  const submitSendMode = (handler: (value: string) => void) => {
+    setModeMenuAnchor(null);
+    void submitDraft(handler);
+  };
 
   return (
     // Plain relative Box: the only in-flow child is the input bar. The tags +
@@ -737,8 +750,9 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
                     boxShadow: "0 4px 12px rgba(0, 0, 0, 0.14)",
                     mt: `${COMPOSER_OPTIONS_MENU_Y_OFFSET_PX}px`,
                     minWidth: 304,
-                    maxHeight: optionsMenuMaxHeight,
+                    maxHeight: optionsMenuMaxHeight === undefined ? "calc(100dvh - 16px)" : `${optionsMenuMaxHeight}px`,
                     overflowY: "auto",
+                    overscrollBehavior: "contain",
                   },
                 },
                 list: {
@@ -760,6 +774,27 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
                 <AttachFileIcon sx={{ fontSize: 16, color: "text.secondary" }} />
                 <Box component="span">{t("attach")}</Box>
               </MenuItem>
+              {showSendModeActions && <Divider sx={sectionDividerSx} />}
+              {onSendAsGoal && (
+                <MenuItem
+                  disabled={sendModeActionsDisabled}
+                  onClick={() => submitSendMode(onSendAsGoal)}
+                  sx={{ gap: 1, fontSize: "0.8rem", minHeight: 0 }}
+                >
+                  <FlagRoundedIcon sx={{ fontSize: 16, color: "text.secondary" }} />
+                  <Box component="span">{t("sendAsGoal")}</Box>
+                </MenuItem>
+              )}
+              {onDeferToQueue && (
+                <MenuItem
+                  disabled={sendModeActionsDisabled}
+                  onClick={() => submitSendMode(onDeferToQueue)}
+                  sx={{ gap: 1, fontSize: "0.8rem", minHeight: 0 }}
+                >
+                  <ScheduleSendRoundedIcon sx={{ fontSize: 16, color: "text.secondary" }} />
+                  <Box component="span">{t("deferToPausedQueue")}</Box>
+                </MenuItem>
+              )}
               {(workModes.length > 0 || hasModifierModes) && <Divider sx={sectionDividerSx} />}
               {workModes.map(renderWorkModeMenuItem)}
               {workModes.length > 0 && hasModifierModes && <Divider sx={sectionDividerSx} />}

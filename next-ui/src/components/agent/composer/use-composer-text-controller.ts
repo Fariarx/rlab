@@ -60,6 +60,7 @@ interface UseComposerTextControllerResult {
   readonly hasComposerPayload: boolean;
   readonly latestDraftRef: RefObject<ComposerDraft>;
   readonly send: () => Promise<void>;
+  readonly submitDraft: (handler: (value: string) => void) => Promise<boolean>;
   readonly setComposerAttachments: (nextAttachments: readonly ComposerAttachmentDraft[]) => void;
   readonly setComposerValue: (nextValue: string) => void;
   readonly updateDraft: (draft: ComposerDraft) => void;
@@ -279,9 +280,9 @@ export function useComposerTextController({
     updateDraft({ text: latestDraftRef.current.text, attachments: nextAttachments });
   }, [updateDraft]);
 
-  const send = useCallback(async () => {
+  const submitDraft = useCallback(async (handler: (value: string) => void): Promise<boolean> => {
     if (sending) {
-      return;
+      return false;
     }
     setSending(true);
     try {
@@ -292,22 +293,34 @@ export function useComposerTextController({
       const draft = latestDraftRef.current;
       const trimmed = draft.text.trim();
       const hasInput = trimmed.length > 0 || draft.attachments.length > 0;
-      if (!hasInput && reviewCount === 0) {
-        return;
+      if (!hasInput) {
+        return false;
       }
-      if (hasInput) {
-        const payload = composerSendPayload(trimmed, draft.attachments);
-        armStaleSubmitChangeGuard(draft.text);
-        updateDraft({ text: "", attachments: [] });
-        onSend?.(payload);
-      }
+      const payload = composerSendPayload(trimmed, draft.attachments);
+      armStaleSubmitChangeGuard(draft.text);
+      updateDraft({ text: "", attachments: [] });
+      handler(payload);
+      return true;
+    } finally {
+      setSending(false);
+    }
+  }, [armStaleSubmitChangeGuard, onBeforeSend, sending, setSending, updateDraft]);
+
+  const send = useCallback(async () => {
+    if (sending) {
+      return;
+    }
+    const submitted = await submitDraft((payload) => onSend?.(payload));
+    if (!submitted && reviewCount === 0) {
+      return;
+    }
+    try {
       if (reviewCount > 0) {
         onSendReview?.();
       }
     } finally {
-      setSending(false);
     }
-  }, [armStaleSubmitChangeGuard, onBeforeSend, onSend, onSendReview, reviewCount, sending, setSending, updateDraft]);
+  }, [onSend, onSendReview, reviewCount, sending, submitDraft]);
 
   const addFiles = useCallback(async (files: readonly File[]) => {
     if (files.length === 0) {
@@ -497,6 +510,7 @@ export function useComposerTextController({
     hasComposerPayload,
     latestDraftRef,
     send,
+    submitDraft,
     setComposerAttachments,
     setComposerValue,
     updateDraft,

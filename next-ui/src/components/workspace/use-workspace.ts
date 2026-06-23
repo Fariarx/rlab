@@ -6,11 +6,11 @@ import { cancelRun, loadActiveRuns, runConversation, type ActiveRunSnapshot } fr
 import {
   cancelPendingQueueItem,
   cancelPendingTurn,
+  enqueuePendingGoal,
   enqueuePendingTurn,
   loadPendingTurnQueue,
   movePendingQueueItemAfter,
   sendNextPendingTurn,
-  setPendingQueueItemPaused,
   setPendingTurnQueuePaused as setServerPendingTurnQueuePaused,
   type PendingQueueItem,
   type PendingTurnQueueSnapshot,
@@ -123,6 +123,8 @@ export interface Workspace {
   readonly archive: (id: string) => void;
   readonly remove: (id: string) => string;
   readonly sendMessage: (id: string, text: string) => void;
+  readonly sendMessageAsGoal: (id: string, text: string) => void;
+  readonly deferMessageToQueue: (id: string, text: string) => void;
   readonly pendingMessageCount: (id: string) => number;
   readonly pendingQueueItemCount: (id: string) => number;
   readonly queuedMessages: (id: string) => readonly ChatMessage[];
@@ -130,7 +132,6 @@ export interface Workspace {
   readonly cancelQueuedMessage: (id: string, messageId: string) => void;
   readonly cancelQueuedItem: (id: string, itemId: string) => void;
   readonly sendQueuedMessageNow: (id: string) => boolean;
-  readonly setQueuedItemPaused: (id: string, itemId: string, paused: boolean) => void;
   readonly moveQueuedItemAfter: (id: string, itemId: string, afterItemId: string | null) => void;
   readonly hasOlderThreadMessages: (id: string) => boolean;
   readonly loadOlderThread: (id: string) => Promise<void>;
@@ -264,6 +265,8 @@ export class WorkspaceStore implements Workspace {
       archive: action.bound,
       remove: action.bound,
       sendMessage: action.bound,
+      sendMessageAsGoal: action.bound,
+      deferMessageToQueue: action.bound,
       cancelQueuedMessage: action.bound,
       sendQueuedMessageNow: action.bound,
       setQueuePaused: action.bound,
@@ -397,7 +400,7 @@ export class WorkspaceStore implements Workspace {
   }
 
   private refreshQueue(id: string): void {
-    if (!id || this.queueRefreshInFlight.has(id) || this.hasPendingWorkspaceWrites()) {
+    if (!id || this.queueRefreshInFlight.has(id)) {
       return;
     }
     this.queueRefreshInFlight.add(id);
@@ -438,7 +441,11 @@ export class WorkspaceStore implements Workspace {
 
   private shouldRefreshQueue(id: string): boolean {
     const snapshot = this.queueSnapshot(id);
-    return snapshot.paused || snapshot.messages.length > 0 || this.conversationHasActiveWork(id);
+    return snapshot.paused || snapshot.items.length > 0 || snapshot.messages.length > 0 || this.conversationHasActiveWork(id);
+  }
+
+  private shouldRefreshQueueAfterWorkspaceEvent(id: string, event?: WorkspaceChangeEvent): boolean {
+    return Boolean(event?.conversationIds?.includes(id)) || this.shouldRefreshQueue(id);
   }
 
   private shouldRunWorkspacePollTick(): boolean {
@@ -648,7 +655,7 @@ export class WorkspaceStore implements Workspace {
       const selectedId = merge.selectedId;
       if (selectedId) {
         this.refreshStaleThreadsAfterRemoteMerge(merge, event?.conversationIds);
-        if (this.shouldRefreshQueue(selectedId)) {
+        if (this.shouldRefreshQueueAfterWorkspaceEvent(selectedId, event)) {
           this.refreshQueue(selectedId);
         }
       }
@@ -1028,6 +1035,38 @@ export class WorkspaceStore implements Workspace {
     this.dispatchUserTurn(id, userMsg);
   }
 
+  sendMessageAsGoal(id: string, text: string): void {
+    const description = text.trim();
+    if (!description) {
+      return;
+    }
+    void enqueuePendingGoal(id, description)
+      .then((snapshot) => {
+        runInAction(() => this.setQueueSnapshot(snapshot));
+      })
+      .catch((error: unknown) => {
+        runInAction(() => {
+          this.loadError = error instanceof Error ? error.message : String(error);
+        });
+      });
+  }
+
+  deferMessageToQueue(id: string, text: string): void {
+    const queuedText = text.trim();
+    if (!queuedText) {
+      return;
+    }
+    void enqueuePendingTurn(id, queuedText, { pauseQueue: true })
+      .then((snapshot) => {
+        runInAction(() => this.setQueueSnapshot(snapshot));
+      })
+      .catch((error: unknown) => {
+        runInAction(() => {
+          this.loadError = error instanceof Error ? error.message : String(error);
+        });
+      });
+  }
+
   /** Append a user turn to the thread and start its run. Immediate sends and
    *  explicit retry/edit flows use this path. Queued turns do not: they are
    *  appended by the server only when the queue drain claims them. */
@@ -1075,6 +1114,14 @@ export class WorkspaceStore implements Workspace {
         }));
   }
 
+  private canSendQueuedItemNow(id: string): boolean {
+    const items = this.queuedItems(id);
+    if (items.some((item) => item.kind === "wakeup" && item.state === "waiting_wakeup")) {
+      return false;
+    }
+    return items.some((item) => (item.kind === "message" || item.kind === "goal") && item.state === "queued");
+  }
+
   /** Cancel a queued turn before it runs. */
   cancelQueuedMessage(id: string, messageId: string): void {
     void cancelPendingTurn(id, messageId)
@@ -1089,7 +1136,7 @@ export class WorkspaceStore implements Workspace {
   }
 
   sendQueuedMessageNow(id: string): boolean {
-    if (this.pendingQueueItemCount(id) === 0) {
+    if (!this.canSendQueuedItemNow(id)) {
       return false;
     }
     const stopCurrentRun = this.conversationHasActiveWork(id) ? this.stopRunWithQueuePolicy(id, { pauseQueue: false }) : Promise.resolve();
@@ -1111,21 +1158,6 @@ export class WorkspaceStore implements Workspace {
     void cancelPendingQueueItem(id, itemId)
       .then((snapshot) => {
         runInAction(() => this.setQueueSnapshot(snapshot));
-      })
-      .catch((error: unknown) => {
-        runInAction(() => {
-          this.loadError = error instanceof Error ? error.message : String(error);
-        });
-      });
-  }
-
-  setQueuedItemPaused(id: string, itemId: string, paused: boolean): void {
-    void setPendingQueueItemPaused(id, itemId, paused)
-      .then((snapshot) => {
-        runInAction(() => this.setQueueSnapshot(snapshot));
-        if (!paused) {
-          void this.refreshBackgroundRuns();
-        }
       })
       .catch((error: unknown) => {
         runInAction(() => {
@@ -1412,7 +1444,7 @@ export class WorkspaceStore implements Workspace {
     // Stopping the run also pauses the server-owned queue (only meaningful when
     // something is queued) so a pending turn doesn't immediately start after the
     // user explicitly hit stop.
-    if (options.pauseQueue && this.pendingMessageCount(id) > 0) {
+    if (options.pauseQueue && this.pendingQueueItemCount(id) > 0) {
       this.setQueuePaused(id, true);
     }
     const active = this.runs.get(id);
@@ -1442,7 +1474,9 @@ export class WorkspaceStore implements Workspace {
     }
     this.enqueueThreadMessageUpserts(id, result.current?.thread ?? []);
     this.persistCurrentStateNow();
-    return cancelPromise;
+    return cancelPromise.finally(() => {
+      this.refreshQueue(id);
+    });
   }
 
   stopRun(id: string): void {

@@ -74,8 +74,9 @@ describe("useAppVersionReload", () => {
     const promptToast = toast.mock.calls[0]?.[0];
     expect(promptToast).toBeDefined();
     const action = promptToast?.action;
-    expect(isValidElement<{ readonly onClick: () => void }>(action)).toBe(true);
-    if (isValidElement<{ readonly onClick: () => void }>(action)) {
+    expect(isValidElement<{ readonly "aria-label": string; readonly onClick: () => void }>(action)).toBe(true);
+    if (isValidElement<{ readonly "aria-label": string; readonly onClick: () => void }>(action)) {
+      expect(action.props["aria-label"]).toBe("reloadApp");
       action.props.onClick();
     }
     expect(reloadApp).toHaveBeenCalledTimes(1);

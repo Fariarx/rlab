@@ -1,7 +1,8 @@
 import { useEffect } from "react";
+import RefreshRoundedIcon from "@mui/icons-material/RefreshRounded";
 import type { I18nApi } from "../../../i18n/I18nProvider";
 import { loadAppVersion } from "../../../client/api/workspace-page-api";
-import { Button, type ToastOptions } from "../../ui";
+import { IconButton, type ToastOptions } from "../../ui";
 
 const DEFAULT_APP_VERSION_POLL_MS = 60_000;
 
@@ -42,9 +43,9 @@ export function useAppVersionReload({
             severity: "info",
             duration: 0,
             action: (
-              <Button variant="subtle" size="small" onClick={reloadApp}>
-                {t("reloadApp")}
-              </Button>
+              <IconButton aria-label={t("reloadApp")} tone="subtle" size="small" onClick={reloadApp}>
+                <RefreshRoundedIcon sx={{ fontSize: 16 }} />
+              </IconButton>
             ),
           });
         }

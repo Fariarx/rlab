@@ -1,19 +1,16 @@
-import { useCallback, useEffect, useRef, type RefObject } from "react";
+import { useCallback, useEffect, type MutableRefObject, type RefObject } from "react";
 import { transcribeVoice } from "../../../client/api/voice-api";
 import { useI18n } from "../../../i18n/I18nProvider";
 import type { ComposerVoiceProvider } from "./composer-model";
-import type { ComposerStore } from "./composer-store";
+import type { ComposerStore, ComposerVoiceSelectionRange } from "./composer-store";
 import type { ComposerDraft } from "../core/types";
 import { blobToBase64 } from "./composer-utils";
 import {
-  VOICE_DEFAULT_LEVEL_COUNT,
-  VOICE_IDLE_LEVELS,
   VOICE_NO_SPEECH_NOTICE_DELAY_MS,
   formatVoiceDuration,
   isMobileSpeechRecognitionRuntime,
   preferredAudioMimeType,
   speechRecognitionConstructor,
-  type SpeechRecognitionLike,
   voiceAmbientLevels,
   voiceIdleLevels,
   voiceLevelsFromTimeDomainData,
@@ -32,14 +29,6 @@ export interface ComposerVoiceController {
   readonly voiceLevels: readonly number[];
   readonly voiceState: ComposerStore["voiceState"];
 }
-
-export interface ComposerVoiceSelectionRange {
-  readonly text: string;
-  readonly start: number;
-  readonly end: number;
-}
-
-type VoiceStopIntent = "recording" | "finish" | "cancel";
 
 function normalizedDictationText(text: string): string {
   return text.trim().replace(/\s+/g, " ");
@@ -85,15 +74,15 @@ export function useComposerVoice({
   textareaRef,
   updateDraft,
   voiceProvider,
-  pendingSelectionRef,
+  cancelOnUnmount = true,
 }: {
-  readonly latestDraftRef: React.MutableRefObject<ComposerDraft>;
+  readonly latestDraftRef: MutableRefObject<ComposerDraft>;
   readonly onVoiceError?: (message: string) => void;
   readonly store: ComposerStore;
   readonly textareaRef: RefObject<HTMLTextAreaElement | null>;
   readonly updateDraft: (draft: ComposerDraft) => void;
   readonly voiceProvider?: ComposerVoiceProvider;
-  readonly pendingSelectionRef?: React.MutableRefObject<ComposerVoiceSelectionRange | null>;
+  readonly cancelOnUnmount?: boolean;
 }): ComposerVoiceController {
   const { t } = useI18n();
   const {
@@ -109,84 +98,69 @@ export function useComposerVoice({
     setVoiceAmbient,
     browserVoiceSupported,
     setBrowserVoiceSupported,
+    setVoicePendingSelection,
   } = store;
-  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const mediaStreamRef = useRef<MediaStream | null>(null);
-  const voiceAudioContextRef = useRef<AudioContext | null>(null);
-  const voiceAnalyserFrameRef = useRef<number | null>(null);
-  const voiceNoSpeechTimerRef = useRef<number | null>(null);
-  const voiceNoSpeechNotifiedRef = useRef(false);
-  const voiceRecognizedRef = useRef(false);
-  const voiceManualStopRef = useRef(false);
-  const voiceBrowserInterimTranscriptRef = useRef("");
-  const voiceCommittedInterimTranscriptRef = useRef("");
-  const voiceLevelValuesRef = useRef<readonly number[]>(VOICE_IDLE_LEVELS);
-  const voiceLevelLastPaintRef = useRef(0);
-  const voiceLevelCountRef = useRef(VOICE_DEFAULT_LEVEL_COUNT);
-  const voiceStopIntentRef = useRef<VoiceStopIntent>("recording");
-  const voiceStopWaiterRef = useRef<{ readonly promise: Promise<void>; readonly resolve: () => void } | null>(null);
 
   const resolveVoiceStopWaiter = useCallback(() => {
-    const waiter = voiceStopWaiterRef.current;
-    voiceStopWaiterRef.current = null;
+    const waiter = store.voiceStopWaiter;
+    store.voiceStopWaiter = null;
     waiter?.resolve();
-  }, []);
+  }, [store]);
 
   const voiceStopWaiter = useCallback((): Promise<void> => {
-    if (voiceStopWaiterRef.current) {
-      return voiceStopWaiterRef.current.promise;
+    if (store.voiceStopWaiter) {
+      return store.voiceStopWaiter.promise;
     }
     let resolveWaiter: () => void = () => undefined;
     const promise = new Promise<void>((resolve) => {
       resolveWaiter = resolve;
     });
-    voiceStopWaiterRef.current = { promise, resolve: resolveWaiter };
+    store.voiceStopWaiter = { promise, resolve: resolveWaiter };
     return promise;
-  }, []);
+  }, [store]);
 
   const setVoiceLevelCountForWidth = useCallback(
     (levelCount: number) => {
-      if (voiceLevelCountRef.current === levelCount) {
+      if (store.voiceLevelCount === levelCount) {
         return;
       }
-      voiceLevelCountRef.current = levelCount;
+      store.voiceLevelCount = levelCount;
       setVoiceLevels((current) => (current.length === levelCount ? current : voiceAmbient ? voiceAmbientLevels(levelCount) : voiceIdleLevels(levelCount)));
     },
-    [setVoiceLevels, voiceAmbient],
+    [setVoiceLevels, store, voiceAmbient],
   );
 
   const setAmbientVoiceLevels = useCallback(
     (enabled: boolean) => {
       setVoiceAmbient(enabled);
       if (enabled) {
-        const levels = voiceAmbientLevels(voiceLevelCountRef.current);
-        voiceLevelValuesRef.current = levels;
+        const levels = voiceAmbientLevels(store.voiceLevelCount);
+        store.voiceLevelValues = levels;
         setVoiceLevels(levels);
       }
     },
-    [setVoiceAmbient, setVoiceLevels],
+    [setVoiceAmbient, setVoiceLevels, store],
   );
 
   const clearVoiceNoSpeechNotice = useCallback(() => {
-    if (voiceNoSpeechTimerRef.current !== null) {
-      window.clearTimeout(voiceNoSpeechTimerRef.current);
-      voiceNoSpeechTimerRef.current = null;
+    if (store.voiceNoSpeechTimer !== null) {
+      window.clearTimeout(store.voiceNoSpeechTimer);
+      store.voiceNoSpeechTimer = null;
     }
-  }, []);
+  }, [store]);
 
   const scheduleVoiceNoSpeechNotice = useCallback(() => {
-    if (voiceRecognizedRef.current || voiceNoSpeechNotifiedRef.current || voiceNoSpeechTimerRef.current !== null) {
+    if (store.voiceRecognized || store.voiceNoSpeechNotified || store.voiceNoSpeechTimer !== null) {
       return;
     }
-    voiceNoSpeechTimerRef.current = window.setTimeout(() => {
-      voiceNoSpeechTimerRef.current = null;
-      if (!voiceRecognizedRef.current) {
-        voiceNoSpeechNotifiedRef.current = true;
+    store.voiceNoSpeechTimer = window.setTimeout(() => {
+      store.voiceNoSpeechTimer = null;
+      if (!store.voiceRecognized) {
+        store.voiceNoSpeechNotified = true;
         onVoiceError?.(t("voiceNoSpeech"));
       }
     }, VOICE_NO_SPEECH_NOTICE_DELAY_MS);
-  }, [onVoiceError, t]);
+  }, [onVoiceError, store, t]);
 
   const appendDictation = useCallback(
     (text: string): boolean => {
@@ -194,13 +168,11 @@ export function useComposerVoice({
       if (!cleanText) {
         return false;
       }
-      voiceRecognizedRef.current = true;
+      store.voiceRecognized = true;
       clearVoiceNoSpeechNotice();
       const currentText = latestDraftRef.current.text;
-      const pendingSelection = pendingSelectionRef?.current;
-      if (pendingSelectionRef) {
-        pendingSelectionRef.current = null;
-      }
+      const pendingSelection = store.voicePendingSelection;
+      setVoicePendingSelection(null);
       const selection = pendingSelection && pendingSelection.text === currentText
         ? clampedTextSelectionRange(currentText, pendingSelection)
         : clampedSelectionRange(currentText, textareaRef.current);
@@ -216,43 +188,43 @@ export function useComposerVoice({
       });
       return true;
     },
-    [clearVoiceNoSpeechNotice, latestDraftRef, pendingSelectionRef, textareaRef, updateDraft],
+    [clearVoiceNoSpeechNotice, latestDraftRef, setVoicePendingSelection, store, textareaRef, updateDraft],
   );
 
   const commitBrowserInterimDictation = useCallback((): boolean => {
-    const interim = voiceBrowserInterimTranscriptRef.current;
-    voiceBrowserInterimTranscriptRef.current = "";
+    const interim = store.voiceBrowserInterimTranscript;
+    store.voiceBrowserInterimTranscript = "";
     const cleanInterim = normalizedDictationText(interim);
     const committed = appendDictation(interim);
     if (committed) {
-      voiceCommittedInterimTranscriptRef.current = cleanInterim;
+      store.voiceCommittedInterimTranscript = cleanInterim;
     }
     return committed;
-  }, [appendDictation]);
+  }, [appendDictation, store]);
 
   const stopVoiceAnalyser = useCallback(() => {
     setVoiceAmbient(false);
-    if (voiceAnalyserFrameRef.current !== null) {
-      cancelAnimationFrame(voiceAnalyserFrameRef.current);
-      voiceAnalyserFrameRef.current = null;
+    if (store.voiceAnalyserFrame !== null) {
+      cancelAnimationFrame(store.voiceAnalyserFrame);
+      store.voiceAnalyserFrame = null;
     }
-    const context = voiceAudioContextRef.current;
-    voiceAudioContextRef.current = null;
+    const context = store.voiceAudioContext;
+    store.voiceAudioContext = null;
     if (context && context.state !== "closed") {
       void context.close();
     }
-    const idleLevels = voiceIdleLevels(voiceLevelCountRef.current);
-    voiceLevelValuesRef.current = idleLevels;
+    const idleLevels = voiceIdleLevels(store.voiceLevelCount);
+    store.voiceLevelValues = idleLevels;
     setVoiceLevels(idleLevels);
-  }, [setVoiceAmbient, setVoiceLevels]);
+  }, [setVoiceAmbient, setVoiceLevels, store]);
 
   const stopVoiceTracks = useCallback(() => {
     stopVoiceAnalyser();
-    mediaStreamRef.current?.getTracks().forEach((track) => {
+    store.voiceMediaStream?.getTracks().forEach((track) => {
       track.stop();
     });
-    mediaStreamRef.current = null;
-  }, [stopVoiceAnalyser]);
+    store.voiceMediaStream = null;
+  }, [stopVoiceAnalyser, store]);
 
   const startVoiceAnalyser = useCallback(
     (stream: MediaStream) => {
@@ -263,21 +235,21 @@ export function useComposerVoice({
       analyser.fftSize = 1024;
       analyser.smoothingTimeConstant = 0.35;
       context.createMediaStreamSource(stream).connect(analyser);
-      voiceAudioContextRef.current = context;
+      store.voiceAudioContext = context;
       const data = new Uint8Array(analyser.fftSize);
       const tick = (now: number) => {
         analyser.getByteTimeDomainData(data);
-        const next = voiceLevelsFromTimeDomainData(data, voiceLevelCountRef.current);
-        voiceLevelValuesRef.current = next;
-        if (now - voiceLevelLastPaintRef.current > 70) {
-          voiceLevelLastPaintRef.current = now;
+        const next = voiceLevelsFromTimeDomainData(data, store.voiceLevelCount);
+        store.voiceLevelValues = next;
+        if (now - store.voiceLevelLastPaint > 70) {
+          store.voiceLevelLastPaint = now;
           setVoiceLevels(next);
         }
-        voiceAnalyserFrameRef.current = requestAnimationFrame(tick);
+        store.voiceAnalyserFrame = requestAnimationFrame(tick);
       };
-      voiceAnalyserFrameRef.current = requestAnimationFrame(tick);
+      store.voiceAnalyserFrame = requestAnimationFrame(tick);
     },
-    [setVoiceLevels, stopVoiceAnalyser],
+    [setVoiceLevels, stopVoiceAnalyser, store],
   );
 
   useEffect(() => {
@@ -286,17 +258,20 @@ export function useComposerVoice({
 
   useEffect(
     () => () => {
-      voiceStopIntentRef.current = "cancel";
+      if (!cancelOnUnmount) {
+        return;
+      }
+      store.voiceStopIntent = "cancel";
       clearVoiceNoSpeechNotice();
-      recognitionRef.current?.stop();
-      if (mediaRecorderRef.current?.state === "recording") {
-        mediaRecorderRef.current.stop();
+      store.voiceRecognition?.stop();
+      if (store.voiceMediaRecorder?.state === "recording") {
+        store.voiceMediaRecorder.stop();
       }
       stopVoiceTracks();
       setVoiceState("idle");
       resolveVoiceStopWaiter();
     },
-    [clearVoiceNoSpeechNotice, resolveVoiceStopWaiter, setVoiceState, stopVoiceTracks],
+    [cancelOnUnmount, clearVoiceNoSpeechNotice, resolveVoiceStopWaiter, setVoiceState, stopVoiceTracks, store],
   );
 
   useEffect(() => {
@@ -342,7 +317,7 @@ export function useComposerVoice({
       const isMobileRuntime = isMobileSpeechRecognitionRuntime();
       if (!isMobileRuntime && navigator.mediaDevices && typeof window.AudioContext !== "undefined") {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        mediaStreamRef.current = stream;
+        store.voiceMediaStream = stream;
         startVoiceAnalyser(stream);
       } else {
         setAmbientVoiceLevels(true);
@@ -353,14 +328,14 @@ export function useComposerVoice({
       recognition.continuous = allowAutoRestart;
       recognition.interimResults = true;
       const finishRecognition = () => {
-        recognitionRef.current = null;
+        store.voiceRecognition = null;
         clearVoiceNoSpeechNotice();
         stopVoiceTracks();
         setVoiceState("idle");
         resolveVoiceStopWaiter();
       };
       recognition.onresult = (event) => {
-        if (voiceStopIntentRef.current === "cancel") {
+        if (store.voiceStopIntent === "cancel") {
           return;
         }
         let finalTranscript = "";
@@ -375,57 +350,57 @@ export function useComposerVoice({
         }
         const cleanFinalTranscript = normalizedDictationText(finalTranscript);
         if (cleanFinalTranscript) {
-          voiceBrowserInterimTranscriptRef.current = "";
+          store.voiceBrowserInterimTranscript = "";
           if (
-            voiceCommittedInterimTranscriptRef.current === cleanFinalTranscript
+            store.voiceCommittedInterimTranscript === cleanFinalTranscript
             && draftEndsWithDictation(latestDraftRef.current.text, cleanFinalTranscript)
           ) {
-            voiceCommittedInterimTranscriptRef.current = "";
+            store.voiceCommittedInterimTranscript = "";
             return;
           }
-          voiceCommittedInterimTranscriptRef.current = "";
+          store.voiceCommittedInterimTranscript = "";
           appendDictation(finalTranscript);
           return;
         }
         if (interimTranscript.trim()) {
-          voiceBrowserInterimTranscriptRef.current = interimTranscript;
-          voiceRecognizedRef.current = true;
+          store.voiceBrowserInterimTranscript = interimTranscript;
+          store.voiceRecognized = true;
           clearVoiceNoSpeechNotice();
         }
       };
       recognition.onerror = (event) => {
-        if (voiceManualStopRef.current && (event.error === "aborted" || event.error === "no-speech")) {
-          if (voiceStopIntentRef.current !== "cancel") {
+        if (store.voiceManualStop && (event.error === "aborted" || event.error === "no-speech")) {
+          if (store.voiceStopIntent !== "cancel") {
             commitBrowserInterimDictation();
           }
           finishRecognition();
           return;
         }
-        if (!voiceManualStopRef.current && event.error === "no-speech") {
+        if (!store.voiceManualStop && event.error === "no-speech") {
           scheduleVoiceNoSpeechNotice();
           return;
         }
         clearVoiceNoSpeechNotice();
-        voiceManualStopRef.current = true;
+        store.voiceManualStop = true;
         stopVoiceTracks();
         onVoiceError?.(t("voiceTranscriptionFailed", { error: event.message || event.error || "unknown" }));
         setVoiceState("idle");
         resolveVoiceStopWaiter();
       };
       recognition.onend = () => {
-        const canceled = voiceStopIntentRef.current === "cancel";
+        const canceled = store.voiceStopIntent === "cancel";
         const committed = canceled ? false : commitBrowserInterimDictation();
-        const shouldReportNoSpeech = !canceled && !committed && !voiceManualStopRef.current && !voiceRecognizedRef.current;
-        if (!canceled && allowAutoRestart && !voiceManualStopRef.current && recognitionRef.current === recognition) {
+        const shouldReportNoSpeech = !canceled && !committed && !store.voiceManualStop && !store.voiceRecognized;
+        if (!canceled && allowAutoRestart && !store.voiceManualStop && store.voiceRecognition === recognition) {
           window.setTimeout(() => {
-            if (voiceManualStopRef.current || recognitionRef.current !== recognition) {
+            if (store.voiceManualStop || store.voiceRecognition !== recognition) {
               return;
             }
             try {
               recognition.start();
             } catch (error) {
-              voiceManualStopRef.current = true;
-              recognitionRef.current = null;
+              store.voiceManualStop = true;
+              store.voiceRecognition = null;
               clearVoiceNoSpeechNotice();
               stopVoiceTracks();
               setVoiceState("idle");
@@ -439,15 +414,15 @@ export function useComposerVoice({
           scheduleVoiceNoSpeechNotice();
         }
       };
-      voiceManualStopRef.current = false;
-      voiceStopIntentRef.current = "recording";
-      voiceStopWaiterRef.current = null;
-      voiceRecognizedRef.current = false;
-      voiceNoSpeechNotifiedRef.current = false;
-      voiceBrowserInterimTranscriptRef.current = "";
-      voiceCommittedInterimTranscriptRef.current = "";
+      store.voiceManualStop = false;
+      store.voiceStopIntent = "recording";
+      store.voiceStopWaiter = null;
+      store.voiceRecognized = false;
+      store.voiceNoSpeechNotified = false;
+      store.voiceBrowserInterimTranscript = "";
+      store.voiceCommittedInterimTranscript = "";
       clearVoiceNoSpeechNotice();
-      recognitionRef.current = recognition;
+      store.voiceRecognition = recognition;
       setVoiceRecordingStartedAt(Date.now());
       setVoiceState("recording");
       recognition.start();
@@ -457,7 +432,7 @@ export function useComposerVoice({
       setVoiceState("idle");
       onVoiceError?.(t("voiceTranscriptionFailed", { error: error instanceof Error ? error.message : String(error) }));
     }
-  }, [appendDictation, clearVoiceNoSpeechNotice, commitBrowserInterimDictation, latestDraftRef, onVoiceError, resolveVoiceStopWaiter, scheduleVoiceNoSpeechNotice, setAmbientVoiceLevels, setVoiceRecordingStartedAt, setVoiceState, startVoiceAnalyser, stopVoiceTracks, t, voiceProvider]);
+  }, [appendDictation, clearVoiceNoSpeechNotice, commitBrowserInterimDictation, latestDraftRef, onVoiceError, resolveVoiceStopWaiter, scheduleVoiceNoSpeechNotice, setAmbientVoiceLevels, setVoiceRecordingStartedAt, setVoiceState, startVoiceAnalyser, stopVoiceTracks, store, t, voiceProvider]);
 
   const startCloudDictation = useCallback(async () => {
     if (voiceProvider?.kind !== "cloud") {
@@ -469,12 +444,12 @@ export function useComposerVoice({
     }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      mediaStreamRef.current = stream;
+      store.voiceMediaStream = stream;
       startVoiceAnalyser(stream);
       const chunks: Blob[] = [];
       const mimeType = preferredAudioMimeType();
       const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
-      mediaRecorderRef.current = recorder;
+      store.voiceMediaRecorder = recorder;
       recorder.ondataavailable = (event) => {
         if (event.data.size > 0) {
           chunks.push(event.data);
@@ -482,7 +457,7 @@ export function useComposerVoice({
       };
       recorder.onerror = (event) => {
         onVoiceError?.(t("voiceTranscriptionFailed", { error: event.error.message }));
-        mediaRecorderRef.current = null;
+        store.voiceMediaRecorder = null;
         stopVoiceTracks();
         setVoiceState("idle");
         resolveVoiceStopWaiter();
@@ -490,9 +465,9 @@ export function useComposerVoice({
       recorder.onstop = () => {
         const type = recorder.mimeType || mimeType || "audio/webm";
         const audio = new Blob(chunks, { type });
-        mediaRecorderRef.current = null;
+        store.voiceMediaRecorder = null;
         stopVoiceTracks();
-        if (voiceStopIntentRef.current === "cancel") {
+        if (store.voiceStopIntent === "cancel") {
           setVoiceState("idle");
           resolveVoiceStopWaiter();
           return;
@@ -511,10 +486,10 @@ export function useComposerVoice({
             resolveVoiceStopWaiter();
           });
       };
-      voiceRecognizedRef.current = false;
-      voiceStopIntentRef.current = "recording";
-      voiceStopWaiterRef.current = null;
-      voiceNoSpeechNotifiedRef.current = false;
+      store.voiceRecognized = false;
+      store.voiceStopIntent = "recording";
+      store.voiceStopWaiter = null;
+      store.voiceNoSpeechNotified = false;
       clearVoiceNoSpeechNotice();
       setVoiceRecordingStartedAt(Date.now());
       setVoiceState("recording");
@@ -525,37 +500,37 @@ export function useComposerVoice({
       setVoiceState("idle");
       onVoiceError?.(t("voiceTranscriptionFailed", { error: error instanceof Error ? error.message : String(error) }));
     }
-  }, [clearVoiceNoSpeechNotice, onVoiceError, resolveVoiceStopWaiter, scheduleVoiceNoSpeechNotice, setVoiceRecordingStartedAt, setVoiceState, startVoiceAnalyser, stopVoiceTracks, t, transcribeCloudAudio, voiceProvider]);
+  }, [clearVoiceNoSpeechNotice, onVoiceError, resolveVoiceStopWaiter, scheduleVoiceNoSpeechNotice, setVoiceRecordingStartedAt, setVoiceState, startVoiceAnalyser, stopVoiceTracks, store, t, transcribeCloudAudio, voiceProvider]);
 
-  const stopRecording = useCallback((intent: Exclude<VoiceStopIntent, "recording">): Promise<void> => {
+  const stopRecording = useCallback((intent: Exclude<typeof store.voiceStopIntent, "recording">): Promise<void> => {
     if (voiceState !== "recording") {
       return Promise.resolve();
     }
-    voiceStopIntentRef.current = intent;
-    voiceManualStopRef.current = true;
+    store.voiceStopIntent = intent;
+    store.voiceManualStop = true;
     clearVoiceNoSpeechNotice();
     const waitForStop = voiceStopWaiter();
     let requestedStop = false;
-    const recognition = recognitionRef.current;
+    const recognition = store.voiceRecognition;
     if (recognition) {
       requestedStop = true;
       try {
         recognition.stop();
       } catch (error) {
-        recognitionRef.current = null;
+        store.voiceRecognition = null;
         stopVoiceTracks();
         setVoiceState("idle");
         resolveVoiceStopWaiter();
         onVoiceError?.(t("voiceTranscriptionFailed", { error: error instanceof Error ? error.message : String(error) }));
       }
     }
-    const recorder = mediaRecorderRef.current;
+    const recorder = store.voiceMediaRecorder;
     if (recorder?.state === "recording") {
       requestedStop = true;
       try {
         recorder.stop();
       } catch (error) {
-        mediaRecorderRef.current = null;
+        store.voiceMediaRecorder = null;
         stopVoiceTracks();
         setVoiceState("idle");
         resolveVoiceStopWaiter();
@@ -568,7 +543,7 @@ export function useComposerVoice({
       resolveVoiceStopWaiter();
     }
     return waitForStop;
-  }, [clearVoiceNoSpeechNotice, onVoiceError, resolveVoiceStopWaiter, setVoiceState, stopVoiceTracks, t, voiceState, voiceStopWaiter]);
+  }, [clearVoiceNoSpeechNotice, onVoiceError, resolveVoiceStopWaiter, setVoiceState, stopVoiceTracks, store, t, voiceState, voiceStopWaiter]);
 
   const cancelVoiceInput = useCallback(() => {
     if (voiceState === "recording") {

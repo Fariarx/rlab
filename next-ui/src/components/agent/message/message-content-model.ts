@@ -8,8 +8,16 @@ export interface MessageAttachment {
   readonly isImage: boolean;
 }
 
+export interface TaskGoalUserMessage {
+  readonly id: string;
+  readonly description: string;
+  readonly instructions: string;
+}
+
 const MESSAGE_IMAGE_RE = /\.(png|jpe?g|gif|webp|svg|avif|bmp)(\?|#|$)/i;
 const READ_ONLY_IMAGE_TOOL_NAMES = new Set(["read", "readfile", "read_file", "viewimage", "view_image", "image", "openimage", "open_image"]);
+const TASK_GOAL_BLOCK_RE = /^\s*🎯\s*<rlab-task-goal\s+id="([^"]+)">\s*<summary>[\s\S]*?<\/summary>\s*<description>([\s\S]*?)<\/description>\s*<instructions>([\s\S]*?)<\/instructions>\s*<\/rlab-task-goal>\s*$/;
+const LEGACY_TASK_GOAL_RE = /^\s*🎯\s*TaskGoal queue item \(id:\s*([^)]+)\)\.\s*Work on this standing goal\.\s*When it is achieved, call TaskGoal with action='complete' for this id; to cancel it, call TaskGoal with action='remove'\.\s*Goal:\s*([\s\S]*?)\s*$/;
 
 export function isMessageImageTarget(target: string): boolean {
   return MESSAGE_IMAGE_RE.test(target);
@@ -44,6 +52,28 @@ export function splitUserContent(raw: string): { readonly text: string; readonly
 
 function unescapeXml(value: string): string {
   return value.replaceAll("&quot;", "\"").replaceAll("&gt;", ">").replaceAll("&lt;", "<").replaceAll("&amp;", "&");
+}
+
+export function parseTaskGoalUserMessage(raw: string): TaskGoalUserMessage | null {
+  const blockMatch = TASK_GOAL_BLOCK_RE.exec(raw);
+  if (blockMatch) {
+    return {
+      id: unescapeXml(blockMatch[1] ?? "").trim(),
+      description: unescapeXml(blockMatch[2] ?? "").trim(),
+      instructions: unescapeXml(blockMatch[3] ?? "").trim(),
+    };
+  }
+
+  const legacyMatch = LEGACY_TASK_GOAL_RE.exec(raw);
+  if (!legacyMatch) {
+    return null;
+  }
+  const id = (legacyMatch[1] ?? "").trim();
+  return {
+    id,
+    description: (legacyMatch[2] ?? "").trim(),
+    instructions: `Work on this standing goal. When it is achieved, call TaskGoal with action="complete" and goalId="${id}"; to cancel it, call TaskGoal with action="remove" and goalId="${id}".`,
+  };
 }
 
 function unescapeMarkdownLabel(value: string): string {

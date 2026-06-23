@@ -5,6 +5,9 @@ interface PopoverPositionActions {
   readonly updatePosition: () => void;
 }
 
+const OPTIONS_MENU_VIEWPORT_MARGIN_PX = 8;
+const OPTIONS_MENU_ANCHOR_GAP_PX = 12;
+
 interface UseComposerLayoutControllerInput {
   readonly composerValue: string;
   readonly composerFocused: boolean;
@@ -39,6 +42,20 @@ function singleRowHeight(el: HTMLTextAreaElement): number {
   }
   const lineHeight = Number.parseFloat(window.getComputedStyle(el).lineHeight);
   return Number.isFinite(lineHeight) && lineHeight > 0 ? lineHeight : el.scrollHeight;
+}
+
+function viewportHeight(): number {
+  return window.visualViewport?.height ?? window.innerHeight ?? document.documentElement.clientHeight;
+}
+
+function optionsMenuMaxHeightForAnchor(anchorEl: HTMLElement): number {
+  const rect = anchorEl.getBoundingClientRect();
+  const maxViewportHeight = Math.max(0, viewportHeight() - OPTIONS_MENU_VIEWPORT_MARGIN_PX * 2);
+  if (rect.top <= 0 && rect.bottom <= 0) {
+    return Math.floor(maxViewportHeight);
+  }
+  const availableAboveAnchor = rect.top - OPTIONS_MENU_ANCHOR_GAP_PX - OPTIONS_MENU_VIEWPORT_MARGIN_PX;
+  return Math.max(0, Math.floor(Math.min(maxViewportHeight, availableAboveAnchor)));
 }
 
 export function useComposerLayoutController({
@@ -127,8 +144,11 @@ export function useComposerLayoutController({
   }, []);
 
   const updateOptionsMenuPosition = useCallback(() => {
+    if (modeMenuAnchor) {
+      setOptionsMenuMaxHeight(optionsMenuMaxHeightForAnchor(modeMenuAnchor));
+    }
     optionsMenuActionRef.current?.updatePosition();
-  }, []);
+  }, [modeMenuAnchor, setOptionsMenuMaxHeight]);
 
   const scheduleOptionsMenuPositionUpdate = useCallback(() => {
     if (optionsMenuPositionFrameRef.current !== null) {
@@ -158,6 +178,21 @@ export function useComposerLayoutController({
     return () => observer.disconnect();
   }, [modeMenuAnchor, scheduleOptionsMenuPositionUpdate]);
 
+  useEffect(() => {
+    if (!modeMenuAnchor) {
+      return;
+    }
+    const visualViewport = window.visualViewport;
+    window.addEventListener("resize", scheduleOptionsMenuPositionUpdate);
+    visualViewport?.addEventListener("resize", scheduleOptionsMenuPositionUpdate);
+    visualViewport?.addEventListener("scroll", scheduleOptionsMenuPositionUpdate);
+    return () => {
+      window.removeEventListener("resize", scheduleOptionsMenuPositionUpdate);
+      visualViewport?.removeEventListener("resize", scheduleOptionsMenuPositionUpdate);
+      visualViewport?.removeEventListener("scroll", scheduleOptionsMenuPositionUpdate);
+    };
+  }, [modeMenuAnchor, scheduleOptionsMenuPositionUpdate]);
+
   useLayoutEffect(() => {
     void limitLayoutKey;
     if (modeMenuAnchor) {
@@ -167,7 +202,7 @@ export function useComposerLayoutController({
 
   const openOptionsMenu = useCallback((anchorEl: HTMLElement) => {
     setLimitOpen(false);
-    setOptionsMenuMaxHeight(Math.max(0, Math.floor(anchorEl.getBoundingClientRect().top - 12)));
+    setOptionsMenuMaxHeight(optionsMenuMaxHeightForAnchor(anchorEl));
     setModeMenuAnchor(anchorEl);
   }, [setLimitOpen, setModeMenuAnchor, setOptionsMenuMaxHeight]);
 

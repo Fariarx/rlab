@@ -8,6 +8,7 @@ import InsertDriveFileOutlinedIcon from "@mui/icons-material/InsertDriveFileOutl
 import MenuIcon from "@mui/icons-material/Menu";
 import MenuOpenIcon from "@mui/icons-material/MenuOpen";
 import OpenInBrowserIcon from "@mui/icons-material/OpenInBrowser";
+import RefreshRoundedIcon from "@mui/icons-material/RefreshRounded";
 import TerminalIcon from "@mui/icons-material/Terminal";
 import SearchIcon from "@mui/icons-material/Search";
 import SettingsIcon from "@mui/icons-material/Settings";
@@ -75,7 +76,7 @@ import {
   latestAgentDiffBlocks,
   workspaceConversations,
 } from "./workspace-page-helpers";
-import { composerMessageHistory, composerVoiceProvider, scheduledWakeupComposerTags } from "./models/workspace-composer-model";
+import { composerMessageHistory, composerVoiceProvider } from "./models/workspace-composer-model";
 import { WorkspacePageStore } from "./stores/workspace-page-store";
 import { useRunNotifications } from "./hooks/use-run-notifications";
 import { usePaneFileDrop } from "./hooks/use-pane-file-drop";
@@ -147,7 +148,7 @@ export const WorkspacePageView = observer(function WorkspacePageView({
   readonly route?: HashRoute;
   readonly onNavigate?: (route: HashRoute) => void;
 }) {
-  const { t, locale } = useI18n();
+  const { t } = useI18n();
   const { toast } = useToast();
   const statusOf = useAgentStatus();
   const cliInfoOf = useAgentCliInfo();
@@ -301,10 +302,6 @@ export const WorkspacePageView = observer(function WorkspacePageView({
     () => composerVoiceProvider(ws.settings.general.voice, voiceConfig.config),
     [voiceConfig.config, ws.settings.general.voice],
   );
-  const scheduledWakeups = useMemo(
-    () => scheduledWakeupComposerTags({ locale, removeWakeup: wakeupsController.removeWakeup, wakeups: wakeupsController.selectedWakeups }),
-    [locale, wakeupsController.removeWakeup, wakeupsController.selectedWakeups],
-  );
   const selectedQueuedMessages = selected ? ws.queuedMessages(selected.id) : [];
   const selectedQueuedItems = selected ? ws.queuedItems(selected.id) : [];
   const selectedCwd = ws.cwdOf(ws.selectedId);
@@ -433,17 +430,18 @@ export const WorkspacePageView = observer(function WorkspacePageView({
     toggleTheme,
     openKit,
   });
+  const workspaceReloadAction = (
+    <IconButton aria-label={t("retryWorkspaceLoad")} tone="subtle" size="small" onClick={ws.reloadWorkspace} disabled={ws.loading}>
+      <RefreshRoundedIcon sx={{ fontSize: 16 }} />
+    </IconButton>
+  );
 
   if (ws.loadError && !ws.loaded) {
     return (
       <Box sx={{ minHeight: "100dvh", display: "flex", alignItems: "center", justifyContent: "center", bgcolor: "background.default", p: 2 }}>
         <Alert
           severity="error"
-          action={
-            <Button variant="subtle" size="small" onClick={ws.reloadWorkspace} disabled={ws.loading}>
-              {t("retryWorkspaceLoad")}
-            </Button>
-          }
+          action={workspaceReloadAction}
           sx={{ ...WORKSPACE_ERROR_ALERT_SX, maxWidth: 720, width: "100%" }}
         >
           {t("workspaceError", { error: ws.loadError })}
@@ -760,11 +758,7 @@ export const WorkspacePageView = observer(function WorkspacePageView({
               {ws.loadError && (
               <Alert
                 severity="error"
-                action={
-                  <Button variant="subtle" size="small" onClick={ws.reloadWorkspace}>
-                    {t("retryWorkspaceLoad")}
-                  </Button>
-                }
+                action={workspaceReloadAction}
                 sx={{ ...WORKSPACE_ERROR_ALERT_SX, mb: 2 }}
               >
                 {t("workspaceError", { error: ws.loadError })}
@@ -916,6 +910,8 @@ export const WorkspacePageView = observer(function WorkspacePageView({
                 onSend={(text) => {
                   submitComposerText(text);
                 }}
+                onSendAsGoal={selected ? ((text) => ws.sendMessageAsGoal(selected.id, text)) : undefined}
+                onDeferToQueue={selected ? ((text) => ws.deferMessageToQueue(selected.id, text)) : undefined}
                 onStop={() => ws.stopRun(ws.selectedId)}
                 running={selectedHasActiveWork}
                 reviewCount={reviewComments.length}
@@ -923,7 +919,6 @@ export const WorkspacePageView = observer(function WorkspacePageView({
                 onTagsHeightChange={setComposerTagsHeight}
                 onOverlayLiftChange={setComposerOverlayLift}
                 history={messageHistory}
-                scheduledWakeups={scheduledWakeups}
                 queuedContent={selected && selectedQueuedItems.length > 0 ? (
                   <QueuedMessages
                     messages={selectedQueuedMessages}
@@ -933,7 +928,6 @@ export const WorkspacePageView = observer(function WorkspacePageView({
                     onCancelItem={(itemId) => ws.cancelQueuedItem(selected.id, itemId)}
                     onCopy={(message) => messageActions.onCopy?.(message)}
                     onSendNow={() => ws.sendQueuedMessageNow(selected.id)}
-                    onToggleItemPause={(itemId, paused) => ws.setQueuedItemPaused(selected.id, itemId, paused)}
                     onTogglePause={() => ws.setQueuePaused(selected.id, !ws.isQueuePaused(selected.id))}
                     onMoveItemAfter={(itemId, afterItemId) => ws.moveQueuedItemAfter(selected.id, itemId, afterItemId)}
                   />

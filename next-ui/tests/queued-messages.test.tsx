@@ -86,19 +86,45 @@ describe("QueuedMessages", () => {
         dispatchCount: 0,
       },
       {
-        id: "wakeup-1",
+        id: "goal-2",
         conversationId: "c1",
         position: 1,
+        kind: "goal",
+        createdAtMs: 150,
+        updatedAtMs: 150,
+        state: "queued",
+        description: "Keep testing",
+        origin: "http://127.0.0.1:4280",
+        dispatchCount: 0,
+      },
+      {
+        id: "goal-active",
+        conversationId: "c1",
+        position: 2,
+        kind: "goal",
+        createdAtMs: 175,
+        updatedAtMs: 175,
+        state: "dispatching",
+        runId: "run-goal-active",
+        description: "Active goal",
+        origin: "http://127.0.0.1:4280",
+        dispatchCount: 1,
+      },
+      {
+        id: "wakeup-1",
+        conversationId: "c1",
+        position: 3,
         kind: "wakeup",
         createdAtMs: 200,
         updatedAtMs: 200,
         state: "waiting_wakeup",
         wakeupId: "wakeup-1",
+        agent: "codex",
         prompt: "Continue later",
+        trigger: { type: "time", fireAtMs: 1_800_000_000_000 },
       },
     ];
     const onCancelItem = vi.fn();
-    const onToggleItemPause = vi.fn();
     const onMoveItemAfter = vi.fn();
     renderWithTheme(
       <QueuedMessages
@@ -109,37 +135,172 @@ describe("QueuedMessages", () => {
         onCancelItem={onCancelItem}
         onCopy={vi.fn()}
         onSendNow={vi.fn()}
-        onToggleItemPause={onToggleItemPause}
         onTogglePause={vi.fn()}
         onMoveItemAfter={onMoveItemAfter}
       />,
     );
 
-    expect(screen.getByText("В очереди · 2")).toBeInTheDocument();
+    expect(screen.getByText("Ожидание Wakeup · 4")).toBeInTheDocument();
     expect(screen.getByText("Keep improving")).toBeInTheDocument();
+    expect(screen.getByText("Keep testing")).toBeInTheDocument();
+    expect(screen.getByText("Active goal")).toBeInTheDocument();
+    expect(screen.getByTestId("queued-item-wakeup-1")).toHaveTextContent("Агент: codex");
+    expect(screen.getByTestId("queued-item-wakeup-1")).toHaveTextContent("Промпт: Continue later");
+    expect(screen.getByText("В работе")).toBeInTheDocument();
+    expect(screen.getByText("В работе").closest(".queued-actions")).not.toBeNull();
+    expect(screen.getByTestId("queued-item-wakeup-1").compareDocumentPosition(screen.getByTestId("queued-item-goal-1"))).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(screen.getByTestId("queued-item-wakeup-1").compareDocumentPosition(screen.getByTestId("queued-item-goal-active"))).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+
+    expect(screen.queryByRole("button", { name: "Поставить элемент на паузу" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Возобновить элемент" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Отправить сейчас" })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Отменить Wakeup" }));
+    expect(onCancelItem).toHaveBeenCalledWith("wakeup-1");
+    expect(screen.getAllByRole("button", { name: "Удалить цель" })).toHaveLength(3);
+
+    fireEvent.click(screen.getByTestId("queued-item-wakeup-1"));
+    expect(screen.getByTestId("queued-wakeup-popover-wakeup-1")).toBeInTheDocument();
     expect(screen.getByText("Continue later")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Поставить элемент на паузу" }));
-    expect(onToggleItemPause).toHaveBeenCalledWith("goal-1", true);
+    expect(screen.getAllByLabelText("Переместить элемент очереди")).toHaveLength(2);
+    expect(screen.getByTestId("queued-item-wakeup-1").querySelector("[aria-label='Переместить элемент очереди']")).toBeNull();
+    expect(screen.getByTestId("queued-item-goal-active").querySelector("[aria-label='Переместить элемент очереди']")).toBeNull();
+    expect(onMoveItemAfter).not.toHaveBeenCalled();
+  });
 
-    const cancelButtons = screen.getAllByRole("button", { name: "Отменить отложенное сообщение" });
-    fireEvent.click(cancelButtons[1]);
-    expect(onCancelItem).toHaveBeenCalledWith("wakeup-1");
+  it("does not send now when the only visible item is an active goal", () => {
+    const onSendNow = vi.fn();
+    renderWithTheme(
+      <QueuedMessages
+        messages={[]}
+        items={[
+          {
+            id: "goal-active",
+            conversationId: "c1",
+            position: 0,
+            kind: "goal",
+            createdAtMs: 100,
+            updatedAtMs: 100,
+            state: "dispatching",
+            runId: "run-goal-active",
+            description: "Active goal",
+            origin: "http://127.0.0.1:4280",
+            dispatchCount: 1,
+          },
+        ]}
+        paused={false}
+        onCancel={vi.fn()}
+        onCancelItem={vi.fn()}
+        onCopy={vi.fn()}
+        onSendNow={onSendNow}
+        onTogglePause={vi.fn()}
+      />,
+    );
 
-    const rows = screen.getAllByText(/Keep improving|Continue later/).map((node) => node.closest("[draggable='true']"));
-    expect(rows[0]).not.toBeNull();
-    expect(rows[1]).not.toBeNull();
-    const dragData: Record<string, string> = {};
-    const dataTransfer = {
-      effectAllowed: "",
-      dropEffect: "",
-      setData: (type: string, value: string) => {
-        dragData[type] = value;
-      },
-      getData: (type: string) => dragData[type] ?? "",
-    };
-    fireEvent.dragStart(rows[0] as Element, { dataTransfer });
-    fireEvent.drop(rows[1] as Element, { dataTransfer });
-    expect(onMoveItemAfter).toHaveBeenCalledWith("goal-1", "wakeup-1");
+    expect(screen.getByText("Active goal")).toBeInTheDocument();
+    expect(screen.getByText("В работе")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Отправить сейчас" }));
+    expect(onSendNow).not.toHaveBeenCalled();
+  });
+
+  it("keeps send now available for queued goals", () => {
+    const onSendNow = vi.fn();
+    renderWithTheme(
+      <QueuedMessages
+        messages={[]}
+        items={[
+          {
+            id: "goal-1",
+            conversationId: "c1",
+            position: 0,
+            kind: "goal",
+            createdAtMs: 100,
+            updatedAtMs: 100,
+            state: "queued",
+            description: "Queued goal",
+            origin: "http://127.0.0.1:4280",
+            dispatchCount: 0,
+          },
+        ]}
+        paused={false}
+        onCancel={vi.fn()}
+        onCancelItem={vi.fn()}
+        onCopy={vi.fn()}
+        onSendNow={onSendNow}
+        onTogglePause={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Отправить сейчас" }));
+    expect(onSendNow).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows waiting goal cooldown instead of a silent active queue", () => {
+    renderWithTheme(
+      <QueuedMessages
+        messages={[]}
+        items={[
+          {
+            id: "goal-waiting",
+            conversationId: "c1",
+            position: 0,
+            kind: "goal",
+            createdAtMs: 100,
+            updatedAtMs: 100,
+            state: "queued",
+            nextDispatchAtMs: Date.now() + 60_000,
+            description: "Queued goal",
+            origin: "http://127.0.0.1:4280",
+            dispatchCount: 2,
+          },
+        ]}
+        paused={false}
+        onCancel={vi.fn()}
+        onCancelItem={vi.fn()}
+        onCopy={vi.fn()}
+        onSendNow={vi.fn()}
+        onTogglePause={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Ожидание цели · 1")).toBeInTheDocument();
+    expect(screen.getByText("Через 60с")).toBeInTheDocument();
+    expect(screen.getByText("Через 60с").closest(".queued-actions")).not.toBeNull();
+  });
+
+  it("shows a paused goal status when the queue is globally paused", () => {
+    renderWithTheme(
+      <QueuedMessages
+        messages={[]}
+        items={[
+          {
+            id: "goal-paused",
+            conversationId: "c1",
+            position: 0,
+            kind: "goal",
+            createdAtMs: 100,
+            updatedAtMs: 100,
+            state: "queued",
+            nextDispatchAtMs: Date.now() + 60_000,
+            description: "Paused queued goal",
+            origin: "http://127.0.0.1:4280",
+            dispatchCount: 2,
+          },
+        ]}
+        paused
+        onCancel={vi.fn()}
+        onCancelItem={vi.fn()}
+        onCopy={vi.fn()}
+        onSendNow={vi.fn()}
+        onTogglePause={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("В очереди · 1 · пауза")).toBeInTheDocument();
+    expect(screen.queryByText("Ожидание цели · 1")).not.toBeInTheDocument();
+    expect(screen.getByText("Пауза")).toBeInTheDocument();
+    expect(screen.queryByText("Через 60с")).not.toBeInTheDocument();
+    expect(screen.getByText("Пауза").closest(".queued-actions")).not.toBeNull();
   });
 });

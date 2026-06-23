@@ -58,6 +58,7 @@ export interface PendingQueueGoalItem extends PendingQueueItemBase {
 export interface PendingQueueWakeupItem extends PendingQueueItemBase {
   readonly kind: "wakeup";
   readonly wakeupId: string;
+  readonly agent?: string;
   readonly prompt: string;
   readonly reason?: string;
   readonly trigger?: WakeupTrigger;
@@ -164,11 +165,19 @@ export async function loadPendingTurnQueue(conversationId: string): Promise<Pend
   return normalizePendingTurnQueue(payload, conversationId);
 }
 
-export async function enqueuePendingTurn(conversationId: string, text: string): Promise<PendingTurnQueueSnapshot> {
+export interface PendingQueueEnqueueOptions {
+  readonly pauseQueue?: boolean;
+}
+
+export interface PendingGoalEnqueueOptions extends PendingQueueEnqueueOptions {
+  readonly afterItemId?: string | null;
+}
+
+export async function enqueuePendingTurn(conversationId: string, text: string, options: PendingQueueEnqueueOptions = {}): Promise<PendingTurnQueueSnapshot> {
   const response = await fetch("/api/queue", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action: "enqueue", conversationId, text }),
+    body: JSON.stringify({ action: "enqueue", conversationId, text, ...(options.pauseQueue ? { pauseQueue: true } : {}) }),
   });
   const payload = await readJsonPayload(response);
   if (!response.ok) {
@@ -190,11 +199,17 @@ export async function cancelPendingTurn(conversationId: string, messageId: strin
   return normalizePendingTurnQueue(payload, conversationId);
 }
 
-export async function enqueuePendingGoal(conversationId: string, description: string, afterItemId?: string | null): Promise<PendingTurnQueueSnapshot> {
+export async function enqueuePendingGoal(conversationId: string, description: string, options: PendingGoalEnqueueOptions = {}): Promise<PendingTurnQueueSnapshot> {
   const response = await fetch("/api/queue", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action: "enqueueGoal", conversationId, description, ...(afterItemId === undefined ? {} : { afterItemId }) }),
+    body: JSON.stringify({
+      action: "enqueueGoal",
+      conversationId,
+      description,
+      ...(options.afterItemId === undefined ? {} : { afterItemId: options.afterItemId }),
+      ...(options.pauseQueue ? { pauseQueue: true } : {}),
+    }),
   });
   const payload = await readJsonPayload(response);
   if (!response.ok) {
@@ -212,19 +227,6 @@ export async function cancelPendingQueueItem(conversationId: string, itemId: str
   const payload = await readJsonPayload(response);
   if (!response.ok) {
     throw new Error(payloadErrorMessage(payload, `Queue item cancel failed (${response.status})`));
-  }
-  return normalizePendingTurnQueue(payload, conversationId);
-}
-
-export async function setPendingQueueItemPaused(conversationId: string, itemId: string, paused: boolean): Promise<PendingTurnQueueSnapshot> {
-  const response = await fetch("/api/queue", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action: "setItemPaused", conversationId, itemId, paused }),
-  });
-  const payload = await readJsonPayload(response);
-  if (!response.ok) {
-    throw new Error(payloadErrorMessage(payload, `Queue item pause failed (${response.status})`));
   }
   return normalizePendingTurnQueue(payload, conversationId);
 }
