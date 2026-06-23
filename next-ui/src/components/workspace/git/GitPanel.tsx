@@ -121,6 +121,8 @@ const DiffFileCard = observer(function DiffFileCard({
   const lineCount = lines?.length ?? 0;
   const gigantic = lineCount > GIGANTIC_DIFF_LINES;
   const counts = lines ? countDiffChanges(lines) : null;
+  const initialLoading = loading && lines === null;
+  const blockingError = error && lines === null;
   const { handleHeaderClick, open, rootRef, sentinelRef, stuck } = useDiffFileCardController({
     autoOpenLineLimit: LARGE_DIFF_LINES,
     focusSignal,
@@ -188,12 +190,12 @@ const DiffFileCard = observer(function DiffFileCard({
       </Stack>
       <Collapse in={open} unmountOnExit>
         <Box sx={{ borderTop: (theme) => `1px solid ${theme.custom.borders.subtle}`, borderBottomLeftRadius: radius, borderBottomRightRadius: radius, overflow: "hidden", backgroundColor: (theme) => theme.custom.surfaces.s1 }}>
-          {loading ? (
+          {initialLoading ? (
             <Stack direction="row" spacing={1} sx={{ alignItems: "center", color: "text.secondary", px: 1.5, py: 1.25 }}>
               <CircularProgress size={14} />
               <Typography sx={{ fontSize: "0.8rem" }}>{t("gitLoading")}</Typography>
             </Stack>
-          ) : error ? (
+          ) : blockingError ? (
             <Alert severity="error" sx={{ m: 1.25 }}>
               {error}
             </Alert>
@@ -219,6 +221,7 @@ const GitFileDiffCard = observer(function GitFileDiffCard({
   mode,
   action,
   autoLoad,
+  revisionKey,
   scrollRef,
   review,
   focusSignal = 0,
@@ -229,12 +232,13 @@ const GitFileDiffCard = observer(function GitFileDiffCard({
   readonly mode: GitDiffMode;
   readonly action?: ReactNode;
   readonly autoLoad: boolean;
+  readonly revisionKey?: number | string;
   readonly scrollRef?: RefObject<HTMLDivElement | null>;
   readonly review?: DiffCommentApi;
   readonly focusSignal?: number;
   readonly t: I18nApi["t"];
 }) {
-  const { lines, loading, error, loadDiff } = useGitFileDiff({ cwd, file, mode, autoLoad, unavailableMessage: t("gitStatusUnavailable") });
+  const { lines, loading, error, loadDiff } = useGitFileDiff({ cwd, file, mode, autoLoad, revisionKey, unavailableMessage: t("gitStatusUnavailable") });
 
   return (
     <DiffFileCard
@@ -469,11 +473,12 @@ export const GitView = observer(function GitView({ cwd, lastTurnDiffs = [], revi
                   <Stack spacing={1.25}>
                     {unstagedFiles.map((file) => (
                       <GitFileDiffCard
-                        key={`${cwd}:${statusVersion}:worktree:${file.code}:${file.gitPath}`}
+                        key={`${cwd}:worktree:${file.gitPath}`}
                         cwd={cwd}
                         file={file}
                         mode="worktree"
                         autoLoad={active && unstagedFiles.length <= EAGER_DIFF_LIMIT}
+                        revisionKey={statusVersion}
                         scrollRef={scrollRef}
                         review={reviewWithActivity}
                         focusSignal={focusSignalFor(file.gitPath)}
@@ -511,11 +516,12 @@ export const GitView = observer(function GitView({ cwd, lastTurnDiffs = [], revi
                     <Divider sx={{ borderColor: (theme) => theme.custom.borders.subtle }} />
                     {stagedFiles.map((file) => (
                       <GitFileDiffCard
-                        key={`${cwd}:${statusVersion}:staged:${file.code}:${file.gitPath}`}
+                        key={`${cwd}:staged:${file.gitPath}`}
                         cwd={cwd}
                         file={file}
                         mode="staged"
                         autoLoad={active && stagedFiles.length <= EAGER_DIFF_LIMIT}
+                        revisionKey={statusVersion}
                         scrollRef={scrollRef}
                         review={reviewWithActivity}
                         focusSignal={focusSignalFor(file.gitPath)}

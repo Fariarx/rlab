@@ -43,11 +43,12 @@ function liveOptionsOrCatalog(catalogOptions: readonly AgentOption[], liveOption
 }
 
 const CHAT_TOOL_LABEL_KEYS: Record<RlabChatToolId, {
-  readonly title: "chatToolAskUserQuestionTitle" | "chatToolTaskWakeupTitle" | "chatToolBrowserPreviewTitle";
-  readonly description: "chatToolAskUserQuestionDescription" | "chatToolTaskWakeupDescription" | "chatToolBrowserPreviewDescription";
+  readonly title: "chatToolAskUserQuestionTitle" | "chatToolTaskWakeupTitle" | "chatToolTaskGoalTitle" | "chatToolBrowserPreviewTitle";
+  readonly description: "chatToolAskUserQuestionDescription" | "chatToolTaskWakeupDescription" | "chatToolTaskGoalDescription" | "chatToolBrowserPreviewDescription";
 }> = {
   AskUserQuestion: { title: "chatToolAskUserQuestionTitle", description: "chatToolAskUserQuestionDescription" },
   TaskWakeup: { title: "chatToolTaskWakeupTitle", description: "chatToolTaskWakeupDescription" },
+  TaskGoal: { title: "chatToolTaskGoalTitle", description: "chatToolTaskGoalDescription" },
   BrowserPreview: { title: "chatToolBrowserPreviewTitle", description: "chatToolBrowserPreviewDescription" },
 };
 

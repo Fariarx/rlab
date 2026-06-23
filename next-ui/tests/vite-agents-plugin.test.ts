@@ -969,7 +969,7 @@ Built-in agents:
       "--permission-mode",
       "plan",
       "--tools",
-      "Read,Glob,Grep,LS,AskUserQuestion,TaskWakeup",
+      "Read,Glob,Grep,LS,AskUserQuestion,TaskWakeup,TaskGoal",
     ]);
   });
 
@@ -1041,7 +1041,7 @@ Built-in agents:
     expect(readOnlyOptions).toMatchObject({
       permissionMode: "plan",
       settings: { autoCompactEnabled: false, autoCompactWindow: 120000 },
-      tools: ["Read", "Glob", "Grep", "LS", "AskUserQuestion", "TaskWakeup"],
+      tools: ["Read", "Glob", "Grep", "LS", "AskUserQuestion", "TaskWakeup", "TaskGoal"],
     });
   });
 
@@ -1596,7 +1596,7 @@ Built-in agents:
       "--permission-mode",
       "plan",
       "--tools",
-      "Read,Glob,Grep,LS,AskUserQuestion,TaskWakeup",
+      "Read,Glob,Grep,LS,AskUserQuestion,TaskWakeup,TaskGoal",
     ]);
     expect(buildCodexRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" })).toEqual([
       "exec",
@@ -1894,8 +1894,7 @@ Built-in agents:
 
   it("registers enabled rlab dynamic tools for Codex app-server threads", () => {
     const tools = codexRlabDynamicTools();
-    // A single consolidated wakeup tool (schedule/cancel/list); no separate TaskAwait.
-    expect(tools).toHaveLength(1);
+    expect(tools).toHaveLength(2);
     expect(tools).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -1908,6 +1907,17 @@ Built-in agents:
               cron: expect.objectContaining({ type: "string" }),
               script: expect.objectContaining({ type: "string" }),
               intervalSeconds: expect.objectContaining({ type: "number" }),
+            }),
+          }),
+        }),
+        expect.objectContaining({
+          name: "TaskGoal",
+          inputSchema: expect.objectContaining({
+            type: "object",
+            properties: expect.objectContaining({
+              action: expect.objectContaining({ enum: ["add", "list", "pause", "resume", "remove", "complete", "update"] }),
+              description: expect.objectContaining({ type: "string" }),
+              goalId: expect.objectContaining({ type: "string" }),
             }),
           }),
         }),

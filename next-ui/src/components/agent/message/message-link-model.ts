@@ -1,6 +1,6 @@
 import { defaultUrlTransform } from "react-markdown";
 
-export const RLAB_TOOL_LINK_RE = /\$(TaskWakeup|ScheduleWakeup|AskUserQuestion|BrowserPreview)\b/g;
+export const RLAB_TOOL_LINK_RE = /\$(TaskWakeup|ScheduleWakeup|TaskGoal|AskUserQuestion|BrowserPreview)\b/g;
 
 export function normalizedRlabToolName(value: string): string {
   return value === "ScheduleWakeup" ? "TaskWakeup" : value;

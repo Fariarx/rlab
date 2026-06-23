@@ -4,7 +4,7 @@ import SendIcon from "@mui/icons-material/Send";
 import StopCircleIcon from "@mui/icons-material/StopCircle";
 import { Box, Stack, type SxProps, type Theme } from "@mui/material";
 import { observer } from "mobx-react-lite";
-import { type ChangeEvent, type ClipboardEvent, type KeyboardEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { type ChangeEvent, type ClipboardEvent, type FocusEvent, type KeyboardEvent, type MouseEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useI18n } from "../../../i18n/I18nProvider";
 import { localFileUrl } from "../../../lib/external-url";
 import type { ComposerAttachmentDraft, ComposerDraft } from "../core/types";
@@ -15,7 +15,7 @@ import { clipboardFilesForComposer, composerSendPayload, mergeComposerAttachment
 import { ComposerStore } from "./composer-store";
 import { fileToAttachmentDraft, isImageMime } from "./composer-utils";
 import { useComposerShared } from "./composer-shared-context";
-import { useComposerVoice } from "./use-composer-voice";
+import { useComposerVoice, type ComposerVoiceSelectionRange } from "./use-composer-voice";
 
 type SubmitShortcut = "enter" | "mod-enter";
 
@@ -107,7 +107,10 @@ export const InlineDraftEditor = observer(function InlineDraftEditor({
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const latestDraftRef = useRef<ComposerDraft>({ text: initialText, attachments: initialAttachments });
+  const voiceSelectionRef = useRef<ComposerVoiceSelectionRange | null>(null);
   const [previewAttachment, setPreviewAttachment] = useState<ComposerAttachmentDraft | null>(null);
+  const [editorFocused, setEditorFocused] = useState(false);
+  const [voiceStartPending, setVoiceStartPending] = useState(false);
   const value = editorStore.internalValue;
   const attachments = editorStore.internalAttachments;
   latestDraftRef.current = { text: value, attachments };
@@ -140,7 +143,9 @@ export const InlineDraftEditor = observer(function InlineDraftEditor({
     textareaRef,
     updateDraft,
     voiceProvider: shared?.voiceProvider,
+    pendingSelectionRef: voiceSelectionRef,
   });
+  const inputActivityActive = editorFocused || voiceInputActive || voiceStartPending;
 
   const autosizeTextarea = useCallback(() => {
     const el = textareaRef.current;
@@ -156,6 +161,16 @@ export const InlineDraftEditor = observer(function InlineDraftEditor({
     void value;
     autosizeTextarea();
   }, [autosizeTextarea, value]);
+
+  useEffect(() => {
+    onInputActivityChange?.(inputActivityActive);
+  }, [inputActivityActive, onInputActivityChange]);
+
+  useEffect(() => {
+    if (voiceState !== "idle" && voiceStartPending) {
+      setVoiceStartPending(false);
+    }
+  }, [voiceStartPending, voiceState]);
 
   useEffect(() => () => {
     onInputActivityChange?.(false);
@@ -219,6 +234,58 @@ export const InlineDraftEditor = observer(function InlineDraftEditor({
     onCancel?.();
   }, [cancelVoiceInput, onCancel]);
 
+  const handleEditorFocus = useCallback(() => {
+    setEditorFocused(true);
+  }, []);
+
+  const handleEditorBlur = useCallback((event: FocusEvent<HTMLElement>) => {
+    const nextTarget = event.relatedTarget;
+    if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) {
+      return;
+    }
+    setEditorFocused(false);
+  }, []);
+
+  const keepTextareaFocus = useCallback((event: MouseEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+  }, []);
+
+  const captureVoiceSelection = useCallback(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) {
+      voiceSelectionRef.current = null;
+      return;
+    }
+    voiceSelectionRef.current = {
+      text: latestDraftRef.current.text,
+      start: textarea.selectionStart,
+      end: textarea.selectionEnd,
+    };
+  }, []);
+
+  const keepTextareaFocusForVoice = useCallback((event: MouseEvent<HTMLButtonElement>) => {
+    keepTextareaFocus(event);
+    if (voiceState === "idle") {
+      captureVoiceSelection();
+      setVoiceStartPending(true);
+      onInputActivityChange?.(true);
+    }
+  }, [captureVoiceSelection, keepTextareaFocus, onInputActivityChange, voiceState]);
+
+  const handleVoiceButtonClick = useCallback(() => {
+    if (voiceState === "recording") {
+      void finishVoiceInput();
+      return;
+    }
+    if (voiceState !== "idle") {
+      return;
+    }
+    captureVoiceSelection();
+    setVoiceStartPending(true);
+    onInputActivityChange?.(true);
+    void toggleVoiceInput().finally(() => setVoiceStartPending(false));
+  }, [captureVoiceSelection, finishVoiceInput, onInputActivityChange, toggleVoiceInput, voiceState]);
+
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.currentTarget.files ?? []);
     event.currentTarget.value = "";
@@ -269,7 +336,7 @@ export const InlineDraftEditor = observer(function InlineDraftEditor({
   const canSend = (value.trim().length > 0 || attachments.length > 0 || voiceState === "recording") && voiceState !== "transcribing";
 
   return (
-    <Stack data-testid={`${testIdPrefix}-editor`} spacing={1.25} sx={rootSx}>
+    <Stack data-testid={`${testIdPrefix}-editor`} spacing={1.25} onFocusCapture={handleEditorFocus} onBlurCapture={handleEditorBlur} sx={rootSx}>
       <input
         ref={fileInputRef}
         data-testid={`${testIdPrefix}-file-input`}
@@ -297,10 +364,8 @@ export const InlineDraftEditor = observer(function InlineDraftEditor({
           }
         }}
         onFocus={() => {
-          onInputActivityChange?.(true);
           autosizeTextarea();
         }}
-        onBlur={() => onInputActivityChange?.(false)}
         onPaste={handlePaste}
         ref={textareaRef}
         rows={inputRows}
@@ -336,14 +401,15 @@ export const InlineDraftEditor = observer(function InlineDraftEditor({
           </span>
         </Tooltip>
         {voiceAvailable && (
-          <Tooltip title={voiceLabel}>
+          <Tooltip title={voiceState === "recording" ? t("stopVoiceInput") : voiceLabel}>
             <span style={{ display: "flex" }}>
               <IconButton
-                aria-label={voiceLabel}
+                aria-label={voiceState === "recording" ? t("stopVoiceInput") : voiceLabel}
                 data-testid={`${testIdPrefix}-voice-button`}
                 tone="subtle"
                 disabled={voiceState === "transcribing"}
-                onClick={toggleVoiceInput}
+                onMouseDown={keepTextareaFocusForVoice}
+                onClick={handleVoiceButtonClick}
                 sx={{
                   width: 30,
                   height: 30,

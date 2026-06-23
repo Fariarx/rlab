@@ -1,7 +1,7 @@
 import type { ApprovalDecision, ChatMessage, CompactionSettings, ConversationSummary } from "../../agent";
+export { promptForUserTurn } from "../../../lib/agent-prompt";
 import type { WorkspaceState } from "../../../lib/workspace-state";
 import {
-  buildAgentPrompt,
   findConversation,
   patchApprovalDecision,
   patchConversation,
@@ -185,22 +185,4 @@ export function editUserTurn(thread: readonly ChatMessage[], messageId: string, 
     userMsg,
     thread: [...thread.slice(0, index), userMsg],
   };
-}
-
-export function promptForUserTurn(
-  thread: readonly ChatMessage[],
-  userMsg: ChatMessage,
-  canResume: boolean,
-  promptOverride: string | undefined,
-): string {
-  const text = userMsg.text ?? "";
-  if (promptOverride !== undefined) {
-    return promptOverride;
-  }
-  if (canResume) {
-    return text;
-  }
-  const userIndex = thread.findIndex((message) => message.id === userMsg.id);
-  const priorMessages = userIndex >= 0 ? thread.slice(0, userIndex) : thread.filter((message) => message.id !== userMsg.id);
-  return buildAgentPrompt(priorMessages, text);
 }

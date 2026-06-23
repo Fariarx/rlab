@@ -38,17 +38,20 @@ function conversationThreadUpdatedAtMs(conversation: WorkspaceState["chats"][num
 
 function preservedThreadIsStale({
   id,
+  currentThread,
   currentConversation,
   serverConversation,
   activeRuns,
 }: {
   readonly id: string;
+  readonly currentThread: readonly ChatMessage[];
   readonly currentConversation: WorkspaceState["chats"][number] | undefined;
   readonly serverConversation: WorkspaceState["chats"][number] | undefined;
   readonly activeRuns: ReadonlyMap<string, RunMessageHandle>;
 }): boolean {
-  if (activeRuns.has(id)) {
-    return false;
+  const activeRun = activeRuns.get(id);
+  if (activeRun) {
+    return !currentThread.some((message) => message.id === activeRun.userMessageId && message.role === "user");
   }
   const serverThreadUpdatedAtMs = conversationThreadUpdatedAtMs(serverConversation);
   if (serverThreadUpdatedAtMs === undefined) {
@@ -70,7 +73,7 @@ export function mergeRemoteWorkspaceShell({ current, serverState, preferredSelec
       threads[id] = messages;
       const currentConversation = currentConversations.get(id);
       const serverConversation = serverConversations.get(id);
-      if (!shellThreadIds.has(id) && currentConversation && serverConversation && preservedThreadIsStale({ id, currentConversation, serverConversation, activeRuns })) {
+      if (!shellThreadIds.has(id) && currentConversation && serverConversation && preservedThreadIsStale({ id, currentThread: messages, currentConversation, serverConversation, activeRuns })) {
         stalePreservedThreadIds.add(id);
       }
     }

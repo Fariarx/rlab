@@ -17,6 +17,12 @@ export interface ConversationResourcesPayload {
   readonly resources: readonly ConversationResource[];
 }
 
+export interface WorkspaceChangeEvent {
+  readonly revision: number;
+  readonly reason?: string;
+  readonly conversationIds?: readonly string[];
+}
+
 export class WorkspaceMutationConflictError extends Error {
   readonly revision: number;
   readonly workspace: WorkspaceState;
@@ -54,6 +60,49 @@ export async function loadWorkspaceRevision(): Promise<number> {
     throw new Error("Workspace revision response is missing revision.");
   }
   return payload.revision;
+}
+
+function parseWorkspaceChangeEvent(payload: unknown): WorkspaceChangeEvent | null {
+  if (!isRecord(payload) || typeof payload.revision !== "number") {
+    return null;
+  }
+  const conversationIds = Array.isArray(payload.conversationIds) ? payload.conversationIds.filter((id): id is string => typeof id === "string" && id.length > 0) : undefined;
+  return {
+    revision: payload.revision,
+    ...(typeof payload.reason === "string" ? { reason: payload.reason } : {}),
+    ...(conversationIds && conversationIds.length > 0 ? { conversationIds } : {}),
+  };
+}
+
+export function subscribeWorkspaceEvents({
+  onEvent,
+  onError,
+}: {
+  readonly onEvent: (event: WorkspaceChangeEvent) => void;
+  readonly onError?: (error: Error) => void;
+}): () => void {
+  if (typeof EventSource === "undefined") {
+    return () => undefined;
+  }
+  const source = new EventSource("/api/workspace/events");
+  const handleEvent = (event: MessageEvent<string>) => {
+    try {
+      const parsed = parseWorkspaceChangeEvent(JSON.parse(event.data) as unknown);
+      if (parsed) {
+        onEvent(parsed);
+      }
+    } catch (error) {
+      onError?.(error instanceof Error ? error : new Error(String(error)));
+    }
+  };
+  source.addEventListener("workspace", handleEvent);
+  source.onerror = () => {
+    onError?.(new Error("Workspace event stream disconnected."));
+  };
+  return () => {
+    source.removeEventListener("workspace", handleEvent);
+    source.close();
+  };
 }
 
 export async function saveWorkspaceMutations(mutations: readonly WorkspaceMutation[], baseRevision: number): Promise<number | undefined> {

@@ -3,14 +3,14 @@ import { dark } from "../../../theme/tokens";
 
 export type WorkspaceAttentionStatus = "error" | "action" | "working" | "done";
 
-export function workspaceAttentionStatus(conversations: readonly ConversationSummary[]): WorkspaceAttentionStatus | null {
+export function workspaceAttentionStatus(conversations: readonly ConversationSummary[], activeRunIds: ReadonlySet<string>): WorkspaceAttentionStatus | null {
   if (conversations.some((conversation) => conversation.status === "error" && conversation.unread === true)) {
     return "error";
   }
   if (conversations.some((conversation) => conversation.status === "waiting" && conversation.unread === true)) {
     return "action";
   }
-  if (conversations.some((conversation) => conversation.status === "running")) {
+  if (conversations.some((conversation) => conversation.status === "running" && Boolean(conversation.activeRunId && activeRunIds.has(conversation.activeRunId)))) {
     return "working";
   }
   if (conversations.some((conversation) => conversation.status === "done" && conversation.unread === true)) {

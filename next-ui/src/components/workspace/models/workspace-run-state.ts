@@ -2,7 +2,7 @@ import { conversationPreviewSnippet } from "../../../lib/conversation-preview";
 import { finishLiveBlock } from "../../../lib/agent-block-state";
 import type { WorkspaceMutation } from "../../../lib/workspace-mutations";
 import { normalizeAgentProfile, type AgentBlock, type ChatMessage, type ConversationStatus, type ConversationSummary } from "../../agent";
-import type { ActiveRunUpdate, RunConversationResult } from "../../../client/api/run-agent";
+import type { ActiveRunSnapshot, ActiveRunUpdate, RunConversationResult } from "../../../client/api/run-agent";
 import { conversationProfile, findConversation, patchConversation, serializableEqual } from "./workspace-state-utils";
 import type { WorkspaceState } from "../../../lib/workspace-state";
 
@@ -317,12 +317,48 @@ export function upsertAgentMessageForUserTurn(messages: readonly ChatMessage[], 
   return [...before, message, ...after];
 }
 
+function upsertUserMessageForRun(
+  messages: ChatMessage[],
+  userMessageId: string,
+  agentMessageId: string,
+  userMessage: ChatMessage | undefined,
+): ChatMessage[] {
+  if (userMessage?.role !== "user" || userMessage.id !== userMessageId) {
+    return messages;
+  }
+  const existingIndex = messages.findIndex((message) => message.id === userMessageId);
+  if (existingIndex >= 0) {
+    const existing = messages[existingIndex];
+    return serializableEqual(existing, userMessage) ? messages : [...messages.slice(0, existingIndex), userMessage, ...messages.slice(existingIndex + 1)];
+  }
+  const agentIndex = messages.findIndex((message) => message.id === agentMessageId);
+  if (agentIndex >= 0) {
+    return [...messages.slice(0, agentIndex), userMessage, ...messages.slice(agentIndex)];
+  }
+  return [...messages, userMessage];
+}
+
+export function patchActiveRunBoundUserMessage(state: WorkspaceState, run: Pick<ActiveRunSnapshot | ActiveRunUpdate, "conversationId" | "userMessageId" | "userMessage" | "agentMessageId">): WorkspaceState {
+  const messages = state.threads[run.conversationId] ?? [];
+  const nextMessages = upsertUserMessageForRun(messages, run.userMessageId, run.agentMessageId, run.userMessage);
+  return nextMessages === messages
+    ? state
+    : {
+        ...state,
+        threads: {
+          ...state.threads,
+          [run.conversationId]: nextMessages,
+        },
+      };
+}
+
 export function isLiveRunStatus(status: ConversationStatus): boolean {
   return status === "running" || status === "waiting";
 }
 
 export function patchActiveRunUpdate(state: WorkspaceState, update: ActiveRunUpdate): WorkspaceState {
-  const messages = state.threads[update.conversationId] ?? [];
+  const stateWithUserMessage = patchActiveRunBoundUserMessage(state, update);
+  const messages = stateWithUserMessage.threads[update.conversationId] ?? [];
   const previousMessage = messages.find((message) => message.id === update.agentMessageId);
   const previousBlocks = previousMessage?.blocks;
   const profile = previousMessage?.profile ?? conversationProfile(findConversation(state, update.conversationId));
@@ -339,10 +375,10 @@ export function patchActiveRunUpdate(state: WorkspaceState, update: ActiveRunUpd
     ...(update.usage === undefined ? {} : { usage: update.usage }),
   };
   const threads = {
-    ...state.threads,
+    ...stateWithUserMessage.threads,
     [update.conversationId]: upsertAgentMessageForUserTurn(messages, update.userMessageId, message),
   };
-  const nextState = { ...state, threads };
+  const nextState = { ...stateWithUserMessage, threads };
   const snippet = snippetFromStateThread(nextState, update.conversationId);
   return patchConversation(nextState, update.conversationId, {
     activeRunId: update.done || !isLiveRunStatus(update.status) ? undefined : update.runId,

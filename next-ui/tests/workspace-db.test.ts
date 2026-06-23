@@ -9,8 +9,10 @@ import { buildEmptyWorkspaceState, type WorkspaceState } from "../src/lib/worksp
 import {
   closeWorkspaceDb,
   applyWorkspaceDbMutations,
+  claimNextPendingQueueItem,
   claimNextPendingTurn,
   deletePendingTurn,
+  enqueuePendingGoal,
   enqueuePendingTurn,
   initializeWorkspaceStateInDb,
   initWorkspaceDb,
@@ -19,17 +21,20 @@ import {
   readConversationResourcesFromDb,
   readMessageBlockById,
   readMessageBlocks,
+  readPendingQueueHead,
   readPendingTurnQueue,
   readThreadPageFromDb,
   readThreadFromDb,
   readWorkspaceRevision,
   readWorkspaceStateFromDb,
   releasePendingTurn,
+  movePendingQueueItemAfter,
   removePendingTurn,
   resetDispatchingPendingTurns,
   restartUserTurn,
   searchConversationIds,
   setPendingTurnQueuePaused,
+  upsertPendingWakeupItem,
   updateConversationData,
   upsertAgentMessageForUserTurn,
   upsertMessage,
@@ -124,6 +129,37 @@ describe("workspace-db", () => {
     expect(claimNextPendingTurn("c1", "run-2")?.id).toBe("u-pending-1");
     deletePendingTurn("u-pending-1");
     expect(readPendingTurnQueue("c1").messages).toEqual([]);
+  });
+
+  it("stores goals as movable queue items and dispatches them in queue order", () => {
+    initializeWorkspaceStateInDb({ ...buildEmptyWorkspaceState(), chats: [conv("c1")], threads: { c1: [] }, selectedId: "c1" });
+
+    enqueuePendingTurn({ id: "u-pending", conversationId: "c1", createdAtMs: 100, message: userMsg("u-pending", "first"), origin: "http://127.0.0.1:4280" });
+    enqueuePendingGoal({ id: "goal-1", conversationId: "c1", createdAtMs: 200, description: "keep improving", origin: "http://127.0.0.1:4280" });
+
+    expect(readPendingTurnQueue("c1").items.map((item) => item.id)).toEqual(["u-pending", "goal-1"]);
+
+    movePendingQueueItemAfter("c1", "goal-1", null);
+
+    expect(readPendingTurnQueue("c1").items.map((item) => item.id)).toEqual(["goal-1", "u-pending"]);
+    const claimed = claimNextPendingQueueItem("c1", "run-goal");
+    expect(claimed?.kind).toBe("goal");
+    expect(claimed?.id).toBe("goal-1");
+  });
+
+  it("represents waiting wakeups as queue head blockers", () => {
+    initializeWorkspaceStateInDb({ ...buildEmptyWorkspaceState(), chats: [conv("c1")], threads: { c1: [] }, selectedId: "c1" });
+
+    upsertPendingWakeupItem({ id: "wakeup-1", conversationId: "c1", createdAtMs: 100, prompt: "continue later", trigger: { type: "time", fireAtMs: 1_000 } });
+    enqueuePendingTurn({ id: "u-pending", conversationId: "c1", createdAtMs: 200, message: userMsg("u-pending", "after wakeup"), origin: "http://127.0.0.1:4280" });
+
+    expect(readPendingTurnQueue("c1").items.map((item) => item.kind)).toEqual(["wakeup", "message"]);
+    expect(readPendingQueueHead("c1")?.kind).toBe("wakeup");
+    expect(claimNextPendingQueueItem("c1", "run-blocked")).toBeNull();
+
+    movePendingQueueItemAfter("c1", "u-pending", null);
+
+    expect(claimNextPendingQueueItem("c1", "run-message")?.id).toBe("u-pending");
   });
 
   it("requeues dispatching pending turns after a server restart", () => {

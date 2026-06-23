@@ -220,7 +220,7 @@ export const WorkspacePageView = observer(function WorkspacePageView({
     showTerminal ? t("terminalTab") : undefined,
   ].filter((label): label is string => Boolean(label)).join(" / "), [previewEnabled, showTerminal, t]);
   const displayedMessages = useMemo(() => appendConversationErrorNotice(selected, messages, t("conversationErrorNotice")), [messages, selected, t]);
-  const selectedThreadLoaded = selected ? ws.isThreadLoaded(selected.id) : false;
+  const selectedThreadLoaded = selected ? ws.isThreadLoaded(selected.id) || (ws.threads[selected.id]?.length ?? 0) > 0 : false;
   const selectedHasOlderMessages = selected ? ws.hasOlderThreadMessages(selected.id) : false;
   const loadOlderSelectedThread = useCallback(() => {
     if (selected) {
@@ -271,7 +271,7 @@ export const WorkspacePageView = observer(function WorkspacePageView({
     toast,
   });
   const conversations = useMemo(() => workspaceConversations({ chats: ws.chats, projects: ws.projects }), [ws.chats, ws.projects]);
-  const appAttentionStatus = useMemo(() => workspaceAttentionStatus(conversations), [conversations]);
+  const appAttentionStatus = workspaceAttentionStatus(conversations, ws.activeRunIds);
   useAppStatusFavicon(appAttentionStatus, ws.settings.appearance.reduceMotion);
   const runNotifications = useRunNotifications({
     conversations,
@@ -306,6 +306,7 @@ export const WorkspacePageView = observer(function WorkspacePageView({
     [locale, wakeupsController.removeWakeup, wakeupsController.selectedWakeups],
   );
   const selectedQueuedMessages = selected ? ws.queuedMessages(selected.id) : [];
+  const selectedQueuedItems = selected ? ws.queuedItems(selected.id) : [];
   const selectedCwd = ws.cwdOf(ws.selectedId);
   const mentionableFiles = useProjectFiles({ cwd: selectedCwd, toast });
   const terminalCwd = selected ? (selectedCwd ?? ".") : undefined;
@@ -923,14 +924,18 @@ export const WorkspacePageView = observer(function WorkspacePageView({
                 onOverlayLiftChange={setComposerOverlayLift}
                 history={messageHistory}
                 scheduledWakeups={scheduledWakeups}
-                queuedContent={selected && selectedQueuedMessages.length > 0 ? (
+                queuedContent={selected && selectedQueuedItems.length > 0 ? (
                   <QueuedMessages
                     messages={selectedQueuedMessages}
+                    items={selectedQueuedItems}
                     paused={ws.isQueuePaused(selected.id)}
                     onCancel={(messageId) => ws.cancelQueuedMessage(selected.id, messageId)}
+                    onCancelItem={(itemId) => ws.cancelQueuedItem(selected.id, itemId)}
                     onCopy={(message) => messageActions.onCopy?.(message)}
                     onSendNow={() => ws.sendQueuedMessageNow(selected.id)}
+                    onToggleItemPause={(itemId, paused) => ws.setQueuedItemPaused(selected.id, itemId, paused)}
                     onTogglePause={() => ws.setQueuePaused(selected.id, !ws.isQueuePaused(selected.id))}
+                    onMoveItemAfter={(itemId, afterItemId) => ws.moveQueuedItemAfter(selected.id, itemId, afterItemId)}
                   />
                 ) : undefined}
               />

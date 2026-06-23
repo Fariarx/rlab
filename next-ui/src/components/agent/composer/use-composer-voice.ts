@@ -23,7 +23,7 @@ export interface ComposerVoiceController {
   readonly cancelVoiceInput: () => void;
   readonly finishVoiceInput: () => Promise<void>;
   readonly setVoiceLevelCountForWidth: (levelCount: number) => void;
-  readonly toggleVoiceInput: () => void;
+  readonly toggleVoiceInput: () => Promise<void>;
   readonly voiceAmbient: boolean;
   readonly voiceAvailable: boolean;
   readonly voiceDuration: string;
@@ -31,6 +31,12 @@ export interface ComposerVoiceController {
   readonly voiceLabel: string;
   readonly voiceLevels: readonly number[];
   readonly voiceState: ComposerStore["voiceState"];
+}
+
+export interface ComposerVoiceSelectionRange {
+  readonly text: string;
+  readonly start: number;
+  readonly end: number;
 }
 
 type VoiceStopIntent = "recording" | "finish" | "cancel";
@@ -43,6 +49,35 @@ function draftEndsWithDictation(draftText: string, dictation: string): boolean {
   return normalizedDictationText(draftText).endsWith(dictation);
 }
 
+function clampedSelectionRange(text: string, textarea: HTMLTextAreaElement | null): { readonly start: number; readonly end: number } {
+  if (!textarea) {
+    return { start: text.length, end: text.length };
+  }
+  return clampedTextSelectionRange(text, { start: textarea.selectionStart, end: textarea.selectionEnd });
+}
+
+function clampedTextSelectionRange(text: string, selection: Pick<ComposerVoiceSelectionRange, "start" | "end">): { readonly start: number; readonly end: number } {
+  const selectionStart = Math.max(0, Math.min(selection.start, text.length));
+  const selectionEnd = Math.max(0, Math.min(selection.end, text.length));
+  return {
+    start: Math.min(selectionStart, selectionEnd),
+    end: Math.max(selectionStart, selectionEnd),
+  };
+}
+
+function insertDictationAtSelection(
+  text: string,
+  selection: { readonly start: number; readonly end: number },
+  dictation: string,
+): { readonly text: string; readonly caret: number } {
+  const before = text.slice(0, selection.start);
+  const after = text.slice(selection.end);
+  const prefix = before.length > 0 && !/\s$/.test(before) ? " " : "";
+  const suffix = after.length > 0 && !/^\s/.test(after) ? " " : "";
+  const nextText = `${before}${prefix}${dictation}${suffix}${after}`;
+  return { text: nextText, caret: before.length + prefix.length + dictation.length + suffix.length };
+}
+
 export function useComposerVoice({
   latestDraftRef,
   onVoiceError,
@@ -50,6 +85,7 @@ export function useComposerVoice({
   textareaRef,
   updateDraft,
   voiceProvider,
+  pendingSelectionRef,
 }: {
   readonly latestDraftRef: React.MutableRefObject<ComposerDraft>;
   readonly onVoiceError?: (message: string) => void;
@@ -57,6 +93,7 @@ export function useComposerVoice({
   readonly textareaRef: RefObject<HTMLTextAreaElement | null>;
   readonly updateDraft: (draft: ComposerDraft) => void;
   readonly voiceProvider?: ComposerVoiceProvider;
+  readonly pendingSelectionRef?: React.MutableRefObject<ComposerVoiceSelectionRange | null>;
 }): ComposerVoiceController {
   const { t } = useI18n();
   const {
@@ -160,12 +197,26 @@ export function useComposerVoice({
       voiceRecognizedRef.current = true;
       clearVoiceNoSpeechNotice();
       const currentText = latestDraftRef.current.text;
-      const separator = currentText.length === 0 || /\s$/.test(currentText) ? "" : " ";
-      updateDraft({ text: `${currentText}${separator}${cleanText}`, attachments: latestDraftRef.current.attachments });
-      requestAnimationFrame(() => textareaRef.current?.focus());
+      const pendingSelection = pendingSelectionRef?.current;
+      if (pendingSelectionRef) {
+        pendingSelectionRef.current = null;
+      }
+      const selection = pendingSelection && pendingSelection.text === currentText
+        ? clampedTextSelectionRange(currentText, pendingSelection)
+        : clampedSelectionRange(currentText, textareaRef.current);
+      const inserted = insertDictationAtSelection(currentText, selection, cleanText);
+      updateDraft({ text: inserted.text, attachments: latestDraftRef.current.attachments });
+      requestAnimationFrame(() => {
+        const textarea = textareaRef.current;
+        if (!textarea) {
+          return;
+        }
+        textarea.focus();
+        textarea.setSelectionRange(inserted.caret, inserted.caret);
+      });
       return true;
     },
-    [clearVoiceNoSpeechNotice, latestDraftRef, textareaRef, updateDraft],
+    [clearVoiceNoSpeechNotice, latestDraftRef, pendingSelectionRef, textareaRef, updateDraft],
   );
 
   const commitBrowserInterimDictation = useCallback((): boolean => {
@@ -527,7 +578,7 @@ export function useComposerVoice({
 
   const finishVoiceInput = useCallback(() => stopRecording("finish"), [stopRecording]);
 
-  const toggleVoiceInput = useCallback(() => {
+  const toggleVoiceInput = useCallback(async () => {
     if (voiceState === "recording") {
       cancelVoiceInput();
       return;
@@ -536,10 +587,10 @@ export function useComposerVoice({
       return;
     }
     if (voiceProvider.kind === "browser") {
-      void startBrowserDictation();
+      await startBrowserDictation();
       return;
     }
-    void startCloudDictation();
+    await startCloudDictation();
   }, [cancelVoiceInput, startBrowserDictation, startCloudDictation, voiceProvider, voiceState]);
 
   const browserProviderAvailable = voiceProvider?.kind === "browser" && browserVoiceSupported;

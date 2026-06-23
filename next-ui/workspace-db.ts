@@ -81,6 +81,20 @@ CREATE TABLE IF NOT EXISTS pending_turns (
   data TEXT NOT NULL,
   CHECK (state IN ('queued', 'dispatching'))
 );
+CREATE TABLE IF NOT EXISTS pending_queue_items (
+  id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  position INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  state TEXT NOT NULL DEFAULT 'queued',
+  run_id TEXT,
+  next_dispatch_at_ms INTEGER,
+  data TEXT NOT NULL,
+  CHECK (kind IN ('message', 'goal', 'wakeup')),
+  CHECK (state IN ('queued', 'dispatching', 'paused', 'waiting_wakeup'))
+);
 CREATE TABLE IF NOT EXISTS kv (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -99,6 +113,8 @@ CREATE INDEX IF NOT EXISTS idx_conversation_resources_conversation ON conversati
 CREATE INDEX IF NOT EXISTS idx_conversation_resources_message ON conversation_resources(message_id);
 CREATE INDEX IF NOT EXISTS idx_pending_turns_conversation ON pending_turns(conversation_id, state, position);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_turns_conversation_position ON pending_turns(conversation_id, position);
+CREATE INDEX IF NOT EXISTS idx_pending_queue_items_conversation ON pending_queue_items(conversation_id, state, position);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_queue_items_conversation_position ON pending_queue_items(conversation_id, position);
 `;
 
 function tableExists(handle: DatabaseHandle, name: string): boolean {
@@ -119,16 +135,26 @@ function assertForeignKeyIntegrity(handle: DatabaseHandle): void {
 }
 
 function assertCurrentSchema(handle: DatabaseHandle): void {
-  for (const table of ["projects", "conversations", "messages", "conversation_resources", "composer_drafts", "pending_queue_state", "pending_turns", "kv"]) {
+  for (const table of ["projects", "conversations", "messages", "conversation_resources", "composer_drafts", "pending_queue_state", "pending_turns", "pending_queue_items", "kv"]) {
     if (!tableExists(handle, table)) {
       throw new Error(`Workspace database schema is incomplete: missing ${table}. Reset the workspace database.`);
     }
   }
-  for (const table of ["conversations", "messages", "conversation_resources", "composer_drafts", "pending_queue_state", "pending_turns"]) {
+  for (const table of ["conversations", "messages", "conversation_resources", "composer_drafts", "pending_queue_state", "pending_turns", "pending_queue_items"]) {
     if (!tableHasForeignKeys(handle, table)) {
       throw new Error(`Workspace database schema is outdated: ${table} has no declared foreign keys. Reset the workspace database.`);
     }
   }
+}
+
+function migratePendingTurnsToQueueItems(handle: DatabaseHandle): void {
+  handle
+    .prepare(
+      `INSERT OR IGNORE INTO pending_queue_items(id, conversation_id, position, kind, created_at_ms, updated_at_ms, state, run_id, next_dispatch_at_ms, data)
+       SELECT id, conversation_id, position, 'message', created_at_ms, created_at_ms, state, run_id, NULL, data
+       FROM pending_turns`,
+    )
+    .run();
 }
 
 /** Open (or create) the workspace database in WAL mode. Idempotent. */
@@ -148,6 +174,7 @@ export function initWorkspaceDb(file: string): void {
     handle.exec(INDEX_SCHEMA);
     assertCurrentSchema(handle);
     assertForeignKeyIntegrity(handle);
+    migratePendingTurnsToQueueItems(handle);
     backfillConversationResourcesIfNeeded(handle);
     db = handle;
   } catch (error) {
@@ -233,10 +260,49 @@ export interface PendingTurnRecord {
   readonly origin: string;
 }
 
+export type PendingQueueItemKind = "message" | "goal" | "wakeup";
+export type PendingQueueItemState = "queued" | "dispatching" | "paused" | "waiting_wakeup";
+
+interface PendingQueueItemBase {
+  readonly id: string;
+  readonly conversationId: string;
+  readonly position: number;
+  readonly createdAtMs: number;
+  readonly updatedAtMs: number;
+  readonly state: PendingQueueItemState;
+  readonly runId?: string;
+  readonly nextDispatchAtMs?: number;
+}
+
+export interface PendingQueueMessageItem extends PendingQueueItemBase {
+  readonly kind: "message";
+  readonly message: ChatMessage;
+  readonly origin: string;
+}
+
+export interface PendingQueueGoalItem extends PendingQueueItemBase {
+  readonly kind: "goal";
+  readonly description: string;
+  readonly origin: string;
+  readonly dispatchCount: number;
+}
+
+export interface PendingQueueWakeupItem extends PendingQueueItemBase {
+  readonly kind: "wakeup";
+  readonly wakeupId: string;
+  readonly prompt: string;
+  readonly reason?: string;
+  readonly trigger?: unknown;
+}
+
+export type PendingQueueItem = PendingQueueMessageItem | PendingQueueGoalItem | PendingQueueWakeupItem;
+export type PendingQueueDispatchItem = PendingQueueMessageItem | PendingQueueGoalItem;
+
 export interface PendingTurnQueueSnapshot {
   readonly conversationId: string;
   readonly paused: boolean;
   readonly messages: readonly ChatMessage[];
+  readonly items: readonly PendingQueueItem[];
 }
 
 export interface ConversationThreadPage {
@@ -250,11 +316,33 @@ interface PendingTurnStoredData {
   readonly origin: string;
 }
 
+interface PendingGoalStoredData {
+  readonly description: string;
+  readonly origin: string;
+  readonly dispatchCount?: number;
+}
+
+interface PendingWakeupStoredData {
+  readonly wakeupId: string;
+  readonly prompt: string;
+  readonly reason?: string;
+  readonly trigger?: unknown;
+}
+
 type PendingTurnRow = {
   readonly id: string;
   readonly conversationId: string;
   readonly createdAtMs: number;
   readonly data: string;
+};
+
+type PendingQueueItemRow = PendingTurnRow & {
+  readonly position: number;
+  readonly kind: PendingQueueItemKind;
+  readonly updatedAtMs: number;
+  readonly state: PendingQueueItemState;
+  readonly runId: string | null;
+  readonly nextDispatchAtMs: number | null;
 };
 
 export class WorkspaceRevisionConflictError extends Error {
@@ -647,6 +735,50 @@ function pendingTurnFromRow(row: PendingTurnRow): PendingTurnRecord {
   };
 }
 
+function maybeNumber(value: number | null): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function pendingQueueItemBase(row: PendingQueueItemRow): PendingQueueItemBase {
+  return {
+    id: row.id,
+    conversationId: row.conversationId,
+    position: row.position,
+    createdAtMs: row.createdAtMs,
+    updatedAtMs: row.updatedAtMs,
+    state: row.state,
+    ...(row.runId ? { runId: row.runId } : {}),
+    ...(maybeNumber(row.nextDispatchAtMs) === undefined ? {} : { nextDispatchAtMs: maybeNumber(row.nextDispatchAtMs) }),
+  };
+}
+
+function pendingQueueItemFromRow(row: PendingQueueItemRow): PendingQueueItem {
+  const base = pendingQueueItemBase(row);
+  if (row.kind === "message") {
+    const data = JSON.parse(row.data) as PendingTurnStoredData;
+    return { ...base, kind: "message", message: data.message, origin: data.origin };
+  }
+  if (row.kind === "goal") {
+    const data = JSON.parse(row.data) as PendingGoalStoredData;
+    return {
+      ...base,
+      kind: "goal",
+      description: data.description,
+      origin: data.origin,
+      dispatchCount: typeof data.dispatchCount === "number" && Number.isFinite(data.dispatchCount) ? Math.max(0, Math.trunc(data.dispatchCount)) : 0,
+    };
+  }
+  const data = JSON.parse(row.data) as PendingWakeupStoredData;
+  return {
+    ...base,
+    kind: "wakeup",
+    wakeupId: data.wakeupId,
+    prompt: data.prompt,
+    ...(data.reason ? { reason: data.reason } : {}),
+    ...(data.trigger === undefined ? {} : { trigger: data.trigger }),
+  };
+}
+
 function pendingQueuePaused(handle: DatabaseHandle, conversationId: string): boolean {
   const row = handle.prepare("SELECT paused FROM pending_queue_state WHERE conversation_id = ?").get(conversationId) as { paused: number } | undefined;
   return row?.paused === 1;
@@ -661,6 +793,10 @@ function setPendingTurnQueuePausedInTransaction(handle: DatabaseHandle, conversa
 
 function nextPendingTurnPosition(handle: DatabaseHandle, conversationId: string): number {
   return (handle.prepare("SELECT COALESCE(MAX(position), -1) + 1 AS next FROM pending_turns WHERE conversation_id = ?").get(conversationId) as { next: number }).next;
+}
+
+function nextPendingQueueItemPosition(handle: DatabaseHandle, conversationId: string): number {
+  return (handle.prepare("SELECT COALESCE(MAX(position), -1) + 1 AS next FROM pending_queue_items WHERE conversation_id = ?").get(conversationId) as { next: number }).next;
 }
 
 function upsertProjectInTransaction(handle: DatabaseHandle, project: ProjectMeta, insertAtFront = false): void {
@@ -1059,13 +1195,41 @@ export function readPendingTurnQueue(conversationId: string): PendingTurnQueueSn
   const handle = database();
   ensureConversationExists(handle, conversationId);
   const rows = handle
-    .prepare("SELECT id, conversation_id AS conversationId, created_at_ms AS createdAtMs, data FROM pending_turns WHERE conversation_id = ? AND state = 'queued' ORDER BY position")
-    .all(conversationId) as PendingTurnRow[];
+    .prepare(
+      `SELECT id, conversation_id AS conversationId, position, kind, created_at_ms AS createdAtMs, updated_at_ms AS updatedAtMs, state, run_id AS runId, next_dispatch_at_ms AS nextDispatchAtMs, data
+       FROM pending_queue_items
+       WHERE conversation_id = ? AND state != 'dispatching'
+       ORDER BY position`,
+    )
+    .all(conversationId) as PendingQueueItemRow[];
+  const items = rows.map((row) => pendingQueueItemFromRow(row));
   return {
     conversationId,
     paused: pendingQueuePaused(handle, conversationId),
-    messages: rows.map((row) => pendingTurnFromRow(row).message),
+    messages: items.filter((item): item is PendingQueueMessageItem => item.kind === "message" && item.state === "queued").map((item) => item.message),
+    items,
   };
+}
+
+export function readPendingQueueConversationIds(): readonly string[] {
+  const rows = database()
+    .prepare("SELECT DISTINCT conversation_id AS conversationId FROM pending_queue_items WHERE state IN ('queued', 'waiting_wakeup') ORDER BY conversation_id")
+    .all() as Array<{ conversationId: string }>;
+  return rows.map((row) => row.conversationId);
+}
+
+export function readPendingQueueHead(conversationId: string): PendingQueueItem | null {
+  const handle = database();
+  ensureConversationExists(handle, conversationId);
+  const row = handle
+    .prepare(
+      `SELECT id, conversation_id AS conversationId, position, kind, created_at_ms AS createdAtMs, updated_at_ms AS updatedAtMs, state, run_id AS runId, next_dispatch_at_ms AS nextDispatchAtMs, data
+       FROM pending_queue_items
+       WHERE conversation_id = ? AND state IN ('queued', 'waiting_wakeup')
+       ORDER BY position LIMIT 1`,
+    )
+    .get(conversationId) as PendingQueueItemRow | undefined;
+  return row ? pendingQueueItemFromRow(row) : null;
 }
 
 export function enqueuePendingTurn(record: PendingTurnRecord): PendingTurnQueueSnapshot {
@@ -1075,8 +1239,63 @@ export function enqueuePendingTurn(record: PendingTurnRecord): PendingTurnQueueS
     const message = record.message.createdAtMs === undefined ? { ...record.message, createdAtMs: record.createdAtMs } : record.message;
     const data: PendingTurnStoredData = { message, origin: record.origin };
     handle
-      .prepare("INSERT INTO pending_turns(id, conversation_id, position, created_at_ms, state, run_id, data) VALUES(?, ?, ?, ?, 'queued', NULL, ?)")
-      .run(record.id, record.conversationId, nextPendingTurnPosition(handle, record.conversationId), record.createdAtMs, JSON.stringify(data));
+      .prepare("INSERT INTO pending_queue_items(id, conversation_id, position, kind, created_at_ms, updated_at_ms, state, run_id, next_dispatch_at_ms, data) VALUES(?, ?, ?, 'message', ?, ?, 'queued', NULL, NULL, ?)")
+      .run(record.id, record.conversationId, nextPendingQueueItemPosition(handle, record.conversationId), record.createdAtMs, record.createdAtMs, JSON.stringify(data));
+    bumpWorkspaceRevisionInTransaction(handle);
+  });
+  return readPendingTurnQueue(record.conversationId);
+}
+
+export function enqueuePendingGoal(record: {
+  readonly id: string;
+  readonly conversationId: string;
+  readonly createdAtMs: number;
+  readonly description: string;
+  readonly origin: string;
+}): PendingTurnQueueSnapshot {
+  const description = record.description.trim();
+  if (!description) {
+    throw new Error("Goal description is required.");
+  }
+  const handle = database();
+  transaction(() => {
+    ensureConversationExists(handle, record.conversationId);
+    const data: PendingGoalStoredData = { description, origin: record.origin, dispatchCount: 0 };
+    handle
+      .prepare("INSERT INTO pending_queue_items(id, conversation_id, position, kind, created_at_ms, updated_at_ms, state, run_id, next_dispatch_at_ms, data) VALUES(?, ?, ?, 'goal', ?, ?, 'queued', NULL, NULL, ?)")
+      .run(record.id, record.conversationId, nextPendingQueueItemPosition(handle, record.conversationId), record.createdAtMs, record.createdAtMs, JSON.stringify(data));
+    bumpWorkspaceRevisionInTransaction(handle);
+  });
+  return readPendingTurnQueue(record.conversationId);
+}
+
+export function upsertPendingWakeupItem(record: {
+  readonly id: string;
+  readonly conversationId: string;
+  readonly createdAtMs: number;
+  readonly prompt: string;
+  readonly reason?: string;
+  readonly trigger?: unknown;
+}): PendingTurnQueueSnapshot {
+  const handle = database();
+  transaction(() => {
+    ensureConversationExists(handle, record.conversationId);
+    const existing = handle.prepare("SELECT position FROM pending_queue_items WHERE id = ?").get(record.id) as { position: number } | undefined;
+    const data: PendingWakeupStoredData = {
+      wakeupId: record.id,
+      prompt: record.prompt,
+      ...(record.reason ? { reason: record.reason } : {}),
+      ...(record.trigger === undefined ? {} : { trigger: record.trigger }),
+    };
+    if (existing) {
+      handle
+        .prepare("UPDATE pending_queue_items SET updated_at_ms = ?, state = 'waiting_wakeup', run_id = NULL, next_dispatch_at_ms = NULL, data = ? WHERE id = ? AND kind = 'wakeup'")
+        .run(Date.now(), JSON.stringify(data), record.id);
+    } else {
+      handle
+        .prepare("INSERT INTO pending_queue_items(id, conversation_id, position, kind, created_at_ms, updated_at_ms, state, run_id, next_dispatch_at_ms, data) VALUES(?, ?, ?, 'wakeup', ?, ?, 'waiting_wakeup', NULL, NULL, ?)")
+        .run(record.id, record.conversationId, nextPendingQueueItemPosition(handle, record.conversationId), record.createdAtMs, record.createdAtMs, JSON.stringify(data));
+    }
     bumpWorkspaceRevisionInTransaction(handle);
   });
   return readPendingTurnQueue(record.conversationId);
@@ -1086,7 +1305,92 @@ export function removePendingTurn(conversationId: string, messageId: string): Pe
   const handle = database();
   transaction(() => {
     ensureConversationExists(handle, conversationId);
-    handle.prepare("DELETE FROM pending_turns WHERE conversation_id = ? AND id = ? AND state = 'queued'").run(conversationId, messageId);
+    handle.prepare("DELETE FROM pending_queue_items WHERE conversation_id = ? AND id = ? AND kind = 'message' AND state = 'queued'").run(conversationId, messageId);
+    bumpWorkspaceRevisionInTransaction(handle);
+  });
+  return readPendingTurnQueue(conversationId);
+}
+
+export function removePendingQueueItem(conversationId: string, itemId: string): PendingTurnQueueSnapshot {
+  const handle = database();
+  transaction(() => {
+    ensureConversationExists(handle, conversationId);
+    const result = handle.prepare("DELETE FROM pending_queue_items WHERE conversation_id = ? AND id = ? AND state != 'dispatching'").run(conversationId, itemId);
+    if (result.changes === 0) {
+      throw new Error("Queue item not found.");
+    }
+    bumpWorkspaceRevisionInTransaction(handle);
+  });
+  return readPendingTurnQueue(conversationId);
+}
+
+export function setPendingQueueItemPaused(conversationId: string, itemId: string, paused: boolean): PendingTurnQueueSnapshot {
+  const handle = database();
+  transaction(() => {
+    ensureConversationExists(handle, conversationId);
+    const nextState: PendingQueueItemState = paused ? "paused" : "queued";
+    const result = handle.prepare("UPDATE pending_queue_items SET state = ?, updated_at_ms = ? WHERE conversation_id = ? AND id = ? AND kind = 'goal' AND state IN ('queued', 'paused')").run(nextState, Date.now(), conversationId, itemId);
+    if (result.changes === 0) {
+      throw new Error("Goal not found.");
+    }
+    bumpWorkspaceRevisionInTransaction(handle);
+  });
+  return readPendingTurnQueue(conversationId);
+}
+
+export function updatePendingGoal(
+  conversationId: string,
+  itemId: string,
+  patch: { readonly description?: string; readonly afterItemId?: string | null },
+): PendingTurnQueueSnapshot {
+  const handle = database();
+  transaction(() => {
+    ensureConversationExists(handle, conversationId);
+    const row = handle
+      .prepare(
+        `SELECT id, conversation_id AS conversationId, position, kind, created_at_ms AS createdAtMs, updated_at_ms AS updatedAtMs, state, run_id AS runId, next_dispatch_at_ms AS nextDispatchAtMs, data
+         FROM pending_queue_items WHERE conversation_id = ? AND id = ? AND kind = 'goal' AND state != 'dispatching'`,
+      )
+      .get(conversationId, itemId) as PendingQueueItemRow | undefined;
+    if (!row) {
+      throw new Error("Goal not found.");
+    }
+    if (patch.description !== undefined) {
+      const description = patch.description.trim();
+      if (!description) {
+        throw new Error("Goal description is required.");
+      }
+      const data = JSON.parse(row.data) as PendingGoalStoredData;
+      handle.prepare("UPDATE pending_queue_items SET data = ?, updated_at_ms = ? WHERE conversation_id = ? AND id = ?").run(JSON.stringify({ ...data, description }), Date.now(), conversationId, itemId);
+    }
+    bumpWorkspaceRevisionInTransaction(handle);
+  });
+  if (patch.afterItemId !== undefined) {
+    return movePendingQueueItemAfter(conversationId, itemId, patch.afterItemId);
+  }
+  return readPendingTurnQueue(conversationId);
+}
+
+export function movePendingQueueItemAfter(conversationId: string, itemId: string, afterItemId: string | null): PendingTurnQueueSnapshot {
+  const handle = database();
+  transaction(() => {
+    ensureConversationExists(handle, conversationId);
+    const rows = handle
+      .prepare("SELECT id FROM pending_queue_items WHERE conversation_id = ? AND state != 'dispatching' ORDER BY position")
+      .all(conversationId) as Array<{ id: string }>;
+    if (!rows.some((row) => row.id === itemId)) {
+      throw new Error("Queue item not found.");
+    }
+    const ids = rows.map((row) => row.id).filter((id) => id !== itemId);
+    const insertAt = afterItemId ? ids.indexOf(afterItemId) + 1 : 0;
+    const safeInsertAt = insertAt <= 0 ? 0 : Math.min(insertAt, ids.length);
+    ids.splice(safeInsertAt, 0, itemId);
+    ids.forEach((id, index) => {
+      handle.prepare("UPDATE pending_queue_items SET position = ?, updated_at_ms = ? WHERE conversation_id = ? AND id = ?").run(1_000_000 + index, Date.now(), conversationId, id);
+    });
+    ids.forEach((id, index) => {
+      handle.prepare("UPDATE pending_queue_items SET position = ?, updated_at_ms = ? WHERE conversation_id = ? AND id = ?").run(index, Date.now(), conversationId, id);
+    });
     bumpWorkspaceRevisionInTransaction(handle);
   });
   return readPendingTurnQueue(conversationId);
@@ -1102,22 +1406,35 @@ export function setPendingTurnQueuePaused(conversationId: string, paused: boolea
 }
 
 export function claimNextPendingTurn(conversationId: string, runId: string): PendingTurnRecord | null {
+  const claimed = claimNextPendingQueueItem(conversationId, runId);
+  return claimed?.kind === "message" ? { id: claimed.id, conversationId: claimed.conversationId, createdAtMs: claimed.createdAtMs, message: claimed.message, origin: claimed.origin } : null;
+}
+
+export function claimNextPendingQueueItem(conversationId: string, runId: string, nowMs = Date.now()): PendingQueueDispatchItem | null {
   const handle = database();
-  let claimed: PendingTurnRecord | null = null;
+  let claimed: PendingQueueDispatchItem | null = null;
   transaction(() => {
     ensureConversationExists(handle, conversationId);
     if (pendingQueuePaused(handle, conversationId)) {
       return;
     }
     const row = handle
-      .prepare("SELECT id, conversation_id AS conversationId, created_at_ms AS createdAtMs, data FROM pending_turns WHERE conversation_id = ? AND state = 'queued' ORDER BY position LIMIT 1")
-      .get(conversationId) as PendingTurnRow | undefined;
-    if (!row) {
+      .prepare(
+        `SELECT id, conversation_id AS conversationId, position, kind, created_at_ms AS createdAtMs, updated_at_ms AS updatedAtMs, state, run_id AS runId, next_dispatch_at_ms AS nextDispatchAtMs, data
+         FROM pending_queue_items
+         WHERE conversation_id = ? AND state IN ('queued', 'waiting_wakeup')
+         ORDER BY position LIMIT 1`,
+      )
+      .get(conversationId) as PendingQueueItemRow | undefined;
+    if (!row || row.kind === "wakeup" || row.state !== "queued" || (row.nextDispatchAtMs !== null && row.nextDispatchAtMs > nowMs)) {
       return;
     }
-    const result = handle.prepare("UPDATE pending_turns SET state = 'dispatching', run_id = ? WHERE id = ? AND state = 'queued'").run(runId, row.id);
+    const result = handle.prepare("UPDATE pending_queue_items SET state = 'dispatching', run_id = ?, updated_at_ms = ? WHERE id = ? AND state = 'queued'").run(runId, nowMs, row.id);
     if (result.changes === 1) {
-      claimed = pendingTurnFromRow(row);
+      const item = pendingQueueItemFromRow({ ...row, state: "dispatching", runId, updatedAtMs: nowMs });
+      if (item.kind === "message" || item.kind === "goal") {
+        claimed = item;
+      }
       bumpWorkspaceRevisionInTransaction(handle);
     }
   });
@@ -1127,34 +1444,78 @@ export function claimNextPendingTurn(conversationId: string, runId: string): Pen
 export function deletePendingTurn(id: string): void {
   const handle = database();
   transaction(() => {
-    handle.prepare("DELETE FROM pending_turns WHERE id = ?").run(id);
+    handle.prepare("DELETE FROM pending_queue_items WHERE id = ?").run(id);
     bumpWorkspaceRevisionInTransaction(handle);
   });
 }
 
 export function releasePendingTurn(id: string, options: { readonly pause: boolean }): PendingTurnRecord | null {
+  const released = releasePendingQueueItem(id, { pause: options.pause });
+  return released?.kind === "message" ? { id: released.id, conversationId: released.conversationId, createdAtMs: released.createdAtMs, message: released.message, origin: released.origin } : null;
+}
+
+export function releasePendingQueueItem(
+  id: string,
+  options: { readonly pause: boolean; readonly rotateToEnd?: boolean; readonly nextDispatchAtMs?: number },
+): PendingQueueDispatchItem | null {
   const handle = database();
-  let released: PendingTurnRecord | null = null;
+  let released: PendingQueueDispatchItem | null = null;
   transaction(() => {
-    const row = handle.prepare("SELECT id, conversation_id AS conversationId, created_at_ms AS createdAtMs, data FROM pending_turns WHERE id = ?").get(id) as PendingTurnRow | undefined;
+    const row = handle
+      .prepare(
+        `SELECT id, conversation_id AS conversationId, position, kind, created_at_ms AS createdAtMs, updated_at_ms AS updatedAtMs, state, run_id AS runId, next_dispatch_at_ms AS nextDispatchAtMs, data
+         FROM pending_queue_items WHERE id = ?`,
+      )
+      .get(id) as PendingQueueItemRow | undefined;
     if (!row) {
       return;
     }
-    handle.prepare("UPDATE pending_turns SET state = 'queued', run_id = NULL WHERE id = ?").run(id);
+    const item = pendingQueueItemFromRow(row);
+    if (item.kind !== "message" && item.kind !== "goal") {
+      return;
+    }
+    const nextState: PendingQueueItemState = item.kind === "goal" && options.pause ? "paused" : "queued";
+    const nextPosition = options.rotateToEnd ? nextPendingQueueItemPosition(handle, row.conversationId) : row.position;
+    let nextData = row.data;
+    if (item.kind === "goal") {
+      const data = JSON.parse(row.data) as PendingGoalStoredData;
+      nextData = JSON.stringify({ ...data, dispatchCount: item.dispatchCount + 1 });
+    }
+    handle
+      .prepare("UPDATE pending_queue_items SET state = ?, run_id = NULL, position = ?, updated_at_ms = ?, next_dispatch_at_ms = ?, data = ? WHERE id = ?")
+      .run(nextState, nextPosition, Date.now(), options.nextDispatchAtMs ?? null, nextData, id);
     if (options.pause) {
       setPendingTurnQueuePausedInTransaction(handle, row.conversationId, true);
     }
-    released = pendingTurnFromRow(row);
+    const nextRow = { ...row, state: nextState, runId: null, position: nextPosition, updatedAtMs: Date.now(), nextDispatchAtMs: options.nextDispatchAtMs ?? null, data: nextData };
+    const nextItem = pendingQueueItemFromRow(nextRow);
+    if (nextItem.kind === "message" || nextItem.kind === "goal") {
+      released = nextItem;
+    }
     bumpWorkspaceRevisionInTransaction(handle);
   });
   return released;
 }
 
+export function releaseDispatchingQueueItemByRunId(
+  runId: string,
+  options: { readonly pause: boolean; readonly rotateToEnd?: boolean; readonly nextDispatchAtMs?: number },
+): PendingQueueDispatchItem | null {
+  const handle = database();
+  const row = handle
+    .prepare(
+      `SELECT id, conversation_id AS conversationId, position, kind, created_at_ms AS createdAtMs, updated_at_ms AS updatedAtMs, state, run_id AS runId, next_dispatch_at_ms AS nextDispatchAtMs, data
+       FROM pending_queue_items WHERE run_id = ? AND state = 'dispatching' LIMIT 1`,
+    )
+    .get(runId) as PendingQueueItemRow | undefined;
+  return row ? releasePendingQueueItem(row.id, options) : null;
+}
+
 export function resetDispatchingPendingTurns(): void {
   const handle = database();
   transaction(() => {
-    const rows = handle.prepare("SELECT DISTINCT conversation_id AS conversationId FROM pending_turns WHERE state = 'dispatching'").all() as Array<{ conversationId: string }>;
-    const result = handle.prepare("UPDATE pending_turns SET state = 'queued', run_id = NULL WHERE state = 'dispatching'").run();
+    const rows = handle.prepare("SELECT DISTINCT conversation_id AS conversationId FROM pending_queue_items WHERE state = 'dispatching'").all() as Array<{ conversationId: string }>;
+    const result = handle.prepare("UPDATE pending_queue_items SET state = 'queued', run_id = NULL WHERE state = 'dispatching'").run();
     if (result.changes > 0) {
       for (const row of rows) {
         setPendingTurnQueuePausedInTransaction(handle, row.conversationId, true);

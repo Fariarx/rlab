@@ -26,7 +26,44 @@ export interface PendingTurnQueueSnapshot {
   readonly conversationId: string;
   readonly paused: boolean;
   readonly messages: readonly ChatMessage[];
+  readonly items: readonly PendingQueueItem[];
 }
+
+export type PendingQueueItemState = "queued" | "dispatching" | "paused" | "waiting_wakeup";
+
+interface PendingQueueItemBase {
+  readonly id: string;
+  readonly conversationId: string;
+  readonly position: number;
+  readonly createdAtMs: number;
+  readonly updatedAtMs: number;
+  readonly state: PendingQueueItemState;
+  readonly runId?: string;
+  readonly nextDispatchAtMs?: number;
+}
+
+export interface PendingQueueMessageItem extends PendingQueueItemBase {
+  readonly kind: "message";
+  readonly message: ChatMessage;
+  readonly origin: string;
+}
+
+export interface PendingQueueGoalItem extends PendingQueueItemBase {
+  readonly kind: "goal";
+  readonly description: string;
+  readonly origin: string;
+  readonly dispatchCount: number;
+}
+
+export interface PendingQueueWakeupItem extends PendingQueueItemBase {
+  readonly kind: "wakeup";
+  readonly wakeupId: string;
+  readonly prompt: string;
+  readonly reason?: string;
+  readonly trigger?: WakeupTrigger;
+}
+
+export type PendingQueueItem = PendingQueueMessageItem | PendingQueueGoalItem | PendingQueueWakeupItem;
 
 export interface CliUpdateInfo {
   readonly agent: string;
@@ -104,14 +141,16 @@ export async function submitRunInput(id: string, selected: readonly string[]): P
 
 function normalizePendingTurnQueue(payload: unknown, conversationId: string): PendingTurnQueueSnapshot {
   if (!isRecord(payload) || !isRecord(payload.queue)) {
-    return { conversationId, paused: false, messages: [] };
+    return { conversationId, paused: false, messages: [], items: [] };
   }
   const queue = payload.queue;
   const rawMessages = Array.isArray(queue.messages) ? queue.messages : [];
+  const rawItems = Array.isArray(queue.items) ? queue.items : [];
   return {
     conversationId: typeof queue.conversationId === "string" ? queue.conversationId : conversationId,
     paused: queue.paused === true,
     messages: rawMessages.filter(isRecord).map((message) => message as unknown as ChatMessage),
+    items: rawItems.filter(isRecord).map((item) => item as unknown as PendingQueueItem),
   };
 }
 
@@ -147,6 +186,58 @@ export async function cancelPendingTurn(conversationId: string, messageId: strin
   const payload = await readJsonPayload(response);
   if (!response.ok) {
     throw new Error(payloadErrorMessage(payload, `Queue cancel failed (${response.status})`));
+  }
+  return normalizePendingTurnQueue(payload, conversationId);
+}
+
+export async function enqueuePendingGoal(conversationId: string, description: string, afterItemId?: string | null): Promise<PendingTurnQueueSnapshot> {
+  const response = await fetch("/api/queue", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "enqueueGoal", conversationId, description, ...(afterItemId === undefined ? {} : { afterItemId }) }),
+  });
+  const payload = await readJsonPayload(response);
+  if (!response.ok) {
+    throw new Error(payloadErrorMessage(payload, `Queue goal enqueue failed (${response.status})`));
+  }
+  return normalizePendingTurnQueue(payload, conversationId);
+}
+
+export async function cancelPendingQueueItem(conversationId: string, itemId: string): Promise<PendingTurnQueueSnapshot> {
+  const response = await fetch("/api/queue", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "cancelItem", conversationId, itemId }),
+  });
+  const payload = await readJsonPayload(response);
+  if (!response.ok) {
+    throw new Error(payloadErrorMessage(payload, `Queue item cancel failed (${response.status})`));
+  }
+  return normalizePendingTurnQueue(payload, conversationId);
+}
+
+export async function setPendingQueueItemPaused(conversationId: string, itemId: string, paused: boolean): Promise<PendingTurnQueueSnapshot> {
+  const response = await fetch("/api/queue", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "setItemPaused", conversationId, itemId, paused }),
+  });
+  const payload = await readJsonPayload(response);
+  if (!response.ok) {
+    throw new Error(payloadErrorMessage(payload, `Queue item pause failed (${response.status})`));
+  }
+  return normalizePendingTurnQueue(payload, conversationId);
+}
+
+export async function movePendingQueueItemAfter(conversationId: string, itemId: string, afterItemId: string | null): Promise<PendingTurnQueueSnapshot> {
+  const response = await fetch("/api/queue", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "moveAfter", conversationId, itemId, afterItemId }),
+  });
+  const payload = await readJsonPayload(response);
+  if (!response.ok) {
+    throw new Error(payloadErrorMessage(payload, `Queue item move failed (${response.status})`));
   }
   return normalizePendingTurnQueue(payload, conversationId);
 }

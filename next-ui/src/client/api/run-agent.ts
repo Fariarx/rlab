@@ -89,6 +89,7 @@ export interface ActiveRunSnapshot {
   readonly runId: string;
   readonly conversationId: string;
   readonly userMessageId: string;
+  readonly userMessage?: ChatMessage;
   readonly agentMessageId: string;
   readonly startedAt: string;
 }
@@ -97,6 +98,7 @@ export interface ActiveRunUpdate {
   readonly runId: string;
   readonly conversationId: string;
   readonly userMessageId: string;
+  readonly userMessage?: ChatMessage;
   readonly agentMessageId: string;
   readonly startedAtMs?: number;
   readonly status: ConversationStatus;
@@ -180,6 +182,7 @@ function isActiveRunSnapshot(value: unknown): value is ActiveRunSnapshot {
     typeof value.runId === "string" &&
     typeof value.conversationId === "string" &&
     typeof value.userMessageId === "string" &&
+    (value.userMessage === undefined || isChatMessage(value.userMessage)) &&
     typeof value.agentMessageId === "string" &&
     typeof value.startedAt === "string"
   );
@@ -198,12 +201,28 @@ function isRunUsage(value: unknown): value is RunUsage {
   );
 }
 
+function isChatMessage(value: unknown): value is ChatMessage {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    (value.role === "user" || value.role === "agent") &&
+    (value.time === undefined || typeof value.time === "string") &&
+    (value.createdAtMs === undefined || typeof value.createdAtMs === "number") &&
+    (value.startedAtMs === undefined || typeof value.startedAtMs === "number") &&
+    (value.text === undefined || typeof value.text === "string") &&
+    (value.blocks === undefined || Array.isArray(value.blocks)) &&
+    (value.costUsd === undefined || typeof value.costUsd === "number") &&
+    (value.usage === undefined || isRunUsage(value.usage))
+  );
+}
+
 function isActiveRunUpdate(value: unknown): value is ActiveRunUpdate {
   return (
     isRecord(value) &&
     typeof value.runId === "string" &&
     typeof value.conversationId === "string" &&
     typeof value.userMessageId === "string" &&
+    (value.userMessage === undefined || isChatMessage(value.userMessage)) &&
     typeof value.agentMessageId === "string" &&
     (value.startedAtMs === undefined || typeof value.startedAtMs === "number") &&
     isConversationStatus(value.status) &&
@@ -234,6 +253,7 @@ export async function loadActiveRuns(): Promise<ActiveRunSnapshot[]> {
     runId: run.runId,
     conversationId: run.conversationId,
     userMessageId: run.userMessageId,
+    ...(run.userMessage === undefined ? {} : { userMessage: run.userMessage }),
     agentMessageId: run.agentMessageId,
     startedAt: run.startedAt,
   }));
@@ -437,7 +457,7 @@ export async function runConversation(opts: {
     if (e.type === "status" && e.level === "info") {
       return;
     }
-    if (e.type !== "session" && e.type !== "done" && e.type !== "wakeup" && e.type !== "cancel_wakeup") {
+    if (e.type !== "session" && e.type !== "done" && e.type !== "wakeup" && e.type !== "cancel_wakeup" && e.type !== "goal") {
       emitBlocks();
     }
   };

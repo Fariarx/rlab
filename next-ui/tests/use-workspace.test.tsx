@@ -117,6 +117,7 @@ function activeRunsPayloadFromState(state: WorkspaceState) {
               runId: conversation.activeRunId,
               conversationId: conversation.id,
               userMessageId: "test-user-message",
+              userMessage: state.threads[conversation.id]?.find((message) => message.id === "test-user-message"),
               agentMessageId: "test-agent-message",
               startedAt: "2026-06-06T14:00:00.000Z",
             },
@@ -728,10 +729,14 @@ describe("useWorkspace", () => {
   it("retries transient workspace save failures and clears the save error after success", async () => {
     vi.useFakeTimers();
     let saveAttempts = 0;
+    let transientServerRevision = 1;
     vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url === "/api/workspace" && (!init || init.method === "GET")) {
-        return Response.json(state);
+        return Response.json({ ...state, revision: transientServerRevision });
+      }
+      if (url === "/api/workspace/revision" && (!init || init.method === "GET")) {
+        return Response.json({ revision: transientServerRevision });
       }
       if (url === "/api/workspace/mutations" && init?.method === "POST") {
         saveAttempts += 1;
@@ -739,7 +744,8 @@ describe("useWorkspace", () => {
           return Response.json({ error: "database is locked" }, { status: 502 });
         }
         state = applyWorkspaceMutationRequest(state, init);
-        return Response.json({ ok: true });
+        transientServerRevision += 1;
+        return Response.json({ ok: true, revision: transientServerRevision });
       }
       const queueResponse = await handleQueueFetch(url, init);
       if (queueResponse) {
@@ -791,6 +797,9 @@ describe("useWorkspace", () => {
       const url = String(input);
       if (url === "/api/workspace" && (!init || init.method === "GET")) {
         return Response.json({ ...state, revision: serverRevision });
+      }
+      if (url === "/api/workspace/revision" && (!init || init.method === "GET")) {
+        return Response.json({ revision: serverRevision });
       }
       if (url === "/api/workspace/mutations" && init?.method === "POST") {
         saveAttempts += 1;
@@ -1649,6 +1658,59 @@ describe("useWorkspace", () => {
       expect(screen.getByTestId("status")).toHaveTextContent("done");
     });
     expect(screen.getByTestId("loading")).toHaveTextContent("false");
+  });
+
+  it("shows a server-owned wakeup user message from active-run discovery before a thread reload", async () => {
+    const wakeupUser: ChatMessage = { id: "test-user-message", role: "user", text: "Wakeup fired", time: "15:00", createdAtMs: 2_000 };
+    state = {
+      ...state,
+      selectedId: "chat-2",
+      threads: { ...state.threads, "chat-2": [] },
+    };
+    vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/workspace" && (!init || init.method === "GET")) {
+        return Response.json({ ...state, revision: serverRevision });
+      }
+      if (url === "/api/workspace/revision" && (!init || init.method === "GET")) {
+        return Response.json({ revision: serverRevision });
+      }
+      const queueResponse = await handleQueueFetch(url, init);
+      if (queueResponse) {
+        return queueResponse;
+      }
+      if (url === "/api/runs") {
+        return Response.json({
+          runs: [
+            {
+              runId: "run-wakeup",
+              conversationId: "chat-2",
+              userMessageId: wakeupUser.id,
+              userMessage: wakeupUser,
+              agentMessageId: "test-agent-message",
+              startedAt: "2026-06-06T15:00:00.000Z",
+            },
+          ],
+        });
+      }
+      if (url.startsWith("/api/run-attach")) {
+        attachRunRequests.push(url);
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            attachRunController = controller;
+          },
+        });
+        return new Response(stream, { headers: { "Content-Type": "application/x-ndjson" } });
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    render(<Probe />);
+
+    await waitFor(() => {
+      expect(attachRunRequests).toEqual(["/api/run-attach?runId=run-wakeup"]);
+    });
+    expect(screen.getByTestId("thread-ids")).toHaveTextContent("test-user-message");
   });
 
   it("reattaches when a background run attach stream closes before a terminal update", async () => {

@@ -4,14 +4,18 @@ import { accessModeForAgentProfile, compactCommandForAgent, type AgentBlock, typ
 import { translate } from "../../i18n/I18nProvider";
 import { cancelRun, loadActiveRuns, runConversation, type ActiveRunSnapshot } from "../../client/api/run-agent";
 import {
+  cancelPendingQueueItem,
   cancelPendingTurn,
   enqueuePendingTurn,
   loadPendingTurnQueue,
+  movePendingQueueItemAfter,
   sendNextPendingTurn,
+  setPendingQueueItemPaused,
   setPendingTurnQueuePaused as setServerPendingTurnQueuePaused,
+  type PendingQueueItem,
   type PendingTurnQueueSnapshot,
 } from "../../client/api/workspace-page-api";
-import { loadConversationThread, loadConversationThreadPage, loadWorkspaceRevision, loadWorkspaceState } from "../../client/api/workspace-api";
+import { loadConversationThread, loadConversationThreadPage, loadWorkspaceRevision, loadWorkspaceState, subscribeWorkspaceEvents, type WorkspaceChangeEvent } from "../../client/api/workspace-api";
 import { nowLabel, starterThread, truncate } from "./sample-data";
 import { type AppSettings, type AppSettingsPatch, mergeAppSettings } from "../../lib/app-settings";
 import type { WorkspaceMutation } from "../../lib/workspace-mutations";
@@ -23,6 +27,7 @@ import {
   isLiveRunStatus,
   isSettledRunConversationResult,
   patchActiveRunUpdate,
+  patchActiveRunBoundUserMessage,
   patchAgentMessageUsage,
   settleThreadLiveBlocks,
   snippetFromStateThread,
@@ -101,6 +106,7 @@ export interface CreatedProject {
 }
 
 export interface Workspace {
+  readonly activeRunIds: ReadonlySet<string>;
   readonly chats: readonly ConversationSummary[];
   readonly projects: readonly Project[];
   readonly threads: Record<string, ChatMessage[]>;
@@ -118,9 +124,14 @@ export interface Workspace {
   readonly remove: (id: string) => string;
   readonly sendMessage: (id: string, text: string) => void;
   readonly pendingMessageCount: (id: string) => number;
+  readonly pendingQueueItemCount: (id: string) => number;
   readonly queuedMessages: (id: string) => readonly ChatMessage[];
+  readonly queuedItems: (id: string) => readonly PendingQueueItem[];
   readonly cancelQueuedMessage: (id: string, messageId: string) => void;
+  readonly cancelQueuedItem: (id: string, itemId: string) => void;
   readonly sendQueuedMessageNow: (id: string) => boolean;
+  readonly setQueuedItemPaused: (id: string, itemId: string, paused: boolean) => void;
+  readonly moveQueuedItemAfter: (id: string, itemId: string, afterItemId: string | null) => void;
   readonly hasOlderThreadMessages: (id: string) => boolean;
   readonly loadOlderThread: (id: string) => Promise<void>;
   readonly isQueuePaused: (id: string) => boolean;
@@ -172,6 +183,8 @@ export class WorkspaceStore implements Workspace {
 
   private loadRetryTimer: ReturnType<typeof setInterval> | null = null;
 
+  private unsubscribeWorkspaceEvents: (() => void) | null = null;
+
   private lastHiddenPollAt = 0;
 
   private lastActiveRunDiscoveryAt = 0;
@@ -197,7 +210,7 @@ export class WorkspaceStore implements Workspace {
       });
     },
     setRevision: (revision) => {
-      this.workspaceRevision = revision;
+      this.workspaceRevision = Math.max(this.workspaceRevision, revision);
     },
   });
   private readonly pendingQueues = observable.map<string, PendingTurnQueueSnapshot>();
@@ -293,6 +306,10 @@ export class WorkspaceStore implements Workspace {
     return this.state.settings;
   }
 
+  get activeRunIds(): ReadonlySet<string> {
+    return new Set([...this.runs.values()].map((run) => run.runId));
+  }
+
   private applyServerState(state: WorkspaceState): void {
     syncGeneratedWorkspaceIdSequence(state);
     // The shell ships only some threads (the selected one); those it does ship
@@ -307,10 +324,14 @@ export class WorkspaceStore implements Workspace {
     return this.saveQueue.hasPendingWrites();
   }
 
-  private applyRemoteServerState(serverState: WorkspaceState, preferredSelectedId: string): string {
+  private hasWorkspaceSaveInFlight(): boolean {
+    return this.saveQueue.hasSaveInFlight();
+  }
+
+  private applyRemoteServerState(serverState: WorkspaceState, preferredSelectedId: string): RemoteWorkspaceShellMerge {
     const merge = mergeRemoteWorkspaceShell({ current: this.state, serverState, preferredSelectedId, activeRuns: this.runs });
     this.applyRemoteMergedState(merge.state, merge);
-    return merge.selectedId;
+    return merge;
   }
 
   private applyRemoteMergedState(nextState: WorkspaceState, merge: RemoteWorkspaceShellMerge): void {
@@ -343,6 +364,16 @@ export class WorkspaceStore implements Workspace {
     return this.threadLoader.loadThread(id, force);
   }
 
+  private refreshStaleThreadsAfterRemoteMerge(merge: RemoteWorkspaceShellMerge, changedConversationIds: readonly string[] = []): void {
+    const ids = new Set([merge.selectedId, ...changedConversationIds].filter((id): id is string => id.length > 0));
+    for (const id of ids) {
+      const shouldRefreshSelectedShellThread = id === merge.selectedId && !this.threadLoader.isLoaded(id);
+      if ((shouldRefreshSelectedShellThread || this.threadLoader.isStale(id)) && (id === merge.selectedId || this.threadLoader.isLoaded(id))) {
+        void this.loadThreadFromServer(id, false);
+      }
+    }
+  }
+
   private async ensureFullThreadLoaded(id: string): Promise<boolean> {
     if (this.threadLoader.isFullyLoaded(id) && !this.threadLoader.isStale(id)) {
       return true;
@@ -358,7 +389,7 @@ export class WorkspaceStore implements Workspace {
   }
 
   private queueSnapshot(id: string): PendingTurnQueueSnapshot {
-    return this.pendingQueues.get(id) ?? { conversationId: id, paused: false, messages: [] };
+    return this.pendingQueues.get(id) ?? { conversationId: id, paused: false, messages: [], items: [] };
   }
 
   private setQueueSnapshot(snapshot: PendingTurnQueueSnapshot): void {
@@ -430,7 +461,56 @@ export class WorkspaceStore implements Workspace {
     return now - this.lastActiveRunDiscoveryAt >= ACTIVE_RUN_DISCOVERY_POLL_MS;
   }
 
+  private syncForegroundWorkspaceState(): void {
+    if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+      return;
+    }
+    if (!this.hydrated || this.loading) {
+      return;
+    }
+    void this.refreshWorkspaceFromServer();
+    void this.refreshBackgroundRuns();
+    this.refreshSelectedQueueIfNeeded();
+  }
+
+  private readonly handleWindowFocus = (): void => {
+    this.syncForegroundWorkspaceState();
+  };
+
+  private readonly handleWindowPageShow = (): void => {
+    this.syncForegroundWorkspaceState();
+  };
+
+  private readonly handleVisibilityChange = (): void => {
+    if (typeof document === "undefined" || document.visibilityState === "visible") {
+      this.syncForegroundWorkspaceState();
+    }
+  };
+
+  private connectWorkspaceEvents(): void {
+    if (this.unsubscribeWorkspaceEvents) {
+      return;
+    }
+    this.unsubscribeWorkspaceEvents = subscribeWorkspaceEvents({
+      onEvent: (event) => {
+        if (!this.hydrated || event.revision <= this.workspaceRevision) {
+          return;
+        }
+        void this.refreshWorkspaceFromServer(event);
+      },
+      onError: () => undefined,
+    });
+  }
+
   mount(): void {
+    this.connectWorkspaceEvents();
+    if (typeof window !== "undefined") {
+      window.addEventListener("focus", this.handleWindowFocus);
+      window.addEventListener("pageshow", this.handleWindowPageShow);
+    }
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", this.handleVisibilityChange);
+    }
     if (!this.pollTimer) {
       this.pollTimer = setInterval(() => {
         if (this.hydrated && !this.loading && this.shouldRunWorkspacePollTick()) {
@@ -455,6 +535,13 @@ export class WorkspaceStore implements Workspace {
   unmount(): void {
     this.loadSeq += 1;
     this.saveQueue.flushNow();
+    if (typeof window !== "undefined") {
+      window.removeEventListener("focus", this.handleWindowFocus);
+      window.removeEventListener("pageshow", this.handleWindowPageShow);
+    }
+    if (typeof document !== "undefined") {
+      document.removeEventListener("visibilitychange", this.handleVisibilityChange);
+    }
     for (const run of this.runs.values()) {
       run.canceled = true;
       run.controller.abort();
@@ -468,6 +555,8 @@ export class WorkspaceStore implements Workspace {
       clearInterval(this.loadRetryTimer);
       this.loadRetryTimer = null;
     }
+    this.unsubscribeWorkspaceEvents?.();
+    this.unsubscribeWorkspaceEvents = null;
     this.saveQueue.dispose();
   }
 
@@ -522,19 +611,19 @@ export class WorkspaceStore implements Workspace {
       });
   }
 
-  private async refreshWorkspaceFromServer(): Promise<void> {
-    if (this.syncInFlight || !this.hydrated || this.loading || this.hasPendingWorkspaceWrites()) {
+  private async refreshWorkspaceFromServer(event?: WorkspaceChangeEvent): Promise<void> {
+    if (this.syncInFlight || !this.hydrated || this.loading || this.hasWorkspaceSaveInFlight()) {
       return;
     }
     const seq = this.loadSeq;
     this.syncInFlight = true;
     try {
-      const revision = await loadWorkspaceRevision();
-      if (seq !== this.loadSeq || revision <= this.workspaceRevision || this.hasPendingWorkspaceWrites()) {
+      const revision = event?.revision ?? (await loadWorkspaceRevision());
+      if (seq !== this.loadSeq || revision <= this.workspaceRevision || this.hasWorkspaceSaveInFlight()) {
         return;
       }
       const loadedState = await loadWorkspaceState();
-      if (seq !== this.loadSeq || this.hasPendingWorkspaceWrites()) {
+      if (seq !== this.loadSeq || this.hasWorkspaceSaveInFlight()) {
         return;
       }
       if (typeof loadedState.revision !== "number") {
@@ -544,17 +633,21 @@ export class WorkspaceStore implements Workspace {
       if (loadedRevision <= this.workspaceRevision) {
         return;
       }
-      let selectedId = "";
-      runInAction(() => {
+      const merge = runInAction((): RemoteWorkspaceShellMerge => {
         const preferredSelectedId = this.state.selectedId;
-        this.workspaceRevision = loadedRevision;
-        selectedId = this.applyRemoteServerState(cloneWorkspaceState(loadedState), preferredSelectedId);
-        this.loadError = null;
-      });
-      if (selectedId) {
-        if (this.threadLoader.isStale(selectedId)) {
-          void this.loadThreadFromServer(selectedId, false);
+        if (this.hasPendingWorkspaceWrites()) {
+          const rebasedMerge = this.saveQueue.rebasePendingMutationsAfterRemoteShell(cloneWorkspaceState(loadedState), loadedRevision);
+          this.loadError = null;
+          return rebasedMerge;
         }
+        this.workspaceRevision = loadedRevision;
+        const remoteMerge = this.applyRemoteServerState(cloneWorkspaceState(loadedState), preferredSelectedId);
+        this.loadError = null;
+        return remoteMerge;
+      });
+      const selectedId = merge.selectedId;
+      if (selectedId) {
+        this.refreshStaleThreadsAfterRemoteMerge(merge, event?.conversationIds);
         if (this.shouldRefreshQueue(selectedId)) {
           this.refreshQueue(selectedId);
         }
@@ -671,6 +764,11 @@ export class WorkspaceStore implements Workspace {
   }
 
   private attachBackgroundRun(run: ActiveRunSnapshot): void {
+    if (run.userMessage) {
+      runInAction(() => {
+        this.state = patchActiveRunBoundUserMessage(this.state, run);
+      });
+    }
     attachWorkspaceBackgroundRun({
       run,
       runs: this.runs,
@@ -924,7 +1022,7 @@ export class WorkspaceStore implements Workspace {
       return;
     }
     const userMsg: ChatMessage = { id: nextWorkspaceId("u"), role: "user", text, time: nowLabel(), createdAtMs: Date.now() };
-    if (this.isQueuePaused(id) && this.pendingMessageCount(id) === 0) {
+    if (this.isQueuePaused(id) && this.pendingQueueItemCount(id) === 0) {
       this.setQueuePaused(id, false);
     }
     this.dispatchUserTurn(id, userMsg);
@@ -950,9 +1048,31 @@ export class WorkspaceStore implements Workspace {
     return this.queueSnapshot(id).messages.length;
   }
 
+  pendingQueueItemCount(id: string): number {
+    const snapshot = this.queueSnapshot(id);
+    return snapshot.items.length > 0 ? snapshot.items.length : snapshot.messages.length;
+  }
+
   /** Queued (not-yet-dispatched) user turns for a conversation, in send order. */
   queuedMessages(id: string): readonly ChatMessage[] {
     return this.queueSnapshot(id).messages;
+  }
+
+  queuedItems(id: string): readonly PendingQueueItem[] {
+    const snapshot = this.queueSnapshot(id);
+    return snapshot.items.length > 0
+      ? snapshot.items
+      : snapshot.messages.map((message, index) => ({
+          id: message.id,
+          conversationId: id,
+          position: index,
+          kind: "message" as const,
+          createdAtMs: message.createdAtMs ?? 0,
+          updatedAtMs: message.createdAtMs ?? 0,
+          state: "queued" as const,
+          message,
+          origin: "",
+        }));
   }
 
   /** Cancel a queued turn before it runs. */
@@ -969,7 +1089,7 @@ export class WorkspaceStore implements Workspace {
   }
 
   sendQueuedMessageNow(id: string): boolean {
-    if (this.pendingMessageCount(id) === 0) {
+    if (this.pendingQueueItemCount(id) === 0) {
       return false;
     }
     const stopCurrentRun = this.conversationHasActiveWork(id) ? this.stopRunWithQueuePolicy(id, { pauseQueue: false }) : Promise.resolve();
@@ -985,6 +1105,46 @@ export class WorkspaceStore implements Workspace {
         });
       });
     return true;
+  }
+
+  cancelQueuedItem(id: string, itemId: string): void {
+    void cancelPendingQueueItem(id, itemId)
+      .then((snapshot) => {
+        runInAction(() => this.setQueueSnapshot(snapshot));
+      })
+      .catch((error: unknown) => {
+        runInAction(() => {
+          this.loadError = error instanceof Error ? error.message : String(error);
+        });
+      });
+  }
+
+  setQueuedItemPaused(id: string, itemId: string, paused: boolean): void {
+    void setPendingQueueItemPaused(id, itemId, paused)
+      .then((snapshot) => {
+        runInAction(() => this.setQueueSnapshot(snapshot));
+        if (!paused) {
+          void this.refreshBackgroundRuns();
+        }
+      })
+      .catch((error: unknown) => {
+        runInAction(() => {
+          this.loadError = error instanceof Error ? error.message : String(error);
+        });
+      });
+  }
+
+  moveQueuedItemAfter(id: string, itemId: string, afterItemId: string | null): void {
+    void movePendingQueueItemAfter(id, itemId, afterItemId)
+      .then((snapshot) => {
+        runInAction(() => this.setQueueSnapshot(snapshot));
+        void this.refreshBackgroundRuns();
+      })
+      .catch((error: unknown) => {
+        runInAction(() => {
+          this.loadError = error instanceof Error ? error.message : String(error);
+        });
+      });
   }
 
   /** Whether the conversation's queue is paused (drains held until resumed). */

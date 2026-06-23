@@ -1,5 +1,6 @@
 import AttachFileIcon from "@mui/icons-material/AttachFile";
 import ChecklistRoundedIcon from "@mui/icons-material/ChecklistRounded";
+import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
 import ConstructionRoundedIcon from "@mui/icons-material/ConstructionRounded";
 import MicRoundedIcon from "@mui/icons-material/MicRounded";
 import OpenInBrowserIcon from "@mui/icons-material/OpenInBrowser";
@@ -41,6 +42,13 @@ export { voiceLevelCountFromWidth, voiceLevelsFromTimeDomainData } from "./Compo
 
 const COMPOSER_BORDER_HOVER_RADIUS_PX = 42;
 const COMPOSER_OPTIONS_MENU_Y_OFFSET_PX = -12;
+const VOICE_INPUT_OVERLAY_MIN_HEIGHT_PX = 70;
+const VOICE_INPUT_PLACEHOLDER_TOP_INSET_PX = 11;
+const VOICE_INPUT_STRIP_HEIGHT_PX = 32;
+const VOICE_INPUT_STRIP_BOTTOM_PX = 6;
+const VOICE_INPUT_TEXT_STRIP_GAP_PX = 2;
+const VOICE_INPUT_OVERLAY_BOTTOM_PADDING_PX = VOICE_INPUT_STRIP_HEIGHT_PX + VOICE_INPUT_STRIP_BOTTOM_PX + VOICE_INPUT_TEXT_STRIP_GAP_PX;
+const VOICE_INPUT_PANEL_GAP_PX = 6;
 const LIMIT_UNSUPPORTED_AGENTS = new Set<string>(["opencode"]);
 const WRITE_PLACEHOLDER_PATTERN = /^(?:Написать|Message)\s*:?\s+(.+)$/;
 
@@ -59,23 +67,27 @@ function ComposerPlaceholderHint({ label, panel = false }: { readonly label: str
         position: "absolute",
         left: panel ? 8 : 0,
         right: panel ? 8 : 0,
-        top: panel ? 8 : "50%",
+        top: panel ? `calc(100% - ${VOICE_INPUT_OVERLAY_MIN_HEIGHT_PX - VOICE_INPUT_PLACEHOLDER_TOP_INSET_PX}px)` : "50%",
         transform: panel ? "none" : "translateY(-50%)",
-        zIndex: 6,
+        zIndex: panel ? 8 : 6,
         display: "flex",
         alignItems: "center",
         gap: 0.5,
         minWidth: 0,
         color: "text.secondary",
         opacity: 0.76,
-        fontSize: "0.84rem",
-        lineHeight: 1.45,
         pointerEvents: "none",
       }}
     >
-      <Box component="span" sx={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+      <Typography
+        data-testid="composer-placeholder-label"
+        variant="microLabel"
+        component="span"
+        noWrap
+        sx={{ color: "inherit", minWidth: 0 }}
+      >
         {label}
-      </Box>
+      </Typography>
       <DriveFileRenameOutlineRoundedIcon data-testid="composer-placeholder-icon" sx={{ flex: "0 0 auto", fontSize: 15, color: "inherit" }} />
     </Box>
   );
@@ -397,6 +409,7 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
   });
 
   const {
+    cancelVoiceInput,
     finishVoiceInput,
     setVoiceLevelCountForWidth,
     toggleVoiceInput,
@@ -416,6 +429,8 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
     voiceProvider: editChrome ? undefined : voiceProvider,
   });
   finishVoiceInputRef.current = finishVoiceInput;
+  const cancelVoiceLabel = t("cancelVoiceInput");
+  const stopVoiceLabel = t("stopVoiceInput");
   const visualExpanded = expanded || voiceState === "recording";
   const effectiveOverlayLift = voiceState === "recording" ? Math.max(overlayLift, 38) : overlayLift;
   const floatingAttachments = editChrome ? [] : composerAttachments;
@@ -929,6 +944,7 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
             </Box>
           )}
           <InputBase
+            data-testid="composer-input-root"
             inputRef={textareaRef}
             value={composerValue}
             onChange={handleComposerChange}
@@ -938,29 +954,28 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
             inputProps={{ "aria-label": inputPlaceholder, "data-testid": "composer-input", spellCheck: false, autoCorrect: "off", autoCapitalize: "none", autoComplete: "off", ...inputEventProps }}
             multiline
             minRows={1}
-            maxRows={expanded ? 8 : 1}
+            maxRows={visualExpanded ? 8 : 1}
             sx={{
               width: "100%",
               fontSize: "0.84rem",
               lineHeight: 1.45,
               py: 0.25,
               ...hiddenNativePlaceholderSx,
-              ...(expanded && {
+              ...(visualExpanded && {
                 position: "absolute",
                 left: 0,
                 right: 0,
                 bottom: 0,
                 zIndex: 5,
-                px: 1,
-                py: 0.75,
+                minHeight: voiceState === "recording" ? VOICE_INPUT_OVERLAY_MIN_HEIGHT_PX : undefined,
+                pl: 1,
+                pr: 0,
+                pt: 0.75,
+                pb: voiceState === "recording" ? `${VOICE_INPUT_OVERLAY_BOTTOM_PADDING_PX}px` : 0.75,
                 borderRadius: (t) => `${t.custom.radii.md}px`,
                 backgroundColor: (t) => t.custom.surfaces.s2,
                 border: (t) => `1px solid ${t.custom.borders.strong}`,
                 boxShadow: "0 -10px 28px rgba(0, 0, 0, 0.45)",
-              }),
-              ...(voiceState === "recording" && {
-                opacity: 0,
-                pointerEvents: "none",
               }),
             }}
           />
@@ -969,26 +984,74 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
               data-testid="composer-voice-input-panel"
               sx={{
                 position: "absolute",
-                left: 0,
-                right: 0,
-                top: "50%",
-                transform: "translateY(-50%)",
-                zIndex: 6,
-                pointerEvents: "none",
+                left: 8,
+                right: 8,
+                bottom: VOICE_INPUT_STRIP_BOTTOM_PX,
+                zIndex: 7,
+                display: "flex",
+                alignItems: "center",
+                gap: `${VOICE_INPUT_PANEL_GAP_PX}px`,
+                pointerEvents: "auto",
               }}
             >
-              <VoiceRecordingStrip label={voiceLabel} duration={voiceDuration} levels={voiceLevels} ambient={voiceAmbient} onLevelCountChange={setVoiceLevelCountForWidth} dockBottom />
+              <Box sx={{ minWidth: 0, flex: "1 1 auto", pointerEvents: "none" }}>
+                <VoiceRecordingStrip label={stopVoiceLabel} duration={voiceDuration} levels={voiceLevels} ambient={voiceAmbient} onLevelCountChange={setVoiceLevelCountForWidth} dockBottom />
+              </Box>
+              <Stack data-testid="composer-voice-action-buttons" direction="row" sx={{ flex: "0 0 auto", alignItems: "center", gap: `${VOICE_INPUT_PANEL_GAP_PX}px` }}>
+                <Tooltip title={cancelVoiceLabel}>
+                  <span style={{ display: "flex" }}>
+                    <IconButton
+                      data-testid="composer-voice-cancel-button"
+                      aria-label={cancelVoiceLabel}
+                      tone="subtle"
+                      onClick={cancelVoiceInput}
+                      sx={{
+                        width: 30,
+                        height: 30,
+                        borderRadius: (theme) => `${theme.custom.radii.md}px`,
+                        backgroundColor: (theme) => theme.palette.status.info.soft,
+                        borderColor: (theme) => theme.palette.status.info.border,
+                        color: (theme) => theme.palette.status.info.main,
+                        "&:hover": { backgroundColor: (theme) => theme.custom.surfaces.s4 },
+                      }}
+                    >
+                      <CloseRoundedIcon sx={{ fontSize: 18 }} />
+                    </IconButton>
+                  </span>
+                </Tooltip>
+                <Tooltip title={stopVoiceLabel}>
+                  <span style={{ display: "flex" }}>
+                    <IconButton
+                      data-testid="composer-voice-stop-button"
+                      aria-label={stopVoiceLabel}
+                      tone="subtle"
+                      onClick={() => void finishVoiceInput()}
+                      sx={{
+                        width: 30,
+                        height: 30,
+                        borderRadius: (theme) => `${theme.custom.radii.md}px`,
+                        backgroundColor: (theme) => theme.palette.status.info.soft,
+                        borderColor: (theme) => theme.palette.status.info.border,
+                        color: (theme) => theme.palette.status.info.main,
+                        "&:hover": { backgroundColor: (theme) => theme.custom.surfaces.s4 },
+                      }}
+                    >
+                      <StopCircleIcon sx={{ fontSize: 18 }} />
+                    </IconButton>
+                  </span>
+                </Tooltip>
+              </Stack>
             </Box>
           ) : null}
-          {voiceState !== "recording" && showPlaceholderHint && placeholderModel.visualLabel ? <ComposerPlaceholderHint label={placeholderModel.visualLabel} /> : null}
+          {showPlaceholderHint && placeholderModel.visualLabel ? <ComposerPlaceholderHint label={placeholderModel.visualLabel} panel={voiceState === "recording"} /> : null}
         </Box>
         <Stack direction="row" spacing={0.5} sx={{ alignItems: "center", flex: "0 0 auto" }}>
           {!editChrome && !running && !voiceInputActive ? (
             <Box sx={{ display: { xs: "none", sm: "flex" }, alignItems: "center", gap: 0.5 }}>
-              <KeyHint keys="⏎" />
+              <KeyHint keys="⏎" enterKeyVariant="glyph" />
             </Box>
           ) : null}
-          {!editChrome && voiceAvailable && (
+          {!editChrome && voiceAvailable && voiceState !== "recording" && (
             <Tooltip title={voiceLabel}>
               <span style={{ display: "flex" }}>
                 <IconButton
@@ -1001,15 +1064,15 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
                     width: 30,
                     height: 30,
                     borderRadius: (theme) => `${theme.custom.radii.md}px`,
-                    backgroundColor: (theme) => (voiceState === "recording" ? theme.palette.status.info.soft : theme.custom.surfaces.s3),
-                    borderColor: (theme) => (voiceState === "recording" ? theme.palette.status.info.border : theme.custom.borders.strong),
-                    color: (theme) => (voiceState === "recording" ? theme.palette.status.info.main : theme.palette.text.primary),
+                    backgroundColor: (theme) => theme.custom.surfaces.s3,
+                    borderColor: (theme) => theme.custom.borders.strong,
+                    color: (theme) => theme.palette.text.primary,
                     "&:hover": {
-                      backgroundColor: (theme) => (voiceState === "recording" ? theme.palette.status.info.soft : theme.custom.surfaces.s4),
+                      backgroundColor: (theme) => theme.custom.surfaces.s4,
                     },
                   }}
                 >
-                  {voiceState === "recording" ? <StopCircleIcon sx={{ fontSize: 18 }} /> : <MicRoundedIcon sx={{ fontSize: 18 }} />}
+                  <MicRoundedIcon sx={{ fontSize: 18 }} />
                 </IconButton>
               </span>
             </Tooltip>

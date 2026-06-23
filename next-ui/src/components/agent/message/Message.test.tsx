@@ -1,5 +1,5 @@
 import { ThemeProvider } from "@mui/material/styles";
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../../../i18n/I18nProvider";
 import { appTheme } from "../../../theme/app-theme";
@@ -123,7 +123,7 @@ describe("Message", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Отправить изменённое сообщение" }));
 
-    expect(onEditAndResend).toHaveBeenCalledWith(message, "updated\n\n<attachment name=\"notes.txt\" type=\"text/plain\">\nhello\n</attachment>");
+    await waitFor(() => expect(onEditAndResend).toHaveBeenCalledWith(message, "updated\n\n<attachment name=\"notes.txt\" type=\"text/plain\">\nhello\n</attachment>"));
   });
 
   it("renders bare urls in user messages as links", () => {

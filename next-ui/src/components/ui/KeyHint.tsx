@@ -1,3 +1,4 @@
+import KeyboardReturnRoundedIcon from "@mui/icons-material/KeyboardReturnRounded";
 import { styled } from "@mui/material/styles";
 import { Fragment, type ReactNode } from "react";
 
@@ -11,6 +12,7 @@ interface KeyHintProps {
   /** Optional glyph drawn between caps. Omit for a clean gap-only look. */
   readonly separator?: ReactNode;
   readonly className?: string;
+  readonly enterKeyVariant?: "glyph" | "icon";
 }
 
 const Row = styled("span")({
@@ -44,6 +46,13 @@ const Separator = styled("span")(({ theme }) => ({
   color: theme.palette.status.idle.main,
 }));
 
+function KeyCapContent({ cap, enterKeyVariant }: { readonly cap: string; readonly enterKeyVariant: "glyph" | "icon" }) {
+  if (cap === "⏎" && enterKeyVariant === "icon") {
+    return <KeyboardReturnRoundedIcon data-testid="key-hint-enter-icon" sx={{ fontSize: 14 }} />;
+  }
+  return cap;
+}
+
 function keyedCaps(caps: readonly string[]): readonly { readonly cap: string; readonly key: string; readonly order: number }[] {
   const occurrences = new Map<string, number>();
   const keyed: { readonly cap: string; readonly key: string; readonly order: number }[] = [];
@@ -57,7 +66,7 @@ function keyedCaps(caps: readonly string[]): readonly { readonly cap: string; re
   return keyed;
 }
 
-export function KeyHint({ keys, separator, className }: KeyHintProps) {
+export function KeyHint({ keys, separator, className, enterKeyVariant = "icon" }: KeyHintProps) {
   const caps = typeof keys === "string" ? [keys] : keys;
 
   return (
@@ -65,7 +74,9 @@ export function KeyHint({ keys, separator, className }: KeyHintProps) {
       {keyedCaps(caps).map(({ cap, key, order }) => (
         <Fragment key={key}>
           {order > 0 && separator != null && <Separator>{separator}</Separator>}
-          <Cap>{cap}</Cap>
+          <Cap>
+            <KeyCapContent cap={cap} enterKeyVariant={enterKeyVariant} />
+          </Cap>
         </Fragment>
       ))}
     </Row>

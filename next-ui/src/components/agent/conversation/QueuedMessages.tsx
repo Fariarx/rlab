@@ -1,21 +1,30 @@
+import { useState } from "react";
+import AccessTimeRoundedIcon from "@mui/icons-material/AccessTimeRounded";
 import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
 import ContentCopyRoundedIcon from "@mui/icons-material/ContentCopyRounded";
+import DragIndicatorRoundedIcon from "@mui/icons-material/DragIndicatorRounded";
+import FlagRoundedIcon from "@mui/icons-material/FlagRounded";
 import PauseRoundedIcon from "@mui/icons-material/PauseRounded";
 import PlayArrowRoundedIcon from "@mui/icons-material/PlayArrowRounded";
 import ScheduleSendRoundedIcon from "@mui/icons-material/ScheduleSendRounded";
 import SendRoundedIcon from "@mui/icons-material/SendRounded";
 import { Box, Stack, Typography } from "@mui/material";
+import type { PendingQueueItem } from "../../../client/api/workspace-page-api";
 import { useI18n } from "../../../i18n/I18nProvider";
 import { Button, IconButton, Tooltip } from "../../ui";
 import type { ChatMessage } from "../core/types";
 
 export interface QueuedMessagesProps {
   readonly messages: readonly ChatMessage[];
+  readonly items?: readonly PendingQueueItem[];
   readonly paused: boolean;
   readonly onCancel: (messageId: string) => void;
+  readonly onCancelItem?: (itemId: string) => void;
   readonly onCopy: (message: ChatMessage) => void;
   readonly onSendNow: () => void;
+  readonly onToggleItemPause?: (itemId: string, paused: boolean) => void;
   readonly onTogglePause: () => void;
+  readonly onMoveItemAfter?: (itemId: string, afterItemId: string | null) => void;
 }
 
 const queuedActionButtonSx = {
@@ -44,18 +53,54 @@ const queuedHeaderButtonSx = {
 const QUEUED_VISIBLE_ROW_COUNT = 5;
 const QUEUED_ROW_HEIGHT_PX = 30;
 
+function messageItems(messages: readonly ChatMessage[]): readonly PendingQueueItem[] {
+  return messages.map((message, index) => ({
+    id: message.id,
+    conversationId: "",
+    position: index,
+    kind: "message" as const,
+    createdAtMs: message.createdAtMs ?? 0,
+    updatedAtMs: message.createdAtMs ?? 0,
+    state: "queued" as const,
+    message,
+    origin: "",
+  }));
+}
+
+function queueItemText(item: PendingQueueItem, emptyText: string): string {
+  if (item.kind === "message") {
+    return (item.message.text ?? "").trim() || emptyText;
+  }
+  if (item.kind === "goal") {
+    return item.description;
+  }
+  return item.prompt;
+}
+
+function QueueItemIcon({ item, index }: { readonly item: PendingQueueItem; readonly index: number }) {
+  if (item.kind === "goal") {
+    return <FlagRoundedIcon sx={{ fontSize: 14, color: (theme) => theme.palette.status.info.main }} />;
+  }
+  if (item.kind === "wakeup") {
+    return <AccessTimeRoundedIcon sx={{ fontSize: 14, color: (theme) => theme.palette.status.warn.main }} />;
+  }
+  return <>{index + 1}</>;
+}
+
 /**
  * The list of user turns waiting for the active run to finish, docked just above
  * the composer. Each turn can be copied or cancelled in place; the first can be
  * sent now (which interrupts the current run). The whole queue can be paused so
  * settled runs don't auto-dispatch the next turn. Hidden when the queue is empty.
  */
-export function QueuedMessages({ messages, paused, onCancel, onCopy, onSendNow, onTogglePause }: QueuedMessagesProps) {
+export function QueuedMessages({ messages, items, paused, onCancel, onCancelItem, onCopy, onSendNow, onToggleItemPause, onTogglePause, onMoveItemAfter }: QueuedMessagesProps) {
   const { t } = useI18n();
-  if (messages.length === 0) {
+  const queueItems = items && items.length > 0 ? items : messageItems(messages);
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+  if (queueItems.length === 0) {
     return null;
   }
-  const scrollable = messages.length > QUEUED_VISIBLE_ROW_COUNT;
+  const scrollable = queueItems.length > QUEUED_VISIBLE_ROW_COUNT;
   return (
     <Box
       data-testid="queued-messages"
@@ -83,7 +128,7 @@ export function QueuedMessages({ messages, paused, onCancel, onCopy, onSendNow, 
         <Stack direction="row" spacing={0.75} sx={{ gridArea: "title", alignItems: "center", minWidth: 0, alignSelf: "center" }}>
           <ScheduleSendRoundedIcon sx={{ fontSize: 14, color: (theme) => theme.palette.status.warn.main, flex: "0 0 auto" }} />
           <Typography variant="microLabel" noWrap sx={{ color: "text.secondary", minWidth: 0 }}>
-            {paused ? t("queuedPausedTitle", { count: messages.length }) : t("queuedTitle", { count: messages.length })}
+            {paused ? t("queuedPausedTitle", { count: queueItems.length }) : t("queuedTitle", { count: queueItems.length })}
           </Typography>
         </Stack>
         <Button
@@ -133,22 +178,50 @@ export function QueuedMessages({ messages, paused, onCancel, onCopy, onSendNow, 
           scrollbarGutter: scrollable ? "stable" : "auto",
         }}
       >
-        {messages.map((message, index) => (
+        {queueItems.map((item, index) => (
           <Stack
-            key={message.id}
+            key={item.id}
             direction="row"
             spacing={0.75}
+            draggable={Boolean(onMoveItemAfter)}
+            onDragStart={(event) => {
+              if (!onMoveItemAfter) {
+                return;
+              }
+              setDraggingId(item.id);
+              event.dataTransfer.effectAllowed = "move";
+              event.dataTransfer.setData("text/plain", item.id);
+            }}
+            onDragOver={(event) => {
+              if (draggingId && draggingId !== item.id) {
+                event.preventDefault();
+                event.dataTransfer.dropEffect = "move";
+              }
+            }}
+            onDrop={(event) => {
+              event.preventDefault();
+              const movedId = event.dataTransfer.getData("text/plain") || draggingId;
+              setDraggingId(null);
+              if (movedId && movedId !== item.id) {
+                onMoveItemAfter?.(movedId, item.id);
+              }
+            }}
+            onDragEnd={() => setDraggingId(null)}
             sx={{
               alignItems: "center",
               minHeight: QUEUED_ROW_HEIGHT_PX,
               px: 0.75,
               py: 0.25,
               borderRadius: (theme) => `${theme.custom.radii.md}px`,
+              opacity: draggingId === item.id ? 0.55 : 1,
               "&:hover": { backgroundColor: (theme) => theme.custom.surfaces.s3 },
               "& .queued-actions": { opacity: 0, transition: "opacity 120ms ease", "@media (hover: none)": { opacity: 1 } },
               "&:hover .queued-actions, &:focus-within .queued-actions": { opacity: 1 },
             }}
           >
+            {onMoveItemAfter ? (
+              <DragIndicatorRoundedIcon sx={{ flex: "0 0 auto", fontSize: 14, color: "text.disabled", cursor: "grab" }} />
+            ) : null}
             <Box
               component="span"
               sx={{
@@ -166,27 +239,40 @@ export function QueuedMessages({ messages, paused, onCancel, onCopy, onSendNow, 
                 backgroundColor: (theme) => theme.custom.surfaces.s3,
               }}
             >
-              {index + 1}
+              <QueueItemIcon item={item} index={index} />
             </Box>
             <Typography
               sx={{ flex: 1, minWidth: 0, fontSize: "0.8rem", color: "text.primary", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
             >
-              {(message.text ?? "").trim() || t("queuedEmptyTurn")}
+              {queueItemText(item, t("queuedEmptyTurn"))}
             </Typography>
             <Stack className="queued-actions" direction="row" spacing={0.25} sx={{ flex: "0 0 auto", alignItems: "center" }}>
-              <Tooltip title={t("copyQueuedMessage")}>
-                <IconButton
-                  aria-label={t("copyQueuedMessage")}
-                  onClick={() => onCopy(message)}
-                  sx={{ ...queuedActionButtonSx, "&:hover": { color: "text.primary", backgroundColor: (theme) => theme.custom.surfaces.s4 } }}
-                >
-                  <ContentCopyRoundedIcon sx={{ fontSize: 14 }} />
-                </IconButton>
-              </Tooltip>
+              {item.kind === "message" ? (
+                <Tooltip title={t("copyQueuedMessage")}>
+                  <IconButton
+                    aria-label={t("copyQueuedMessage")}
+                    onClick={() => onCopy(item.message)}
+                    sx={{ ...queuedActionButtonSx, "&:hover": { color: "text.primary", backgroundColor: (theme) => theme.custom.surfaces.s4 } }}
+                  >
+                    <ContentCopyRoundedIcon sx={{ fontSize: 14 }} />
+                  </IconButton>
+                </Tooltip>
+              ) : null}
+              {item.kind === "goal" && onToggleItemPause ? (
+                <Tooltip title={item.state === "paused" ? t("resumeQueueItem") : t("pauseQueueItem")}>
+                  <IconButton
+                    aria-label={item.state === "paused" ? t("resumeQueueItem") : t("pauseQueueItem")}
+                    onClick={() => onToggleItemPause(item.id, item.state !== "paused")}
+                    sx={{ ...queuedActionButtonSx, "&:hover": { color: "text.primary", backgroundColor: (theme) => theme.custom.surfaces.s4 } }}
+                  >
+                    {item.state === "paused" ? <PlayArrowRoundedIcon sx={{ fontSize: 14 }} /> : <PauseRoundedIcon sx={{ fontSize: 14 }} />}
+                  </IconButton>
+                </Tooltip>
+              ) : null}
               <Tooltip title={t("cancelQueuedMessage")}>
                 <IconButton
                   aria-label={t("cancelQueuedMessage")}
-                  onClick={() => onCancel(message.id)}
+                  onClick={() => (onCancelItem ? onCancelItem(item.id) : item.kind === "message" ? onCancel(item.message.id) : undefined)}
                   sx={{ ...queuedActionButtonSx, "&:hover": { color: (theme) => theme.palette.status.error.main, backgroundColor: (theme) => theme.custom.surfaces.s4 } }}
                 >
                   <CloseRoundedIcon sx={{ fontSize: 14 }} />

@@ -24,6 +24,16 @@ const unifiedDiff = [
   "+new",
 ].join("\n");
 
+const updatedUnifiedDiff = [
+  "diff --git a/src/file.ts b/src/file.ts",
+  "index 2222222..3333333 100644",
+  "--- a/src/file.ts",
+  "+++ b/src/file.ts",
+  "@@ -1 +1 @@",
+  "-new",
+  "+newer",
+].join("\n");
+
 function jsonResponse(payload: unknown, init?: ResponseInit): Response {
   return new Response(JSON.stringify(payload), {
     status: 200,
@@ -34,9 +44,11 @@ function jsonResponse(payload: unknown, init?: ResponseInit): Response {
 
 const Probe = observer(function Probe({
   autoLoad,
+  revisionKey = 0,
   onSnapshot,
 }: {
   readonly autoLoad: boolean;
+  readonly revisionKey?: number | string;
   readonly onSnapshot: (snapshot: UseGitFileDiffResult) => void;
 }) {
   const result = useGitFileDiff({
@@ -44,6 +56,7 @@ const Probe = observer(function Probe({
     file,
     mode: "worktree",
     autoLoad,
+    revisionKey,
     unavailableMessage: "Diff unavailable",
   });
 
@@ -97,5 +110,21 @@ describe("useGitFileDiff", () => {
     fireEvent.click(screen.getByRole("button", { name: "load" }));
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("reloads an already requested diff when its revision changes", async () => {
+    const snapshots: UseGitFileDiffResult[] = [];
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ diff: unifiedDiff, mode: "worktree", path: file.gitPath }))
+      .mockResolvedValueOnce(jsonResponse({ diff: updatedUnifiedDiff, mode: "worktree", path: file.gitPath }));
+
+    const { rerender } = render(<Probe autoLoad={false} revisionKey={1} onSnapshot={(snapshot) => snapshots.push(snapshot)} />);
+    fireEvent.click(screen.getByRole("button", { name: "load" }));
+    await waitFor(() => expect(snapshots.at(-1)?.lines?.some((line) => line.text === "+new")).toBe(true));
+
+    rerender(<Probe autoLoad={false} revisionKey={2} onSnapshot={(snapshot) => snapshots.push(snapshot)} />);
+
+    await waitFor(() => expect(snapshots.at(-1)?.lines?.some((line) => line.text === "+newer")).toBe(true));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

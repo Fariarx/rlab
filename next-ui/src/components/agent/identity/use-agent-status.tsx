@@ -150,18 +150,18 @@ class AgentStatusStore {
   }
 
   mount(): void {
-    void this.reload();
+    void this.reload({ liveModels: false });
     if (!this.retryTimer) {
       this.retryTimer = setInterval(() => {
         if (this.error && !this.loading) {
-          void this.reload();
+          void this.reload({ liveModels: false });
         }
       }, AGENT_STATUS_RETRY_MS);
     }
     if (!this.refreshTimer) {
       this.refreshTimer = setInterval(() => {
         if (!this.loading) {
-          void this.reload();
+          void this.reload({ liveModels: false });
         }
       }, AGENT_STATUS_REFRESH_MS);
     }
@@ -179,14 +179,14 @@ class AgentStatusStore {
     }
   }
 
-  async reload(): Promise<void> {
+  async reload({ liveModels = true }: { readonly liveModels?: boolean } = {}): Promise<void> {
     const requestId = this.requestId + 1;
     this.requestId = requestId;
     this.loading = true;
     this.error = null;
 
     try {
-      const agents = await this.load();
+      const agents = await this.load({ liveModels });
       if (this.requestId === requestId) {
         runInAction(() => {
           this.agents = agents;
@@ -209,8 +209,8 @@ class AgentStatusStore {
     }
   }
 
-  private async load(): Promise<AgentCliMap> {
-    return normalizeAgentPayload(await loadAgentStatusPayload());
+  private async load({ liveModels }: { readonly liveModels: boolean }): Promise<AgentCliMap> {
+    return normalizeAgentPayload(await loadAgentStatusPayload({ liveModels }));
   }
 }
 

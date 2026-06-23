@@ -13,7 +13,7 @@ import { query, type CanUseTool, type EffortLevel, type Options as ClaudeQueryOp
 import { CronExpressionParser } from "cron-parser";
 import * as pty from "node-pty";
 import { chromium, type Browser, type BrowserContext, type ConsoleMessage, type Frame, type FrameLocator, type Locator, type Page, type Request as PlaywrightRequest } from "playwright";
-import type { Plugin, ViteDevServer, PreviewServer } from "vite";
+import type { Plugin } from "vite";
 import { parseGitStatusPorcelain, parseNumstatTotals } from "./src/lib/git-status";
 import { normalizeAgentToolOutput, truncateAgentToolOutput } from "./src/lib/agent-output";
 import { conversationPreviewSnippet, previewSnippet } from "./src/lib/conversation-preview";
@@ -28,7 +28,7 @@ import {
   type RunEventAccumulator,
 } from "./src/lib/run-event-accumulator";
 import { attachPtyTerminalWebSockets, PtyTerminalManager } from "./src/server/pty-terminal";
-import { attachExactApiRoutes, methodOnly, type ApiHandler, type ExactApiRoute } from "./src/server/api-router";
+import { attachExactApiRoutes, methodOnly, type ApiHandler, type ApiMiddlewareStack, type ExactApiRoute } from "./src/server/api-router";
 import { validateRlabRequest } from "./src/server/request-security";
 import {
   cloneAppSettings,
@@ -40,34 +40,46 @@ import { buildEmptyWorkspaceState, buildInitialWorkspaceState, type WorkspaceSta
 import { parseWorkspaceMutationRequestBody, workspaceMutationBadRequestMessages } from "./src/lib/workspace-mutations";
 import {
   applyWorkspaceDbMutations,
+  claimNextPendingQueueItem,
   claimNextPendingTurn,
   deletePendingTurn,
+  enqueuePendingGoal,
   enqueuePendingTurn,
   initWorkspaceDb,
   initializeWorkspaceStateInDb,
+  movePendingQueueItemAfter,
   patchMessageBlockById,
   readConversation,
   readConversationResourcesFromDb,
   readMessage,
   readMessageBlockById,
   readMessageBlocks,
+  readPendingQueueConversationIds,
+  readPendingQueueHead,
   readPendingTurnQueue,
   readSelectedConversationId,
   readThreadPageFromDb,
   readThreadFromDb,
   readWorkspaceRevision,
   readWorkspaceStateFromDb,
+  releaseDispatchingQueueItemByRunId,
+  releasePendingQueueItem,
   releasePendingTurn,
+  removePendingQueueItem,
   removePendingTurn,
   resetDispatchingPendingTurns,
   restartUserTurn,
   searchConversationIds,
+  setPendingQueueItemPaused,
   setPendingTurnQueuePaused,
   updateConversationData,
+  updatePendingGoal,
+  upsertPendingWakeupItem,
   upsertAgentMessageForUserTurn,
   upsertMessage,
   workspaceDbHasState,
   WorkspaceRevisionConflictError,
+  type PendingQueueDispatchItem,
   type PendingTurnRecord,
   type WorkspaceDbMutation,
 } from "./workspace-db";
@@ -106,7 +118,7 @@ import {
   type RunUsage,
   type SearchBlock,
 } from "./src/domain/agent-types";
-import { promptForUserTurn } from "./src/components/workspace/models/workspace-thread-actions-model";
+import { promptForUserTurn } from "./src/lib/agent-prompt";
 import { pickDirectoryPathFromSystemDialog } from "./src/server/directory-picker";
 export {
   parseAnthropicModelInfos,
@@ -817,12 +829,6 @@ let agentDetectionInflight: Promise<Record<string, AgentCliInfo>> | null = null;
 function clearAgentDetectionCache(): void {
   agentDetectionCache = null;
   agentDetectionInflight = null;
-}
-
-function prewarmAgentDetectionCache(): void {
-  void detectAgentsWithLiveModels().catch((error) => {
-    console.warn(`[rlab] Agent detection prewarm failed: ${errorMessage(error)}`);
-  });
 }
 
 async function detectAgentsWithLiveModels(): Promise<Record<string, AgentCliInfo>> {
@@ -2508,6 +2514,9 @@ function ensureWorkspaceDb(): void {
   initWorkspaceDb(WORKSPACE_DB_FILE);
   resetDispatchingPendingTurns();
   workspaceDbReady = true;
+  for (const conversationId of readPendingQueueConversationIds()) {
+    scheduleServerQueueDrain(conversationId, 0);
+  }
 }
 
 function readWorkspaceState(): WorkspaceState {
@@ -2991,6 +3000,7 @@ function persistWorkspaceDelta(before: WorkspaceState, after: WorkspaceState): v
   if (operations.length > 0) {
     cachedWorkspaceLocale = after.settings?.general?.locale ?? cachedWorkspaceLocale;
     applyWorkspaceDbMutations(operations);
+    emitWorkspaceChange({ reason: "workspace-delta" });
   }
 }
 
@@ -3264,6 +3274,88 @@ function sendJson(res: ServerResponse, statusCode: number, payload: unknown): vo
   res.setHeader("Content-Type", JSON_CONTENT_TYPE);
   res.setHeader("Cache-Control", "no-store");
   res.end(JSON.stringify(payload));
+}
+
+interface WorkspaceChangeEvent {
+  readonly id: number;
+  readonly revision: number;
+  readonly reason: string;
+  readonly conversationIds?: readonly string[];
+}
+
+const workspaceEventClients = new Set<ServerResponse>();
+let workspaceEventSeq = 0;
+
+function workspaceChangeEvent(reason: string, conversationIds?: readonly string[]): WorkspaceChangeEvent {
+  ensureWorkspaceDb();
+  return {
+    id: ++workspaceEventSeq,
+    revision: readWorkspaceRevision(),
+    reason,
+    ...(conversationIds && conversationIds.length > 0 ? { conversationIds: [...new Set(conversationIds)] } : {}),
+  };
+}
+
+function writeWorkspaceChangeEvent(res: ServerResponse, event: WorkspaceChangeEvent): void {
+  if (res.writableEnded) {
+    return;
+  }
+  res.write(`id: ${event.id}\n`);
+  res.write("event: workspace\n");
+  res.write(`data: ${JSON.stringify(event)}\n\n`);
+}
+
+function emitWorkspaceChange({ reason, conversationIds }: { readonly reason: string; readonly conversationIds?: readonly string[] }): void {
+  if (workspaceEventClients.size === 0) {
+    return;
+  }
+  let event: WorkspaceChangeEvent;
+  try {
+    event = workspaceChangeEvent(reason, conversationIds);
+  } catch (error) {
+    console.error(`[rlab] Failed to build workspace change event: ${errorMessage(error)}`);
+    return;
+  }
+  for (const client of [...workspaceEventClients]) {
+    try {
+      writeWorkspaceChangeEvent(client, event);
+    } catch {
+      workspaceEventClients.delete(client);
+      if (!client.writableEnded) {
+        client.end();
+      }
+    }
+  }
+}
+
+function handleWorkspaceEvents(_req: IncomingMessage, res: ServerResponse): void {
+  try {
+    const initial = workspaceChangeEvent("initial");
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("Connection", "keep-alive");
+    res.flushHeaders?.();
+    writeWorkspaceChangeEvent(res, initial);
+    const heartbeat = setInterval(() => {
+      if (!res.writableEnded) {
+        res.write(": heartbeat\n\n");
+      }
+    }, 15_000);
+    const cleanup = () => {
+      clearInterval(heartbeat);
+      workspaceEventClients.delete(res);
+    };
+    workspaceEventClients.add(res);
+    res.on("close", cleanup);
+    res.on("error", cleanup);
+  } catch (error) {
+    if (res.headersSent) {
+      res.end();
+      return;
+    }
+    sendJson(res, 500, { error: errorMessage(error) });
+  }
 }
 
 export function workspacePutErrorStatus(error: unknown): 400 | 500 {
@@ -4194,6 +4286,7 @@ function handleWorkspaceMutations(req: IncomingMessage, res: ServerResponse): vo
       ensureWorkspaceDb();
       const { mutations, baseRevision } = parseWorkspaceMutationRequestBody(body);
       const revision = applyWorkspaceDbMutations(sanitizeClientWorkspaceMutations(mutations), { expectedRevision: baseRevision });
+      emitWorkspaceChange({ reason: "workspace-mutations" });
       sendJson(res, 200, { ok: true, revision });
     } catch (error) {
       if (error instanceof WorkspaceRevisionConflictError) {
@@ -6561,6 +6654,7 @@ export interface ActiveBackgroundRunSnapshot {
   readonly runId: string;
   readonly conversationId: string;
   readonly userMessageId: string;
+  readonly userMessage?: ChatMessage;
   readonly agentMessageId: string;
   readonly startedAt: string;
 }
@@ -6569,6 +6663,7 @@ export interface ActiveBackgroundRunUpdate {
   readonly runId: string;
   readonly conversationId: string;
   readonly userMessageId: string;
+  readonly userMessage?: ChatMessage;
   readonly agentMessageId: string;
   readonly startedAtMs?: number;
   readonly status: ConversationStatus;
@@ -6605,8 +6700,9 @@ interface RunSpec {
 }
 
 const TASK_WAKEUP_TOOL_NAME = "TaskWakeup";
+const TASK_GOAL_TOOL_NAME = "TaskGoal";
 const CLAUDE_SAFE_READ_TOOLS = ["Read", "Glob", "Grep", "LS"] as const;
-const CLAUDE_READ_ONLY_TOOLS = ["Read", "Glob", "Grep", "LS", "AskUserQuestion", TASK_WAKEUP_TOOL_NAME] as const;
+const CLAUDE_READ_ONLY_TOOLS = ["Read", "Glob", "Grep", "LS", "AskUserQuestion", TASK_WAKEUP_TOOL_NAME, TASK_GOAL_TOOL_NAME] as const;
 // rlab's chat tools are described to the model in RLAB_CHAT_TOOLS_PROMPT and must
 // also be *registered* so agents don't reject the call with "No such tool
 // available" (which would also stop the stream translator from scheduling the
@@ -6618,6 +6714,7 @@ const RLAB_MCP_SERVER_NAME = "rlab";
 // tool names so a bare `TaskWakeup` call isn't rejected as unknown.
 const RLAB_CHAT_TOOL_ALIASES: Record<string, string> = {
   [TASK_WAKEUP_TOOL_NAME]: `mcp__${RLAB_MCP_SERVER_NAME}__${TASK_WAKEUP_TOOL_NAME}`,
+  [TASK_GOAL_TOOL_NAME]: `mcp__${RLAB_MCP_SERVER_NAME}__${TASK_GOAL_TOOL_NAME}`,
   ScheduleWakeup: `mcp__${RLAB_MCP_SERVER_NAME}__${TASK_WAKEUP_TOOL_NAME}`,
 };
 const CLAUDE_EFFORT_LEVELS: ReadonlySet<EffortLevel> = new Set(["low", "medium", "high", "xhigh", "max"]);
@@ -6638,6 +6735,12 @@ const TASK_WAKEUP_PROMPT_LINES = [
   "To inspect scheduled wakeups in this chat, call TaskWakeup with action=\"list\". The tool result returns wakeup ids, trigger type, next fire/check time, prompt, and reason.",
 ] as const;
 
+const TASK_GOAL_PROMPT_LINES = [
+  "When a chat needs a standing objective that should keep returning through the server queue, use TaskGoal.",
+  "TaskGoal supports action='add' with description, action='list', and action='pause'/'resume'/'remove'/'complete' with goalId/id. Use complete/remove when the goal is achieved or no longer needed.",
+  "A TaskGoal is a persistent queue item. The user can reorder it among queued messages; rlab sends it back to the agent as a 🎯 goal turn when it reaches the front of the queue.",
+] as const;
+
 function rlabChatToolsPrompt(tools: unknown): string {
   const lines: string[] = [];
   if (rlabChatToolEnabled(tools, "AskUserQuestion")) {
@@ -6645,6 +6748,9 @@ function rlabChatToolsPrompt(tools: unknown): string {
   }
   if (rlabChatToolEnabled(tools, "TaskWakeup")) {
     lines.push(...TASK_WAKEUP_PROMPT_LINES);
+  }
+  if (rlabChatToolEnabled(tools, "TaskGoal")) {
+    lines.push(...TASK_GOAL_PROMPT_LINES);
   }
   return lines.join("\n");
 }
@@ -6723,10 +6829,45 @@ const CODEX_RLAB_DYNAMIC_TOOLS: readonly CodexDynamicToolSpec[] = [
       },
     },
   },
+  {
+    name: TASK_GOAL_TOOL_NAME,
+    description:
+      "Create or manage a persistent standing goal in the current rlab chat queue. Goals are queue items that the user can reorder among pending messages. Use add with description; use complete/remove when achieved; use pause/resume/list for management.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        action: {
+          type: "string",
+          enum: ["add", "list", "pause", "resume", "remove", "complete", "update"],
+          description: "Use add for a new goal; complete/remove to stop it; pause/resume to manage it; list to inspect goals.",
+        },
+        description: {
+          type: "string",
+          description: "Goal description. Required for action='add' and action='update'.",
+        },
+        goalId: {
+          type: "string",
+          description: "Goal id for update/pause/resume/remove/complete.",
+        },
+        id: {
+          type: "string",
+          description: "Alias for goalId.",
+        },
+        afterItemId: {
+          type: "string",
+          description: "Optional queue item id after which the new or updated goal should be placed.",
+        },
+      },
+    },
+  },
 ];
 
 export function codexRlabDynamicTools(tools?: readonly RlabChatToolId[]): readonly CodexDynamicToolSpec[] {
-  return rlabChatToolEnabled(tools, "TaskWakeup") ? CODEX_RLAB_DYNAMIC_TOOLS : [];
+  if (rlabChatToolEnabled(tools, "TaskWakeup") && rlabChatToolEnabled(tools, "TaskGoal")) {
+    return CODEX_RLAB_DYNAMIC_TOOLS;
+  }
+  return CODEX_RLAB_DYNAMIC_TOOLS.filter((tool) => rlabChatToolEnabled(tools, tool.name));
 }
 
 function registeredRlabPluginLinks(): readonly RlabPluginLink[] {
@@ -6881,6 +7022,7 @@ function rlabChatToolsPromptAppendix(tools: unknown): string {
     "This rlab chat has server-side tools that are handled by the application, not by the user's project.",
     prompt,
     ...(rlabChatToolEnabled(tools, "TaskWakeup") ? ["Tool names accepted by rlab for task wakeups: TaskWakeup."] : []),
+    ...(rlabChatToolEnabled(tools, "TaskGoal") ? ["Tool names accepted by rlab for persistent queue goals: TaskGoal."] : []),
     "</rlab-chat-tools>",
   ].join("\n");
 }
@@ -6937,9 +7079,9 @@ function ensureGeminiMcpConfig(): void {
   }
 }
 
-/** Extra env for CLI agents so they load rlab's external MCP server (TaskWakeup). */
+/** Extra env for CLI agents so they load rlab's external MCP server (chat tools). */
 function rlabAgentMcpRunEnv(agent: string, tools?: readonly RlabChatToolId[]): NodeJS.ProcessEnv {
-  if (!rlabChatToolEnabled(tools, "TaskWakeup")) {
+  if (!rlabChatToolEnabled(tools, "TaskWakeup") && !rlabChatToolEnabled(tools, "TaskGoal")) {
     return {};
   }
   if (agent === "opencode") {
@@ -7178,6 +7320,7 @@ function claudeToolsForRequest(request: RunRequest): ClaudeQueryOptions["tools"]
       ...CLAUDE_SAFE_READ_TOOLS,
       ...(rlabChatToolEnabled(request.tools, "AskUserQuestion") ? ["AskUserQuestion" as const] : []),
       ...(rlabChatToolEnabled(request.tools, "TaskWakeup") ? [TASK_WAKEUP_TOOL_NAME] : []),
+      ...(rlabChatToolEnabled(request.tools, "TaskGoal") ? [TASK_GOAL_TOOL_NAME] : []),
     ];
   }
   return { type: "preset", preset: "claude_code" };
@@ -7205,7 +7348,7 @@ export function buildClaudeSdkOptions(
     permissionMode,
     systemPrompt: { type: "preset", preset: "claude_code", append: claudeSdkSystemPromptAppend(request) },
     tools: claudeToolsForRequest(request),
-    ...(rlabChatToolEnabled(request.tools, "TaskWakeup")
+    ...(rlabChatToolEnabled(request.tools, "TaskWakeup") || rlabChatToolEnabled(request.tools, "TaskGoal")
       ? {
           mcpServers: { [RLAB_MCP_SERVER_NAME]: { type: "stdio", command: "node", args: [RLAB_MCP_STDIO_SCRIPT], alwaysLoad: true } },
           toolAliases: RLAB_CHAT_TOOL_ALIASES,
@@ -8155,6 +8298,9 @@ export function createRunApprovalHandler(send: (event: RunEvent) => void, scopeI
     if (isWakeupToolName(toolName) && !rlabChatToolEnabled(tools, "TaskWakeup")) {
       return Promise.resolve<PermissionResult>({ behavior: "deny", message: "TaskWakeup is disabled for this chat.", toolUseID: context.toolUseID });
     }
+    if (isGoalToolName(toolName) && !rlabChatToolEnabled(tools, "TaskGoal")) {
+      return Promise.resolve<PermissionResult>({ behavior: "deny", message: "TaskGoal is disabled for this chat.", toolUseID: context.toolUseID });
+    }
     if (toolName === "AskUserQuestion") {
       const inputHandler = createRunInputHandler(input, context, send, scopeId);
       if (inputHandler) {
@@ -8162,6 +8308,9 @@ export function createRunApprovalHandler(send: (event: RunEvent) => void, scopeI
       }
     }
     if (isWakeupToolName(toolName)) {
+      return Promise.resolve<PermissionResult>({ behavior: "allow", updatedInput: input, toolUseID: context.toolUseID });
+    }
+    if (isGoalToolName(toolName)) {
       return Promise.resolve<PermissionResult>({ behavior: "allow", updatedInput: input, toolUseID: context.toolUseID });
     }
 
@@ -8212,16 +8361,21 @@ export function isPersistedBackgroundRunActive<T extends Pick<WorkspaceConversat
 export function activeBackgroundRunSnapshotsFromHandles(
   handles: ReadonlyMap<string, BackgroundRunHandle>,
   isActive: (handle: BackgroundRunHandle) => boolean = () => true,
+  readUserMessage: (binding: BackgroundRunBinding) => ChatMessage | undefined = () => undefined,
 ): ActiveBackgroundRunSnapshot[] {
   return Array.from(handles.values())
     .filter(isActive)
-    .map(({ binding, startedAt }) => ({
-    runId: binding.runId,
-    conversationId: binding.conversationId,
-    userMessageId: binding.userMessageId,
-    agentMessageId: binding.agentMessageId,
-    startedAt,
-    }));
+    .map(({ binding, startedAt }) => {
+      const userMessage = readUserMessage(binding);
+      return {
+        runId: binding.runId,
+        conversationId: binding.conversationId,
+        userMessageId: binding.userMessageId,
+        ...(userMessage === undefined ? {} : { userMessage }),
+        agentMessageId: binding.agentMessageId,
+        startedAt,
+      };
+    });
 }
 
 function persistedConversationForBackgroundHandle(handle: BackgroundRunHandle): WorkspaceConversation | null {
@@ -8284,7 +8438,7 @@ function activeBackgroundRunIds(): Set<string> {
 
 function activeBackgroundRunSnapshots(): ActiveBackgroundRunSnapshot[] {
   pruneOrphanBackgroundRuns();
-  return activeBackgroundRunSnapshotsFromHandles(backgroundRunHandles);
+  return activeBackgroundRunSnapshotsFromHandles(backgroundRunHandles, undefined, (binding) => readMessage(binding.userMessageId));
 }
 
 const scheduledWakeupTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -8292,6 +8446,7 @@ let scheduledWakeupsStarted = false;
 const MAX_WAKEUP_TIMER_DELAY_MS = 2_147_483_647;
 const SCRIPT_WAKEUP_TIMEOUT_MS = 30_000;
 export const WAKEUP_DISPATCH_RETRY_DELAY_MS = 60_000;
+const GOAL_REQUEUE_COOLDOWN_MS = 60_000;
 
 export function wakeupTimerDelay(targetMs: number, nowMs = Date.now()): number {
   return Math.max(0, Math.min(MAX_WAKEUP_TIMER_DELAY_MS, targetMs - nowMs));
@@ -8314,6 +8469,10 @@ function serverNowLabel(): string {
 
 function scheduledWakeupId(): string {
   return `wakeup-${Date.now()}-${randomUUID().slice(0, 8)}`;
+}
+
+function scheduledGoalId(): string {
+  return `goal-${Date.now()}-${randomUUID().slice(0, 8)}`;
 }
 
 function scheduledRunId(prefix: "run" | "u" | "a"): string {
@@ -8348,6 +8507,20 @@ export function retryScheduledWakeupDispatchRecord(record: ScheduledWakeupRecord
 }
 
 const serverQueueDrainInFlight = new Set<string>();
+const serverQueueDelayedDrainTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function scheduleServerQueueDrain(conversationId: string, delayMs: number): void {
+  const existing = serverQueueDelayedDrainTimers.get(conversationId);
+  if (existing) {
+    clearTimeout(existing);
+  }
+  const timer = setTimeout(() => {
+    serverQueueDelayedDrainTimers.delete(conversationId);
+    drainServerQueue(conversationId);
+  }, Math.max(0, delayMs));
+  timer.unref?.();
+  serverQueueDelayedDrainTimers.set(conversationId, timer);
+}
 
 function activeBackgroundRunForConversation(conversationId: string): BackgroundRunHandle | null {
   for (const handle of backgroundRunHandles.values()) {
@@ -8381,15 +8554,29 @@ function serverConversationSessionId(conversation: ConversationSummary, agent: A
   return conversation.agentSessions?.[agent] ?? (conversation.sessionAgent === agent ? conversation.sessionId : undefined);
 }
 
-export function queuedTurnRunBody(record: PendingTurnRecord, runId: string): Record<string, unknown> {
+function pendingQueueDispatchMessage(record: PendingQueueDispatchItem | PendingTurnRecord): ChatMessage {
+  if (!("kind" in record) || record.kind === "message") {
+    return record.message;
+  }
+  return {
+    id: scheduledRunId("u"),
+    role: "user",
+    text: `🎯 Цель: ${record.description}`,
+    time: serverNowLabel(),
+    createdAtMs: Date.now(),
+  };
+}
+
+export function queuedTurnRunBody(record: PendingQueueDispatchItem | PendingTurnRecord, runId: string): Record<string, unknown> {
   const state = readWorkspaceStateFromDb(new Set([record.conversationId]));
   const conversation = workspaceConversationMap(state).get(record.conversationId);
   if (!conversation) {
     throw new Error(`Conversation ${record.conversationId} does not exist.`);
   }
+  const userMessage = pendingQueueDispatchMessage(record);
   const profile = normalizeAgentProfile(conversation.profile, conversation.agent ?? "claude-code");
   const resume = serverConversationSessionId(conversation, profile.agent);
-  const prompt = promptForUserTurn(state.threads[record.conversationId] ?? [], record.message, Boolean(resume), undefined);
+  const prompt = promptForUserTurn(state.threads[record.conversationId] ?? [], userMessage, Boolean(resume), undefined);
   const agentMessageTime = serverNowLabel();
   const cwd = serverConversationCwd(state, record.conversationId);
   return {
@@ -8400,7 +8587,7 @@ export function queuedTurnRunBody(record: PendingTurnRecord, runId: string): Rec
     autoConfirm: profile.autoConfirm ?? false,
     ...(profile.tools !== undefined ? { tools: profile.tools } : {}),
     prompt,
-    serverPrompt: { userMessage: record.message },
+    serverPrompt: { userMessage },
     ...(cwd ? { cwd } : {}),
     accessMode: accessModeForAgentProfile(profile),
     ...(resume ? { resume } : {}),
@@ -8408,21 +8595,21 @@ export function queuedTurnRunBody(record: PendingTurnRecord, runId: string): Rec
     ...(typeof conversation.compaction?.window === "number" ? { compactWindow: conversation.compaction.window } : {}),
     conversationId: record.conversationId,
     runId,
-    userMessageId: record.message.id,
-    userMessageTime: record.message.time ?? agentMessageTime,
-    userMessageCreatedAtMs: record.message.createdAtMs ?? record.createdAtMs,
+    userMessageId: userMessage.id,
+    userMessageTime: userMessage.time ?? agentMessageTime,
+    userMessageCreatedAtMs: userMessage.createdAtMs ?? record.createdAtMs,
     agentMessageId: scheduledRunId("a"),
     agentMessageTime,
   };
 }
 
-async function startQueuedTurn(record: PendingTurnRecord, runId: string, onAccepted: () => void): Promise<void> {
+async function startQueuedTurn(record: PendingQueueDispatchItem, runId: string, onAccepted: () => void): Promise<void> {
   const body = queuedTurnRunBody(record, runId);
   appendRunAuditEvent(RUN_AUDIT_FILE, {
-    type: "queued_turn_started",
+    type: record.kind === "goal" ? "queued_goal_started" : "queued_turn_started",
     runId,
     conversationId: record.conversationId,
-    userMessageId: record.message.id,
+    userMessageId: body.userMessageId,
     agent: body.agent,
   });
   const result = startServerRunFromPayload(body, record.origin, createDetachedRunEventSender());
@@ -8445,25 +8632,32 @@ function drainServerQueue(conversationId: string): void {
           return;
         }
         const runId = scheduledRunId("run");
-        const record = claimNextPendingTurn(conversationId, runId);
+        const record = claimNextPendingQueueItem(conversationId, runId);
         if (!record) {
+          const head = readPendingQueueHead(conversationId);
+          if (head?.kind === "goal" && head.nextDispatchAtMs !== undefined && head.nextDispatchAtMs > Date.now()) {
+            scheduleServerQueueDrain(conversationId, head.nextDispatchAtMs - Date.now());
+          }
           return;
         }
         let accepted = false;
         try {
           await startQueuedTurn(record, runId, () => {
             accepted = true;
-            deletePendingTurn(record.id);
+            if (record.kind === "message") {
+              deletePendingTurn(record.id);
+            }
           });
         } catch (error) {
           if (!accepted) {
-            releasePendingTurn(record.id, { pause: true });
+            releasePendingQueueItem(record.id, { pause: true });
           }
           appendRunAuditEvent(RUN_AUDIT_FILE, {
-            type: accepted ? "queued_turn_stream_failed" : "queued_turn_failed",
+            type: accepted ? "queued_item_stream_failed" : "queued_item_failed",
             runId,
             conversationId: record.conversationId,
-            userMessageId: record.message.id,
+            queueItemId: record.id,
+            queueItemKind: record.kind,
             error: errorMessage(error),
           });
           return;
@@ -8527,8 +8721,21 @@ function clearScheduledWakeupTimer(id: string): void {
 function removeScheduledWakeupRecord(id: string): void {
   clearScheduledWakeupTimer(id);
   const records = readScheduledWakeupMap();
+  const record = records.get(id);
   if (records.delete(id)) {
     persistScheduledWakeupMap(records.values());
+    if (record) {
+      try {
+        removePendingQueueItem(record.conversationId, record.id);
+      } catch (error) {
+        appendRunAuditEvent(RUN_AUDIT_FILE, {
+          type: "wakeup_queue_item_remove_failed",
+          wakeupId: record.id,
+          conversationId: record.conversationId,
+          error: errorMessage(error),
+        });
+      }
+    }
   }
 }
 
@@ -8550,8 +8757,21 @@ function cancelScheduledWakeups(options: { readonly conversationId?: string; rea
     }
   }
   for (const id of removeIds) {
+    const record = records.get(id);
     clearScheduledWakeupTimer(id);
     records.delete(id);
+    if (record) {
+      try {
+        removePendingQueueItem(record.conversationId, record.id);
+      } catch (error) {
+        appendRunAuditEvent(RUN_AUDIT_FILE, {
+          type: "wakeup_queue_item_remove_failed",
+          wakeupId: record.id,
+          conversationId: record.conversationId,
+          error: errorMessage(error),
+        });
+      }
+    }
   }
   if (removeIds.length > 0) {
     persistScheduledWakeupMap(records.values());
@@ -8563,6 +8783,23 @@ function updateScheduledWakeupRecord(record: ScheduledWakeupRecord): void {
   const records = readScheduledWakeupMap();
   records.set(record.id, record);
   persistScheduledWakeupMap(records.values());
+  try {
+    upsertPendingWakeupItem({
+      id: record.id,
+      conversationId: record.conversationId,
+      createdAtMs: record.createdAtMs,
+      prompt: record.request.prompt,
+      ...(record.reason ? { reason: record.reason } : {}),
+      trigger: record.trigger,
+    });
+  } catch (error) {
+    appendRunAuditEvent(RUN_AUDIT_FILE, {
+      type: "wakeup_queue_item_update_failed",
+      wakeupId: record.id,
+      conversationId: record.conversationId,
+      error: errorMessage(error),
+    });
+  }
 }
 
 function wakeupStatusText(record: ScheduledWakeupRecord, locale: Locale): string {
@@ -8589,6 +8826,90 @@ function wakeupScheduleToolResultText(record: ScheduledWakeupRecord, locale: Loc
 
 function wakeupCancelToolResultText(count: number, conversationId: string, locale: Locale): string {
   return [wakeupCancelStatusText(count, locale), scheduledWakeupListToolText(conversationId)].join("\n\n");
+}
+
+function goalActionStatusText(action: Extract<RunEvent, { type: "goal" }>["action"], locale: Locale): string {
+  if (locale === "ru") {
+    switch (action) {
+      case "add":
+        return "TaskGoal добавлена в очередь.";
+      case "update":
+        return "TaskGoal обновлена.";
+      case "pause":
+        return "TaskGoal поставлена на паузу.";
+      case "resume":
+        return "TaskGoal возобновлена.";
+      case "complete":
+        return "TaskGoal завершена.";
+      case "remove":
+        return "TaskGoal удалена.";
+      case "list":
+        return "TaskGoal список получен.";
+    }
+  }
+  switch (action) {
+    case "add":
+      return "TaskGoal added to the queue.";
+    case "update":
+      return "TaskGoal updated.";
+    case "pause":
+      return "TaskGoal paused.";
+    case "resume":
+      return "TaskGoal resumed.";
+    case "complete":
+      return "TaskGoal completed.";
+    case "remove":
+      return "TaskGoal removed.";
+    case "list":
+      return "TaskGoal list fetched.";
+  }
+}
+
+function applyGoalRunEvent(
+  event: Extract<RunEvent, { type: "goal" }>,
+  binding: BackgroundRunBinding | null,
+  origin: string,
+  locale: Locale,
+): RunEvent[] {
+  if (!binding) {
+    return [{ type: "error", text: "TaskGoal requires a conversation-bound run." }];
+  }
+  const conversationId = binding.conversationId;
+  if (event.action === "list") {
+    return event.toolId ? [{ type: "tool_result", id: event.toolId, ok: true, output: goalListToolText(conversationId) }] : [{ type: "status", level: "ok", text: goalActionStatusText("list", locale) }];
+  }
+  if (event.action === "add") {
+    if (!event.description?.trim()) {
+      return [{ type: "error", text: "TaskGoal add requires a non-empty description." }];
+    }
+    const id = scheduledGoalId();
+    enqueuePendingGoal({ id, conversationId, createdAtMs: Date.now(), description: event.description, origin });
+    if (event.afterItemId !== undefined) {
+      movePendingQueueItemAfter(conversationId, id, event.afterItemId);
+    }
+  } else {
+    const goalId = event.goalId?.trim();
+    if (!goalId) {
+      return [{ type: "error", text: `TaskGoal ${event.action} requires goalId/id.` }];
+    }
+    if (event.action === "update") {
+      updatePendingGoal(conversationId, goalId, {
+        ...(event.description ? { description: event.description } : {}),
+        ...(event.afterItemId === undefined ? {} : { afterItemId: event.afterItemId }),
+      });
+    } else if (event.action === "pause") {
+      setPendingQueueItemPaused(conversationId, goalId, true);
+    } else if (event.action === "resume") {
+      setPendingQueueItemPaused(conversationId, goalId, false);
+    } else {
+      removePendingQueueItem(conversationId, goalId);
+    }
+  }
+  const output = [goalActionStatusText(event.action, locale), goalListToolText(conversationId)].join("\n\n");
+  return [
+    ...(event.toolId ? [{ type: "tool_result" as const, id: event.toolId, ok: true, output }] : []),
+    { type: "status" as const, level: "ok" as const, text: goalActionStatusText(event.action, locale) },
+  ];
 }
 
 function shellScriptLaunch(script: string): { readonly command: string; readonly args: readonly string[] } {
@@ -8823,6 +9144,14 @@ function scheduleWakeupFromRunEvent(
   const records = readScheduledWakeupMap();
   records.set(record.id, record);
   persistScheduledWakeupMap(records.values());
+  upsertPendingWakeupItem({
+    id: record.id,
+    conversationId: record.conversationId,
+    createdAtMs: record.createdAtMs,
+    prompt: event.prompt,
+    ...(record.reason ? { reason: record.reason } : {}),
+    trigger: record.trigger,
+  });
   armScheduledWakeup(record);
   appendRunAuditEvent(RUN_AUDIT_FILE, {
     type: "wakeup_scheduled",
@@ -8866,7 +9195,7 @@ function notifyBackgroundRunUpdate(binding: BackgroundRunBinding, done: boolean)
     }
     return;
   }
-  const update = buildActiveRunUpdate(conversation, readMessage(binding.agentMessageId), binding, done);
+  const update = buildActiveRunUpdate(conversation, readMessage(binding.userMessageId), readMessage(binding.agentMessageId), binding, done);
   for (const subscriber of handle.subscribers) {
     subscriber(update);
   }
@@ -8875,6 +9204,25 @@ function notifyBackgroundRunUpdate(binding: BackgroundRunBinding, done: boolean)
 function finishBackgroundHandle(binding: BackgroundRunBinding, canceled: boolean): void {
   backgroundRunHandles.delete(binding.runId);
   closeIdleBrowserPreviewSession(binding.conversationId);
+  try {
+    const nextDispatchAtMs = Date.now() + GOAL_REQUEUE_COOLDOWN_MS;
+    const releaseOptions = {
+      pause: canceled,
+      rotateToEnd: true,
+      ...(canceled ? {} : { nextDispatchAtMs }),
+    };
+    const released = releaseDispatchingQueueItemByRunId(binding.runId, releaseOptions);
+    if (released?.kind === "goal" && !canceled) {
+      scheduleServerQueueDrain(binding.conversationId, Math.max(0, nextDispatchAtMs - Date.now()));
+    }
+  } catch (error) {
+    appendRunAuditEvent(RUN_AUDIT_FILE, {
+      type: "queue_item_release_failed",
+      runId: binding.runId,
+      conversationId: binding.conversationId,
+      error: errorMessage(error),
+    });
+  }
   if (!canceled) {
     drainServerQueue(binding.conversationId);
   }
@@ -9033,7 +9381,13 @@ function backgroundRunStartedAtMs(binding: BackgroundRunBinding): number | undef
   return Number.isNaN(time) ? undefined : time;
 }
 
-function buildActiveRunUpdate(conversation: WorkspaceConversation, agentMessage: ChatMessage | undefined, binding: BackgroundRunBinding, done: boolean): ActiveBackgroundRunUpdate {
+function buildActiveRunUpdate(
+  conversation: WorkspaceConversation,
+  userMessage: ChatMessage | undefined,
+  agentMessage: ChatMessage | undefined,
+  binding: BackgroundRunBinding,
+  done: boolean,
+): ActiveBackgroundRunUpdate {
   const blocks = agentMessage?.blocks ?? [];
   const costUsd = conversation.costUsd ?? agentMessage?.costUsd;
   const usage = conversation.usage ?? agentMessage?.usage;
@@ -9043,6 +9397,7 @@ function buildActiveRunUpdate(conversation: WorkspaceConversation, agentMessage:
     runId: binding.runId,
     conversationId: binding.conversationId,
     userMessageId: binding.userMessageId,
+    ...(userMessage === undefined ? {} : { userMessage }),
     agentMessageId: binding.agentMessageId,
     ...(startedAtMs === undefined ? {} : { startedAtMs }),
     status: conversation.status,
@@ -9061,8 +9416,9 @@ export function activeBackgroundRunUpdateFromState(state: WorkspaceState, bindin
   if (!conversation) {
     return null;
   }
+  const userMessage = (state.threads[binding.conversationId] ?? []).find((message) => message.id === binding.userMessageId && message.role === "user");
   const agentMessage = (state.threads[binding.conversationId] ?? []).find((message) => message.id === binding.agentMessageId);
-  return buildActiveRunUpdate(conversation, agentMessage, binding, done);
+  return buildActiveRunUpdate(conversation, userMessage, agentMessage, binding, done);
 }
 
 function mergeServerOwnedRunFields(incoming: WorkspaceConversation, current: WorkspaceConversation): WorkspaceConversation {
@@ -9298,6 +9654,7 @@ function persistBackgroundRunSnapshot(binding: BackgroundRunBinding, accumulator
       ? { ...patched, agentSessions: { ...(patched.agentSessions ?? {}), [accumulator.agent]: accumulator.sessionId }, sessionId: accumulator.sessionId, sessionAgent: accumulator.agent }
       : patched,
   );
+  emitWorkspaceChange({ reason: "background-run", conversationIds: [binding.conversationId] });
   const now = Date.now();
   accumulator.lastPersistedAt = now;
   lastBackgroundPersistAt = now;
@@ -9405,6 +9762,7 @@ function persistConversationDelta(state: WorkspaceState, conversationId: string,
       upsertMessage(conversationId, message);
     }
   }
+  emitWorkspaceChange({ reason: "conversation-delta", conversationIds: [conversationId] });
 }
 
 /** Build a minimal WorkspaceState holding just one conversation + the given
@@ -9625,6 +9983,11 @@ function isWakeupToolName(name: string): boolean {
   return leaf === "wakeup" || leaf.endsWith("taskwakeup") || leaf.endsWith("schedulewakeup");
 }
 
+function isGoalToolName(name: string): boolean {
+  const leaf = normalizedToolName(name);
+  return leaf === "goal" || leaf.endsWith("taskgoal");
+}
+
 function isWakeupListRequested(_name: string, input: Record<string, unknown> | undefined): boolean {
   const action = firstString(input, ["action", "operation", "mode"])?.toLowerCase();
   return action === "list" || action === "show" || action === "get" || action === "status";
@@ -9710,6 +10073,56 @@ function scheduledWakeupListToolText(conversationId: string | undefined): string
   return ["Scheduled TaskWakeup entries for this chat:", ...lines].join("\n");
 }
 
+function goalListToolText(conversationId: string | undefined): string {
+  if (!conversationId) {
+    return "TaskGoal list requires a conversation-bound run.";
+  }
+  const queue = readPendingTurnQueue(conversationId);
+  const goals = queue.items.filter((item) => item.kind === "goal");
+  if (goals.length === 0) {
+    return "No TaskGoal entries for this chat.";
+  }
+  const lines = goals.map((goal, index) => `${index + 1}. id: ${goal.id}; state: ${goal.state}; description: ${goal.description}`);
+  return ["TaskGoal entries for this chat:", ...lines].join("\n");
+}
+
+function isGoalListRequested(_name: string, input: Record<string, unknown> | undefined): boolean {
+  const action = firstString(input, ["action", "operation", "mode"])?.toLowerCase();
+  return action === "list" || action === "show" || action === "get" || action === "status";
+}
+
+function goalAction(input: Record<string, unknown> | undefined): Extract<RunEvent, { type: "goal" }>["action"] {
+  const action = firstString(input, ["action", "operation", "mode"])?.toLowerCase();
+  if (action === "update" || action === "pause" || action === "resume" || action === "remove" || action === "delete" || action === "complete" || action === "list") {
+    return action === "delete" ? "remove" : action;
+  }
+  return "add";
+}
+
+function goalInputValidationError(name: string, input: Record<string, unknown> | undefined): string | null {
+  if (!isGoalToolName(name)) {
+    return `${name} is not a supported rlab dynamic tool.`;
+  }
+  if (!input) {
+    return `${name} requires a JSON object input.`;
+  }
+  const action = goalAction(input);
+  if (action === "list") {
+    return null;
+  }
+  const goalId = firstString(input, ["goalId", "goal_id", "id"]);
+  if (action === "add") {
+    return firstString(input, ["description", "goal", "task", "prompt"]) ? null : `${name} add requires a non-empty description.`;
+  }
+  if (action === "update") {
+    if (!goalId) {
+      return `${name} update requires goalId/id.`;
+    }
+    return firstString(input, ["description", "goal", "task", "prompt"]) ? null : `${name} update requires a non-empty description.`;
+  }
+  return goalId ? null : `${name} ${action} requires goalId/id.`;
+}
+
 export function codexDynamicToolCallResponse(params: Record<string, unknown>, context: CodexDynamicToolCallContext = {}): Record<string, unknown> {
   const tool = firstString(params, ["tool"]) ?? "";
   if (isWakeupToolName(tool) && !rlabChatToolEnabled(context.tools, "TaskWakeup")) {
@@ -9719,6 +10132,31 @@ export function codexDynamicToolCallResponse(params: Record<string, unknown>, co
     };
   }
   const input = isRecord(params.arguments) ? params.arguments : undefined;
+  if (isGoalToolName(tool)) {
+    if (!rlabChatToolEnabled(context.tools, "TaskGoal")) {
+      return {
+        contentItems: [{ type: "inputText", text: "TaskGoal is disabled for this chat." }],
+        success: false,
+      };
+    }
+    const validationError = goalInputValidationError(tool, input);
+    if (validationError) {
+      return {
+        contentItems: [{ type: "inputText", text: validationError }],
+        success: false,
+      };
+    }
+    if (isGoalListRequested(tool, input)) {
+      return {
+        contentItems: [{ type: "inputText", text: goalListToolText(context.conversationId) }],
+        success: Boolean(context.conversationId),
+      };
+    }
+    return {
+      contentItems: [{ type: "inputText", text: "rlab accepted the TaskGoal queue update. Finish this turn after reporting the update." }],
+      success: true,
+    };
+  }
   const validationError = wakeupInputValidationError(tool, input);
   if (validationError) {
     return {
@@ -9745,6 +10183,36 @@ export function codexDynamicToolCallResponse(params: Record<string, unknown>, co
     ],
     success: true,
   };
+}
+
+function goalFollowupEvents(id: string, name: string, input: Record<string, unknown> | undefined, ok: boolean): RunEvent[] {
+  if (!isGoalToolName(name)) {
+    return [];
+  }
+  if (isGoalListRequested(name, input)) {
+    return [];
+  }
+  if (!ok) {
+    return [{ type: "error", text: `${name} failed; TaskGoal was not updated.` }];
+  }
+  const validationError = goalInputValidationError(name, input);
+  if (validationError) {
+    return [{ type: "error", text: validationError }];
+  }
+  const action = goalAction(input);
+  const goalId = firstString(input, ["goalId", "goal_id", "id"]);
+  const description = firstString(input, ["description", "goal", "task", "prompt"]);
+  const afterItemId = firstString(input, ["afterItemId", "after_item_id", "after"]);
+  return [
+    {
+      type: "goal",
+      action,
+      toolId: id,
+      ...(goalId ? { goalId } : {}),
+      ...(description ? { description } : {}),
+      ...(afterItemId === undefined ? {} : { afterItemId }),
+    },
+  ];
 }
 
 function wakeupFollowupEvents(id: string, name: string, input: Record<string, unknown> | undefined, ok: boolean): RunEvent[] {
@@ -9793,6 +10261,10 @@ function wakeupFollowupEvents(id: string, name: string, input: Record<string, un
   ];
 }
 
+function rlabToolFollowupEvents(id: string, name: string, input: Record<string, unknown> | undefined, ok: boolean): RunEvent[] {
+  return [...wakeupFollowupEvents(id, name, input, ok), ...goalFollowupEvents(id, name, input, ok)];
+}
+
 /** A running card for a diff tool, with the bulky diff-trigger fields stripped
  *  from its args so the frontend doesn't build a second (clipped) diff from the
  *  card — the backend's own diff event is the single source of truth. */
@@ -9829,7 +10301,7 @@ function toolResultEvents(tool: StreamedTool | undefined, id: string, ok: boolea
     return [];
   }
   if (tool) {
-    const wakeupEvents = wakeupFollowupEvents(id, tool.name, toolInput(tool), ok);
+    const wakeupEvents = rlabToolFollowupEvents(id, tool.name, toolInput(tool), ok);
     if (wakeupEvents.length > 0) {
       return [{ type: "tool_result", id, ok, output: resultText(output) }, ...wakeupEvents];
     }
@@ -10546,7 +11018,7 @@ function geminiToolEvents(value: unknown): RunEvent[] {
           output: resultText(tool.resultDisplay ?? tool.result ?? tool.output ?? ""),
         });
       }
-      events.push(...wakeupFollowupEvents(id, name, input, ok));
+      events.push(...rlabToolFollowupEvents(id, name, input, ok));
     }
   });
   return events;
@@ -10588,7 +11060,7 @@ function geminiToolUseEvents(msg: Record<string, unknown>, fallbackIndex: number
   // The rlab MCP TaskWakeup tool always acks, so schedule from the call itself —
   // Gemini's tool-result event carries no tool name to key off later.
   if (isWakeupToolName(name)) {
-    return wakeupFollowupEvents(id, name, input, true);
+    return rlabToolFollowupEvents(id, name, input, true);
   }
   const rich = richToolEvents(id, name, input, "running");
   if (rich.length > 0) {
@@ -10798,7 +11270,7 @@ function opencodeToolEvents(msg: Record<string, unknown>, part: Record<string, u
         output: resultText(output ?? ""),
       });
     }
-    events.push(...wakeupFollowupEvents(id, name, input, ok));
+    events.push(...rlabToolFollowupEvents(id, name, input, ok));
   }
   return events;
 }
@@ -10853,7 +11325,7 @@ function opencodeToolLifecycleEvents(msg: Record<string, unknown>): RunEvent[] {
   const events: RunEvent[] = [{ type: "tool", id, name, summary: clip(summary, 80), args: toArgs(input) }];
   if (state === "ok" || state === "error") {
     events.push({ type: "tool_result", id, ok: state === "ok", output: resultText(output ?? "") });
-    events.push(...wakeupFollowupEvents(id, name, input, state === "ok"));
+    events.push(...rlabToolFollowupEvents(id, name, input, state === "ok"));
   }
   return events;
 }
@@ -11776,7 +12248,7 @@ export function codexAppServerItemEvents(item: Record<string, unknown>, complete
               : isRecord(item.params)
                 ? item.params
                 : undefined;
-        events.push(...wakeupFollowupEvents(callId, tool, input, ok));
+        events.push(...rlabToolFollowupEvents(callId, tool, input, ok));
       }
       return events;
     }
@@ -11793,7 +12265,7 @@ export function codexAppServerItemEvents(item: Record<string, unknown>, complete
         const ok = status === "completed" && item.success !== false;
         const output = item.contentItems ?? item.error ?? "";
         events.push({ type: "tool_result", id: callId, ok, output: resultText(output) });
-        events.push(...wakeupFollowupEvents(callId, tool, input, ok));
+        events.push(...rlabToolFollowupEvents(callId, tool, input, ok));
       }
       return events;
     }
@@ -12247,7 +12719,7 @@ function handleRunAttach(req: IncomingMessage, res: ServerResponse): void {
     return;
   }
   const initialDone = !isPersistedBackgroundRunActive(attachConversation, handle.binding);
-  const initial = attachConversation ? buildActiveRunUpdate(attachConversation, readMessage(handle.binding.agentMessageId), handle.binding, initialDone) : null;
+  const initial = attachConversation ? buildActiveRunUpdate(attachConversation, readMessage(handle.binding.userMessageId), readMessage(handle.binding.agentMessageId), handle.binding, initialDone) : null;
   if (!initial) {
     sendJson(res, 409, { error: `Active run ${runId} has no persisted workspace state.` });
     return;
@@ -12491,6 +12963,25 @@ function startServerRunFromParsedPayload(parsedPayload: ParsedRunRequestSuccess,
       }
       return;
     }
+    if (event.type === "goal") {
+      const publicEvents: RunEvent[] = (() => {
+        try {
+          return applyGoalRunEvent(event, binding, origin, cachedWorkspaceLocale);
+        } catch (error) {
+          return [{ type: "error", text: errorMessage(error) }];
+        }
+      })();
+      for (const publicEvent of publicEvents) {
+        sender.send(publicEvent);
+        if (binding && accumulator) {
+          applyBackgroundRunEvent(binding, accumulator, publicEvent);
+        }
+      }
+      if (binding) {
+        drainServerQueue(binding.conversationId);
+      }
+      return;
+    }
     sender.send(event);
     if (binding && accumulator) {
       applyBackgroundRunEvent(binding, accumulator, event);
@@ -12730,6 +13221,10 @@ function handleWakeups(req: IncomingMessage, res: ServerResponse): void {
 type PendingQueuePayload =
   | { readonly action: "enqueue"; readonly conversationId: string; readonly text: string }
   | { readonly action: "cancel"; readonly conversationId: string; readonly messageId: string }
+  | { readonly action: "enqueueGoal"; readonly conversationId: string; readonly description: string; readonly afterItemId?: string | null }
+  | { readonly action: "cancelItem"; readonly conversationId: string; readonly itemId: string }
+  | { readonly action: "setItemPaused"; readonly conversationId: string; readonly itemId: string; readonly paused: boolean }
+  | { readonly action: "moveAfter"; readonly conversationId: string; readonly itemId: string; readonly afterItemId: string | null }
   | { readonly action: "setPaused"; readonly conversationId: string; readonly paused: boolean }
   | { readonly action: "sendNext"; readonly conversationId: string };
 
@@ -12750,12 +13245,45 @@ function parsePendingQueuePayload(body: string): PendingQueuePayload {
     }
     return { action, conversationId, text };
   }
+  if (action === "enqueueGoal") {
+    const description = typeof parsed.description === "string" ? parsed.description.trim() : "";
+    if (!description) {
+      throw new Error("Empty queued goal.");
+    }
+    const afterItemId = typeof parsed.afterItemId === "string" && parsed.afterItemId.trim() ? parsed.afterItemId.trim() : undefined;
+    return { action, conversationId, description, ...(afterItemId === undefined ? {} : { afterItemId }) };
+  }
   if (action === "cancel") {
     const messageId = typeof parsed.messageId === "string" ? parsed.messageId.trim() : "";
     if (!messageId) {
       throw new Error("Missing queued message id.");
     }
     return { action, conversationId, messageId };
+  }
+  if (action === "cancelItem") {
+    const itemId = typeof parsed.itemId === "string" ? parsed.itemId.trim() : "";
+    if (!itemId) {
+      throw new Error("Missing queue item id.");
+    }
+    return { action, conversationId, itemId };
+  }
+  if (action === "setItemPaused") {
+    const itemId = typeof parsed.itemId === "string" ? parsed.itemId.trim() : "";
+    if (!itemId) {
+      throw new Error("Missing queue item id.");
+    }
+    if (typeof parsed.paused !== "boolean") {
+      throw new Error("Missing paused flag.");
+    }
+    return { action, conversationId, itemId, paused: parsed.paused };
+  }
+  if (action === "moveAfter") {
+    const itemId = typeof parsed.itemId === "string" ? parsed.itemId.trim() : "";
+    if (!itemId) {
+      throw new Error("Missing queue item id.");
+    }
+    const afterItemId = typeof parsed.afterItemId === "string" && parsed.afterItemId.trim() ? parsed.afterItemId.trim() : null;
+    return { action, conversationId, itemId, afterItemId };
   }
   if (action === "setPaused") {
     if (typeof parsed.paused !== "boolean") {
@@ -12816,8 +13344,47 @@ function handlePendingQueue(req: IncomingMessage, res: ServerResponse): void {
         sendJson(res, 200, pendingQueueResponse(payload.conversationId));
         return;
       }
+      if (payload.action === "enqueueGoal") {
+        const id = scheduledGoalId();
+        enqueuePendingGoal({ id, conversationId: payload.conversationId, createdAtMs: Date.now(), description: payload.description, origin: browserBridgeOrigin(req) });
+        if (payload.afterItemId !== undefined) {
+          movePendingQueueItemAfter(payload.conversationId, id, payload.afterItemId);
+        }
+        drainServerQueue(payload.conversationId);
+        sendJson(res, 200, pendingQueueResponse(payload.conversationId));
+        return;
+      }
       if (payload.action === "cancel") {
         sendJson(res, 200, { queue: removePendingTurn(payload.conversationId, payload.messageId) });
+        return;
+      }
+      if (payload.action === "cancelItem") {
+        const item = readPendingTurnQueue(payload.conversationId).items.find((entry) => entry.id === payload.itemId);
+        const queue = item?.kind === "wakeup"
+          ? (() => {
+              const canceled = cancelScheduledWakeups({ conversationId: payload.conversationId, wakeupId: item.wakeupId });
+              if (canceled === 0) {
+                throw new Error("Wakeup not found.");
+              }
+              return readPendingTurnQueue(payload.conversationId);
+            })()
+          : removePendingQueueItem(payload.conversationId, payload.itemId);
+        drainServerQueue(payload.conversationId);
+        sendJson(res, 200, { queue });
+        return;
+      }
+      if (payload.action === "setItemPaused") {
+        const queue = setPendingQueueItemPaused(payload.conversationId, payload.itemId, payload.paused);
+        if (!payload.paused) {
+          drainServerQueue(payload.conversationId);
+        }
+        sendJson(res, 200, { queue });
+        return;
+      }
+      if (payload.action === "moveAfter") {
+        const queue = movePendingQueueItemAfter(payload.conversationId, payload.itemId, payload.afterItemId);
+        drainServerQueue(payload.conversationId);
+        sendJson(res, 200, { queue });
         return;
       }
       if (payload.action === "setPaused") {
@@ -13025,7 +13592,12 @@ function handlePreviewProxy(req: IncomingMessage, res: ServerResponse): void {
   req.pipe(proxyReq);
 }
 
-function attach(server: ViteDevServer | PreviewServer): void {
+export interface RlabApiAttachTarget {
+  readonly middlewares: ApiMiddlewareStack;
+  readonly httpServer?: object | null;
+}
+
+export function attachRlabApi(server: RlabApiAttachTarget): void {
   ensureScheduledWakeupsStarted();
   if (server.httpServer && !terminalWebSocketServers.has(server.httpServer)) {
     terminalWebSocketServers.add(server.httpServer);
@@ -13058,6 +13630,7 @@ function attach(server: ViteDevServer | PreviewServer): void {
     { path: "/api/browser/snapshot", handler: methodOnly("GET", handleBrowserSnapshot) },
     { path: "/api/browser/events", handler: methodOnly("GET", handleBrowserEvents) },
     { path: "/api/workspace/revision", handler: methodOnly("GET", handleWorkspaceRevision) },
+    { path: "/api/workspace/events", handler: methodOnly("GET", handleWorkspaceEvents) },
     { path: "/api/workspace/mutations", handler: methodOnly("POST", handleWorkspaceMutations) },
     { path: "/api/workspace", handler: handleWorkspace },
     { path: "/api/conversations/search", handler: methodOnly("GET", handleConversationSearch) },
@@ -13101,10 +13674,11 @@ function attach(server: ViteDevServer | PreviewServer): void {
     },
     {
       path: "/api/agents",
-      handler: methodOnly("GET", (_req, res) => {
+      handler: methodOnly("GET", (req, res) => {
         void (async () => {
           try {
-            sendJson(res, 200, await detectAgentsWithLiveModels());
+            const params = new URL(req.url ?? "/", "http://localhost").searchParams;
+            sendJson(res, 200, params.get("live") === "1" ? await detectAgentsWithLiveModels() : detectAgents());
           } catch (error) {
             sendJson(res, 500, { error: errorMessage(error) });
           }
@@ -13155,9 +13729,8 @@ function attach(server: ViteDevServer | PreviewServer): void {
     { path: "/api/run-cancel", handler: methodOnly("POST", handleRunCancel) },
     { path: "/api/run-input", handler: methodOnly("POST", handleRunInput) },
   ];
-  attachExactApiRoutes(server, routes);
+  attachExactApiRoutes(server.middlewares, routes);
   cleanupStaleBrowserPreviewTempFiles(Date.now(), { force: true });
-  prewarmAgentDetectionCache();
   startCliUpdateMonitor();
 }
 
@@ -13165,10 +13738,10 @@ export function agentsApiPlugin(): Plugin {
   return {
     name: "rlab:agents-api",
     configureServer(server) {
-      attach(server);
+      attachRlabApi({ middlewares: server.middlewares, httpServer: server.httpServer });
     },
     configurePreviewServer(server) {
-      attach(server);
+      attachRlabApi({ middlewares: server.middlewares, httpServer: server.httpServer });
     },
   };
 }

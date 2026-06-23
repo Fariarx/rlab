@@ -18,8 +18,8 @@ describe("package scripts", () => {
     expect(scripts.dev).toBe("cross-env NODE_ENV=development RLAB_DATA_DIR=.data-dev vite --host 127.0.0.1");
     expect(scripts.test).toBe("cross-env NODE_ENV=test RLAB_DATA_DIR=.data-test vitest run");
     expect(scripts["test:watch"]).toBe("cross-env NODE_ENV=test RLAB_DATA_DIR=.data-test vitest");
-    expect(scripts.preview).toBe("cross-env NODE_ENV=production vite preview --host 127.0.0.1");
-    expect(scripts.serve).toBe("cross-env NODE_ENV=production vite preview --host 127.0.0.1");
+    expect(scripts.preview).toBe("cross-env NODE_ENV=production node bin/rlab.mjs");
+    expect(scripts.serve).toBe("cross-env NODE_ENV=production node bin/rlab.mjs");
     expect(scripts["smoke:agents"]).toBe("node scripts/agent-smoke.mjs");
     expect(scripts["test:e2e"]).toBe("playwright test");
   });

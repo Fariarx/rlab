@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Standalone stdio MCP server that exposes rlab's chat tools (TaskWakeup) to CLI
+// Standalone stdio MCP server that exposes rlab's chat tools to CLI
 // agents that can only load external MCP servers (OpenCode, Gemini) — unlike
 // Claude (in-process SDK MCP) and Codex (native dynamic tools).
 //
@@ -11,7 +11,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
-const ACK = "rlab accepted the request and handles it server-side. Finish this turn now; rlab re-runs you when a wakeup fires.";
+const ACK = "rlab accepted the request and handles it server-side. Finish this turn after reporting the result.";
 
 const server = new McpServer({ name: "rlab", version: "1.0.0" });
 
@@ -32,6 +32,22 @@ server.registerTool(
       wakeupId: z.string().optional(),
       id: z.string().optional(),
       all: z.boolean().optional(),
+    },
+  },
+  async () => ({ content: [{ type: "text", text: ACK }] }),
+);
+
+server.registerTool(
+  "TaskGoal",
+  {
+    description:
+      "Create or manage a persistent rlab goal in the current chat queue. Use action='add' with description. Use action='complete' or action='remove' with goalId/id when achieved or no longer needed. action='list' inspects goals.",
+    inputSchema: {
+      action: z.string().optional(),
+      description: z.string().optional(),
+      goalId: z.string().optional(),
+      id: z.string().optional(),
+      afterItemId: z.string().optional(),
     },
   },
   async () => ({ content: [{ type: "text", text: ACK }] }),

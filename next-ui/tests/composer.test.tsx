@@ -63,6 +63,8 @@ describe("Composer", () => {
     expect(screen.getByTestId("composer-file-input")).toBe(screen.getByLabelText("Выбрать файлы"));
     expect(screen.getByTestId("composer-options-button")).toBe(screen.getByRole("button", { name: /Опции/ }));
     expect(screen.getByTestId("composer-send-button")).toBe(screen.getByRole("button", { name: "Отправить" }));
+    expect(screen.queryByTestId("key-hint-enter-icon")).not.toBeInTheDocument();
+    expect(screen.getByText("⏎")).toBeInTheDocument();
   });
 
   it("renders the agent placeholder with an icon instead of the handwriting glyph", () => {
@@ -72,6 +74,7 @@ describe("Composer", () => {
     expect(input).toBe(screen.getByPlaceholderText("CODEX/GPT-5.5/XHIGH"));
     expect(input.getAttribute("placeholder")).not.toContain("✍");
     expect(screen.getByTestId("composer-placeholder-hint")).toHaveTextContent("CODEX/GPT-5.5/XHIGH");
+    expect(screen.getByTestId("composer-placeholder-label")).toHaveStyle({ textTransform: "uppercase", letterSpacing: "0.12em" });
     expect(screen.getByTestId("composer-placeholder-icon")).toBeInTheDocument();
   });
 
@@ -315,6 +318,66 @@ describe("Composer", () => {
     expect(screen.getByPlaceholderText("Написать")).toHaveValue("привет голосом");
   });
 
+  it("finishes browser voice input from the inline stop button without discarding interim text", async () => {
+    class FakeSpeechRecognition {
+      static current: FakeSpeechRecognition | null = null;
+      lang = "";
+      continuous = false;
+      interimResults = false;
+      onresult: ((event: { readonly resultIndex: number; readonly results: { readonly length: number; readonly 0: { readonly length: number; readonly isFinal: boolean; readonly 0: { readonly transcript: string } } } }) => void) | null = null;
+      onerror: ((event: { readonly error?: string; readonly message?: string }) => void) | null = null;
+      onend: (() => void) | null = null;
+
+      constructor() {
+        FakeSpeechRecognition.current = this;
+      }
+
+      start(): void {}
+      stop(): void {
+        this.onend?.();
+      }
+
+      emitInterim(text: string): void {
+        this.onresult?.({
+          resultIndex: 0,
+          results: {
+            length: 1,
+            0: { length: 1, isFinal: false, 0: { transcript: text } },
+          },
+        });
+      }
+    }
+    vi.stubGlobal("SpeechRecognition", FakeSpeechRecognition);
+    installVoiceCaptureMocks();
+
+    renderWithTheme(
+      <Composer
+        placeholder="Написать"
+        initialValue="alpha omega"
+        voiceProvider={{ id: "web-speech", name: "Browser Web Speech", kind: "browser", language: "ru-RU", configured: true }}
+      />,
+    );
+
+    const input = screen.getByTestId("composer-input") as HTMLTextAreaElement;
+    fireEvent.click(await screen.findByTestId("composer-voice-button"));
+    await waitFor(() => {
+      expect(FakeSpeechRecognition.current).not.toBeNull();
+    });
+    input.setSelectionRange("alpha ".length, "alpha ".length);
+    act(() => {
+      FakeSpeechRecognition.current?.emitInterim("ручная остановка");
+    });
+
+    fireEvent.click(screen.getByTestId("composer-voice-stop-button"));
+
+    expect(input).toHaveValue("alpha ручная остановка omega");
+    await waitFor(() => {
+      expect(input.selectionStart).toBe("alpha ручная остановка ".length);
+      expect(input.selectionEnd).toBe("alpha ручная остановка ".length);
+    });
+    expect(screen.queryByTestId("composer-voice-recording-strip")).not.toBeInTheDocument();
+  });
+
   it("ignores browser speech interim events without spamming no-speech errors", async () => {
     const onVoiceError = vi.fn();
     class FakeSpeechRecognition {
@@ -507,7 +570,7 @@ describe("Composer", () => {
 
     renderWithTheme(
       <Composer
-        placeholder="Написать"
+        placeholder="Написать: Голосовой ввод"
         voiceProvider={{ id: "web-speech", name: "Browser Web Speech", kind: "browser", language: "ru-RU", configured: true }}
       />,
     );
@@ -518,8 +581,16 @@ describe("Composer", () => {
     expect(screen.getByTestId("composer-input-area")).toHaveAttribute("data-expanded", "true");
     expect(screen.getByTestId("composer-voice-input-panel")).toBeInTheDocument();
     expect(screen.getByTestId("composer-voice-recording-strip")).toHaveAttribute("data-layout", "inline");
+    expect(screen.getByTestId("composer-input-root")).toHaveStyle({ paddingRight: "0px" });
+    expect(screen.getByTestId("composer-placeholder-hint")).toHaveTextContent("Голосовой ввод");
+    expect(screen.getByTestId("composer-placeholder-hint")).toHaveStyle({ top: "calc(100% - 59px)" });
+    expect(screen.getByTestId("composer-placeholder-icon")).toBeInTheDocument();
     expect(screen.queryByText("⏎")).not.toBeInTheDocument();
-    expect(screen.getByTestId("composer-voice-button")).toHaveStyle({ height: "30px" });
+    expect(screen.getByTestId("composer-voice-input-panel")).toHaveStyle({ gap: "6px" });
+    expect(screen.getByTestId("composer-voice-action-buttons")).toHaveStyle({ gap: "6px" });
+    expect(screen.queryByTestId("composer-voice-button")).not.toBeInTheDocument();
+    expect(screen.getByTestId("composer-voice-cancel-button")).toHaveStyle({ height: "30px" });
+    expect(screen.getByTestId("composer-voice-stop-button")).toHaveStyle({ height: "30px" });
     expect(screen.getByTestId("composer-send-button")).toBeEnabled();
     expect(screen.queryByTestId("composer-stop-button")).not.toBeInTheDocument();
   });
@@ -707,7 +778,7 @@ describe("Composer", () => {
       expect(FakeMediaRecorder.current?.state).toBe("recording");
     });
 
-    fireEvent.click(screen.getByTestId("composer-voice-button"));
+    fireEvent.click(screen.getByTestId("composer-voice-cancel-button"));
 
     await waitFor(() => {
       expect(screen.queryByTestId("composer-voice-recording-strip")).not.toBeInTheDocument();
@@ -1044,7 +1115,7 @@ describe("Composer", () => {
     act(() => {
       FakeSpeechRecognition.current?.emitInterim("ручная остановка");
     });
-    fireEvent.click(screen.getByTestId("composer-voice-button"));
+    fireEvent.click(screen.getByTestId("composer-voice-cancel-button"));
 
     expect(screen.getByPlaceholderText("Написать")).toHaveValue("");
     expect(screen.queryByTestId("composer-voice-recording-strip")).not.toBeInTheDocument();

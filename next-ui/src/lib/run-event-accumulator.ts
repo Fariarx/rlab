@@ -27,6 +27,7 @@ export type RunEvent =
   | { type: "session"; id: string }
   | { type: "wakeup"; prompt: string; reason?: string; toolId?: string; delaySeconds?: number; fireAt?: string; cron?: string; script?: string; intervalSeconds?: number }
   | { type: "cancel_wakeup"; wakeupId?: string; all?: boolean; reason?: string; toolId?: string }
+  | { type: "goal"; action: "add" | "update" | "pause" | "resume" | "remove" | "complete" | "list"; goalId?: string; description?: string; afterItemId?: string | null; toolId?: string }
   | { type: "done"; costUsd?: number; usage?: RunUsage; usageDebug?: unknown };
 
 export interface StreamingTool {
@@ -262,6 +263,7 @@ export function accumulateRunEvent(accumulator: RunEventAccumulator, event: RunE
       break;
     case "wakeup":
     case "cancel_wakeup":
+    case "goal":
       break;
   }
 }

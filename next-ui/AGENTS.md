@@ -7,10 +7,12 @@ This file is high-signal, not comprehensive. Add to it when something was non-ob
 ## Architecture
 - **Frontend**: SPA under `src`. Routing is a hash-switch (`#/kit`, etc.). App state lives in a MobX store (`src/components/workspace/use-workspace.ts`) and is persisted server-side in an **embedded SQLite database** (`workspace.db`, WAL) — see `workspace-db.ts`. The tree is normalized into `projects`/`conversations`/`messages`/`composer_drafts`/`kv` rows, and message threads load lazily: **`GET /api/workspace` returns a shell** (conversation summaries, projects, drafts, settings) with only the **selected** conversation's thread; other threads load on open via **`GET /api/thread?conversationId=…`** (client `loadThread`, tracked by `fullyLoadedThreadIds`; full-text search first `loadAllThreads`). Do **not** add a UI path that writes the whole workspace back. Full workspace writes are intentionally disabled: `PUT /api/workspace` returns 410, and the client must persist via `POST /api/workspace/mutations` with row-level operations (`upsertConversation`, `deleteConversation`, `upsertMessage`, `replaceConversationThread`, etc.). `initializeWorkspaceStateInDb` is insert-only for an empty DB; there must be no function that can delete/rewrite all projects/conversations/messages from a client payload. The streaming hot path upserts only the single changed message + conversation row. `node:sqlite` is loaded via `process.getBuiltinModule` so bundlers don't choke on the experimental built-in.
 - **MobX frontend state**: prefer class stores with explicit `makeObservable(this, { ... })` annotations (`observable`, `computed`, `action.bound`) over React hook state for coordinated app/UI state. Do not use `makeAutoObservable` in new stores. Components that read store data must be wrapped in `observer()`; hooks may create/mount a store, but must not bridge MobX updates through `reaction + setState`.
-- **Backend**: `vite-agents-plugin.ts` — a Vite plugin that serves `/api/*` via connect middleware in **both** `configureServer` (dev) and `configurePreviewServer` (prod preview). There is no separate server process; `bin/rlab.mjs` runs `vite preview`.
+- **Backend**: `vite-agents-plugin.ts` owns the `/api/*`, `/preview-proxy/*`, terminal WS, agent, wakeup, git, and browser-preview runtime. In dev it is mounted as a Vite plugin. In prod it is mounted by the compiled Node runtime server (`dist-server/prod-server.mjs`) through `attachRlabApi`; Vite is not part of the long-lived prod process.
 - **Deploy mental model — read this before redeploying:**
-  - **Backend** changes (`vite-agents-plugin.ts`) load **from source on restart, no rebuild** — `vite preview` loads the plugin TS at boot. Just `sudo systemctl restart rlab`.
-  - **Frontend** changes (anything under `src/`) **need `npm run build`** — they're bundled into `dist/`, which preview serves statically. Forgetting this means prod silently runs the old UI.
+  - **Any prod code change** needs `npm run build` before restart. Frontend bundles into `dist/`; backend runtime bundles into `dist-server/`.
+- `bin/rlab.mjs` refuses to start without `dist-server/prod-server.mjs`; it must never run `vite build` inside the prod service.
+- A plain `sudo systemctl restart rlab` is only valid for config/data-only restarts when the built artifacts are already current.
+- `/api/agents` is intentionally cheap: it reports PATH/env availability only. Live model discovery is `/api/agents?live=1` and must stay manual/user-triggered; running it on startup or periodic background refresh inflates the long-lived Node RSS because V8 keeps the expanded heap.
 
 ## Agents
 Four agents, dispatched in the `/api/run` handler:
@@ -36,7 +38,8 @@ npm run dev          # dev server → http://localhost:5187 (vite, host 0.0.0.0)
 npm run typecheck    # tsc --noEmit
 npm run lint         # biome lint src  (lint only; formatter off; code is 2-space — don't reformat)
 npm test             # NODE_ENV=test vitest run  (WITHOUT NODE_ENV=test the suite fails)
-npm run build        # tsc --noEmit && vite build  → bundles the frontend into dist/
+npm run build        # tsc --noEmit && vite build && server build → dist/ + dist-server/
+npm run serve        # production runtime from dist/ + dist-server/ (no Vite)
 npm run smoke:agents # quick agent smoke run
 ```
 `npm install` drops devDeps unless you pass `--include=dev`.
@@ -44,9 +47,7 @@ npm run smoke:agents # quick agent smoke run
 ### Deploy to prod
 The prod service is named **`rlab`** (not `rlab-prod` or anything else).
 ```bash
-# backend change (vite-agents-plugin.ts) — restart picks it up from source, no build:
-sudo systemctl restart rlab
-# frontend change (anything under src/) — MUST build first, else prod silently runs the old UI:
+# code change — MUST build first, else prod runs the old client/server bundle:
 npm run build && sudo systemctl restart rlab
 ```
 
@@ -61,7 +62,7 @@ curl -s -X POST http://127.0.0.1:4280/api/run -H "Content-Type: application/json
 ```
 
 ### Dev loop
-edit → `npm run typecheck` → `npm test` → (if you touched `src/`) `npm run build` → `sudo systemctl restart rlab` → `curl …/api/agents` and reload the page to verify. Do not commit unless asked.
+edit → `npm run typecheck` → `npm test` → `npm run build` → `sudo systemctl restart rlab` → `curl …/api/agents` and reload the page to verify. Do not commit unless asked.
 - Agent shell commands launched from the production chat inherit prod env (`RLAB_DATA_DIR=/home/kanban/.rlab-prod`, `PORT=4280`, `NODE_ENV=production`). Keep dev/test scripts explicitly pinned to non-prod data dirs (currently `.data-dev` / `.data-test`) and do not run raw `vite`/`vitest` from an rlab chat without setting `RLAB_DATA_DIR`, or the dev process can read/write prod SQLite/agent-limit files.
 
 ## Prod
@@ -85,7 +86,7 @@ Source:
 - `src/components/workspace/use-workspace.ts` — MobX store, persistence, background-run reattach.
 - `src/components/workspace/run-agent.ts` — client run stream + event→block mapping.
 - `src/components/agent/` — chat rendering (`Message`, `Conversation`, `parts`, `Composer`).
-- `bin/rlab.mjs` — prod entrypoint (`vite preview`).
+- `bin/rlab.mjs` — prod entrypoint; imports the compiled `dist-server/prod-server.mjs` and never imports Vite.
 
 Runtime (prod):
 - Ports: dev `5187`, prod `4280` (localhost only; public via Caddy + token-in-link).

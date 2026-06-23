@@ -1,4 +1,5 @@
 import { translate } from "../../../i18n/I18nProvider";
+export { buildAgentPrompt } from "../../../lib/agent-prompt";
 import {
   normalizeAgentProfile,
   type AgentId,
@@ -135,36 +136,6 @@ export function workspaceStateStructuralEqual(left: WorkspaceState, right: Works
 
 export function conversationProfile(conversation: ConversationSummary | null | undefined): AgentProfile {
   return normalizeAgentProfile(conversation?.profile, conversation?.agent ?? "claude-code");
-}
-
-/** A lean transcript line for one message: the user's text, or the agent's
- *  answer (text/code blocks only; reasoning and tool noise are omitted). */
-function messageTranscriptText(message: ChatMessage): string {
-  if (message.role === "user") {
-    return (message.text ?? "").trim();
-  }
-  return (message.blocks ?? [])
-    .map((block) => (block.kind === "text" ? block.text : block.kind === "code" ? block.code : ""))
-    .filter(Boolean)
-    .join("\n")
-    .trim();
-}
-
-/** Builds the agent prompt from the conversation so far. Each agent run is a
- *  fresh, stateless invocation (no session/resume), so prior turns must be
- *  replayed in the prompt or the agent loses the thread. First message in a
- *  conversation uses only the current text. */
-export function buildAgentPrompt(priorMessages: readonly ChatMessage[], currentText: string): string {
-  const turns = priorMessages
-    .map((message) => {
-      const content = messageTranscriptText(message);
-      return content ? `${message.role === "user" ? "User" : "Assistant"}: ${content}` : null;
-    })
-    .filter((line): line is string => line !== null);
-  if (turns.length === 0) {
-    return currentText;
-  }
-  return `This is a continuing conversation; here are the earlier turns for context:\n\n${turns.join("\n\n")}\n\n---\n\nUser: ${currentText}`;
 }
 
 /** The project's base working directory (ignores any worktree override). */

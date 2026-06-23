@@ -1,5 +1,5 @@
 import { ThemeProvider } from "@mui/material/styles";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../../../i18n/I18nProvider";
 import { appTheme } from "../../../theme/app-theme";
@@ -12,13 +12,15 @@ function renderGitDiffLines({
   composerShared,
   comments = [],
   onAddComment = vi.fn(),
+  onInputActivityChange,
 }: {
   readonly lines: readonly DiffViewerLine[];
   readonly composerShared?: ComposerSharedProps;
   readonly comments?: readonly ReviewCommentEntry[];
   readonly onAddComment?: (line: number, lineText: string, body: string) => void;
+  readonly onInputActivityChange?: (active: boolean) => void;
 }) {
-  const node = <GitDiffLines lines={lines} path="src/auth.ts" comments={comments} onAddComment={onAddComment} />;
+  const node = <GitDiffLines lines={lines} path="src/auth.ts" comments={comments} onAddComment={onAddComment} onInputActivityChange={onInputActivityChange} />;
   render(
     <ThemeProvider theme={appTheme}>
       <I18nProvider locale="ru">
@@ -76,6 +78,109 @@ describe("GitDiffLines", () => {
       "needsRefactor",
       "вынести в хелпер\n\n<attachment name=\"notes.txt\" type=\"text/plain\">\nhello\n</attachment>",
     );
+  });
+
+  it("keeps git review input activity active while dictation is running", async () => {
+    class FakeSpeechRecognition {
+      lang = "";
+      continuous = false;
+      interimResults = false;
+      onresult = null;
+      onerror = null;
+      onend = null;
+      start(): void {}
+      stop(): void {}
+    }
+    vi.stubGlobal("SpeechRecognition", FakeSpeechRecognition);
+    const onInputActivityChange = vi.fn();
+    renderGitDiffLines({
+      lines: [{ kind: "add", text: "+needsRefactor" }],
+      composerShared: {
+        voiceProvider: { id: "web-speech", name: "Browser Web Speech", kind: "browser", language: "ru-RU", configured: true },
+      },
+      onInputActivityChange,
+    });
+
+    fireEvent.click(screen.getByText("needsRefactor"));
+    const input = await screen.findByTestId("git-comment-input");
+    fireEvent.focus(input);
+    await waitFor(() => expect(onInputActivityChange).toHaveBeenLastCalledWith(true));
+
+    const voiceButton = await screen.findByTestId("git-comment-voice-button");
+    const mouseDown = new MouseEvent("mousedown", { bubbles: true, cancelable: true });
+    fireEvent(voiceButton, mouseDown);
+    expect(mouseDown.defaultPrevented).toBe(true);
+    fireEvent.click(voiceButton);
+    await waitFor(() => expect(onInputActivityChange).toHaveBeenLastCalledWith(true));
+
+    fireEvent.blur(input);
+    expect(onInputActivityChange).toHaveBeenLastCalledWith(true);
+  });
+
+  it("inserts git review dictation at the original caret after browser focus changes", async () => {
+    type FakeSpeechResultEvent = {
+      readonly resultIndex: number;
+      readonly results: {
+        readonly length: number;
+        readonly 0: { readonly length: number; readonly isFinal: boolean; readonly 0: { readonly transcript: string } };
+      };
+    };
+    class FakeSpeechRecognition {
+      static current: FakeSpeechRecognition | null = null;
+      lang = "";
+      continuous = false;
+      interimResults = false;
+      onresult: ((event: FakeSpeechResultEvent) => void) | null = null;
+      onerror: ((event: { readonly error?: string; readonly message?: string }) => void) | null = null;
+      onend: (() => void) | null = null;
+
+      constructor() {
+        FakeSpeechRecognition.current = this;
+      }
+
+      start(): void {}
+
+      stop(): void {
+        this.onend?.();
+      }
+
+      emitInterim(text: string): void {
+        this.onresult?.({
+          resultIndex: 0,
+          results: {
+            length: 1,
+            0: { length: 1, isFinal: false, 0: { transcript: text } },
+          },
+        });
+      }
+    }
+    vi.stubGlobal("SpeechRecognition", FakeSpeechRecognition);
+    renderGitDiffLines({
+      lines: [{ kind: "add", text: "+needsRefactor" }],
+      composerShared: {
+        voiceProvider: { id: "web-speech", name: "Browser Web Speech", kind: "browser", language: "ru-RU", configured: true },
+      },
+    });
+
+    fireEvent.click(screen.getByText("needsRefactor"));
+    const input = await screen.findByTestId("git-comment-input") as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "alpha omega" } });
+    input.setSelectionRange("alpha ".length, "alpha ".length);
+
+    fireEvent.click(await screen.findByTestId("git-comment-voice-button"));
+    await waitFor(() => expect(FakeSpeechRecognition.current).not.toBeNull());
+
+    input.setSelectionRange(input.value.length, input.value.length);
+    act(() => {
+      FakeSpeechRecognition.current?.emitInterim("ручная остановка");
+    });
+    fireEvent.click(await screen.findByTestId("git-comment-voice-button"));
+
+    await waitFor(() => expect(input).toHaveValue("alpha ручная остановка omega"));
+    await waitFor(() => {
+      expect(input.selectionStart).toBe("alpha ручная остановка ".length);
+      expect(input.selectionEnd).toBe("alpha ручная остановка ".length);
+    });
   });
 
   it("converts large mobile beforeinput paste in review comments into a text attachment", async () => {

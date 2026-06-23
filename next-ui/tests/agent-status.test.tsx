@@ -1,6 +1,6 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AgentStatusProvider, useAgentStatus, useAgentStatusError, useAgentStatusLive } from "../src/components/agent";
+import { AgentStatusProvider, useAgentStatus, useAgentStatusError, useAgentStatusLive, useReloadAgentStatus } from "../src/components/agent";
 
 function Probe() {
   const statusOf = useAgentStatus();
@@ -13,6 +13,11 @@ function Probe() {
       <output data-testid="claude">{statusOf("claude-code")}</output>
     </div>
   );
+}
+
+function ReloadProbe() {
+  const reload = useReloadAgentStatus();
+  return <button onClick={reload}>reload</button>;
 }
 
 describe("AgentStatusProvider", () => {
@@ -106,5 +111,38 @@ describe("AgentStatusProvider", () => {
 
     expect(screen.getByTestId("live")).toHaveTextContent("live");
     expect(reads).toBe(2);
+  });
+
+  it("uses cheap status detection automatically and live model discovery only on manual reload", async () => {
+    const urls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL | Request) => {
+        const value = typeof url === "string" ? url : url instanceof URL ? `${url.pathname}${url.search}` : url.url;
+        urls.push(value);
+        return Response.json({ "claude-code": "available" });
+      }),
+    );
+
+    render(
+      <AgentStatusProvider>
+        <Probe />
+        <ReloadProbe />
+      </AgentStatusProvider>,
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(urls).toEqual(["/api/agents"]);
+
+    fireEvent.click(screen.getByRole("button", { name: "reload" }));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(urls).toEqual(["/api/agents", "/api/agents?live=1"]);
   });
 });
