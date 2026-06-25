@@ -114,13 +114,23 @@ export interface SuggestedActionsBlock {
 
 export type SuggestedActionIconKey = "arrow-forward" | "copy" | "refresh";
 
-/** A single code-review comment a user attached to a diff line in the Git view. */
-export interface ReviewCommentEntry {
-  readonly id: string;
-  readonly file: string;
+/** Compact source anchor for a code-review comment attached to a diff line. */
+export interface ReviewCommentAnchor {
   /** 1-based line number within the rendered diff. */
   readonly line: number;
   readonly lineText: string;
+  /** Exact rendered diff line, including the unified-diff prefix when present. */
+  readonly diffLine?: string;
+  /** Nearest unified-diff hunk header above the line, when present. */
+  readonly hunkHeader?: string;
+  /** A small set of nearby rendered diff lines with rendered diff line numbers. */
+  readonly diffContext?: readonly string[];
+}
+
+/** A single code-review comment a user attached to a diff line in the Git view. */
+export interface ReviewCommentEntry extends ReviewCommentAnchor {
+  readonly id: string;
+  readonly file: string;
   readonly body: string;
 }
 
@@ -244,6 +254,9 @@ export interface ConversationSummary {
   /** Pinned conversations surface in a dedicated top group and are hidden from
    *  their original project/chats list. */
   readonly pinned?: boolean;
+  /** Manual order inside the pinned group. Regular project/chats groups keep
+   *  their persisted server order. */
+  readonly pinnedOrder?: number;
   /** Archived conversations stay persisted and searchable, but are hidden from
    *  the normal sidebar groups. */
   readonly archived?: boolean;

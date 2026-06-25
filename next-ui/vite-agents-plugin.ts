@@ -2638,6 +2638,10 @@ function sanitizeOptionalTimestamp(value: unknown, fallback?: number): number | 
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : fallback;
 }
 
+function sanitizeOptionalPinnedOrder(value: unknown, fallback?: number): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
 function conversationProjectPath(state: WorkspaceState, conversationId: string): string | undefined {
   return state.projects.find((project) => project.conversations.some((conversation) => conversation.id === conversationId))?.path;
 }
@@ -2686,6 +2690,7 @@ function sanitizeClientConversationCreate(conversation: ConversationSummary): Co
     ...(view ? { view } : {}),
     ...(conversation.unread !== undefined ? { unread: Boolean(conversation.unread) } : {}),
     ...(conversation.pinned !== undefined ? { pinned: Boolean(conversation.pinned) } : {}),
+    ...(conversation.pinned && conversation.pinnedOrder !== undefined ? { pinnedOrder: sanitizeOptionalPinnedOrder(conversation.pinnedOrder) } : {}),
     ...(conversation.archived !== undefined ? { archived: Boolean(conversation.archived) } : {}),
   };
 }
@@ -2694,6 +2699,7 @@ function sanitizeClientConversationUpdate(state: WorkspaceState, existing: Conve
   const compaction = sanitizeClientCompaction(incoming.compaction);
   const view = sanitizeClientConversationView(incoming.view);
   const worktreePath = sanitizeClientWorktreePath(state, existing, incoming);
+  const pinned = incoming.pinned !== undefined ? Boolean(incoming.pinned) : existing.pinned;
   return {
     ...existing,
     title: incoming.title,
@@ -2703,7 +2709,8 @@ function sanitizeClientConversationUpdate(state: WorkspaceState, existing: Conve
     ...(compaction ? { compaction } : { compaction: undefined }),
     ...(view ? { view } : { view: undefined }),
     ...(incoming.unread !== undefined ? { unread: Boolean(incoming.unread) } : { unread: undefined }),
-    ...(incoming.pinned !== undefined ? { pinned: Boolean(incoming.pinned) } : { pinned: undefined }),
+    ...(incoming.pinned !== undefined ? { pinned } : { pinned: undefined }),
+    pinnedOrder: pinned ? sanitizeOptionalPinnedOrder(incoming.pinnedOrder, existing.pinnedOrder) : undefined,
     ...(incoming.archived !== undefined ? { archived: Boolean(incoming.archived) } : { archived: undefined }),
     ...(worktreePath ? { worktreePath } : { worktreePath: undefined }),
   };
@@ -2778,7 +2785,7 @@ export function sanitizeClientWorkspaceMutations(mutations: readonly WorkspaceDb
         if (!existing) {
           throw new Error(`Conversation ${mutation.conversationId} does not exist.`);
         }
-        const conversation = { ...existing, archived: true, pinned: false };
+        const conversation = { ...existing, archived: true, pinned: false, pinnedOrder: undefined };
         pendingConversations.set(conversation.id, conversation);
         sanitized.push({ type: "updateConversation", conversation });
         break;
@@ -5098,9 +5105,8 @@ function handleGitTree(req: IncomingMessage, res: ServerResponse): void {
           "--graph",
           "--decorate=short",
           "--all",
-          "--date=short",
           "--max-count=160",
-          "--pretty=format:%x1f%H%x1f%h%x1f%P%x1f%an%x1f%ad%x1f%D%x1f%s",
+          "--pretty=format:%x1f%H%x1f%h%x1f%P%x1f%an%x1f%ai%x1f%D%x1f%s",
         ]);
         if (!result.ok) {
           sendJson(res, 500, { error: result.error });
@@ -5120,6 +5126,9 @@ interface GitCommandResult {
   readonly stdout: string;
   readonly error: string;
 }
+
+const DEFAULT_GIT_DIFF_CONTEXT_LINES = 3;
+const MAX_GIT_DIFF_CONTEXT_LINES = 5000;
 
 function validateGitCwd(cwd: string): string | null {
   if (!cwd) {
@@ -5196,6 +5205,38 @@ export function parseGitFilePayload(body: string): { readonly cwd: string; reado
     throw new Error(pathError);
   }
   return { cwd, path, mode: parsed.mode === "staged" ? "staged" : "worktree" };
+}
+
+export function parseGitDiffPayload(body: string): { readonly cwd: string; readonly path: string; readonly mode: "staged" | "worktree"; readonly contextLines: number } {
+  const parsed = parseJsonObjectPayload(body, "Invalid git request payload.");
+  const cwd = typeof parsed.cwd === "string" ? parsed.cwd.trim() : "";
+  const path = typeof parsed.path === "string" ? parsed.path.trim() : "";
+  if (!cwd) {
+    throw new Error("Project directory is required.");
+  }
+  const pathError = validateGitPath(path);
+  if (pathError) {
+    throw new Error(pathError);
+  }
+  const rawContextLines = parsed.contextLines;
+  const contextLines = typeof rawContextLines === "number" && Number.isFinite(rawContextLines)
+    ? Math.max(0, Math.min(MAX_GIT_DIFF_CONTEXT_LINES, Math.floor(rawContextLines)))
+    : DEFAULT_GIT_DIFF_CONTEXT_LINES;
+  return { cwd, path, mode: parsed.mode === "staged" ? "staged" : "worktree", contextLines };
+}
+
+export function parseGitDiscardFilePayload(body: string): { readonly cwd: string; readonly path: string; readonly untracked: boolean } {
+  const parsed = parseJsonObjectPayload(body, "Invalid git request payload.");
+  const cwd = typeof parsed.cwd === "string" ? parsed.cwd.trim() : "";
+  const path = typeof parsed.path === "string" ? parsed.path.trim() : "";
+  if (!cwd) {
+    throw new Error("Project directory is required.");
+  }
+  const pathError = validateGitPath(path);
+  if (pathError) {
+    throw new Error(pathError);
+  }
+  return { cwd, path, untracked: parsed.untracked === true };
 }
 
 export function parseGitCommitPayload(body: string): { readonly cwd: string; readonly message: string } {
@@ -5338,7 +5379,7 @@ function runGit(cwd: string, args: readonly string[], onDone: (result: GitComman
 }
 
 function respondWithGitStatus(cwd: string, res: ServerResponse): void {
-  runGit(cwd, ["status", "--porcelain=v1", "-b"], (statusResult) => {
+  runGit(cwd, ["status", "--porcelain=v1", "-b", "-uall"], (statusResult) => {
     if (!statusResult.ok) {
       sendJson(res, 500, { error: statusResult.error });
       return;
@@ -5375,6 +5416,71 @@ function sendGitStatusAfterMutation(cwd: string, res: ServerResponse): void {
 
 function runGitP(cwd: string, args: readonly string[]): Promise<GitCommandResult> {
   return new Promise((resolve) => runGit(cwd, args, resolve));
+}
+
+function textLineCount(text: string): number {
+  if (text.length === 0) {
+    return 0;
+  }
+  const normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const withoutTrailingLineBreak = normalized.endsWith("\n") ? normalized.slice(0, -1) : normalized;
+  return withoutTrailingLineBreak.length === 0 ? 0 : withoutTrailingLineBreak.split("\n").length;
+}
+
+async function gitObjectLineCount(cwd: string, revisionPrefix: "HEAD:" | ":", path: string): Promise<number> {
+  const result = await runGitP(cwd, ["show", `${revisionPrefix}${path}`]);
+  return result.ok ? textLineCount(result.stdout) : 0;
+}
+
+function worktreeGitPathLineCount(cwd: string, path: string): number {
+  const filePath = safeWorktreeGitFilePath(cwd, path);
+  if (!filePath) {
+    return 0;
+  }
+  return textLineCount(readFileSync(filePath, "utf8"));
+}
+
+function safeWorktreeGitFilePath(cwd: string, path: string): string | null {
+  const filePath = resolve(cwd, path);
+  const relativePath = relative(cwd, filePath);
+  if (relativePath.startsWith("..") || isAbsolute(relativePath) || !existsSync(filePath) || !statSync(filePath).isFile()) {
+    return null;
+  }
+  return filePath;
+}
+
+async function isTrackedGitPath(cwd: string, path: string): Promise<boolean> {
+  const result = await runGitP(cwd, ["ls-files", "--error-unmatch", "--", path]);
+  return result.ok;
+}
+
+export async function gitDiffCommand(cwd: string, path: string, mode: "staged" | "worktree", contextLines: number): Promise<{ readonly args: readonly string[]; readonly allowNoIndexDifference: boolean }> {
+  if (mode === "worktree" && safeWorktreeGitFilePath(cwd, path) && !(await isTrackedGitPath(cwd, path))) {
+    return {
+      args: ["diff", "--no-index", `--unified=${contextLines}`, "--", "/dev/null", path],
+      allowNoIndexDifference: true,
+    };
+  }
+  return {
+    args: mode === "staged" ? ["diff", "--cached", `--unified=${contextLines}`, "--", path] : ["diff", `--unified=${contextLines}`, "--", path],
+    allowNoIndexDifference: false,
+  };
+}
+
+function gitDiffResultOk(result: GitCommandResult, allowNoIndexDifference: boolean): boolean {
+  return result.ok || (allowNoIndexDifference && result.stdout.trim().length > 0);
+}
+
+async function gitDiffFileLineCounts(cwd: string, path: string, mode: "staged" | "worktree"): Promise<{ readonly oldLineCount: number; readonly newLineCount: number }> {
+  if (mode === "staged") {
+    const [oldLineCount, newLineCount] = await Promise.all([
+      gitObjectLineCount(cwd, "HEAD:", path),
+      gitObjectLineCount(cwd, ":", path),
+    ]);
+    return { oldLineCount, newLineCount };
+  }
+  const oldLineCount = await gitObjectLineCount(cwd, ":", path);
+  return { oldLineCount, newLineCount: worktreeGitPathLineCount(cwd, path) };
 }
 
 interface GitGraphCommitPayload {
@@ -5636,24 +5742,26 @@ function handleGitReset(req: IncomingMessage, res: ServerResponse): void {
 
 function handleGitDiff(req: IncomingMessage, res: ServerResponse): void {
   readJsonBody(req, res, (body) => {
-    try {
-      const { cwd, path, mode } = parseGitFilePayload(body);
-      const cwdError = validateGitCwd(cwd);
-      if (cwdError) {
-        sendJson(res, workspacePathErrorStatus(cwdError), { error: cwdError });
-        return;
-      }
-      const args = mode === "staged" ? ["diff", "--cached", "--", path] : ["diff", "--", path];
-      runGit(cwd, args, (result) => {
-        if (!result.ok) {
+    void (async () => {
+      try {
+        const { cwd, path, mode, contextLines } = parseGitDiffPayload(body);
+        const cwdError = validateGitCwd(cwd);
+        if (cwdError) {
+          sendJson(res, workspacePathErrorStatus(cwdError), { error: cwdError });
+          return;
+        }
+        const command = await gitDiffCommand(cwd, path, mode, contextLines);
+        const result = await runGitP(cwd, command.args);
+        if (!gitDiffResultOk(result, command.allowNoIndexDifference)) {
           sendJson(res, 500, { error: result.error });
           return;
         }
-        sendJson(res, 200, { path, mode, diff: result.stdout });
-      });
-    } catch (error) {
-      sendJson(res, gitErrorStatus(error), { error: errorMessage(error) });
-    }
+        const lineCounts = await gitDiffFileLineCounts(cwd, path, mode);
+        sendJson(res, 200, { path, mode, diff: result.stdout, contextLines, ...lineCounts });
+      } catch (error) {
+        sendJson(res, gitErrorStatus(error), { error: errorMessage(error) });
+      }
+    })();
   });
 }
 
@@ -5689,6 +5797,29 @@ function handleGitUnstage(req: IncomingMessage, res: ServerResponse): void {
         return;
       }
       runGit(cwd, ["restore", "--staged", "--", path], (result) => {
+        if (!result.ok) {
+          sendJson(res, 500, { error: result.error });
+          return;
+        }
+        sendGitStatusAfterMutation(cwd, res);
+      });
+    } catch (error) {
+      sendJson(res, gitErrorStatus(error), { error: errorMessage(error) });
+    }
+  });
+}
+
+function handleGitDiscardFile(req: IncomingMessage, res: ServerResponse): void {
+  readJsonBody(req, res, (body) => {
+    try {
+      const { cwd, path, untracked } = parseGitDiscardFilePayload(body);
+      const cwdError = validateGitCwd(cwd);
+      if (cwdError) {
+        sendJson(res, workspacePathErrorStatus(cwdError), { error: cwdError });
+        return;
+      }
+      const args = untracked ? ["clean", "-f", "--", path] : ["restore", "--", path];
+      runGit(cwd, args, (result) => {
         if (!result.ok) {
           sendJson(res, 500, { error: result.error });
           return;
@@ -7036,10 +7167,15 @@ export function appendRlabChatToolsPrompt(prompt: string, tools?: readonly RlabC
 }
 
 // MCP-capable agents load a tiny external stdio MCP server that exposes
-// TaskWakeup so the model can actually call it; the run-stream translator still
-// does the real scheduling. Keeping Claude on the same external server avoids
-// in-process SDK MCP stream failures ("Stream closed") during long agent runs.
-const RLAB_MCP_STDIO_SCRIPT = join(PLUGIN_DIR, "bin", "rlab-mcp-stdio.mjs");
+// rlab chat tools so the model can actually call them; the run-stream
+// translator still does the real scheduling/queue updates. In production this
+// module runs from dist-server, while package bin scripts stay at package root.
+export function resolveRlabMcpStdioScript(pluginDir = PLUGIN_DIR): string {
+  const packageRoot = basename(pluginDir) === "dist-server" ? dirname(pluginDir) : pluginDir;
+  return join(packageRoot, "bin", "rlab-mcp-stdio.mjs");
+}
+
+const RLAB_MCP_STDIO_SCRIPT = resolveRlabMcpStdioScript();
 let rlabOpenCodeMcpConfigPath: string | null = null;
 let rlabGeminiMcpMerged = false;
 
@@ -7707,6 +7843,19 @@ function firstString(record: Record<string, string> | Record<string, unknown> | 
   for (const key of keys) {
     const value = record[key];
     if (typeof value === "string" && value.trim().length > 0) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function stringField(record: Record<string, unknown> | undefined, keys: readonly string[]): string | undefined {
+  if (!record) {
+    return undefined;
+  }
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "string") {
       return value;
     }
   }
@@ -12348,6 +12497,11 @@ export function codexAppServerItemEvents(item: Record<string, unknown>, complete
   }
 }
 
+export function codexAppServerTextDeltaEvents(params: Record<string, unknown>, type: "text" | "reasoning"): RunEvent[] {
+  const delta = stringField(params, ["delta"]);
+  return delta === undefined || delta.length === 0 ? [] : [{ type, text: delta }];
+}
+
 function codexConfigForRequest(request: RunRequest, profile: AgentProfile): Record<string, unknown> | undefined {
   const config: Record<string, unknown> = {};
   if (typeof request.compactWindow === "number" && request.compactWindow > 0) {
@@ -12476,24 +12630,22 @@ async function runCodexAppServer(
     switch (method) {
       case "item/agentMessage/delta": {
         const itemId = firstString(params, ["itemId"]);
-        const delta = firstString(params, ["delta"]);
         if (itemId) {
           streamedText.add(itemId);
         }
-        if (delta) {
-          send({ type: "text", text: delta });
+        for (const event of codexAppServerTextDeltaEvents(params, "text")) {
+          send(event);
         }
         return;
       }
       case "item/reasoning/textDelta":
       case "item/reasoning/summaryTextDelta": {
         const itemId = firstString(params, ["itemId"]);
-        const delta = firstString(params, ["delta"]);
         if (itemId) {
           streamedReasoning.add(itemId);
         }
-        if (delta) {
-          send({ type: "reasoning", text: delta });
+        for (const event of codexAppServerTextDeltaEvents(params, "reasoning")) {
+          send(event);
         }
         return;
       }
@@ -13772,6 +13924,7 @@ export function attachRlabApi(server: RlabApiAttachTarget): void {
     { path: "/api/git-diff", handler: methodOnly("POST", handleGitDiff) },
     { path: "/api/git-stage", handler: methodOnly("POST", handleGitStage) },
     { path: "/api/git-unstage", handler: methodOnly("POST", handleGitUnstage) },
+    { path: "/api/git-discard-file", handler: methodOnly("POST", handleGitDiscardFile) },
     { path: "/api/git-commit", handler: methodOnly("POST", handleGitCommit) },
     { path: "/api/git-checkout", handler: methodOnly("POST", handleGitCheckout) },
     { path: "/api/git-cherry-pick", handler: methodOnly("POST", handleGitCherryPick) },

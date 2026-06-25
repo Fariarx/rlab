@@ -56,6 +56,21 @@ describe("ConversationList pinning", () => {
     expect(screen.queryByRole("button", { name: /Закреплённые/ })).not.toBeInTheDocument();
   });
 
+  it("uses the whole pinned row as the drag target without a separate handle", () => {
+    const actions = { ...noopActions(), onReorderPinned: vi.fn() };
+    render(
+      [
+        { ...base, id: "pinned-a", title: "Pinned A", pinned: true },
+        { ...base, id: "pinned-b", title: "Pinned B", pinned: true },
+      ],
+      actions,
+    );
+
+    expect(screen.queryByLabelText("Переместить закреплённый диалог")).not.toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Pinned A" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Pinned B" })).toBeInTheDocument();
+  });
+
   it("confirms Pin inline before calling onTogglePin", () => {
     const actions = render([{ ...base, id: "plain", title: "Plain chat" }]);
 

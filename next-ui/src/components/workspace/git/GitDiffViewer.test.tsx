@@ -4,23 +4,41 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../../../i18n/I18nProvider";
 import { appTheme } from "../../../theme/app-theme";
 import { ComposerSharedProvider, type ComposerSharedProps } from "../../agent/composer/composer-shared-context";
-import type { ReviewCommentEntry } from "../../agent/core/types";
-import { GitDiffLines, type DiffViewerLine } from "./GitDiffViewer";
+import type { ReviewCommentAnchor, ReviewCommentEntry } from "../../agent/core/types";
+import { GitDiffLines, gitDiffViewerLinesFromUnified, reviewCommentAnchorForLine, type DiffViewerLine } from "./GitDiffViewer";
+import type { GitDiffContextDirection } from "./use-git-file-diff";
 
 function renderGitDiffLines({
   lines,
   composerShared,
   comments = [],
+  oldLineCount,
+  newLineCount,
   onAddComment = vi.fn(),
+  onExpandContext,
   onInputActivityChange,
 }: {
   readonly lines: readonly DiffViewerLine[];
   readonly composerShared?: ComposerSharedProps;
   readonly comments?: readonly ReviewCommentEntry[];
-  readonly onAddComment?: (line: number, lineText: string, body: string) => void;
+  readonly oldLineCount?: number;
+  readonly newLineCount?: number;
+  readonly onAddComment?: (anchor: ReviewCommentAnchor, body: string) => void;
+  readonly onExpandContext?: (direction: GitDiffContextDirection) => void;
   readonly onInputActivityChange?: (active: boolean) => void;
 }) {
-  const node = <GitDiffLines lines={lines} path="src/auth.ts" comments={comments} onAddComment={onAddComment} onInputActivityChange={onInputActivityChange} />;
+  const node = (
+    <GitDiffLines
+      lines={lines}
+      path="src/auth.ts"
+      oldLineCount={oldLineCount}
+      newLineCount={newLineCount}
+      comments={comments}
+      onAddComment={onAddComment}
+      onExpandContext={onExpandContext}
+      onInputActivityChange={onInputActivityChange}
+    />
+  );
   render(
     <ThemeProvider theme={appTheme}>
       <I18nProvider locale="ru">
@@ -34,6 +52,27 @@ function renderGitDiffLines({
 describe("GitDiffLines", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it("builds compact review anchors with hunk and nearby diff context", () => {
+    const anchor = reviewCommentAnchorForLine(
+      [
+        { kind: "meta", text: "@@ -10,6 +10,7 @@ function auth()" },
+        { kind: "ctx", text: " const keep = true;" },
+        { kind: "del", text: "-oldCall();" },
+        { kind: "add", text: "+newCall();" },
+        { kind: "ctx", text: " return keep;" },
+      ],
+      4,
+    );
+
+    expect(anchor).toEqual({
+      line: 4,
+      lineText: "newCall();",
+      diffLine: "+newCall();",
+      hunkHeader: "@@ -10,6 +10,7 @@ function auth()",
+      diffContext: ["2:  const keep = true;", "3: -oldCall();", "4: +newCall();", "5:  return keep;"],
+    });
   });
 
   it("adds review comments with attachments and voice controls", async () => {
@@ -74,10 +113,30 @@ describe("GitDiffLines", () => {
 
     await waitFor(() => expect(onAddComment).toHaveBeenCalledTimes(1));
     expect(onAddComment).toHaveBeenCalledWith(
-      1,
-      "needsRefactor",
+      {
+        line: 1,
+        lineText: "needsRefactor",
+        diffLine: "+needsRefactor",
+        diffContext: ["1: +needsRefactor"],
+      },
       "вынести в хелпер\n\n<attachment name=\"notes.txt\" type=\"text/plain\">\nhello\n</attachment>",
     );
+  });
+
+  it("renders context expansion controls on expandable hunk edges", () => {
+    const onExpandContext = vi.fn<(direction: GitDiffContextDirection) => void>();
+    renderGitDiffLines({
+      lines: gitDiffViewerLinesFromUnified("@@ -21,4 +21,4 @@\n before\n-old\n+new\n after"),
+      oldLineCount: 80,
+      newLineCount: 80,
+      onExpandContext,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Показать 20 строк выше" }));
+    expect(onExpandContext).toHaveBeenLastCalledWith("before");
+
+    fireEvent.click(screen.getByRole("button", { name: "Показать 20 строк ниже" }));
+    expect(onExpandContext).toHaveBeenLastCalledWith("after");
   });
 
   it("keeps git review input activity active while dictation is running", async () => {
@@ -208,8 +267,12 @@ describe("GitDiffLines", () => {
 
     await waitFor(() => expect(onAddComment).toHaveBeenCalledTimes(1));
     expect(onAddComment).toHaveBeenCalledWith(
-      1,
-      "needsRefactor",
+      {
+        line: 1,
+        lineText: "needsRefactor",
+        diffLine: "+needsRefactor",
+        diffContext: ["1: +needsRefactor"],
+      },
       [
         "см. файл",
         "",

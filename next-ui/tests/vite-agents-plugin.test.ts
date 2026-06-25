@@ -1,4 +1,5 @@
 ﻿import { describe, expect, it, vi } from "vitest";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
@@ -14,6 +15,7 @@ import {
   buildCodexThreadParams,
   codexDynamicToolCallResponse,
   codexAppServerItemEvents,
+  codexAppServerTextDeltaEvents,
   codexRlabDynamicTools,
   codexAppServerUsage,
   createScheduledWakeupDispatch,
@@ -53,7 +55,10 @@ import {
   parseAnthropicModelInfos,
   parseGitStatusPorcelain,
   parseGitCwdPayload,
+  parseGitDiffPayload,
+  gitDiffCommand,
   parseGitFilePayload,
+  parseGitDiscardFilePayload,
   parseGitCommitPayload,
   parseGitCheckoutPayload,
   parseGitCommitActionPayload,
@@ -68,6 +73,7 @@ import {
   isNoChangesGitCommitResult,
   jsonBodyReadErrorStatus,
   parseProjectDirectoryPayload,
+  resolveRlabMcpStdioScript,
   parseRunRequestPayload,
   agentInstallErrorStatus,
   applyRunApprovalDecisionState,
@@ -211,6 +217,12 @@ describe("vite agents plugin", () => {
     expect(source).toContain("startServerRunFromPayload(body, dispatchingRecord.origin");
     expect(source).not.toContain("fetch(`${record.origin}/api/run`");
     expect(source).not.toContain("fetch(`${dispatchingRecord.origin}/api/run`");
+  });
+
+  it("requests full untracked git status paths for the Git panel", () => {
+    const source = readFileSync("vite-agents-plugin.ts", "utf8");
+
+    expect(source).toContain('["status", "--porcelain=v1", "-b", "-uall"]');
   });
 
   it("builds queued turn run bodies from the current persisted conversation profile", () => {
@@ -1287,8 +1299,14 @@ Built-in agents:
     expect(options.mcpServers?.rlab).toMatchObject({ args: [expect.stringContaining("rlab-mcp-stdio.mjs")] });
     expect(options.toolAliases).toMatchObject({
       TaskWakeup: "mcp__rlab__TaskWakeup",
+      TaskGoal: "mcp__rlab__TaskGoal",
     });
     expect(options.toolAliases).not.toHaveProperty("TaskAwait");
+  });
+
+  it("resolves the rlab MCP stdio script from source and production server bundles", () => {
+    expect(resolveRlabMcpStdioScript(resolve("/repo/next-ui"))).toBe(resolve("/repo/next-ui/bin/rlab-mcp-stdio.mjs"));
+    expect(resolveRlabMcpStdioScript(resolve("/repo/next-ui/dist-server"))).toBe(resolve("/repo/next-ui/bin/rlab-mcp-stdio.mjs"));
   });
 
   it("schedules a wakeup from an MCP-prefixed TaskWakeup tool call", () => {
@@ -2241,6 +2259,21 @@ Built-in agents:
     expect(translate(JSON.stringify({ type: "agent_message", message: "hello" }))).toEqual([{ type: "text", text: "hello" }]);
     expect(translate(JSON.stringify({ type: "item.completed", item: { id: "reasoning_0", type: "reasoning", text: "right side." } }))).toEqual([{ type: "reasoning", text: "right side.\n" }]);
     expect(translate(JSON.stringify({ type: "turn.failed", error: { message: "model unsupported" } }))).toEqual([{ type: "error", text: "model unsupported" }]);
+  });
+
+  it("preserves whitespace-only Codex app-server text deltas", () => {
+    const accumulator = createRunEventAccumulator();
+    for (const event of [
+      ...codexAppServerTextDeltaEvents({ delta: "```text" }, "text"),
+      ...codexAppServerTextDeltaEvents({ delta: "\n" }, "text"),
+      ...codexAppServerTextDeltaEvents({ delta: "for expert in experts:" }, "text"),
+    ]) {
+      accumulateRunEvent(accumulator, event);
+    }
+
+    expect(runEventBlocks(accumulator)).toEqual([
+      { kind: "text", text: "```text\nfor expert in experts:", streaming: true, result: false },
+    ]);
   });
 
   it("maps Codex app-server thread items (camelCase) into run events", () => {
@@ -3317,6 +3350,57 @@ Built-in agents:
     expect(parseGitFilePayload(JSON.stringify({ cwd: "C:\\repo", path: "src/auth.ts", mode: "other" })).mode).toBe("worktree");
   });
 
+  it("validates git diff payload context lines", () => {
+    expect(() => parseGitDiffPayload(JSON.stringify(false))).toThrow("Invalid git request payload.");
+    expect(parseGitDiffPayload(JSON.stringify({ cwd: " C:\\repo ", path: " src/auth.ts ", mode: "staged", contextLines: 23 }))).toEqual({
+      cwd: "C:\\repo",
+      path: "src/auth.ts",
+      mode: "staged",
+      contextLines: 23,
+    });
+    expect(parseGitDiffPayload(JSON.stringify({ cwd: "C:\\repo", path: "src/auth.ts" })).contextLines).toBe(3);
+    expect(parseGitDiffPayload(JSON.stringify({ cwd: "C:\\repo", path: "src/auth.ts", contextLines: -5 })).contextLines).toBe(0);
+    expect(parseGitDiffPayload(JSON.stringify({ cwd: "C:\\repo", path: "src/auth.ts", contextLines: 6000 })).contextLines).toBe(5000);
+  });
+
+  it("uses no-index diff args for untracked worktree files", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "rlab-git-diff-command-"));
+    try {
+      execFileSync("git", ["init"], { cwd: dir, stdio: "ignore" });
+      mkdirSync(join(dir, "src"), { recursive: true });
+      writeFileSync(join(dir, "src", "tracked.ts"), "export const value = 1;\n");
+      execFileSync("git", ["add", "--", "src/tracked.ts"], { cwd: dir, stdio: "ignore" });
+      writeFileSync(join(dir, "src", "tracked.ts"), "export const value = 2;\n");
+      writeFileSync(join(dir, "src", "new.ts"), "export const value = 3;\n");
+
+      await expect(gitDiffCommand(dir, "src/tracked.ts", "worktree", 23)).resolves.toEqual({
+        args: ["diff", "--unified=23", "--", "src/tracked.ts"],
+        allowNoIndexDifference: false,
+      });
+      await expect(gitDiffCommand(dir, "src/new.ts", "worktree", 23)).resolves.toEqual({
+        args: ["diff", "--no-index", "--unified=23", "--", "/dev/null", "src/new.ts"],
+        allowNoIndexDifference: true,
+      });
+      await expect(gitDiffCommand(dir, "src/new.ts", "staged", 23)).resolves.toEqual({
+        args: ["diff", "--cached", "--unified=23", "--", "src/new.ts"],
+        allowNoIndexDifference: false,
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("validates git discard file payloads", () => {
+    expect(() => parseGitDiscardFilePayload(JSON.stringify(null))).toThrow("Invalid git request payload.");
+    expect(() => parseGitDiscardFilePayload(JSON.stringify({ cwd: "C:\\repo", path: "" }))).toThrow("Git file path is required.");
+    expect(parseGitDiscardFilePayload(JSON.stringify({ cwd: " C:\\repo ", path: " scratch.txt ", untracked: true }))).toEqual({
+      cwd: "C:\\repo",
+      path: "scratch.txt",
+      untracked: true,
+    });
+    expect(parseGitDiscardFilePayload(JSON.stringify({ cwd: "C:\\repo", path: "src/auth.ts", untracked: "true" })).untracked).toBe(false);
+  });
+
   it("validates git commit payloads without accepting non-object JSON", () => {
     expect(() => parseGitCommitPayload(JSON.stringify(null))).toThrow("Invalid git request payload.");
     expect(() => parseGitCommitPayload(JSON.stringify({ cwd: "C:\\repo", message: "" }))).toThrow("Commit message is required.");
@@ -3354,8 +3438,8 @@ Built-in agents:
   it("parses decorated git graph log rows", () => {
     const commits = parseGitGraphLog(
         [
-          "* \u001fabcd1234\u001fabcd123\u001f1111 2222\u001fAda\u001f2026-06-11\u001fHEAD -> main, origin/main\u001fMerge branch 'feature'",
-          "| * \u001fbeef5678\u001fbeef567\u001f3333\u001fLuis\u001f2026-06-10\u001ffeature/api\u001fRefine webhook handling",
+          "* \u001fabcd1234\u001fabcd123\u001f1111 2222\u001fAda\u001f2026-06-11 09:24:31 +0200\u001fHEAD -> main, origin/main\u001fMerge branch 'feature'",
+          "| * \u001fbeef5678\u001fbeef567\u001f3333\u001fLuis\u001f2026-06-10 18:05:44 +0200\u001ffeature/api\u001fRefine webhook handling",
         ].join("\n"),
       );
 
@@ -3366,7 +3450,7 @@ Built-in agents:
         shortHash: "abcd123",
         parents: ["1111", "2222"],
         author: "Ada",
-        date: "2026-06-11",
+        date: "2026-06-11 09:24:31 +0200",
         refs: ["HEAD -> main", "origin/main"],
         subject: "Merge branch 'feature'",
       },
@@ -3376,7 +3460,7 @@ Built-in agents:
         shortHash: "beef567",
         parents: ["3333"],
         author: "Luis",
-        date: "2026-06-10",
+        date: "2026-06-10 18:05:44 +0200",
         refs: ["feature/api"],
         subject: "Refine webhook handling",
       },

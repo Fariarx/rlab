@@ -56,12 +56,23 @@ export function useConversationAutoScroll(items: readonly unknown[], options?: C
     return element.scrollHeight - element.scrollTop - element.clientHeight <= BOTTOM_THRESHOLD;
   }, []);
 
+  const lastScrollTop = useRef(0);
+  const lastScrollHeight = useRef(0);
+  const lastClientHeight = useRef(0);
+
+  const rememberScrollMetrics = useCallback((element: HTMLDivElement) => {
+    lastScrollTop.current = element.scrollTop;
+    lastScrollHeight.current = element.scrollHeight;
+    lastClientHeight.current = element.clientHeight;
+  }, []);
+
   const snapInstant = useCallback(() => {
     const element = containerRef.current;
     if (element) {
       element.scrollTop = element.scrollHeight;
+      rememberScrollMetrics(element);
     }
-  }, []);
+  }, [rememberScrollMetrics]);
 
   const setPinned = useCallback((value: boolean) => {
     if (pinnedToBottom.current === value) {
@@ -89,21 +100,25 @@ export function useConversationAutoScroll(items: readonly unknown[], options?: C
   // (async) scroll event, which would falsely unpin. A growing thread only ever
   // moves scrollTop *down* via our own snap, so a scrollTop *decrease* is the
   // unambiguous signal that the user scrolled up themselves.
-  const lastScrollTop = useRef(0);
   useEffect(() => {
     const element = containerRef.current;
     if (!element) {
       return;
     }
-    lastScrollTop.current = element.scrollTop;
+    rememberScrollMetrics(element);
     const onScroll = () => {
       const top = element.scrollTop;
+      const layoutContracted =
+        element.scrollHeight < lastScrollHeight.current - 2
+        || element.clientHeight > lastClientHeight.current + 2;
       const scrolledUp = top < lastScrollTop.current - 2;
-      lastScrollTop.current = top;
-      if (scrolledUp && !isAtBottom(element)) {
+      rememberScrollMetrics(element);
+      if (scrolledUp && !layoutContracted && !isAtBottom(element)) {
         setPinned(false);
       } else if (isAtBottom(element)) {
         setPinned(true);
+      } else if (layoutContracted && pinnedToBottom.current) {
+        snapInstant();
       }
       if (top <= TOP_THRESHOLD) {
         onReachTopRef.current?.(element);
@@ -111,7 +126,7 @@ export function useConversationAutoScroll(items: readonly unknown[], options?: C
     };
     element.addEventListener("scroll", onScroll, { passive: true });
     return () => element.removeEventListener("scroll", onScroll);
-  }, [isAtBottom, setPinned]);
+  }, [isAtBottom, rememberScrollMetrics, setPinned, snapInstant]);
 
   // The single stick mechanism: keep glued to the bottom as content grows while
   // pinned (streaming + images). The browser batches resize notifications to once

@@ -42,6 +42,7 @@ export interface GitViewController {
   readonly setCommitMessage: (message: string) => void;
   readonly stageFile: (file: GitFileStatus) => void;
   readonly unstageFile: (file: GitFileStatus) => void;
+  readonly discardFile: (file: GitFileStatus) => void;
   readonly commitStagedFiles: () => void;
   readonly checkoutRef: (ref: string) => void;
   readonly commitAction: (action: GitCommitAction, hash: string) => void;
@@ -261,6 +262,11 @@ export function useGitViewController({
       runGitAction(() => mutateGitFile("/api/git-unstage", cwd, file));
     }
   };
+  const discardFile = (file: GitFileStatus) => {
+    if (cwd) {
+      runGitAction(() => mutateGitFile("/api/git-discard-file", cwd, file));
+    }
+  };
   const commitStagedFiles = () => {
     const message = commitMessage.trim();
     if (cwd && message) {
@@ -303,6 +309,7 @@ export function useGitViewController({
     setCommitMessage,
     stageFile,
     unstageFile,
+    discardFile,
     commitStagedFiles,
     checkoutRef,
     commitAction,

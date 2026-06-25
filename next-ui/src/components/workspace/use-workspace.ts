@@ -1,6 +1,7 @@
 import { action, computed, makeObservable, observable, runInAction } from "mobx";
 import { useEffect, useState } from "react";
 import { accessModeForAgentProfile, compactCommandForAgent, type AgentBlock, type AgentProfile, type ApprovalDecision, type ChatMessage, type CompactionSettings, type ComposerDraft, type ConversationSummary, type ConversationView, type Project, type ReviewCommentEntry } from "../agent";
+import { parseUserDraft } from "../agent/message/message-content-model";
 import { translate } from "../../i18n/I18nProvider";
 import { cancelRun, loadActiveRuns, runConversation, type ActiveRunSnapshot } from "../../client/api/run-agent";
 import {
@@ -16,6 +17,7 @@ import {
   type PendingTurnQueueSnapshot,
 } from "../../client/api/workspace-page-api";
 import { loadConversationThread, loadConversationThreadPage, loadWorkspaceRevision, loadWorkspaceState, subscribeWorkspaceEvents, type WorkspaceChangeEvent } from "../../client/api/workspace-api";
+import { reviewCommentsPromptText } from "../../lib/agent-prompt";
 import { nowLabel, starterThread, truncate } from "./sample-data";
 import { type AppSettings, type AppSettingsPatch, mergeAppSettings } from "../../lib/app-settings";
 import type { WorkspaceMutation } from "../../lib/workspace-mutations";
@@ -49,6 +51,7 @@ import {
   putComposerDraftState,
   renameConversationState,
   removeConversationState,
+  reorderPinnedConversationsState,
   stopRunConversationState,
   type StopRunConversationStateResult,
   toggleConversationPinState,
@@ -120,9 +123,10 @@ export interface Workspace {
   readonly setConversationProfile: (id: string, profile: AgentProfile) => void;
   readonly rename: (id: string, title: string) => void;
   readonly togglePin: (id: string) => void;
+  readonly reorderPinnedConversations: (orderedIds: readonly string[]) => void;
   readonly archive: (id: string) => void;
   readonly remove: (id: string) => string;
-  readonly sendMessage: (id: string, text: string) => void;
+  readonly sendMessage: (id: string, text: string, reviewComments?: readonly ReviewCommentEntry[]) => void;
   readonly sendMessageAsGoal: (id: string, text: string) => void;
   readonly deferMessageToQueue: (id: string, text: string) => void;
   readonly pendingMessageCount: (id: string) => number;
@@ -131,6 +135,7 @@ export interface Workspace {
   readonly queuedItems: (id: string) => readonly PendingQueueItem[];
   readonly cancelQueuedMessage: (id: string, messageId: string) => void;
   readonly cancelQueuedItem: (id: string, itemId: string) => void;
+  readonly editQueuedMessage: (id: string, itemId: string, message: ChatMessage) => ComposerDraft;
   readonly sendQueuedMessageNow: (id: string) => boolean;
   readonly moveQueuedItemAfter: (id: string, itemId: string, afterItemId: string | null) => void;
   readonly hasOlderThreadMessages: (id: string) => boolean;
@@ -262,12 +267,14 @@ export class WorkspaceStore implements Workspace {
       setConversationProfile: action.bound,
       rename: action.bound,
       togglePin: action.bound,
+      reorderPinnedConversations: action.bound,
       archive: action.bound,
       remove: action.bound,
       sendMessage: action.bound,
       sendMessageAsGoal: action.bound,
       deferMessageToQueue: action.bound,
       cancelQueuedMessage: action.bound,
+      editQueuedMessage: action.bound,
       sendQueuedMessageNow: action.bound,
       setQueuePaused: action.bound,
       setCompaction: action.bound,
@@ -958,6 +965,18 @@ export class WorkspaceStore implements Workspace {
     this.patchConversationMetadata((current) => toggleConversationPinState(current, id));
   }
 
+  reorderPinnedConversations(orderedIds: readonly string[]): void {
+    const result: { current: ReturnType<typeof reorderPinnedConversationsState> | null } = { current: null };
+    this.setState((current) => {
+      result.current = reorderPinnedConversationsState(current, orderedIds);
+      return result.current?.state ?? current;
+    });
+    if (result.current && result.current.conversations.length > 0) {
+      this.enqueueMutations(...result.current.conversations.map((conversation) => ({ type: "updateConversation" as const, conversation })));
+      this.persistCurrentStateNow();
+    }
+  }
+
   private cancelActiveRun(id: string): void {
     const active = this.runs.get(id);
     if (active) {
@@ -1002,22 +1021,24 @@ export class WorkspaceStore implements Workspace {
     return nextSelectedId;
   }
 
-  sendMessage(id: string, text: string): void {
+  sendMessage(id: string, text: string, reviewComments: readonly ReviewCommentEntry[] = []): void {
     if (!this.threadLoader.isLoaded(id)) {
       void this.loadThreadFromServer(id, false).then(() => {
         runInAction(() => {
           if (this.threadLoader.isLoaded(id)) {
-            this.sendMessage(id, text);
+            this.sendMessage(id, text, reviewComments);
           }
         });
       });
       return;
     }
+    const reviewBlock = reviewComments.length > 0 ? { kind: "review" as const, comments: [...reviewComments] } : undefined;
     // If the agent is still working, queue this turn on the server. The server
     // owns queued-turn dispatch: enqueue never starts a run by itself, which keeps
     // a late queue request from racing ahead of the active /api/run registration.
     if (this.conversationHasActiveWork(id)) {
-      void enqueuePendingTurn(id, text)
+      const queuedText = reviewBlock ? [text.trim(), reviewCommentsPromptText(reviewComments)].filter(Boolean).join("\n\n") : text;
+      void enqueuePendingTurn(id, queuedText)
         .then((snapshot) => {
           runInAction(() => this.setQueueSnapshot(snapshot));
         })
@@ -1028,7 +1049,7 @@ export class WorkspaceStore implements Workspace {
         });
       return;
     }
-    const userMsg: ChatMessage = { id: nextWorkspaceId("u"), role: "user", text, time: nowLabel(), createdAtMs: Date.now() };
+    const userMsg: ChatMessage = { id: nextWorkspaceId("u"), role: "user", text, time: nowLabel(), createdAtMs: Date.now(), ...(reviewBlock ? { blocks: [reviewBlock] } : {}) };
     if (this.isQueuePaused(id) && this.pendingQueueItemCount(id) === 0) {
       this.setQueuePaused(id, false);
     }
@@ -1164,6 +1185,32 @@ export class WorkspaceStore implements Workspace {
           this.loadError = error instanceof Error ? error.message : String(error);
         });
       });
+  }
+
+  editQueuedMessage(id: string, itemId: string, message: ChatMessage): ComposerDraft {
+    const draft = parseUserDraft(message.text ?? "");
+    const snapshot = this.queueSnapshot(id);
+    const hasServerItems = snapshot.items.length > 0;
+    this.updateComposerDraft(id, draft);
+    this.setQueueSnapshot({
+      ...snapshot,
+      messages: snapshot.messages.filter((queuedMessage) => queuedMessage.id !== message.id),
+      items: snapshot.items.filter((item) => item.id !== itemId),
+    });
+
+    const cancelRequest = hasServerItems ? cancelPendingQueueItem(id, itemId) : cancelPendingTurn(id, message.id);
+    void cancelRequest
+      .then((nextSnapshot) => {
+        runInAction(() => this.setQueueSnapshot(nextSnapshot));
+      })
+      .catch((error: unknown) => {
+        runInAction(() => {
+          this.loadError = error instanceof Error ? error.message : String(error);
+          this.refreshQueue(id);
+        });
+      });
+
+    return draft;
   }
 
   moveQueuedItemAfter(id: string, itemId: string, afterItemId: string | null): void {

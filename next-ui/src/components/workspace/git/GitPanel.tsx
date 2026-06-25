@@ -6,12 +6,14 @@ import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
 import MergeIcon from "@mui/icons-material/Merge";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import RemoveIcon from "@mui/icons-material/Remove";
+import UnfoldLessIcon from "@mui/icons-material/UnfoldLess";
+import UnfoldMoreIcon from "@mui/icons-material/UnfoldMore";
 import { Alert, Box, CircularProgress, Collapse, Dialog, DialogActions, DialogContent, DialogContentText, DialogTitle, Divider, Stack, Tab, Tabs, type Theme, Tooltip, Typography } from "@mui/material";
 import { observer } from "mobx-react-lite";
 import { type ReactNode, type RefObject, useMemo, useRef, useState } from "react";
 import { type I18nApi, useI18n } from "../../../i18n/I18nProvider";
 import type { GitFileStatus } from "../../../lib/git-status";
-import type { DiffBlock, ReviewCommentEntry } from "../../agent";
+import type { DiffBlock, ReviewCommentAnchor, ReviewCommentEntry } from "../../agent";
 import { Button, EmptyState, IconButton } from "../../ui";
 import type { GitDiffMode } from "../../../client/api/git-panel-api";
 import { countDiffChanges, type DiffViewerLine, GitDiffLines, gitDiffViewerLinesFromBlock } from "./GitDiffViewer";
@@ -24,10 +26,10 @@ import { useGitFileDiff } from "./use-git-file-diff";
 import { useGitViewController } from "./use-git-view-controller";
 
 /** Code-review comment plumbing shared by the diff cards. The file path is bound
- *  at each card so individual diff lines only deal with (line, text, body). */
+ *  at each card so individual diff lines only emit a compact source anchor. */
 export interface DiffCommentApi {
   readonly comments: readonly ReviewCommentEntry[];
-  readonly onAddComment: (file: string, line: number, lineText: string, body: string) => void;
+  readonly onAddComment: (file: string, anchor: ReviewCommentAnchor, body: string) => void;
   readonly onUpdateComment: (id: string, body: string) => void;
   readonly onDeleteComment: (id: string) => void;
   readonly onInputActivityChange?: (active: boolean) => void;
@@ -73,9 +75,15 @@ const GIGANTIC_DIFF_LINES = 2000;
 // automatically); with many, diffs load lazily on expand to avoid a request flood.
 const EAGER_DIFF_LIMIT = 25;
 
+type DiffOpenMode = "expand" | "collapse";
+
 interface PendingGitCommitAction {
   readonly action: GitCommitAction;
   readonly hash: string;
+}
+
+interface PendingGitDiscardFile {
+  readonly file: GitFileStatus;
 }
 
 function tabLabel(label: string, count?: number): string {
@@ -91,6 +99,9 @@ const DiffFileCard = observer(function DiffFileCard({
   lines,
   loading = false,
   error = null,
+  oldLineCount,
+  newLineCount,
+  onExpandContext,
   onFirstOpen,
   scrollRef,
   comments,
@@ -99,6 +110,8 @@ const DiffFileCard = observer(function DiffFileCard({
   onDeleteComment,
   onInputActivityChange,
   focusSignal = 0,
+  openMode,
+  openSignal = 0,
   t,
 }: {
   readonly path: string;
@@ -106,16 +119,21 @@ const DiffFileCard = observer(function DiffFileCard({
   readonly lines: readonly DiffViewerLine[] | null;
   readonly loading?: boolean;
   readonly error?: string | null;
+  readonly oldLineCount?: number;
+  readonly newLineCount?: number;
+  readonly onExpandContext?: (direction: "before" | "after") => void;
   readonly onFirstOpen?: () => void;
   readonly scrollRef?: RefObject<HTMLDivElement | null>;
   readonly comments?: readonly ReviewCommentEntry[];
-  readonly onAddComment?: (line: number, lineText: string, body: string) => void;
+  readonly onAddComment?: (anchor: ReviewCommentAnchor, body: string) => void;
   readonly onUpdateComment?: (id: string, body: string) => void;
   readonly onDeleteComment?: (id: string) => void;
   readonly onInputActivityChange?: (active: boolean) => void;
   /** Increments when this card is the target of an external "open in Git" jump;
    *  each new value expands the card and scrolls it into view. */
   readonly focusSignal?: number;
+  readonly openMode?: DiffOpenMode;
+  readonly openSignal?: number;
   readonly t: I18nApi["t"];
 }) {
   const lineCount = lines?.length ?? 0;
@@ -129,6 +147,8 @@ const DiffFileCard = observer(function DiffFileCard({
     hasLines: lines !== null,
     lineCount,
     onFirstOpen,
+    openMode,
+    openSignal,
     scrollRef,
   });
 
@@ -204,7 +224,19 @@ const DiffFileCard = observer(function DiffFileCard({
               {t("gitDiffTooLarge", { count: lineCount })}
             </Alert>
           ) : lines && lines.length > 0 ? (
-            <GitDiffLines lines={lines} path={path} comments={comments} onAddComment={onAddComment} onUpdateComment={onUpdateComment} onDeleteComment={onDeleteComment} onInputActivityChange={onInputActivityChange} />
+            <GitDiffLines
+              lines={lines}
+              path={path}
+              oldLineCount={oldLineCount}
+              newLineCount={newLineCount}
+              contextLoading={loading}
+              comments={comments}
+              onAddComment={onAddComment}
+              onUpdateComment={onUpdateComment}
+              onDeleteComment={onDeleteComment}
+              onExpandContext={onExpandContext}
+              onInputActivityChange={onInputActivityChange}
+            />
           ) : (
             <Typography sx={{ color: "text.secondary", fontSize: "0.8rem", px: 1.5, py: 1.25 }}>{t("gitDiffEmpty")}</Typography>
           )}
@@ -225,6 +257,8 @@ const GitFileDiffCard = observer(function GitFileDiffCard({
   scrollRef,
   review,
   focusSignal = 0,
+  openMode,
+  openSignal = 0,
   t,
 }: {
   readonly cwd: string;
@@ -236,9 +270,11 @@ const GitFileDiffCard = observer(function GitFileDiffCard({
   readonly scrollRef?: RefObject<HTMLDivElement | null>;
   readonly review?: DiffCommentApi;
   readonly focusSignal?: number;
+  readonly openMode?: DiffOpenMode;
+  readonly openSignal?: number;
   readonly t: I18nApi["t"];
 }) {
-  const { lines, loading, error, loadDiff } = useGitFileDiff({ cwd, file, mode, autoLoad, revisionKey, unavailableMessage: t("gitStatusUnavailable") });
+  const { lines, loading, error, oldLineCount, newLineCount, expandContext, loadDiff } = useGitFileDiff({ cwd, file, mode, autoLoad, revisionKey, unavailableMessage: t("gitStatusUnavailable") });
 
   return (
     <DiffFileCard
@@ -247,14 +283,19 @@ const GitFileDiffCard = observer(function GitFileDiffCard({
       lines={lines}
       loading={loading}
       error={error}
+      oldLineCount={oldLineCount}
+      newLineCount={newLineCount}
+      onExpandContext={expandContext}
       onFirstOpen={loadDiff}
       scrollRef={scrollRef}
       comments={review ? review.comments.filter((comment) => comment.file === file.gitPath) : undefined}
-      onAddComment={review ? (line, lineText, body) => review.onAddComment(file.gitPath, line, lineText, body) : undefined}
+      onAddComment={review ? (anchor, body) => review.onAddComment(file.gitPath, anchor, body) : undefined}
       onUpdateComment={review?.onUpdateComment}
       onDeleteComment={review?.onDeleteComment}
       onInputActivityChange={review?.onInputActivityChange}
       focusSignal={focusSignal}
+      openMode={openMode}
+      openSignal={openSignal}
       t={t}
     />
   );
@@ -263,6 +304,7 @@ const GitFileDiffCard = observer(function GitFileDiffCard({
 export const GitView = observer(function GitView({ cwd, lastTurnDiffs = [], review, active = true, onUnstagedStatsChange, bottomInset = 0, focusPath, focusNonce = 0, reloadSignal = 0, worktree }: GitViewProps) {
   const { t } = useI18n();
   const [reviewInputActive, setReviewInputActive] = useState(false);
+  const [diffOpenCommand, setDiffOpenCommand] = useState<{ readonly mode: DiffOpenMode; readonly signal: number }>({ mode: "expand", signal: 0 });
   const reviewWithActivity = useMemo<DiffCommentApi | undefined>(
     () => review ? { ...review, onInputActivityChange: setReviewInputActive } : undefined,
     [review],
@@ -303,6 +345,7 @@ export const GitView = observer(function GitView({ cwd, lastTurnDiffs = [], revi
     setCommitMessage,
     stageFile,
     unstageFile,
+    discardFile,
     commitStagedFiles,
     checkoutRef,
     commitAction,
@@ -310,11 +353,18 @@ export const GitView = observer(function GitView({ cwd, lastTurnDiffs = [], revi
   } = controller;
   const scrollRef = useRef<HTMLDivElement>(null);
   const [pendingCommitAction, setPendingCommitAction] = useState<PendingGitCommitAction | null>(null);
+  const [pendingDiscardFile, setPendingDiscardFile] = useState<PendingGitDiscardFile | null>(null);
   const pendingConfirmation = pendingCommitAction ? gitCommitActionConfirmation(pendingCommitAction.action) : null;
   const pendingActionLabel = pendingCommitAction ? t(gitCommitActionLabelKey(pendingCommitAction.action)) : "";
   const pendingHashLabel = pendingCommitAction?.hash.slice(0, 12) ?? "";
+  const pendingDiscardPath = pendingDiscardFile?.file.gitPath ?? "";
+  const visibleDiffCount = activeTab === "unstaged" ? unstagedFiles.length : activeTab === "staged" ? stagedFiles.length : activeTab === "last-turn" ? lastTurnDiffs.length : 0;
+  const diffOpenControlsDisabled = visibleDiffCount === 0;
   const requestCommitAction = (action: GitCommitAction, hash: string) => {
     setPendingCommitAction({ action, hash });
+  };
+  const commandDiffCards = (mode: DiffOpenMode) => {
+    setDiffOpenCommand((current) => ({ mode, signal: current.signal + 1 }));
   };
   const confirmCommitAction = () => {
     if (!pendingCommitAction) {
@@ -322,6 +372,13 @@ export const GitView = observer(function GitView({ cwd, lastTurnDiffs = [], revi
     }
     commitAction(pendingCommitAction.action, pendingCommitAction.hash);
     setPendingCommitAction(null);
+  };
+  const confirmDiscardFile = () => {
+    if (!pendingDiscardFile) {
+      return;
+    }
+    discardFile(pendingDiscardFile.file);
+    setPendingDiscardFile(null);
   };
 
   return (
@@ -412,6 +469,20 @@ export const GitView = observer(function GitView({ cwd, lastTurnDiffs = [], revi
                 )}
               </>
             )}
+            <Tooltip title={t("gitExpandAllDiffs")}>
+              <span>
+                <IconButton aria-label={t("gitExpandAllDiffs")} disabled={diffOpenControlsDisabled} onClick={() => commandDiffCards("expand")}>
+                  <UnfoldMoreIcon sx={{ fontSize: 17 }} />
+                </IconButton>
+              </span>
+            </Tooltip>
+            <Tooltip title={t("gitCollapseAllDiffs")}>
+              <span>
+                <IconButton aria-label={t("gitCollapseAllDiffs")} disabled={diffOpenControlsDisabled} onClick={() => commandDiffCards("collapse")}>
+                  <UnfoldLessIcon sx={{ fontSize: 17 }} />
+                </IconButton>
+              </span>
+            </Tooltip>
             <Tooltip title={t("refresh")}>
               <span>
                 <IconButton aria-label={t("refresh")} disabled={!cwd || loading} onClick={refreshStatus}>
@@ -482,15 +553,26 @@ export const GitView = observer(function GitView({ cwd, lastTurnDiffs = [], revi
                         scrollRef={scrollRef}
                         review={reviewWithActivity}
                         focusSignal={focusSignalFor(file.gitPath)}
+                        openMode={diffOpenCommand.mode}
+                        openSignal={diffOpenCommand.signal}
                         t={t}
                         action={
-                          <Tooltip title={t("gitStage")}>
-                            <Box component="span" sx={{ display: "inline-flex" }}>
-                              <IconButton size="small" disabled={actionLoading} aria-label={t("gitStageFile", { path: file.gitPath })} onClick={() => stageFile(file)} sx={{ width: 28, height: 28 }}>
-                                <AddIcon sx={{ fontSize: 16 }} />
-                              </IconButton>
-                            </Box>
-                          </Tooltip>
+                          <Stack direction="row" spacing={0.25} sx={{ alignItems: "center" }}>
+                            <Tooltip title={t("gitDiscard")}>
+                              <Box component="span" sx={{ display: "inline-flex" }}>
+                                <IconButton size="small" disabled={actionLoading} aria-label={t("gitDiscardFile", { path: file.gitPath })} onClick={() => setPendingDiscardFile({ file })} sx={{ width: 28, height: 28 }}>
+                                  <RemoveIcon sx={{ fontSize: 16 }} />
+                                </IconButton>
+                              </Box>
+                            </Tooltip>
+                            <Tooltip title={t("gitStage")}>
+                              <Box component="span" sx={{ display: "inline-flex" }}>
+                                <IconButton size="small" disabled={actionLoading} aria-label={t("gitStageFile", { path: file.gitPath })} onClick={() => stageFile(file)} sx={{ width: 28, height: 28 }}>
+                                  <AddIcon sx={{ fontSize: 16 }} />
+                                </IconButton>
+                              </Box>
+                            </Tooltip>
+                          </Stack>
                         }
                       />
                     ))}
@@ -525,6 +607,8 @@ export const GitView = observer(function GitView({ cwd, lastTurnDiffs = [], revi
                         scrollRef={scrollRef}
                         review={reviewWithActivity}
                         focusSignal={focusSignalFor(file.gitPath)}
+                        openMode={diffOpenCommand.mode}
+                        openSignal={diffOpenCommand.signal}
                         t={t}
                         action={
                           <Tooltip title={t("gitUnstage")}>
@@ -546,7 +630,16 @@ export const GitView = observer(function GitView({ cwd, lastTurnDiffs = [], revi
                 ) : (
                   <Stack spacing={1.25}>
                     {lastTurnDiffs.map((block) => (
-                      <DiffFileCard key={block.file} path={block.file} lines={gitDiffViewerLinesFromBlock(block)} scrollRef={scrollRef} focusSignal={focusSignalFor(block.file)} t={t} />
+                      <DiffFileCard
+                        key={block.file}
+                        path={block.file}
+                        lines={gitDiffViewerLinesFromBlock(block)}
+                        scrollRef={scrollRef}
+                        focusSignal={focusSignalFor(block.file)}
+                        openMode={diffOpenCommand.mode}
+                        openSignal={diffOpenCommand.signal}
+                        t={t}
+                      />
                     ))}
                   </Stack>
                 ))}
@@ -564,6 +657,18 @@ export const GitView = observer(function GitView({ cwd, lastTurnDiffs = [], revi
             <Button onClick={() => setPendingCommitAction(null)}>{t("cancel")}</Button>
             <Button variant="contained" color={pendingConfirmation?.danger ? "error" : "primary"} disabled={actionLoading} onClick={confirmCommitAction} autoFocus>
               {pendingConfirmation ? t(pendingConfirmation.confirmKey) : ""}
+            </Button>
+          </DialogActions>
+        </Dialog>
+        <Dialog open={pendingDiscardFile !== null} onClose={() => setPendingDiscardFile(null)} maxWidth="xs" fullWidth>
+          <DialogTitle>{t("gitConfirmDiscardFileTitle")}</DialogTitle>
+          <DialogContent>
+            <DialogContentText>{t("gitConfirmDiscardFileBody", { path: pendingDiscardPath })}</DialogContentText>
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={() => setPendingDiscardFile(null)}>{t("cancel")}</Button>
+            <Button variant="contained" color="error" disabled={actionLoading} onClick={confirmDiscardFile} autoFocus>
+              {t("gitConfirmDiscardFileConfirm")}
             </Button>
           </DialogActions>
         </Dialog>

@@ -15,6 +15,8 @@ export function useDiffFileCardController({
   hasLines,
   lineCount,
   onFirstOpen,
+  openMode,
+  openSignal = 0,
   scrollRef,
 }: {
   readonly autoOpenLineLimit: number;
@@ -22,6 +24,8 @@ export function useDiffFileCardController({
   readonly hasLines: boolean;
   readonly lineCount: number;
   readonly onFirstOpen?: () => void;
+  readonly openMode?: "expand" | "collapse";
+  readonly openSignal?: number;
   readonly scrollRef?: RefObject<HTMLDivElement | null>;
 }): DiffFileCardController {
   const [store] = useState(() => new DiffFileCardStore());
@@ -46,6 +50,19 @@ export function useDiffFileCardController({
     const frame = requestAnimationFrame(() => rootRef.current?.scrollIntoView({ block: "start", behavior: "smooth" }));
     return () => cancelAnimationFrame(frame);
   }, [focusSignal, onFirstOpen, setOpen, setTouched]);
+
+  useEffect(() => {
+    if (openSignal <= 0 || !openMode) {
+      return;
+    }
+    setTouched(true);
+    if (openMode === "expand") {
+      setOpen(true);
+      onFirstOpen?.();
+      return;
+    }
+    setOpen(false);
+  }, [onFirstOpen, openMode, openSignal, setOpen, setTouched]);
 
   useEffect(() => {
     const sentinel = sentinelRef.current;

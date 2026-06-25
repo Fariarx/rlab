@@ -1127,7 +1127,7 @@ describe("WorkspacePage", () => {
               shortHash: "a1b2c3d",
               parents: ["0000000"],
               author: "Luis",
-              date: "2026-06-11",
+              date: "2026-06-11 09:24:31 +0200",
               refs: ["HEAD -> main", "origin/main"],
               subject: "Refine webhook handling",
             },
@@ -1137,7 +1137,7 @@ describe("WorkspacePage", () => {
               shortHash: "b2c3d4e",
               parents: ["1111111", "2222222"],
               author: "Ada",
-              date: "2026-06-10",
+              date: "2026-06-10 18:05:44 +0200",
               refs: ["feature/api"],
               subject: "Merge API branch",
             },
@@ -1159,6 +1159,16 @@ describe("WorkspacePage", () => {
     expect(screen.getAllByText("main").length).toBeGreaterThan(0);
     expect(screen.getByText("origin/main")).toBeInTheDocument();
     expect(screen.getByText("feature/api")).toBeInTheDocument();
+    expect(screen.getAllByText("Luis · 2026-06-11 09:24:31 +0200").length).toBeGreaterThan(0);
+    const firstCommitRow = (await screen.findAllByTestId("git-commit-row"))[0];
+    const firstCommitSubjectButton = within(firstCommitRow).getByText("Refine webhook handling").closest("button");
+    if (!firstCommitSubjectButton) {
+      throw new Error("Commit subject button not found.");
+    }
+    fireEvent.click(firstCommitSubjectButton);
+    expect(screen.queryByRole("menuitem", { name: "Cherry-pick на текущую ветку" })).not.toBeInTheDocument();
+    fireEvent.click(within(firstCommitRow).getByRole("button", { name: "Действия с коммитом a1b2c3d" }));
+    expect(await screen.findByRole("menuitem", { name: "Cherry-pick на текущую ветку" })).toBeInTheDocument();
     expect(treeRequests).toEqual([{ cwd: "/root/workspace/rlab" }]);
   });
 
@@ -1383,6 +1393,72 @@ describe("WorkspacePage", () => {
         "/api/git-stage",
         expect.objectContaining({
           body: JSON.stringify({ cwd: "/root/workspace/rlab", path: "src/auth.ts" }),
+          method: "POST",
+        }),
+      );
+    });
+  });
+
+  it("confirms before discarding an unstaged file from the Git panel", async () => {
+    let workspace = { ...buildInitialWorkspaceState(), selectedId: "c-flaky" };
+    const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const path = typeof url === "string" ? url : url instanceof URL ? url.pathname : url.url;
+      const activeRuns = activeRunsResponse(path);
+      if (activeRuns) {
+        return activeRuns;
+      }
+      if (path === "/api/workspace" && (!init || init.method === "GET")) {
+        return Response.json(workspace);
+      }
+      if (isWorkspaceMutationRequest(path, init)) {
+        workspace = applyWorkspaceMutationRequest(workspace, init);
+        return Response.json({ ok: true, revision: 1 });
+      }
+      if (path === "/api/project-files") {
+        return Response.json({ files: [] });
+      }
+      if (path === "/api/git-status") {
+        return Response.json({
+          branch: "main",
+          ahead: 0,
+          behind: 0,
+          clean: false,
+          files: [{ code: " M", label: "Modified", path: "src/auth.ts", gitPath: "src/auth.ts", staged: false, unstaged: true }],
+        });
+      }
+      if (path === "/api/git-diff") {
+        return Response.json({ path: "src/auth.ts", mode: "worktree", diff: "@@ -1 +1 @@\n-old\n+new" });
+      }
+      if (path === "/api/git-discard-file") {
+        return Response.json({
+          branch: "main",
+          ahead: 0,
+          behind: 0,
+          clean: true,
+          files: [],
+        });
+      }
+      return new Response("not found", { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetch);
+
+    renderWithThemeAndVirtuoso(<WorkspacePage />);
+
+    await screen.findByPlaceholderText("claude-code/default/default");
+    fireEvent.click(screen.getByRole("button", { name: "Git" }));
+
+    expect(await screen.findByText(/@@ -1 \+1 @@/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Отменить изменения в src/auth.ts" }));
+    const dialog = await screen.findByRole("dialog", { name: "Отменить изменения файла?" });
+    expect(within(dialog).getByText(/src\/auth\.ts/)).toBeInTheDocument();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Отменить изменения" }));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/git-discard-file",
+        expect.objectContaining({
+          body: JSON.stringify({ cwd: "/root/workspace/rlab", path: "src/auth.ts", untracked: false }),
           method: "POST",
         }),
       );

@@ -7,6 +7,7 @@ import { canceledRunStatusBlock, cloneMessageForFork, settleThreadLiveBlocks, sn
 import { findConversation, patchConversation, serializableEqual, workspaceConversations } from "./workspace-state-utils";
 
 const FORK_TITLE_PREFIX_PATTERN = /^(?:Fork|Форк)(?:\s*#(\d+))?\s*:\s*(.+)$/i;
+const PINNED_ORDER_STEP = 1024;
 
 export function buildForkConversationTitle(sourceTitle: string): string {
   const trimmed = sourceTitle.trim();
@@ -140,6 +141,21 @@ function conversationMetadataResult(state: WorkspaceState, conversationId: strin
   return conversation ? { conversation, state } : null;
 }
 
+function effectivePinnedOrder(conversation: ConversationSummary, index: number): number {
+  return typeof conversation.pinnedOrder === "number" && Number.isFinite(conversation.pinnedOrder) ? conversation.pinnedOrder : (index + 1) * PINNED_ORDER_STEP;
+}
+
+function nextPinnedOrder(state: WorkspaceState, excludingConversationId: string): number {
+  const pinned = workspaceConversations(state).filter((conversation) => conversation.id !== excludingConversationId && conversation.pinned && !conversation.archived);
+  const maxOrder = pinned.reduce((max, conversation, index) => Math.max(max, effectivePinnedOrder(conversation, index)), 0);
+  return maxOrder + PINNED_ORDER_STEP;
+}
+
+export interface ReorderPinnedConversationsStateResult {
+  readonly conversations: readonly ConversationSummary[];
+  readonly state: WorkspaceState;
+}
+
 export function updateConversationProfileState(
   state: WorkspaceState,
   conversationId: string,
@@ -161,7 +177,46 @@ export function toggleConversationPinState(state: WorkspaceState, conversationId
   if (!conversation) {
     return null;
   }
-  return conversationMetadataResult(patchConversation(state, conversationId, { pinned: !conversation.pinned }), conversationId);
+  if (conversation.pinned) {
+    return conversationMetadataResult(patchConversation(state, conversationId, { pinned: false, pinnedOrder: undefined }), conversationId);
+  }
+  return conversationMetadataResult(patchConversation(state, conversationId, { pinned: true, pinnedOrder: nextPinnedOrder(state, conversationId) }), conversationId);
+}
+
+export function reorderPinnedConversationsState(state: WorkspaceState, orderedConversationIds: readonly string[]): ReorderPinnedConversationsStateResult | null {
+  const pinned = workspaceConversations(state).filter((conversation) => conversation.pinned && !conversation.archived);
+  if (pinned.length === 0) {
+    return null;
+  }
+  const pinnedIds = new Set(pinned.map((conversation) => conversation.id));
+  const orderedUniqueIds = orderedConversationIds.filter((id, index) => pinnedIds.has(id) && orderedConversationIds.indexOf(id) === index);
+  if (orderedUniqueIds.length === 0) {
+    return null;
+  }
+  const orderedSet = new Set(orderedUniqueIds);
+  const nextIds = [...orderedUniqueIds, ...pinned.filter((conversation) => !orderedSet.has(conversation.id)).map((conversation) => conversation.id)];
+  const orderById = new Map(nextIds.map((id, index) => [id, (index + 1) * PINNED_ORDER_STEP]));
+  let changed = false;
+  const changedConversations: ConversationSummary[] = [];
+  const applyOrder = (conversation: ConversationSummary): ConversationSummary => {
+    const pinnedOrder = orderById.get(conversation.id);
+    if (pinnedOrder === undefined || conversation.pinnedOrder === pinnedOrder) {
+      return conversation;
+    }
+    changed = true;
+    const next = { ...conversation, pinnedOrder };
+    changedConversations.push(next);
+    return next;
+  };
+  const nextState: WorkspaceState = {
+    ...state,
+    chats: state.chats.map(applyOrder),
+    projects: state.projects.map((project) => ({
+      ...project,
+      conversations: project.conversations.map(applyOrder),
+    })),
+  };
+  return changed ? { conversations: changedConversations, state: nextState } : null;
 }
 
 export function selectedConversationIdForState(state: WorkspaceState, preferredSelectedId: string): string {
@@ -190,7 +245,7 @@ export interface ArchiveConversationStateResult {
 
 export function archiveConversationState(state: WorkspaceState, conversationId: string): ArchiveConversationStateResult {
   const nextState = {
-    ...patchConversation(state, conversationId, { archived: true, pinned: false, activeRunId: undefined, status: "idle" }),
+    ...patchConversation(state, conversationId, { archived: true, pinned: false, pinnedOrder: undefined, activeRunId: undefined, status: "idle" }),
     selectedId: state.selectedId === conversationId ? "" : state.selectedId,
   };
   return {
@@ -284,6 +339,7 @@ export function forkConversationState({
     activeRunId: undefined,
     unread: false,
     pinned: false,
+    pinnedOrder: undefined,
     costUsd: undefined,
     usage: undefined,
     agentSessions: undefined,

@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useRef } from "react";
-import type { ReviewCommentEntry } from "../../agent";
+import type { ReviewCommentAnchor, ReviewCommentEntry } from "../../agent";
 import type { DiffCommentApi } from "../git/GitPanel";
 
 export interface UseReviewCommentsOptions {
@@ -21,8 +21,8 @@ export function useReviewComments({ comments, setComments, selectedConversationI
   const review = useMemo<DiffCommentApi>(
     () => ({
       comments,
-      onAddComment: (file, line, lineText, body) =>
-        setComments((current) => [...current, { id: `rc-${++sequenceRef.current}`, file, line, lineText, body }]),
+      onAddComment: (file, anchor: ReviewCommentAnchor, body) =>
+        setComments((current) => [...current, { id: `rc-${++sequenceRef.current}`, file, ...anchor, body }]),
       onUpdateComment: (id, body) => setComments((current) => current.map((comment) => (comment.id === id ? { ...comment, body } : comment))),
       onDeleteComment: (id) => setComments((current) => current.filter((comment) => comment.id !== id)),
     }),

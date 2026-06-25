@@ -107,6 +107,16 @@ export function useComposerVoice({
     waiter?.resolve();
   }, [store]);
 
+  const restoreComposerFocus = useCallback(() => {
+    requestAnimationFrame(() => {
+      const textarea = textareaRef.current;
+      if (!textarea) {
+        return;
+      }
+      textarea.focus({ preventScroll: true });
+    });
+  }, [textareaRef]);
+
   const voiceStopWaiter = useCallback((): Promise<void> => {
     if (store.voiceStopWaiter) {
       return store.voiceStopWaiter.promise;
@@ -542,8 +552,8 @@ export function useComposerVoice({
       setVoiceState("idle");
       resolveVoiceStopWaiter();
     }
-    return waitForStop;
-  }, [clearVoiceNoSpeechNotice, onVoiceError, resolveVoiceStopWaiter, setVoiceState, stopVoiceTracks, store, t, voiceState, voiceStopWaiter]);
+    return waitForStop.finally(restoreComposerFocus);
+  }, [clearVoiceNoSpeechNotice, onVoiceError, resolveVoiceStopWaiter, restoreComposerFocus, setVoiceState, stopVoiceTracks, store, t, voiceState, voiceStopWaiter]);
 
   const cancelVoiceInput = useCallback(() => {
     if (voiceState === "recording") {

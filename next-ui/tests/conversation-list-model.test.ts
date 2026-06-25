@@ -80,6 +80,43 @@ describe("conversation-list-model", () => {
     expect(sections[0]?.conversations.map((item) => item.id)).toEqual(["older", "newest", "middle"]);
   });
 
+  it("orders pinned conversations by their manual pinned order", () => {
+    const sections = visibleConversationSections({
+      projects: [
+        {
+          id: "project",
+          name: "Project",
+          conversations: [conversation({ id: "project-pinned", pinned: true, pinnedOrder: 1024, updatedAtMs: 1000 })],
+        },
+      ],
+      chats: [
+        conversation({ id: "chat-newer", pinned: true, pinnedOrder: 3072, updatedAtMs: 5000 }),
+        conversation({ id: "chat-middle", pinned: true, pinnedOrder: 2048, updatedAtMs: 3000 }),
+      ],
+      wakeupConversationIds: new Set(),
+      pinnedLabel: "Pinned",
+      chatsLabel: "Chats",
+    });
+
+    expect(sections[0]?.idBase).toBe("pinned-group");
+    expect(sections[0]?.conversations.map((item) => item.id)).toEqual(["project-pinned", "chat-middle", "chat-newer"]);
+  });
+
+  it("keeps legacy pinned conversations without manual order in their fallback position", () => {
+    const sections = visibleConversationSections({
+      projects: [],
+      chats: [
+        conversation({ id: "legacy-pinned", pinned: true }),
+        conversation({ id: "new-pinned", pinned: true, pinnedOrder: 2048 }),
+      ],
+      wakeupConversationIds: new Set(),
+      pinnedLabel: "Pinned",
+      chatsLabel: "Chats",
+    });
+
+    expect(sections[0]?.conversations.map((item) => item.id)).toEqual(["legacy-pinned", "new-pinned"]);
+  });
+
   it("flattens only expanded conversation rows for keyboard navigation", () => {
     const sections = visibleConversationSections({
       projects: [],

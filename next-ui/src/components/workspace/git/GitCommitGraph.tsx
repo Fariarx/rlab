@@ -1,9 +1,10 @@
 import CallSplitRoundedIcon from "@mui/icons-material/CallSplitRounded";
 import ContentCopyRoundedIcon from "@mui/icons-material/ContentCopyRounded";
+import MoreHorizRoundedIcon from "@mui/icons-material/MoreHorizRounded";
 import RestartAltRoundedIcon from "@mui/icons-material/RestartAltRounded";
 import UndoRoundedIcon from "@mui/icons-material/UndoRounded";
-import { Box, Divider, ListItemIcon, Menu, MenuItem, Stack, Typography } from "@mui/material";
-import { type ReactNode, useMemo, useState } from "react";
+import { Box, Divider, IconButton, ListItemIcon, Menu, MenuItem, Stack, Typography } from "@mui/material";
+import { type MouseEvent, type ReactNode, useMemo, useState } from "react";
 import type { GitGraphCommit } from "../../../client/api/git-panel-api";
 import type { I18nApi } from "../../../i18n/I18nProvider";
 import { buildGitGraphLayout } from "./git-commit-graph-model";
@@ -114,9 +115,13 @@ export function GitCommitGraph({
     }
     closeMenu();
   };
-  const handleRowClick = (commit: GitGraphCommit, branchNames: readonly string[], element: HTMLElement) => {
+  const handleRowClick = (commit: GitGraphCommit) => {
     onSelectCommit(commit.hash);
-    setMenu({ anchor: element, commit, branches: branchNames });
+  };
+  const handleMenuButtonClick = (event: MouseEvent<HTMLButtonElement>, commit: GitGraphCommit, branchNames: readonly string[]) => {
+    event.stopPropagation();
+    onSelectCommit(commit.hash);
+    setMenu({ anchor: event.currentTarget, commit, branches: branchNames });
   };
 
   return (
@@ -181,10 +186,8 @@ export function GitCommitGraph({
           return (
             <Box
               key={commit.hash}
-              component="button"
-              type="button"
+              component="div"
               data-testid="git-commit-row"
-              onClick={(event) => handleRowClick(commit, canCheckout ? switchableBranches : [], event.currentTarget)}
               sx={{
                 height: ROW_HEIGHT,
                 width: "100%",
@@ -197,18 +200,59 @@ export function GitCommitGraph({
                 textAlign: "left",
                 border: 0,
                 borderRadius: (theme) => `${theme.custom.radii.sm}px`,
-                cursor: "pointer",
                 backgroundColor: (theme) => (selected ? theme.palette.status.running.soft : "transparent"),
                 transition: "background-color 120ms ease",
                 "&:hover": { backgroundColor: (theme) => (selected ? theme.palette.status.running.soft : theme.custom.surfaces.s2) },
+                "&:hover .git-commit-actions-trigger, &:focus-within .git-commit-actions-trigger": {
+                  opacity: 1,
+                  pointerEvents: "auto",
+                },
               }}
             >
-              {refs.map((gitRef) => (
-                <RefChip key={gitRef.raw} gitRef={gitRef} />
-              ))}
-              <Typography noWrap sx={{ minWidth: 0, flex: 1, fontSize: "0.8rem", color: "text.primary" }}>
-                {commit.subject || "-"}
-              </Typography>
+              <Box
+                component="button"
+                type="button"
+                onClick={() => handleRowClick(commit)}
+                sx={{
+                  minWidth: 0,
+                  flex: 1,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 1,
+                  p: 0,
+                  border: 0,
+                  background: "transparent",
+                  color: "inherit",
+                  font: "inherit",
+                  textAlign: "left",
+                  cursor: "pointer",
+                }}
+              >
+                {refs.map((gitRef) => (
+                  <RefChip key={gitRef.raw} gitRef={gitRef} />
+                ))}
+                <Typography noWrap sx={{ minWidth: 0, flex: 1, fontSize: "0.8rem", color: "text.primary" }}>
+                  {commit.subject || "-"}
+                </Typography>
+              </Box>
+              <IconButton
+                className="git-commit-actions-trigger"
+                size="small"
+                aria-label={t("gitCommitActions", { hash: commit.shortHash })}
+                onClick={(event) => handleMenuButtonClick(event, commit, canCheckout ? switchableBranches : [])}
+                sx={{
+                  flex: "0 0 auto",
+                  width: 22,
+                  height: 22,
+                  color: "text.secondary",
+                  opacity: { xs: 1, sm: 0 },
+                  pointerEvents: { xs: "auto", sm: "none" },
+                  transition: "opacity 120ms ease, background-color 120ms ease",
+                  "& .MuiSvgIcon-root": { fontSize: 16 },
+                }}
+              >
+                <MoreHorizRoundedIcon />
+              </IconButton>
               <Typography component="span" sx={{ flex: "0 0 auto", fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.68rem", fontWeight: 700, color: "text.secondary" }}>
                 {commit.shortHash}
               </Typography>
@@ -223,9 +267,10 @@ export function GitCommitGraph({
         anchorEl={menu?.anchor ?? null}
         open={menu !== null}
         onClose={closeMenu}
-        anchorOrigin={{ vertical: "bottom", horizontal: "left" }}
-        transformOrigin={{ vertical: "top", horizontal: "left" }}
-        slotProps={{ paper: { sx: { minWidth: 232 } } }}
+        anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+        transformOrigin={{ vertical: "top", horizontal: "right" }}
+        marginThreshold={8}
+        slotProps={{ paper: { sx: { minWidth: 232, mt: 0.5 } } }}
       >
         <Box sx={{ px: 1.5, py: 0.5 }}>
           <Typography noWrap sx={{ fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.72rem", fontWeight: 700, color: "text.secondary" }}>

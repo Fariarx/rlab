@@ -16,6 +16,7 @@ import {
   putComposerDraftState,
   renameConversationState,
   removeConversationState,
+  reorderPinnedConversationsState,
   selectedConversationIdForState,
   stopRunConversationState,
   toggleConversationPinState,
@@ -261,7 +262,26 @@ describe("workspace-conversation-model", () => {
 
     const pinned = toggleConversationPinState(renamed?.state ?? state, "chat-1");
     expect(pinned?.conversation.pinned).toBe(true);
+    expect(pinned?.conversation.pinnedOrder).toBe(1024);
+    const unpinned = toggleConversationPinState(pinned?.state ?? state, "chat-1");
+    expect(unpinned?.conversation.pinned).toBe(false);
+    expect(unpinned?.conversation.pinnedOrder).toBeUndefined();
     expect(toggleConversationPinState(state, "missing")).toBeNull();
+  });
+
+  it("reorders pinned conversations without moving their original collections", () => {
+    const state = workspace({
+      chats: [conversation("root-a", { pinned: true, pinnedOrder: 1024 }), conversation("root-b", { pinned: true, pinnedOrder: 2048 })],
+      projects: [project("p1", [conversation("project-a", { pinned: true, pinnedOrder: 3072 }), conversation("project-plain")])],
+    });
+
+    const result = reorderPinnedConversationsState(state, ["project-a", "root-b", "root-a"]);
+
+    expect(result?.state.chats.map((item) => item.id)).toEqual(["root-a", "root-b"]);
+    expect(result?.state.projects[0]?.conversations.map((item) => item.id)).toEqual(["project-a", "project-plain"]);
+    expect(result?.state.chats.map((item) => item.pinnedOrder)).toEqual([3072, 2048]);
+    expect(result?.state.projects[0]?.conversations[0]?.pinnedOrder).toBe(1024);
+    expect(result?.conversations).toHaveLength(2);
   });
 
   it("archives conversations, clears active run state, and deselects archived active chats", () => {
@@ -285,6 +305,7 @@ describe("workspace-conversation-model", () => {
       activeRunId: undefined,
       archived: true,
       pinned: false,
+      pinnedOrder: undefined,
       status: "idle",
     });
     expect(result.state.chats[0]).toBe(result.conversation);
@@ -372,6 +393,7 @@ describe("workspace-conversation-model", () => {
       agent: "gemini",
       activeRunId: undefined,
       pinned: false,
+      pinnedOrder: undefined,
       usage: undefined,
       sessionId: undefined,
       sessionAgent: undefined,

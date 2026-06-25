@@ -112,17 +112,30 @@ export function useComposerLayoutController({
     }
   }, [composerFocused, composerValue, expanded, setExpanded, setOverlayLift]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = tagsRef.current;
     if (!el || typeof ResizeObserver === "undefined") {
       onTagsHeightChange?.(0);
       return;
     }
-    const report = () => onTagsHeightChange?.(el.offsetHeight);
+    let frame: number | null = null;
+    const report = () => onTagsHeightChange?.(Math.ceil(el.getBoundingClientRect().height));
+    const scheduleReport = () => {
+      if (frame !== null) {
+        cancelAnimationFrame(frame);
+      }
+      frame = requestAnimationFrame(() => {
+        frame = null;
+        report();
+      });
+    };
     report();
-    const observer = new ResizeObserver(report);
+    const observer = new ResizeObserver(scheduleReport);
     observer.observe(el);
     return () => {
+      if (frame !== null) {
+        cancelAnimationFrame(frame);
+      }
       observer.disconnect();
       onTagsHeightChange?.(0);
     };

@@ -6,7 +6,10 @@ import ForumRoundedIcon from "@mui/icons-material/ForumRounded";
 import MoreHorizIcon from "@mui/icons-material/MoreHoriz";
 import PushPinOutlinedIcon from "@mui/icons-material/PushPinOutlined";
 import PushPinRoundedIcon from "@mui/icons-material/PushPinRounded";
-import { Box, InputBase, Menu, MenuItem, Stack, Tooltip, Typography } from "@mui/material";
+import { closestCenter, DndContext, PointerSensor, useSensor, useSensors, type DragEndEvent } from "@dnd-kit/core";
+import { arrayMove, SortableContext, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+import { Box, InputBase, Menu, MenuItem, Stack, Tooltip, Typography, type SxProps, type Theme } from "@mui/material";
 import { observer } from "mobx-react-lite";
 import { type KeyboardEvent, type MouseEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { Virtuoso } from "react-virtuoso";
@@ -31,6 +34,7 @@ import { useConversationListNavigation } from "./use-conversation-list-navigatio
 export interface ConversationActions {
   readonly onRename: (id: string, title: string) => void;
   readonly onTogglePin: (id: string) => void;
+  readonly onReorderPinned?: (orderedIds: readonly string[]) => void;
   readonly onArchive: (id: string) => void;
   readonly onDelete: (id: string) => void;
 }
@@ -168,6 +172,22 @@ const conversationRowActionIconSx = {
   p: 0,
 } as const;
 
+interface ConversationRowProps {
+  readonly conversation: ConversationSummary;
+  readonly subtitle: string;
+  readonly active: boolean;
+  readonly delay: number;
+  readonly onSelect: (id: string) => void;
+  readonly onMove: (id: string, offset: -1 | 1) => void;
+  readonly registerRowRef: (id: string, element: HTMLDivElement | null) => void;
+  readonly actions: ConversationActions;
+  readonly hasWakeup: boolean;
+  readonly disableRise?: boolean;
+  readonly sortable?: Pick<ReturnType<typeof useSortable>, "attributes" | "listeners" | "setActivatorNodeRef">;
+  readonly setRowRef?: (element: HTMLDivElement | null) => void;
+  readonly rowSx?: SxProps<Theme>;
+}
+
 function ConversationRowConfirmButton({
   children,
   onClick,
@@ -223,17 +243,11 @@ const ConversationRow = observer(function ConversationRow({
   registerRowRef,
   actions,
   hasWakeup,
-}: {
-  readonly conversation: ConversationSummary;
-  readonly subtitle: string;
-  readonly active: boolean;
-  readonly delay: number;
-  readonly onSelect: (id: string) => void;
-  readonly onMove: (id: string, offset: -1 | 1) => void;
-  readonly registerRowRef: (id: string, element: HTMLDivElement | null) => void;
-  readonly actions: ConversationActions;
-  readonly hasWakeup: boolean;
-}) {
+  disableRise,
+  sortable,
+  setRowRef,
+  rowSx,
+}: ConversationRowProps) {
   const [store] = useState(() => new ConversationRowStore(conversation.title));
   const [confirmation, setConfirmation] = useState<ConversationRowConfirmation>(null);
   const { menuAnchor, setMenuAnchor, editing, setEditing, draft, setDraft } = store;
@@ -242,6 +256,8 @@ const ConversationRow = observer(function ConversationRow({
   const menuOpen = Boolean(menuAnchor);
   const { t } = useI18n();
   const activeAccent = selectedRowAccentStatus(conversation, hasWakeup);
+  const sortableAttributes = sortable?.attributes ?? {};
+  const sortableListeners = sortable?.listeners ?? {};
 
   // Focus (and select) the rename field once it mounts. Doing it in an effect —
   // rather than relying on `autoFocus` — wins the race against the closing menu
@@ -341,8 +357,12 @@ const ConversationRow = observer(function ConversationRow({
 
   return (
     <Stack
+      {...sortableAttributes}
+      {...sortableListeners}
       ref={(element: HTMLDivElement | null) => {
         rowRef.current = element;
+        setRowRef?.(element);
+        sortable?.setActivatorNodeRef(element);
         registerRowRef(conversation.id, element);
       }}
       role="option"
@@ -359,7 +379,8 @@ const ConversationRow = observer(function ConversationRow({
         px: 1.25,
         py: 1,
         borderRadius: (t) => `${t.custom.radii.md}px`,
-        cursor: editing ? "default" : "pointer",
+        cursor: editing ? "default" : sortable ? "grab" : "pointer",
+        touchAction: sortable ? "none" : undefined,
         backgroundColor: (t) => (active ? t.custom.surfaces.s3 : "transparent"),
         // Accent rendered as an inset shadow (not an element) so it never shifts
         // the content or collides with the avatar.
@@ -379,7 +400,8 @@ const ConversationRow = observer(function ConversationRow({
           outline: (t) => `2px solid ${t.custom.borders.focus}`,
           outlineOffset: "-2px",
         },
-        ...rise(delay),
+        ...(disableRise ? {} : rise(delay)),
+        ...rowSx,
       }}
     >
       <ConversationAvatar conversation={conversation} hasWakeup={hasWakeup} />
@@ -391,6 +413,7 @@ const ConversationRow = observer(function ConversationRow({
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={onEditKey}
             onBlur={commitRename}
+            onPointerDown={(e) => e.stopPropagation()}
             onClick={(e) => e.stopPropagation()}
             sx={{
               width: "100%",
@@ -443,6 +466,7 @@ const ConversationRow = observer(function ConversationRow({
             transition: "opacity 120ms ease",
             "&:hover": { backgroundColor: (t) => t.custom.surfaces.s4 },
           }}
+          onPointerDown={(event) => event.stopPropagation()}
         >
           {confirmation === "pin" ? (
             <ConversationRowConfirmButton onClick={togglePin}>
@@ -487,6 +511,28 @@ const ConversationRow = observer(function ConversationRow({
     </Stack>
   );
 });
+
+function SortablePinnedConversationRow(props: Omit<ConversationRowProps, "sortable" | "setRowRef" | "rowSx">) {
+  const { attributes, listeners, setActivatorNodeRef, setNodeRef, transform, transition, isDragging } = useSortable({ id: props.conversation.id });
+  return (
+    <ConversationRow
+      {...props}
+      // dnd-kit moves sortable rows with transform; the entrance rise animation
+      // also owns transform and would make dragging look stuck.
+      disableRise
+      setRowRef={setNodeRef}
+      rowSx={{
+        opacity: isDragging ? 0.55 : 1,
+        transform: transform ? CSS.Transform.toString({ ...transform, x: 0 }) : undefined,
+        transition: isDragging ? undefined : transition,
+        zIndex: isDragging ? 2 : 1,
+        willChange: isDragging ? "transform" : "auto",
+        cursor: isDragging ? "grabbing" : "grab",
+      }}
+      sortable={{ attributes, listeners, setActivatorNodeRef }}
+    />
+  );
+}
 
 /** A collapsible sidebar group header. Rows are rendered by the virtual list,
  *  so the header owns only collapse state and collapsed summary indicators. */
@@ -642,6 +688,7 @@ export const ConversationList = observer(function ConversationList({
   const { collapsedGroups, setCollapsedGroups } = store;
   const [expandedGroups, setExpandedGroups] = useState<ReadonlySet<string>>(() => new Set<string>());
   const { t } = useI18n();
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
 
   const wakeupConversationKey = [...wakeupConversationIds].sort().join("\0");
   const modelWakeupConversationIds = useMemo(
@@ -669,22 +716,39 @@ export const ConversationList = observer(function ConversationList({
       return next;
     });
   };
-  const listItems = useMemo<readonly ConversationListItem[]>(() => {
-    const sections = visibleConversationSections({
-      projects,
-      chats,
-      wakeupConversationIds: modelWakeupConversationIds,
-      pinnedLabel: t("pinned"),
-      chatsLabel: t("chats"),
-    });
-    return buildConversationListItems(sections, collapsedGroups, expandedGroups);
-  }, [chats, collapsedGroups, expandedGroups, modelWakeupConversationIds, projects, t]);
+  const sections = useMemo(
+    () =>
+      visibleConversationSections({
+        projects,
+        chats,
+        wakeupConversationIds: modelWakeupConversationIds,
+        pinnedLabel: t("pinned"),
+        chatsLabel: t("chats"),
+      }),
+    [chats, modelWakeupConversationIds, projects, t],
+  );
+  const pinnedConversationIds = useMemo(() => sections.find((section) => section.idBase === "pinned-group")?.conversations.map((conversation) => conversation.id) ?? [], [sections]);
+  const sortablePinnedEnabled = Boolean(actions.onReorderPinned && pinnedConversationIds.length > 1);
+  const listItems = useMemo<readonly ConversationListItem[]>(() => buildConversationListItems(sections, collapsedGroups, expandedGroups), [collapsedGroups, expandedGroups, sections]);
   const { moveConversation, registerRowRef, virtuosoRef } = useConversationListNavigation({ listItems, onSelect });
+  const handleDragEnd = (event: DragEndEvent) => {
+    if (!actions.onReorderPinned || !event.over || event.active.id === event.over.id) {
+      return;
+    }
+    const activeId = String(event.active.id);
+    const overId = String(event.over.id);
+    const oldIndex = pinnedConversationIds.indexOf(activeId);
+    const newIndex = pinnedConversationIds.indexOf(overId);
+    if (oldIndex < 0 || newIndex < 0) {
+      return;
+    }
+    actions.onReorderPinned(arrayMove(pinnedConversationIds, oldIndex, newIndex));
+  };
 
   // One unified, full-width scroll list (scrollbar flush at the right edge):
   // pinned group, then project folder-accordions, then a chats group. No mode
   // toggle, no inline search (search is a popup from the sidebar header).
-  return (
+  const list = (
     <Box
       role="listbox"
       aria-label={t("conversationList")}
@@ -700,7 +764,7 @@ export const ConversationList = observer(function ConversationList({
         increaseViewportBy={{ bottom: 480, top: 240 }}
         initialItemCount={Math.min(listItems.length, 40)}
         minOverscanItemCount={{ bottom: 8, top: 4 }}
-        style={{ height: "100%", scrollbarGutter: "stable both-edges" }}
+        style={{ height: "100%", overflowX: "hidden", scrollbarGutter: "stable both-edges" }}
         itemContent={(index, item) => {
           if (!item) {
             return null;
@@ -738,9 +802,11 @@ export const ConversationList = observer(function ConversationList({
               </Box>
             );
           }
+          const isSortablePinned = sortablePinnedEnabled && item.conversation.pinned === true;
+          const RowComponent = isSortablePinned ? SortablePinnedConversationRow : ConversationRow;
           return (
-            <Box sx={{ px: 0.75, pb: 0.25 }}>
-              <ConversationRow
+            <Box sx={{ px: 0.75, pb: 0.25, overflowX: "clip" }}>
+              <RowComponent
                 conversation={item.conversation}
                 subtitle={conversationPreviewSnippet(threads[item.conversation.id] ?? [], 60) || item.conversation.snippet}
                 active={item.conversation.id === selectedId}
@@ -756,5 +822,15 @@ export const ConversationList = observer(function ConversationList({
         }}
       />
     </Box>
+  );
+  if (!sortablePinnedEnabled) {
+    return list;
+  }
+  return (
+    <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+      <SortableContext items={pinnedConversationIds} strategy={verticalListSortingStrategy}>
+        {list}
+      </SortableContext>
+    </DndContext>
   );
 });

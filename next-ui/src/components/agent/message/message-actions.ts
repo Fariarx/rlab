@@ -1,4 +1,5 @@
 import { normalizeAgentToolOutput } from "../../../lib/agent-output";
+import { reviewCommentsPromptText } from "../../../lib/agent-prompt";
 import type { AgentBlock, ApprovalDecision, ChatMessage } from "../core/types";
 
 export interface MessageActionHandlers {
@@ -44,6 +45,6 @@ function blockToPlainText(block: AgentBlock): string {
     case "suggested":
       return block.actions.map((action) => action.label).join("\n");
     case "review":
-      return block.comments.map((comment) => `${comment.file}:${comment.line} ${comment.body}`).join("\n");
+      return reviewCommentsPromptText(block.comments);
   }
 }

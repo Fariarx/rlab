@@ -162,7 +162,7 @@ export interface ComposerProps {
   readonly supportsAutoConfirm?: boolean;
   readonly onAutoConfirmChange?: (enabled: boolean) => void;
   readonly onDraftChange?: (draft: ComposerDraft) => void;
-  readonly onSend?: (value: string) => void;
+  readonly onSend?: (value: string, options?: { readonly includeReviewComments: boolean }) => void;
   readonly onSendAsGoal?: (value: string) => void;
   readonly onDeferToQueue?: (value: string) => void;
   readonly onStop?: () => void;
@@ -172,6 +172,7 @@ export interface ComposerProps {
    *  button is enabled and sending also flushes the comments via onSendReview. */
   readonly reviewCount?: number;
   readonly onSendReview?: () => void;
+  readonly onClearReviewComments?: () => void;
   /** Reports the height of the floating tags row so the thread/Git content above
    *  can reserve matching bottom space (the tags still float over the content). */
   readonly onTagsHeightChange?: (height: number) => void;
@@ -243,6 +244,7 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
     running = false,
     reviewCount = 0,
     onSendReview,
+    onClearReviewComments,
     onTagsHeightChange,
     onOverlayLiftChange,
     history = [],
@@ -443,7 +445,7 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
   const floatingAttachments = editChrome ? [] : composerAttachments;
   const hasInlineAttachments = editChrome && composerAttachments.length > 0;
   const hasFloatingTags = (!editChrome && scheduledWakeups.length > 0) || (!editChrome && effectiveReviewCount > 0) || floatingAttachments.length > 0;
-  useEffect(() => {
+  useLayoutEffect(() => {
     onOverlayLiftChange?.(effectiveOverlayLift);
   }, [effectiveOverlayLift, onOverlayLiftChange]);
 
@@ -484,7 +486,7 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
     };
   }, [composerBarRef, rootRef]);
 
-  const { chooseFiles, fileInputRef, openFilePicker } = useComposerFileController({ addFiles, forwardedRef: ref, textareaRef });
+  const { chooseFiles, fileInputRef, openFilePicker } = useComposerFileController({ addFiles, forwardedRef: ref, setDraft: updateDraft, textareaRef });
   useEffect(() => {
     void suggestionKey;
     setActiveSuggestion(0);
@@ -614,6 +616,8 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
               <ComposerTag
                 icon={<RateReviewOutlinedIcon sx={{ fontSize: 15, color: (theme) => theme.palette.status.info.main }} />}
                 label={t("reviewPending", { count: effectiveReviewCount })}
+                removeLabel={t("reviewClearComments")}
+                onRemove={onClearReviewComments}
                 testId="composer-review-tag"
               />
             )}

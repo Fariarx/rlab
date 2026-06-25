@@ -274,6 +274,65 @@ function textFromReactNode(children: ReactNode): string {
   return "";
 }
 
+const MALFORMED_TEXT_FENCE_OPEN_RE = /^([ \t]{0,3})(`{3,})text(.+)$/;
+const CODEISH_TEXT_FENCE_INFO_RE = /[\s:()[\]{}=+\-*\/_.,]/;
+
+function closingFenceIndex(line: string, fence: string): number {
+  const index = line.lastIndexOf(fence);
+  if (index < 0 || line.slice(index).trim() !== fence) {
+    return -1;
+  }
+  return index;
+}
+
+function normalizeMalformedTextFences(text: string): string {
+  const lines = text.split("\n");
+  const normalized: string[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    const open = MALFORMED_TEXT_FENCE_OPEN_RE.exec(line);
+    const firstCodeLine = open?.[3] ?? "";
+    if (!open || firstCodeLine.trim().length === 0 || !CODEISH_TEXT_FENCE_INFO_RE.test(firstCodeLine)) {
+      normalized.push(line);
+      continue;
+    }
+
+    const indent = open[1] ?? "";
+    const fence = open[2] ?? "```";
+    const originalLines = [line];
+    const codeLines: string[] = [];
+    let scanIndex = index;
+    let closed = false;
+    const consumeCodeLine = (value: string) => {
+      const closeIndex = closingFenceIndex(value, fence);
+      if (closeIndex >= 0) {
+        codeLines.push(value.slice(0, closeIndex).replace(/\s+$/, ""));
+        closed = true;
+        return;
+      }
+      codeLines.push(value);
+    };
+
+    consumeCodeLine(firstCodeLine.replace(/^\s+/, ""));
+    while (!closed && scanIndex + 1 < lines.length) {
+      scanIndex += 1;
+      const nextLine = lines[scanIndex] ?? "";
+      originalLines.push(nextLine);
+      consumeCodeLine(nextLine);
+    }
+
+    if (!closed) {
+      normalized.push(...originalLines);
+      index = scanIndex;
+      continue;
+    }
+
+    normalized.push(`${indent}${fence}text`, ...codeLines, `${indent}${fence}`);
+    index = scanIndex;
+  }
+  return normalized.join("\n");
+}
+
 const markdownComponents = {
   p({ children }) {
     return (
@@ -409,7 +468,7 @@ const markdownComponents = {
 } satisfies Components;
 
 const MarkdownMessage = memo(function MarkdownMessage({ text }: { readonly text: string }) {
-  const markdownText = useMemo(() => rlabToolMarkdownLinks(text), [text]);
+  const markdownText = useMemo(() => rlabToolMarkdownLinks(normalizeMalformedTextFences(text)), [text]);
   return (
     <Stack spacing={1} sx={{ width: "100%", minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }}>
       <Markdown remarkPlugins={[remarkGfm]} skipHtml components={markdownComponents} urlTransform={messageMarkdownUrlTransform}>

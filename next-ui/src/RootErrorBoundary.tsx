@@ -28,6 +28,19 @@ function errorDetails(error: Error, info: ErrorInfo | null): string {
   return [error.stack || `${error.name}: ${error.message}`, info?.componentStack].filter(Boolean).join("\n\nComponent stack:\n");
 }
 
+const BENIGN_RESIZE_OBSERVER_ERROR_MESSAGES = new Set(["ResizeObserver loop completed with undelivered notifications.", "ResizeObserver loop limit exceeded"]);
+
+function errorMessage(value: unknown): string {
+  if (value instanceof Error) {
+    return value.message;
+  }
+  return typeof value === "string" ? value : "";
+}
+
+function isBenignResizeObserverError(value: unknown): boolean {
+  return BENIGN_RESIZE_OBSERVER_ERROR_MESSAGES.has(errorMessage(value));
+}
+
 const pageStyle: CSSProperties = {
   minHeight: "100dvh",
   display: "flex",
@@ -138,6 +151,10 @@ export class RootErrorBoundary extends Component<RootErrorBoundaryProps, RootErr
   }
 
   private readonly handleWindowError = (event: ErrorEvent): void => {
+    if (isBenignResizeObserverError(event.error) || isBenignResizeObserverError(event.message)) {
+      event.preventDefault();
+      return;
+    }
     const error = event.error ? errorFromUnknown(event.error) : new Error(event.message || "Unhandled window error");
     console.error("[rlab] Uncaught window error", error);
     this.setState({ error, errorInfo: null, source: "window" });

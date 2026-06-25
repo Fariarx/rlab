@@ -69,6 +69,36 @@ describe("useConversationAutoScroll", () => {
     expect(captured.current?.showScrollToBottom).toBe(false);
   });
 
+  it("does not detach when composer shrink clamps the scroll position after submit", async () => {
+    const captured: { current: ConversationAutoScrollController | null } = { current: null };
+    render(<Harness capture={(controller) => { captured.current = controller; }} />);
+
+    await waitFor(() => expect(captured.current).not.toBeNull());
+    const element = captured.current?.containerRef.current as HTMLElement;
+    sizeContainer(element, { scrollHeight: 1000, clientHeight: 300, scrollTop: 700 });
+    await act(async () => {
+      element.dispatchEvent(new Event("scroll"));
+    });
+
+    // Sending clears/shrinks the composer, which removes bottom spacer height
+    // from the thread. Browsers clamp scrollTop down after the content shrinks;
+    // that is layout, not a user scroll up, so the bottom pin must survive.
+    Object.defineProperty(element, "scrollHeight", { value: 850, configurable: true });
+    element.scrollTop = 550;
+    await act(async () => {
+      element.dispatchEvent(new Event("scroll"));
+    });
+
+    expect(captured.current?.showScrollToBottom).toBe(false);
+
+    element.scrollTop = 300;
+    await act(async () => {
+      element.dispatchEvent(new Event("scroll"));
+    });
+
+    expect(captured.current?.showScrollToBottom).toBe(true);
+  });
+
   it("snaps back to the bottom and hides the affordance", async () => {
     const captured: { current: ConversationAutoScrollController | null } = { current: null };
     render(<Harness capture={(controller) => { captured.current = controller; }} />);

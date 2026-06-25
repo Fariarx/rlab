@@ -2,8 +2,11 @@ import type { GitFileStatus, GitStatusPayload } from "../../lib/git-status";
 import { readJsonPayload, responseErrorMessage } from "./http";
 
 export interface GitDiffPayload {
+  readonly contextLines?: number;
   readonly diff: string;
   readonly mode: "staged" | "worktree";
+  readonly newLineCount?: number;
+  readonly oldLineCount?: number;
   readonly path: string;
 }
 
@@ -55,22 +58,22 @@ export async function fetchGitTree(cwd: string): Promise<GitTreePayload> {
   return readGitApiPayload("Git tree", response);
 }
 
-export async function fetchGitDiff(cwd: string, file: GitFileStatus, mode: GitDiffMode): Promise<GitDiffPayload> {
+export async function fetchGitDiff(cwd: string, file: GitFileStatus, mode: GitDiffMode, contextLines?: number): Promise<GitDiffPayload> {
   const response = await fetch("/api/git-diff", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ cwd, path: file.gitPath, mode }),
+    body: JSON.stringify({ cwd, path: file.gitPath, mode, ...(contextLines === undefined ? {} : { contextLines }) }),
   });
   return readGitApiPayload("Git diff", response);
 }
 
-export async function mutateGitFile(endpoint: "/api/git-stage" | "/api/git-unstage", cwd: string, file: GitFileStatus): Promise<GitStatusPayload> {
+export async function mutateGitFile(endpoint: "/api/git-stage" | "/api/git-unstage" | "/api/git-discard-file", cwd: string, file: GitFileStatus): Promise<GitStatusPayload> {
   const response = await fetch(endpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ cwd, path: file.gitPath }),
+    body: JSON.stringify({ cwd, path: file.gitPath, ...(endpoint === "/api/git-discard-file" ? { untracked: file.code === "??" } : {}) }),
   });
-  return readGitApiPayload(endpoint === "/api/git-stage" ? "Git stage" : "Git unstage", response);
+  return readGitApiPayload(endpoint === "/api/git-stage" ? "Git stage" : endpoint === "/api/git-unstage" ? "Git unstage" : "Git discard file", response);
 }
 
 export async function initGitRepo(cwd: string): Promise<GitStatusPayload> {

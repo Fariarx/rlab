@@ -126,6 +126,29 @@ describe("Composer", () => {
     expect(payload.match(/<attachment name="notes\.txt"/g)).toHaveLength(1);
   });
 
+  it("sends typed text with pending review comments in the same turn", async () => {
+    const onSend = vi.fn();
+    const onSendReview = vi.fn();
+    renderWithTheme(<Composer placeholder="Написать" reviewCount={2} onSend={onSend} onSendReview={onSendReview} />);
+
+    const input = screen.getByPlaceholderText("Написать");
+    fireEvent.change(input, { target: { value: "проверь комментарии" } });
+    fireEvent.click(screen.getByTestId("composer-send-button"));
+
+    await waitFor(() => expect(onSend).toHaveBeenCalledWith("проверь комментарии", { includeReviewComments: true }));
+    expect(onSendReview).not.toHaveBeenCalled();
+  });
+
+  it("clears all pending review comments from the review tag remove button", () => {
+    const onClearReviewComments = vi.fn();
+    renderWithTheme(<Composer placeholder="Написать" reviewCount={3} onClearReviewComments={onClearReviewComments} />);
+
+    expect(screen.getByTestId("composer-review-tag")).toHaveTextContent("3 комментариев");
+    fireEvent.click(screen.getByRole("button", { name: "Удалить комментарии ревью" }));
+
+    expect(onClearReviewComments).toHaveBeenCalledTimes(1);
+  });
+
   it("tracks pointer coordinates for the animated composer border", () => {
     renderWithTheme(<Composer placeholder="Написать" />);
 
@@ -402,6 +425,49 @@ describe("Composer", () => {
       expect(input.selectionEnd).toBe("alpha ручная остановка ".length);
     });
     expect(screen.queryByTestId("composer-voice-recording-strip")).not.toBeInTheDocument();
+  });
+
+  it("returns focus to the composer after stopping browser voice input without transcript", async () => {
+    class FakeSpeechRecognition {
+      static current: FakeSpeechRecognition | null = null;
+      lang = "";
+      continuous = false;
+      interimResults = false;
+      onresult: ((event: { readonly resultIndex: number; readonly results: { readonly length: number } }) => void) | null = null;
+      onerror: ((event: { readonly error?: string; readonly message?: string }) => void) | null = null;
+      onend: (() => void) | null = null;
+
+      constructor() {
+        FakeSpeechRecognition.current = this;
+      }
+
+      start(): void {}
+      stop(): void {
+        this.onend?.();
+      }
+    }
+    vi.stubGlobal("SpeechRecognition", FakeSpeechRecognition);
+    installVoiceCaptureMocks();
+
+    renderWithTheme(
+      <Composer
+        placeholder="Написать"
+        voiceProvider={{ id: "web-speech", name: "Browser Web Speech", kind: "browser", language: "ru-RU", configured: true }}
+      />,
+    );
+
+    const input = screen.getByTestId("composer-input");
+    fireEvent.click(await screen.findByTestId("composer-voice-button"));
+    await waitFor(() => {
+      expect(FakeSpeechRecognition.current).not.toBeNull();
+    });
+
+    fireEvent.click(screen.getByTestId("composer-voice-stop-button"));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("composer-voice-recording-strip")).not.toBeInTheDocument();
+      expect(input).toHaveFocus();
+    });
   });
 
   it("ignores browser speech interim events without spamming no-speech errors", async () => {
@@ -1157,6 +1223,20 @@ describe("Composer", () => {
     });
 
     expect(await screen.findByText("drop.txt")).toBeInTheDocument();
+  });
+
+  it("sets the visible draft handed in by the parent", () => {
+    const ref = createRef<ComposerHandle>();
+    const onDraftChange = vi.fn();
+    renderWithTheme(<Composer ref={ref} placeholder="Написать" onDraftChange={onDraftChange} />);
+
+    const draft = { text: "Edited queued turn", attachments: [] };
+    act(() => {
+      ref.current?.setDraft(draft);
+    });
+
+    expect(screen.getByPlaceholderText("Написать")).toHaveValue("Edited queued turn");
+    expect(onDraftChange).toHaveBeenCalledWith(draft);
   });
 
   it("dismisses the suggestion popover with Escape without sending", () => {

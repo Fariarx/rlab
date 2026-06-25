@@ -75,6 +75,7 @@ function conversationSummaryEqual(left: ConversationSummary, right: Conversation
       left.activeRunId === right.activeRunId &&
       left.unread === right.unread &&
       left.pinned === right.pinned &&
+      left.pinnedOrder === right.pinnedOrder &&
       left.archived === right.archived &&
       left.costUsd === right.costUsd &&
       left.sessionId === right.sessionId &&

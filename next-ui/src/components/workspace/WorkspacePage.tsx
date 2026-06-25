@@ -907,8 +907,12 @@ export const WorkspacePageView = observer(function WorkspacePageView({
                     composerDraftPersistence.scheduleDraft(ws.selectedId, draft);
                   }
                 }}
-                onSend={(text) => {
-                  submitComposerText(text);
+                onSend={(text, options) => {
+                  const commentsForTurn = options?.includeReviewComments ? reviewComments : [];
+                  submitComposerText(text, commentsForTurn);
+                  if (commentsForTurn.length > 0) {
+                    setReviewComments([]);
+                  }
                 }}
                 onSendAsGoal={selected ? ((text) => ws.sendMessageAsGoal(selected.id, text)) : undefined}
                 onDeferToQueue={selected ? ((text) => ws.deferMessageToQueue(selected.id, text)) : undefined}
@@ -916,6 +920,7 @@ export const WorkspacePageView = observer(function WorkspacePageView({
                 running={selectedHasActiveWork}
                 reviewCount={reviewComments.length}
                 onSendReview={sendReviewComments}
+                onClearReviewComments={() => setReviewComments([])}
                 onTagsHeightChange={setComposerTagsHeight}
                 onOverlayLiftChange={setComposerOverlayLift}
                 history={messageHistory}
@@ -927,6 +932,11 @@ export const WorkspacePageView = observer(function WorkspacePageView({
                     onCancel={(messageId) => ws.cancelQueuedMessage(selected.id, messageId)}
                     onCancelItem={(itemId) => ws.cancelQueuedItem(selected.id, itemId)}
                     onCopy={(message) => messageActions.onCopy?.(message)}
+                    onEdit={(item) => {
+                      composerDraftPersistence.discardDraft(selected.id);
+                      const draft = ws.editQueuedMessage(selected.id, item.id, item.message);
+                      composerRef.current?.setDraft(draft);
+                    }}
                     onSendNow={() => ws.sendQueuedMessageNow(selected.id)}
                     onTogglePause={() => ws.setQueuePaused(selected.id, !ws.isQueuePaused(selected.id))}
                     onMoveItemAfter={(itemId, afterItemId) => ws.moveQueuedItemAfter(selected.id, itemId, afterItemId)}

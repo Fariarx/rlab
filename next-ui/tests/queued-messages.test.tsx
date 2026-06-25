@@ -23,15 +23,20 @@ describe("QueuedMessages", () => {
   it("lists queued turns with a count and supports copy, cancel, send now, and pause", () => {
     const onCancel = vi.fn();
     const onCopy = vi.fn();
+    const onEdit = vi.fn();
     const onSendNow = vi.fn();
     const onTogglePause = vi.fn();
     renderWithTheme(
-      <QueuedMessages messages={messages} paused={false} onCancel={onCancel} onCopy={onCopy} onSendNow={onSendNow} onTogglePause={onTogglePause} />,
+      <QueuedMessages messages={messages} paused={false} onCancel={onCancel} onCopy={onCopy} onEdit={onEdit} onSendNow={onSendNow} onTogglePause={onTogglePause} />,
     );
 
     expect(screen.getByText("В очереди · 2")).toBeInTheDocument();
     expect(screen.getByText("First queued turn")).toBeInTheDocument();
     expect(screen.getByText("Second queued turn")).toBeInTheDocument();
+
+    const editButtons = screen.getAllByRole("button", { name: "Редактировать отложенное сообщение" });
+    fireEvent.click(editButtons[0]);
+    expect(onEdit).toHaveBeenCalledWith(expect.objectContaining({ id: "q1", kind: "message", message: messages[0] }));
 
     const copyButtons = screen.getAllByRole("button", { name: "Скопировать отложенное сообщение" });
     fireEvent.click(copyButtons[0]);
@@ -141,6 +146,7 @@ describe("QueuedMessages", () => {
     );
 
     expect(screen.getByText("Ожидание Wakeup · 4")).toBeInTheDocument();
+    expect(screen.getByTestId("queued-header-schedule-icon")).toBeInTheDocument();
     expect(screen.getByText("Keep improving")).toBeInTheDocument();
     expect(screen.getByText("Keep testing")).toBeInTheDocument();
     expect(screen.getByText("Active goal")).toBeInTheDocument();

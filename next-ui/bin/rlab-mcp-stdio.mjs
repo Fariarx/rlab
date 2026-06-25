@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// Standalone stdio MCP server that exposes rlab's chat tools to CLI
-// agents that can only load external MCP servers (OpenCode, Gemini) — unlike
-// Claude (in-process SDK MCP) and Codex (native dynamic tools).
+// Standalone stdio MCP server that exposes rlab's chat tools to agents that
+// load external MCP servers (Claude SDK, OpenCode, Gemini). Codex uses native
+// dynamic tools instead.
 //
 // The handler only acknowledges the call: rlab's run-stream translator watches
 // the agent's tool call/result and does the real scheduling/cancel/list server

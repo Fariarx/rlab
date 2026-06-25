@@ -1,7 +1,7 @@
 import { act, render, waitFor } from "@testing-library/react";
 import { useEffect, useState } from "react";
 import { describe, expect, it, vi } from "vitest";
-import type { ReviewCommentEntry } from "../src/components/agent";
+import type { ReviewCommentAnchor, ReviewCommentEntry } from "../src/components/agent";
 import { useReviewComments, type UseReviewCommentsResult } from "../src/components/workspace/hooks/use-review-comments";
 
 function Harness({
@@ -48,9 +48,16 @@ describe("useReviewComments", () => {
     );
 
     await waitFor(() => expect(captured.current).not.toBeNull());
-    act(() => captured.current?.review.onAddComment("src/file.ts", 12, "+line", "first"));
+    const anchor: ReviewCommentAnchor = {
+      line: 12,
+      lineText: "line",
+      diffLine: "+line",
+      hunkHeader: "@@ -8,6 +8,7 @@",
+      diffContext: ["11:  before", "12: +line"],
+    };
+    act(() => captured.current?.review.onAddComment("src/file.ts", anchor, "first"));
     await waitFor(() => expect(captured.current?.comments).toHaveLength(1));
-    expect(captured.current?.comments[0]).toEqual({ id: "rc-1", file: "src/file.ts", line: 12, lineText: "+line", body: "first" });
+    expect(captured.current?.comments[0]).toEqual({ id: "rc-1", file: "src/file.ts", ...anchor, body: "first" });
 
     act(() => captured.current?.review.onUpdateComment("rc-1", "updated"));
     await waitFor(() => expect(captured.current?.comments[0]?.body).toBe("updated"));

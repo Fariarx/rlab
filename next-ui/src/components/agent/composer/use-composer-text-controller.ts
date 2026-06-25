@@ -30,7 +30,7 @@ interface UseComposerTextControllerInput {
   readonly onAttachmentError?: (message: string) => void;
   readonly onBeforeSend?: () => void | Promise<void>;
   readonly onDraftChange?: (draft: ComposerDraft) => void;
-  readonly onSend?: (value: string) => void;
+  readonly onSend?: (value: string, options?: { readonly includeReviewComments: boolean }) => void;
   readonly onSendReview?: () => void;
   readonly pluginTokenRanges: readonly ComposerPluginTokenRange[];
   readonly recentlySubmittedValue?: string;
@@ -310,12 +310,18 @@ export function useComposerTextController({
     if (sending) {
       return;
     }
-    const submitted = await submitDraft((payload) => onSend?.(payload));
+    const submitted = await submitDraft((payload) => {
+      if (reviewCount > 0) {
+        onSend?.(payload, { includeReviewComments: true });
+        return;
+      }
+      onSend?.(payload);
+    });
     if (!submitted && reviewCount === 0) {
       return;
     }
     try {
-      if (reviewCount > 0) {
+      if (!submitted && reviewCount > 0) {
         onSendReview?.();
       }
     } finally {

@@ -11,6 +11,7 @@ import {
   type ConversationView,
   type MessageActionHandlers,
   type Project,
+  type ReviewCommentEntry,
 } from "../../agent";
 import type { ToastOptions } from "../../ui";
 import { conversationProfile, type Workspace } from "../use-workspace";
@@ -49,7 +50,7 @@ export interface UseWorkspaceConversationActionsOptions {
 export interface WorkspaceConversationActions {
   readonly openConversation: (id: string, updateRoute?: boolean) => void;
   readonly createConversation: (projectId?: string) => void;
-  readonly submitComposerText: (text: string) => void;
+  readonly submitComposerText: (text: string, reviewComments?: readonly ReviewCommentEntry[]) => void;
   readonly handleCreateProject: (input: Parameters<Workspace["createProject"]>[0]) => void;
   readonly conversationActions: ConversationActions;
   readonly doDelete: () => void;
@@ -129,7 +130,7 @@ export function useWorkspaceConversationActions({
   );
 
   const submitComposerText = useCallback(
-    (text: string) => {
+    (text: string, reviewComments: readonly ReviewCommentEntry[] = []) => {
       const activeConversation = ws.find(ws.selectedId);
       let targetId = activeConversation?.id ?? EMPTY_CHAT_ID;
       if (!targetId) {
@@ -144,7 +145,7 @@ export function useWorkspaceConversationActions({
       }
       composerDraftPersistence.clearDraft(targetId);
       runNotifications.mark(targetId);
-      ws.sendMessage(targetId, text);
+      ws.sendMessage(targetId, text, reviewComments);
     },
     [bumpRunKey, composerDraftPersistence, onNavigate, route, runNotifications, setProfile, setView, ws],
   );
@@ -167,6 +168,7 @@ export function useWorkspaceConversationActions({
     () => ({
       onRename: ws.rename,
       onTogglePin: ws.togglePin,
+      onReorderPinned: ws.reorderPinnedConversations,
       onArchive: (id: string) => {
         ws.archive(id);
         toast({ message: t("conversationArchived"), severity: "info", duration: 2500 });

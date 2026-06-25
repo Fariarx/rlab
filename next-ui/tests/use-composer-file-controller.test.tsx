@@ -2,13 +2,15 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { forwardRef, useEffect, useRef } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { type ComposerFileController, type ComposerHandle, useComposerFileController } from "../src/components/agent/composer/use-composer-file-controller";
+import type { ComposerDraft } from "../src/components/agent";
 
 const Harness = forwardRef<ComposerHandle, {
   readonly addFiles: (files: readonly File[]) => Promise<void>;
   readonly capture?: (controller: ComposerFileController) => void;
-}>(function Harness({ addFiles, capture }, ref) {
+  readonly setDraft?: (draft: ComposerDraft) => void;
+}>(function Harness({ addFiles, capture, setDraft = vi.fn() }, ref) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
-  const controller = useComposerFileController({ addFiles, forwardedRef: ref, textareaRef });
+  const controller = useComposerFileController({ addFiles, forwardedRef: ref, setDraft, textareaRef });
 
   useEffect(() => {
     capture?.(controller);
@@ -38,10 +40,11 @@ describe("useComposerFileController", () => {
 
   it("exposes file picker and imperative composer actions", async () => {
     const addFiles = vi.fn<(files: readonly File[]) => Promise<void>>(async () => undefined);
+    const setDraft = vi.fn<(draft: ComposerDraft) => void>();
     const handleRef = { current: null as ComposerHandle | null };
     const controller: { current: ComposerFileController | null } = { current: null };
 
-    render(<Harness ref={handleRef} addFiles={addFiles} capture={(next) => { controller.current = next; }} />);
+    render(<Harness ref={handleRef} addFiles={addFiles} setDraft={setDraft} capture={(next) => { controller.current = next; }} />);
     await waitFor(() => expect(controller.current).not.toBeNull());
 
     const input = screen.getByTestId("file-input") as HTMLInputElement;
@@ -55,5 +58,10 @@ describe("useComposerFileController", () => {
 
     handleRef.current?.focus();
     expect(document.activeElement).toBe(screen.getByTestId("composer-textarea"));
+
+    const draft = { text: "Edited queued turn", attachments: [] };
+    handleRef.current?.setDraft(draft);
+    expect(setDraft).toHaveBeenCalledWith(draft);
+    expect(screen.getByTestId("composer-textarea")).toHaveFocus();
   });
 });

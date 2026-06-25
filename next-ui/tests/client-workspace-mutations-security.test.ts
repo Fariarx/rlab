@@ -61,6 +61,7 @@ describe("client workspace mutation sanitizer", () => {
       sessionId: "session-client",
       sessionAgent: "gemini",
       pinned: true,
+      pinnedOrder: 4096,
     });
 
     const [sanitized] = sanitizeClientWorkspaceMutations([{ type: "updateConversation", conversation: incoming }]);
@@ -70,6 +71,7 @@ describe("client workspace mutation sanitizer", () => {
       conversation: {
         title: "Client title",
         pinned: true,
+        pinnedOrder: 4096,
         status: "done",
         agent: "codex",
         agentSessions: { codex: "session-server" },

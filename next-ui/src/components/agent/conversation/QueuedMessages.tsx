@@ -6,13 +6,14 @@ import AccessTimeRoundedIcon from "@mui/icons-material/AccessTimeRounded";
 import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
 import ContentCopyRoundedIcon from "@mui/icons-material/ContentCopyRounded";
 import DragIndicatorRoundedIcon from "@mui/icons-material/DragIndicatorRounded";
+import EditRoundedIcon from "@mui/icons-material/EditRounded";
 import FlagRoundedIcon from "@mui/icons-material/FlagRounded";
 import PauseRoundedIcon from "@mui/icons-material/PauseRounded";
 import PlayArrowRoundedIcon from "@mui/icons-material/PlayArrowRounded";
 import ScheduleSendRoundedIcon from "@mui/icons-material/ScheduleSendRounded";
 import SendRoundedIcon from "@mui/icons-material/SendRounded";
 import { Box, Stack, Typography, type SxProps, type Theme } from "@mui/material";
-import type { PendingQueueItem, PendingQueueWakeupItem } from "../../../client/api/workspace-page-api";
+import type { PendingQueueItem, PendingQueueMessageItem, PendingQueueWakeupItem } from "../../../client/api/workspace-page-api";
 import { useI18n } from "../../../i18n/I18nProvider";
 import { pendingQueueWakeupDetail, pendingQueueWakeupQueueLabel } from "../../workspace/models/workspace-composer-model";
 import { Button, IconButton, Tooltip } from "../../ui";
@@ -26,6 +27,7 @@ export interface QueuedMessagesProps {
   readonly onCancel: (messageId: string) => void;
   readonly onCancelItem?: (itemId: string) => void;
   readonly onCopy: (message: ChatMessage) => void;
+  readonly onEdit?: (item: PendingQueueMessageItem) => void;
   readonly onSendNow: () => void;
   readonly onTogglePause: () => void;
   readonly onMoveItemAfter?: (itemId: string, afterItemId: string | null) => void;
@@ -134,6 +136,7 @@ interface QueueItemRowProps {
   readonly onCancel: (messageId: string) => void;
   readonly onCancelItem?: (itemId: string) => void;
   readonly onCopy: (message: ChatMessage) => void;
+  readonly onEdit?: (item: PendingQueueMessageItem) => void;
   readonly onOpenWakeup: (item: PendingQueueWakeupItem, anchor: HTMLElement) => void;
   readonly paused: boolean;
   readonly rowRef?: (node: HTMLDivElement | null) => void;
@@ -148,6 +151,7 @@ function QueueItemRow({
   onCancel,
   onCancelItem,
   onCopy,
+  onEdit,
   onOpenWakeup,
   paused,
   rowRef,
@@ -250,18 +254,34 @@ function QueueItemRow({
           </Box>
         ) : null}
         {item.kind === "message" ? (
-          <Tooltip title={t("copyQueuedMessage")}>
-            <IconButton
-              aria-label={t("copyQueuedMessage")}
-              onClick={(event) => {
-                event.stopPropagation();
-                onCopy(item.message);
-              }}
-              sx={{ ...queuedActionButtonSx, "&:hover": { color: "text.primary", backgroundColor: (theme) => theme.custom.surfaces.s4 } }}
-            >
-              <ContentCopyRoundedIcon sx={{ fontSize: 14 }} />
-            </IconButton>
-          </Tooltip>
+          <>
+            {item.state === "queued" && onEdit ? (
+              <Tooltip title={t("editQueuedMessage")}>
+                <IconButton
+                  aria-label={t("editQueuedMessage")}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onEdit(item);
+                  }}
+                  sx={{ ...queuedActionButtonSx, "&:hover": { color: "text.primary", backgroundColor: (theme) => theme.custom.surfaces.s4 } }}
+                >
+                  <EditRoundedIcon sx={{ fontSize: 14 }} />
+                </IconButton>
+              </Tooltip>
+            ) : null}
+            <Tooltip title={t("copyQueuedMessage")}>
+              <IconButton
+                aria-label={t("copyQueuedMessage")}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onCopy(item.message);
+                }}
+                sx={{ ...queuedActionButtonSx, "&:hover": { color: "text.primary", backgroundColor: (theme) => theme.custom.surfaces.s4 } }}
+              >
+                <ContentCopyRoundedIcon sx={{ fontSize: 14 }} />
+              </IconButton>
+            </Tooltip>
+          </>
         ) : null}
         <Tooltip title={cancelLabel}>
           <IconButton
@@ -318,7 +338,7 @@ function SortableQueueItemRow(props: Omit<QueueItemRowProps, "dragHandle" | "row
  * the composer. Wakes are pinned at the top as queue blockers; message/goal
  * rows are sortable through dnd-kit and can never move above wakeups.
  */
-export function QueuedMessages({ messages, items, paused, onCancel, onCancelItem, onCopy, onSendNow, onTogglePause, onMoveItemAfter }: QueuedMessagesProps) {
+export function QueuedMessages({ messages, items, paused, onCancel, onCancelItem, onCopy, onEdit, onSendNow, onTogglePause, onMoveItemAfter }: QueuedMessagesProps) {
   const { locale, t } = useI18n();
   const [nowMs, setNowMs] = useState(() => Date.now());
   const queueItems = items && items.length > 0 ? items : messageItems(messages);
@@ -396,11 +416,7 @@ export function QueuedMessages({ messages, items, paused, onCancel, onCancelItem
         }}
       >
         <Stack direction="row" spacing={0.75} sx={{ gridArea: "title", alignItems: "center", minWidth: 0, alignSelf: "center" }}>
-          {waitingWakeup ? (
-            <AccessTimeRoundedIcon sx={{ fontSize: 14, color: (theme) => theme.palette.status.warn.main, flex: "0 0 auto" }} />
-          ) : (
-            <ScheduleSendRoundedIcon sx={{ fontSize: 14, color: (theme) => theme.palette.status.warn.main, flex: "0 0 auto" }} />
-          )}
+          <ScheduleSendRoundedIcon data-testid="queued-header-schedule-icon" sx={{ fontSize: 14, color: (theme) => theme.palette.status.warn.main, flex: "0 0 auto" }} />
           <Typography variant="microLabel" noWrap sx={{ color: "text.secondary", minWidth: 0 }}>
             {title}
           </Typography>
@@ -461,6 +477,7 @@ export function QueuedMessages({ messages, items, paused, onCancel, onCancelItem
             onCancel={onCancel}
             onCancelItem={onCancelItem}
             onCopy={onCopy}
+            onEdit={onEdit}
             onOpenWakeup={(wakeup, anchor) => {
               setOpenWakeupId(wakeup.id);
               setWakeupAnchorEl(anchor);
@@ -477,6 +494,7 @@ export function QueuedMessages({ messages, items, paused, onCancel, onCancelItem
             onCancel={onCancel}
             onCancelItem={onCancelItem}
             onCopy={onCopy}
+            onEdit={onEdit}
             onOpenWakeup={(wakeup, anchor) => {
               setOpenWakeupId(wakeup.id);
               setWakeupAnchorEl(anchor);
@@ -496,6 +514,7 @@ export function QueuedMessages({ messages, items, paused, onCancel, onCancelItem
                   onCancel={onCancel}
                   onCancelItem={onCancelItem}
                   onCopy={onCopy}
+                  onEdit={onEdit}
                   onOpenWakeup={(wakeup, anchor) => {
                     setOpenWakeupId(wakeup.id);
                     setWakeupAnchorEl(anchor);
@@ -515,6 +534,7 @@ export function QueuedMessages({ messages, items, paused, onCancel, onCancelItem
               onCancel={onCancel}
               onCancelItem={onCancelItem}
               onCopy={onCopy}
+              onEdit={onEdit}
               onOpenWakeup={(wakeup, anchor) => {
                 setOpenWakeupId(wakeup.id);
                 setWakeupAnchorEl(anchor);

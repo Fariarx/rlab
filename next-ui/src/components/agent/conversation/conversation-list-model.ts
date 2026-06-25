@@ -74,6 +74,26 @@ export function sortedConversationsByActivity(conversations: readonly Conversati
   return conversations;
 }
 
+const PINNED_ORDER_FALLBACK_STEP = 1024;
+
+export function sortPinnedConversations(conversations: readonly ConversationSummary[]): readonly ConversationSummary[] {
+  return conversations
+    .map((conversation, index) => ({ conversation, index }))
+    .sort((left, right) => {
+      const leftOrder = typeof left.conversation.pinnedOrder === "number" && Number.isFinite(left.conversation.pinnedOrder)
+        ? left.conversation.pinnedOrder
+        : (left.index + 1) * PINNED_ORDER_FALLBACK_STEP;
+      const rightOrder = typeof right.conversation.pinnedOrder === "number" && Number.isFinite(right.conversation.pinnedOrder)
+        ? right.conversation.pinnedOrder
+        : (right.index + 1) * PINNED_ORDER_FALLBACK_STEP;
+      if (leftOrder !== rightOrder) {
+        return leftOrder - rightOrder;
+      }
+      return left.index - right.index;
+    })
+    .map((item) => item.conversation);
+}
+
 export function visibleConversationSections({
   projects,
   chats,
@@ -86,7 +106,7 @@ export function visibleConversationSections({
   readonly pinnedLabel: string;
   readonly chatsLabel: string;
 }): readonly ConversationListSection[] {
-  const pinned = sortedConversationsByActivity([...chats, ...projects.flatMap((project) => project.conversations)].filter((conversation) => conversation.pinned && !conversation.archived));
+  const pinned = sortPinnedConversations([...chats, ...projects.flatMap((project) => project.conversations)].filter((conversation) => conversation.pinned && !conversation.archived));
   const visibleProjects = projects
     .map((project) => ({
       ...project,

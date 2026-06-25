@@ -195,4 +195,39 @@ describe("workspace-thread-actions-model", () => {
     expect(promptForUserTurn(thread, thread[2], false, undefined)).toContain("Assistant: answer");
     expect(promptForUserTurn(thread, thread[2], false, undefined)).toContain("User: second");
   });
+
+  it("includes review comment anchors in prompts even for resumed sessions", () => {
+    const userMsg: ChatMessage = {
+      id: "review-turn",
+      role: "user",
+      text: "Apply these comments",
+      blocks: [
+        {
+          kind: "review",
+          comments: [
+            {
+              id: "rc-1",
+              file: "src/auth.ts",
+              line: 4,
+              lineText: "newCall();",
+              diffLine: "+newCall();",
+              hunkHeader: "@@ -10,6 +10,7 @@ function auth()",
+              diffContext: ["2:  const keep = true;", "3: -oldCall();", "4: +newCall();", "5:  return keep;"],
+              body: "Use the shared helper here.",
+            },
+          ],
+        },
+      ],
+    };
+
+    const prompt = promptForUserTurn([userMsg], userMsg, true, undefined);
+
+    expect(prompt).toContain("Apply these comments");
+    expect(prompt).toContain("Git review comments");
+    expect(prompt).toContain("src/auth.ts:4");
+    expect(prompt).toContain("Hunk: @@ -10,6 +10,7 @@ function auth()");
+    expect(prompt).toContain("Line: +newCall();");
+    expect(prompt).toContain("4: +newCall();");
+    expect(prompt).toContain("Comment: Use the shared helper here.");
+  });
 });
