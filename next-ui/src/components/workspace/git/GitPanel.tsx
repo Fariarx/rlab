@@ -8,9 +8,9 @@ import RefreshIcon from "@mui/icons-material/Refresh";
 import RemoveIcon from "@mui/icons-material/Remove";
 import UnfoldLessIcon from "@mui/icons-material/UnfoldLess";
 import UnfoldMoreIcon from "@mui/icons-material/UnfoldMore";
-import { Alert, Box, CircularProgress, Collapse, Dialog, DialogActions, DialogContent, DialogContentText, DialogTitle, Divider, Stack, Tab, Tabs, type Theme, Tooltip, Typography } from "@mui/material";
+import { Alert, Box, CircularProgress, Collapse, Dialog, DialogActions, DialogContent, DialogContentText, DialogTitle, Divider, Popover, Stack, Tab, Tabs, type Theme, Tooltip, Typography } from "@mui/material";
 import { observer } from "mobx-react-lite";
-import { type ReactNode, type RefObject, useMemo, useRef, useState } from "react";
+import { type MouseEvent, type ReactNode, type RefObject, useMemo, useRef, useState } from "react";
 import { type I18nApi, useI18n } from "../../../i18n/I18nProvider";
 import type { GitFileStatus } from "../../../lib/git-status";
 import type { DiffBlock, ReviewCommentAnchor, ReviewCommentEntry } from "../../agent";
@@ -354,10 +354,12 @@ export const GitView = observer(function GitView({ cwd, lastTurnDiffs = [], revi
   const scrollRef = useRef<HTMLDivElement>(null);
   const [pendingCommitAction, setPendingCommitAction] = useState<PendingGitCommitAction | null>(null);
   const [pendingDiscardFile, setPendingDiscardFile] = useState<PendingGitDiscardFile | null>(null);
+  const [worktreeConfirmAnchor, setWorktreeConfirmAnchor] = useState<HTMLElement | null>(null);
   const pendingConfirmation = pendingCommitAction ? gitCommitActionConfirmation(pendingCommitAction.action) : null;
   const pendingActionLabel = pendingCommitAction ? t(gitCommitActionLabelKey(pendingCommitAction.action)) : "";
   const pendingHashLabel = pendingCommitAction?.hash.slice(0, 12) ?? "";
   const pendingDiscardPath = pendingDiscardFile?.file.gitPath ?? "";
+  const worktreeConfirmOpen = Boolean(worktreeConfirmAnchor);
   const visibleDiffCount = activeTab === "unstaged" ? unstagedFiles.length : activeTab === "staged" ? stagedFiles.length : activeTab === "last-turn" ? lastTurnDiffs.length : 0;
   const diffOpenControlsDisabled = visibleDiffCount === 0;
   const requestCommitAction = (action: GitCommitAction, hash: string) => {
@@ -379,6 +381,16 @@ export const GitView = observer(function GitView({ cwd, lastTurnDiffs = [], revi
     }
     discardFile(pendingDiscardFile.file);
     setPendingDiscardFile(null);
+  };
+  const requestWorktreeCreate = (event: MouseEvent<HTMLElement>) => {
+    setWorktreeConfirmAnchor(event.currentTarget);
+  };
+  const closeWorktreeConfirm = () => {
+    setWorktreeConfirmAnchor(null);
+  };
+  const confirmWorktreeCreate = () => {
+    worktree?.onCreate();
+    closeWorktreeConfirm();
   };
 
   return (
@@ -463,7 +475,7 @@ export const GitView = observer(function GitView({ cwd, lastTurnDiffs = [], revi
                     {t("worktreeMerge")}
                   </Button>
                 ) : (
-                  <Button size="small" variant="subtle" disabled={worktree.busy} onClick={worktree.onCreate} startIcon={<CallSplitIcon sx={{ fontSize: 14 }} />} sx={{ minHeight: 28, height: 28, px: 1, fontSize: "0.72rem", flex: "0 0 auto" }}>
+                  <Button size="small" variant="subtle" disabled={worktree.busy} onClick={requestWorktreeCreate} startIcon={<CallSplitIcon sx={{ fontSize: 14 }} />} sx={{ minHeight: 28, height: 28, px: 1, fontSize: "0.72rem", flex: "0 0 auto" }}>
                     {t("worktreeCreate")}
                   </Button>
                 )}
@@ -672,6 +684,27 @@ export const GitView = observer(function GitView({ cwd, lastTurnDiffs = [], revi
             </Button>
           </DialogActions>
         </Dialog>
+        <Popover
+          open={worktreeConfirmOpen}
+          anchorEl={worktreeConfirmAnchor}
+          onClose={closeWorktreeConfirm}
+          anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+          transformOrigin={{ vertical: "top", horizontal: "right" }}
+          slotProps={{ paper: { sx: { mt: 0.75, width: 300, p: 1.25, borderRadius: (theme) => `${theme.custom.radii.md}px`, border: (theme) => `1px solid ${theme.custom.borders.subtle}`, backgroundColor: (theme) => theme.custom.surfaces.s2 } } }}
+        >
+          <Stack spacing={1}>
+            <Typography sx={{ fontSize: "0.82rem", fontWeight: 700 }}>{t("worktreeConfirmCreateTitle")}</Typography>
+            <Typography sx={{ fontSize: "0.76rem", color: "text.secondary", lineHeight: 1.45 }}>{t("worktreeConfirmCreateBody")}</Typography>
+            <Stack direction="row" spacing={0.75} sx={{ justifyContent: "flex-end" }}>
+              <Button size="small" variant="text" onClick={closeWorktreeConfirm}>
+                {t("cancel")}
+              </Button>
+              <Button size="small" variant="contained" disabled={worktree?.busy} onClick={confirmWorktreeCreate} autoFocus>
+                {t("confirm")}
+              </Button>
+            </Stack>
+          </Stack>
+        </Popover>
     </Stack>
   );
 });

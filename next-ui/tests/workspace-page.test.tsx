@@ -1218,6 +1218,56 @@ describe("WorkspacePage", () => {
     });
   });
 
+  it("confirms before moving a conversation into a worktree", async () => {
+    let workspace = { ...buildInitialWorkspaceState(), selectedId: "c-flaky" };
+    const createRequests: Array<{ readonly cwd?: string }> = [];
+    const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const path = requestPath(url);
+      const activeRuns = activeRunsResponse(path);
+      if (activeRuns) {
+        return activeRuns;
+      }
+      if (path === "/api/workspace" && (!init || init.method === "GET")) {
+        return Response.json(workspace);
+      }
+      if (isWorkspaceMutationRequest(path, init)) {
+        workspace = applyWorkspaceMutationRequest(workspace, init);
+        return Response.json({ ok: true, revision: 1 });
+      }
+      if (path === "/api/project-files") {
+        return Response.json({ files: [] });
+      }
+      if (path === "/api/agent-config") {
+        return Response.json({ agents: {} });
+      }
+      if (path === "/api/git-status") {
+        return Response.json({ branch: "main", branches: ["main"], ahead: 0, behind: 0, clean: true, files: [], unstagedAdditions: 0, unstagedDeletions: 0 });
+      }
+      if (path === "/api/git-worktree-create") {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { cwd?: string };
+        createRequests.push(body);
+        return Response.json({ path: "/root/workspace/rlab.worktrees/c-jwt", branch: "kanban/c-jwt" });
+      }
+      return new Response("not found", { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetch);
+
+    renderWithThemeAndVirtuoso(<WorkspacePage />);
+
+    await screen.findByPlaceholderText("claude-code/default/default");
+    fireEvent.click(screen.getByRole("button", { name: "Git" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Перенести в ворктри" }));
+
+    expect(createRequests).toEqual([]);
+    expect(await screen.findByText("Перенести диалог в ворктри?")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Подтвердить" }));
+
+    await waitFor(() => {
+      expect(createRequests).toEqual([{ cwd: "/root/workspace/rlab" }]);
+    });
+  });
+
   it("clears stale worktree Git changes immediately after switching the conversation back to main", async () => {
     const base = buildInitialWorkspaceState();
     const worktreePath = "/root/workspace/rlab.worktrees/wt-stale";
