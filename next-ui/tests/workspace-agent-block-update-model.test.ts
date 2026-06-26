@@ -136,4 +136,30 @@ describe("applyWorkspaceAgentBlocks", () => {
 
     expect(next.threads["chat-1"]?.find((message) => message.id === "a1")?.blocks?.[0]).toEqual(previous);
   });
+
+  it("uses the runtime profile from background run updates for the agent reply", () => {
+    const runtimeProfile = { agent: "codex", model: "default", reasoning: "high", mode: "review" } as const;
+    const currentConversationProfile = { agent: "gemini", model: "default", reasoning: "default", mode: "default" } as const;
+    const next = patchActiveRunUpdate(
+      workspace({
+        chats: [conversation({ activeRunId: "run-1", status: "running", agent: "gemini", profile: currentConversationProfile })],
+        threads: { "chat-1": [userMessage("u1"), agentMessage({ profile: currentConversationProfile })] },
+      }),
+      {
+        runId: "run-1",
+        conversationId: "chat-1",
+        userMessageId: "u1",
+        agentMessageId: "a1",
+        profile: runtimeProfile,
+        status: "running",
+        time: "12:00",
+        agentMessageTime: "12:02",
+        updatedAtMs: 120_000,
+        done: false,
+        blocks: [{ kind: "text", text: "streaming", streaming: true }],
+      },
+    );
+
+    expect(next.threads["chat-1"]?.find((message) => message.id === "a1")?.profile).toEqual(runtimeProfile);
+  });
 });

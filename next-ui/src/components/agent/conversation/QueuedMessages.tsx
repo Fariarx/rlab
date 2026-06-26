@@ -3,6 +3,7 @@ import { closestCenter, DndContext, KeyboardSensor, PointerSensor, useSensor, us
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import AccessTimeRoundedIcon from "@mui/icons-material/AccessTimeRounded";
+import ChecklistRoundedIcon from "@mui/icons-material/ChecklistRounded";
 import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
 import ContentCopyRoundedIcon from "@mui/icons-material/ContentCopyRounded";
 import DragIndicatorRoundedIcon from "@mui/icons-material/DragIndicatorRounded";
@@ -12,7 +13,7 @@ import PauseRoundedIcon from "@mui/icons-material/PauseRounded";
 import PlayArrowRoundedIcon from "@mui/icons-material/PlayArrowRounded";
 import ScheduleSendRoundedIcon from "@mui/icons-material/ScheduleSendRounded";
 import SendRoundedIcon from "@mui/icons-material/SendRounded";
-import { Box, Stack, Typography, type SxProps, type Theme } from "@mui/material";
+import { Box, Divider, Menu, MenuItem, Stack, Typography, type SxProps, type Theme } from "@mui/material";
 import type { PendingQueueItem, PendingQueueMessageItem, PendingQueueWakeupItem } from "../../../client/api/workspace-page-api";
 import { useI18n } from "../../../i18n/I18nProvider";
 import { pendingQueueWakeupDetail, pendingQueueWakeupQueueLabel } from "../../workspace/models/workspace-composer-model";
@@ -24,12 +25,13 @@ export interface QueuedMessagesProps {
   readonly messages: readonly ChatMessage[];
   readonly items?: readonly PendingQueueItem[];
   readonly paused: boolean;
+  readonly resumeAtMs?: number;
   readonly onCancel: (messageId: string) => void;
   readonly onCancelItem?: (itemId: string) => void;
   readonly onCopy: (message: ChatMessage) => void;
   readonly onEdit?: (item: PendingQueueMessageItem) => void;
   readonly onSendNow: () => void;
-  readonly onTogglePause: () => void;
+  readonly onTogglePause: (resumeAtMs?: number) => void;
   readonly onMoveItemAfter?: (itemId: string, afterItemId: string | null) => void;
 }
 
@@ -58,6 +60,15 @@ const queuedHeaderButtonSx = {
 
 const QUEUED_VISIBLE_ROW_COUNT = 5;
 const QUEUED_ROW_HEIGHT_PX = 30;
+const QUEUE_PAUSE_DELAY_OPTIONS = [
+  { key: "5m", delayMs: 5 * 60_000, labelKey: "pauseQueueFor5Minutes" },
+  { key: "15m", delayMs: 15 * 60_000, labelKey: "pauseQueueFor15Minutes" },
+  { key: "1h", delayMs: 60 * 60_000, labelKey: "pauseQueueFor1Hour" },
+] as const;
+
+function formatQueueResumeTime(value: number, locale: string): string {
+  return new Intl.DateTimeFormat(locale, { hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(value));
+}
 
 function messageItems(messages: readonly ChatMessage[]): readonly PendingQueueItem[] {
   return messages.map((message, index) => ({
@@ -80,6 +91,12 @@ function queueItemText(item: PendingQueueItem, emptyText: string, locale: Return
   if (item.kind === "goal") {
     return item.description;
   }
+  if (item.kind === "tracker") {
+    const openTasks = item.tasks.filter((task) => !task.done);
+    const taskText = openTasks.map((task) => task.text).join(" · ");
+    const prefix = item.title?.trim() || (locale === "ru" ? "Трекер задач" : "Task tracker");
+    return taskText ? `${prefix} · ${taskText}` : prefix;
+  }
   return pendingQueueWakeupQueueLabel(item, locale);
 }
 
@@ -87,8 +104,14 @@ function QueueItemIcon({ item, index }: { readonly item: PendingQueueItem; reado
   if (item.kind === "goal" && item.state === "dispatching") {
     return <ScheduleSendRoundedIcon sx={{ fontSize: 14, color: (theme) => theme.palette.status.info.main }} />;
   }
+  if (item.kind === "tracker" && item.state === "dispatching") {
+    return <ScheduleSendRoundedIcon sx={{ fontSize: 14, color: (theme) => theme.palette.status.ok.main }} />;
+  }
   if (item.kind === "goal") {
     return <FlagRoundedIcon sx={{ fontSize: 14, color: (theme) => theme.palette.status.info.main }} />;
+  }
+  if (item.kind === "tracker") {
+    return <ChecklistRoundedIcon sx={{ fontSize: 14, color: (theme) => theme.palette.status.ok.main }} />;
   }
   if (item.kind === "wakeup") {
     return <AccessTimeRoundedIcon sx={{ fontSize: 14, color: (theme) => theme.palette.status.warn.main }} />;
@@ -100,6 +123,9 @@ function queueItemCancelLabel(item: PendingQueueItem, t: ReturnType<typeof useI1
   if (item.kind === "goal") {
     return t("cancelQueuedGoal");
   }
+  if (item.kind === "tracker") {
+    return t("cancelQueuedTracker");
+  }
   if (item.kind === "wakeup") {
     return t("cancelQueuedWakeup");
   }
@@ -107,17 +133,17 @@ function queueItemCancelLabel(item: PendingQueueItem, t: ReturnType<typeof useI1
 }
 
 function queueItemStatusLabel(item: PendingQueueItem, nowMs: number, queuePaused: boolean, t: ReturnType<typeof useI18n>["t"]): string | null {
-  if (item.kind !== "goal") {
+  if (item.kind !== "goal" && item.kind !== "tracker") {
     return null;
   }
   if (item.state === "dispatching") {
-    return t("queuedGoalActive");
+    return t(item.kind === "tracker" ? "queuedTrackerActive" : "queuedGoalActive");
   }
   if (queuePaused || item.state === "paused") {
-    return t("queuedGoalPaused");
+    return t(item.kind === "tracker" ? "queuedTrackerPaused" : "queuedGoalPaused");
   }
   if (item.state === "queued" && item.nextDispatchAtMs !== undefined && item.nextDispatchAtMs > nowMs) {
-    return t("queuedGoalWaiting", { seconds: Math.max(1, Math.ceil((item.nextDispatchAtMs - nowMs) / 1_000)) });
+    return t(item.kind === "tracker" ? "queuedTrackerWaiting" : "queuedGoalWaiting", { seconds: Math.max(1, Math.ceil((item.nextDispatchAtMs - nowMs) / 1_000)) });
   }
   return null;
 }
@@ -126,7 +152,7 @@ function queueCanSendNow(items: readonly PendingQueueItem[]): boolean {
   if (items.some((item) => item.kind === "wakeup" && item.state === "waiting_wakeup")) {
     return false;
   }
-  return items.some((item) => (item.kind === "message" || item.kind === "goal") && item.state === "queued");
+  return items.some((item) => (item.kind === "message" || item.kind === "goal" || item.kind === "tracker") && item.state === "queued");
 }
 
 interface QueueItemRowProps {
@@ -161,7 +187,7 @@ function QueueItemRow({
   const { locale, t } = useI18n();
   const [nowMs, setNowMs] = useState(() => Date.now());
   useEffect(() => {
-    if (item.kind !== "goal" || item.state !== "queued" || item.nextDispatchAtMs === undefined) {
+    if ((item.kind !== "goal" && item.kind !== "tracker") || item.state !== "queued" || item.nextDispatchAtMs === undefined) {
       return undefined;
     }
     const timer = window.setInterval(() => setNowMs(Date.now()), 1_000);
@@ -246,8 +272,8 @@ function QueueItemRow({
               borderRadius: (theme) => `${theme.custom.radii.sm}px`,
               fontSize: "0.62rem",
               fontWeight: 700,
-              color: (theme) => theme.palette.status.info.main,
-              backgroundColor: (theme) => theme.palette.status.info.soft,
+              color: (theme) => (item.kind === "tracker" ? theme.palette.status.ok.main : theme.palette.status.info.main),
+              backgroundColor: (theme) => (item.kind === "tracker" ? theme.palette.status.ok.soft : theme.palette.status.info.soft),
             }}
           >
             {statusLabel}
@@ -338,24 +364,27 @@ function SortableQueueItemRow(props: Omit<QueueItemRowProps, "dragHandle" | "row
  * the composer. Wakes are pinned at the top as queue blockers; message/goal
  * rows are sortable through dnd-kit and can never move above wakeups.
  */
-export function QueuedMessages({ messages, items, paused, onCancel, onCancelItem, onCopy, onEdit, onSendNow, onTogglePause, onMoveItemAfter }: QueuedMessagesProps) {
+export function QueuedMessages({ messages, items, paused, resumeAtMs, onCancel, onCancelItem, onCopy, onEdit, onSendNow, onTogglePause, onMoveItemAfter }: QueuedMessagesProps) {
   const { locale, t } = useI18n();
   const [nowMs, setNowMs] = useState(() => Date.now());
   const queueItems = items && items.length > 0 ? items : messageItems(messages);
+  const hasScheduledResume = paused && resumeAtMs !== undefined && resumeAtMs > nowMs;
+  const hasWaitingTracker = queueItems.some((item) => item.kind === "tracker" && item.state === "queued" && item.nextDispatchAtMs !== undefined && item.nextDispatchAtMs > nowMs);
   const hasWaitingGoal = queueItems.some((item) => item.kind === "goal" && item.state === "queued" && item.nextDispatchAtMs !== undefined && item.nextDispatchAtMs > nowMs);
   useEffect(() => {
-    if (!hasWaitingGoal) {
+    if (!hasWaitingGoal && !hasWaitingTracker && !hasScheduledResume) {
       return undefined;
     }
     const timer = window.setInterval(() => setNowMs(Date.now()), 1_000);
     return () => window.clearInterval(timer);
-  }, [hasWaitingGoal]);
+  }, [hasScheduledResume, hasWaitingGoal, hasWaitingTracker]);
   const wakeupItems = useMemo(() => queueItems.filter((item): item is PendingQueueWakeupItem => item.kind === "wakeup"), [queueItems]);
   const activeItems = useMemo(() => queueItems.filter((item) => item.kind !== "wakeup" && item.state === "dispatching"), [queueItems]);
   const movableItems = useMemo(() => queueItems.filter((item) => item.kind !== "wakeup" && item.state !== "dispatching"), [queueItems]);
   const movableIds = useMemo(() => movableItems.map((item) => item.id), [movableItems]);
   const [wakeupAnchorEl, setWakeupAnchorEl] = useState<HTMLElement | null>(null);
   const [openWakeupId, setOpenWakeupId] = useState<string | null>(null);
+  const [pauseAnchorEl, setPauseAnchorEl] = useState<HTMLElement | null>(null);
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
@@ -368,8 +397,12 @@ export function QueuedMessages({ messages, items, paused, onCancel, onCancelItem
   const waitingWakeup = wakeupItems.some((item) => item.state === "waiting_wakeup");
   const title = waitingWakeup
     ? t("queuedWakeupWaitingTitle", { count: queueItems.length })
-    : hasWaitingGoal && !paused
+    : hasWaitingTracker && !paused
+      ? t("queuedTrackerWaitingTitle", { count: queueItems.length })
+      : hasWaitingGoal && !paused
       ? t("queuedGoalWaitingTitle", { count: queueItems.length })
+      : hasScheduledResume && resumeAtMs !== undefined
+        ? t("queuedPausedUntilTitle", { count: queueItems.length, time: formatQueueResumeTime(resumeAtMs, locale) })
       : paused
         ? t("queuedPausedTitle", { count: queueItems.length })
         : t("queuedTitle", { count: queueItems.length });
@@ -424,7 +457,13 @@ export function QueuedMessages({ messages, items, paused, onCancel, onCancelItem
         <Button
           variant="text"
           size="small"
-          onClick={onTogglePause}
+          onClick={(event) => {
+            if (paused) {
+              onTogglePause();
+              return;
+            }
+            setPauseAnchorEl(event.currentTarget);
+          }}
           aria-label={paused ? t("resumeQueue") : t("pauseQueue")}
           startIcon={paused ? <PlayArrowRoundedIcon sx={{ fontSize: 16 }} /> : <PauseRoundedIcon sx={{ fontSize: 16 }} />}
           sx={{
@@ -438,6 +477,65 @@ export function QueuedMessages({ messages, items, paused, onCancel, onCancelItem
             {paused ? t("resumeQueue") : t("pauseQueue")}
           </Box>
         </Button>
+        <Menu
+          anchorEl={pauseAnchorEl}
+          open={Boolean(pauseAnchorEl)}
+          onClose={() => setPauseAnchorEl(null)}
+          anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+          transformOrigin={{ vertical: "top", horizontal: "right" }}
+          slotProps={{
+            paper: {
+              sx: {
+                mt: 0.5,
+                minWidth: 210,
+                borderRadius: (theme) => `${theme.custom.radii.lg}px`,
+                border: (theme) => `1px solid ${theme.custom.borders.strong}`,
+                backgroundImage: "none",
+                backgroundColor: (theme) => theme.custom.surfaces.s2,
+              },
+            },
+          }}
+        >
+          <Box sx={{ px: 1.25, pt: 0.9, pb: 0.55 }}>
+            <Typography variant="microLabel" sx={{ color: "text.secondary" }}>
+              {t("pauseQueueMenuTitle")}
+            </Typography>
+          </Box>
+          <MenuItem
+            dense
+            onClick={() => {
+              setPauseAnchorEl(null);
+              onTogglePause();
+            }}
+          >
+            {t("pauseQueueUntilManual")}
+          </MenuItem>
+          <Divider sx={{ my: 0.5 }} />
+          <Box sx={{ px: 1.25, py: 0.35 }}>
+            <Typography variant="microLabel" sx={{ color: "text.disabled" }}>
+              {t("pauseQueueResumeAfter")}
+            </Typography>
+          </Box>
+          {QUEUE_PAUSE_DELAY_OPTIONS.map((option) => {
+            const optionResumeAtMs = nowMs + option.delayMs;
+            return (
+              <MenuItem
+                key={option.key}
+                dense
+                onClick={() => {
+                  setPauseAnchorEl(null);
+                  onTogglePause(Date.now() + option.delayMs);
+                }}
+                sx={{ gap: 1.25, justifyContent: "space-between" }}
+              >
+                <Box component="span">{t(option.labelKey)}</Box>
+                <Typography component="span" variant="caption" sx={{ color: "text.disabled", fontVariantNumeric: "tabular-nums" }}>
+                  {formatQueueResumeTime(optionResumeAtMs, locale)}
+                </Typography>
+              </MenuItem>
+            );
+          })}
+        </Menu>
         <Button
           variant="text"
           size="small"

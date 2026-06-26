@@ -192,6 +192,6 @@ describe("AgentPicker a11y", () => {
     fireEvent.click(screen.getByRole("switch", { name: "Отложенные задачи: включён" }));
     fireEvent.click(screen.getByRole("button", { name: "Применить" }));
 
-    expect(onSelect).toHaveBeenCalledWith(expect.objectContaining({ tools: ["AskUserQuestion", "TaskGoal"] }));
+    expect(onSelect).toHaveBeenCalledWith(expect.objectContaining({ tools: ["AskUserQuestion", "TaskTracker", "TaskGoal"] }));
   });
 });

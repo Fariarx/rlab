@@ -14,10 +14,24 @@ export interface TaskGoalUserMessage {
   readonly instructions: string;
 }
 
+export interface TaskTrackerUserMessage {
+  readonly id: string;
+  readonly title?: string;
+  readonly tasks: readonly TaskTrackerUserMessageTask[];
+  readonly instructions: string;
+}
+
+export interface TaskTrackerUserMessageTask {
+  readonly id: string;
+  readonly text: string;
+}
+
 const MESSAGE_IMAGE_RE = /\.(png|jpe?g|gif|webp|svg|avif|bmp)(\?|#|$)/i;
 const READ_ONLY_IMAGE_TOOL_NAMES = new Set(["read", "readfile", "read_file", "viewimage", "view_image", "image", "openimage", "open_image"]);
 const TASK_GOAL_BLOCK_RE = /^\s*🎯\s*<rlab-task-goal\s+id="([^"]+)">\s*<summary>[\s\S]*?<\/summary>\s*<description>([\s\S]*?)<\/description>\s*<instructions>([\s\S]*?)<\/instructions>\s*<\/rlab-task-goal>\s*$/;
 const LEGACY_TASK_GOAL_RE = /^\s*🎯\s*TaskGoal queue item \(id:\s*([^)]+)\)\.\s*Work on this standing goal\.\s*When it is achieved, call TaskGoal with action='complete' for this id; to cancel it, call TaskGoal with action='remove'\.\s*Goal:\s*([\s\S]*?)\s*$/;
+const TASK_TRACKER_BLOCK_RE = /^\s*📋\s*<rlab-task-tracker\s+id="([^"]+)">([\s\S]*?)<\/rlab-task-tracker>\s*$/;
+const TASK_TRACKER_TASK_RE = /<task\s+id="([^"]+)">([\s\S]*?)<\/task>/g;
 
 export function isMessageImageTarget(target: string): boolean {
   return MESSAGE_IMAGE_RE.test(target);
@@ -73,6 +87,34 @@ export function parseTaskGoalUserMessage(raw: string): TaskGoalUserMessage | nul
     id,
     description: (legacyMatch[2] ?? "").trim(),
     instructions: `Work on this standing goal. When it is achieved, call TaskGoal with action="complete" and goalId="${id}"; to cancel it, call TaskGoal with action="remove" and goalId="${id}".`,
+  };
+}
+
+function xmlTagText(body: string, tag: string): string {
+  const match = new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`).exec(body);
+  return unescapeXml(match?.[1] ?? "").trim();
+}
+
+export function parseTaskTrackerUserMessage(raw: string): TaskTrackerUserMessage | null {
+  const blockMatch = TASK_TRACKER_BLOCK_RE.exec(raw);
+  if (!blockMatch) {
+    return null;
+  }
+  const body = blockMatch[2] ?? "";
+  const tasks = Array.from(body.matchAll(TASK_TRACKER_TASK_RE)).flatMap((match) => {
+    const id = unescapeXml(match[1] ?? "").trim();
+    const text = unescapeXml(match[2] ?? "").trim();
+    return id && text ? [{ id, text }] : [];
+  });
+  if (tasks.length === 0) {
+    return null;
+  }
+  const title = xmlTagText(body, "title");
+  return {
+    id: unescapeXml(blockMatch[1] ?? "").trim(),
+    ...(title ? { title } : {}),
+    tasks,
+    instructions: xmlTagText(body, "instructions"),
   };
 }
 

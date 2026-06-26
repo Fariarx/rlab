@@ -14,7 +14,7 @@ import { CronExpressionParser } from "cron-parser";
 import * as pty from "node-pty";
 import { chromium, type Browser, type BrowserContext, type ConsoleMessage, type Frame, type FrameLocator, type Locator, type Page, type Request as PlaywrightRequest } from "playwright";
 import type { Plugin } from "vite";
-import { parseGitStatusPorcelain, parseNumstatTotals } from "./src/lib/git-status";
+import { parseGitStatusPorcelain, parseNumstatTotals, type GitStatusPayload } from "./src/lib/git-status";
 import { normalizeAgentToolOutput, truncateAgentToolOutput } from "./src/lib/agent-output";
 import { conversationPreviewSnippet, previewSnippet } from "./src/lib/conversation-preview";
 import { formatClock24, formatDateTime24 } from "./src/lib/time-format";
@@ -42,8 +42,10 @@ import {
   applyWorkspaceDbMutations,
   claimNextPendingQueueItem,
   claimNextPendingTurn,
+  completePendingTrackerTasks,
   deletePendingTurn,
   enqueuePendingGoal,
+  enqueuePendingTracker,
   enqueuePendingTurn,
   initWorkspaceDb,
   initializeWorkspaceStateInDb,
@@ -69,6 +71,7 @@ import {
   removePendingQueueItem,
   removePendingTurn,
   resetDispatchingPendingTurns,
+  resumePendingTurnQueueIfDue,
   restartUserTurn,
   searchConversationIds,
   setPendingTurnQueuePaused,
@@ -80,6 +83,7 @@ import {
   workspaceDbHasState,
   WorkspaceRevisionConflictError,
   type PendingQueueDispatchItem,
+  type PendingTrackerTaskInput,
   type PendingTurnRecord,
   type WorkspaceDbMutation,
 } from "./workspace-db";
@@ -2515,7 +2519,7 @@ function ensureWorkspaceDb(): void {
   resetDispatchingPendingTurns();
   workspaceDbReady = true;
   for (const conversationId of readPendingQueueConversationIds()) {
-    scheduleServerQueueDrain(conversationId, 0);
+    scheduleServerQueueFromSnapshot(conversationId);
   }
 }
 
@@ -5173,6 +5177,12 @@ const gitBadRequestMessages = new Set([
   "Git file path contains an invalid null byte.",
   "Git branch is required.",
   "Git branch contains an invalid null byte.",
+  "Git remote is required.",
+  "Git remote contains an invalid null byte.",
+  "Git remote cannot start with '-'.",
+  "Git ref is required.",
+  "Git ref contains an invalid null byte.",
+  "Git ref cannot start with '-'.",
   "Commit message is required.",
 ]);
 
@@ -5268,6 +5278,55 @@ export function parseGitCheckoutPayload(body: string): { readonly cwd: string; r
   return { cwd, branch };
 }
 
+export function parseGitFetchPayload(body: string): { readonly cwd: string; readonly remote?: string; readonly all: boolean } {
+  const parsed = parseJsonObjectPayload(body, "Invalid git request payload.");
+  const cwd = typeof parsed.cwd === "string" ? parsed.cwd.trim() : "";
+  if (!cwd) {
+    throw new Error("Project directory is required.");
+  }
+  const remote = typeof parsed.remote === "string" ? parsed.remote.trim() : "";
+  return { cwd, ...(remote ? { remote } : {}), all: parsed.all === true };
+}
+
+export function parseGitPullPayload(body: string): { readonly cwd: string; readonly remote: string; readonly branch: string; readonly rebase: boolean; readonly autostash: boolean } {
+  const parsed = parseJsonObjectPayload(body, "Invalid git request payload.");
+  const cwd = typeof parsed.cwd === "string" ? parsed.cwd.trim() : "";
+  const remote = typeof parsed.remote === "string" ? parsed.remote.trim() : "";
+  const branch = typeof parsed.branch === "string" ? parsed.branch.trim() : "";
+  if (!cwd) {
+    throw new Error("Project directory is required.");
+  }
+  return { cwd, remote, branch, rebase: parsed.rebase === true, autostash: parsed.autostash === true };
+}
+
+export function parseGitPushPayload(body: string): {
+  readonly cwd: string;
+  readonly localBranch?: string;
+  readonly remote?: string;
+  readonly remoteBranch?: string;
+  readonly useDefaultDestination: boolean;
+  readonly pushTags: boolean;
+  readonly force: boolean;
+} {
+  const parsed = parseJsonObjectPayload(body, "Invalid git request payload.");
+  const cwd = typeof parsed.cwd === "string" ? parsed.cwd.trim() : "";
+  if (!cwd) {
+    throw new Error("Project directory is required.");
+  }
+  const localBranch = typeof parsed.localBranch === "string" ? parsed.localBranch.trim() : "";
+  const remote = typeof parsed.remote === "string" ? parsed.remote.trim() : "";
+  const remoteBranch = typeof parsed.remoteBranch === "string" ? parsed.remoteBranch.trim() : "";
+  return {
+    cwd,
+    ...(localBranch ? { localBranch } : {}),
+    ...(remote ? { remote } : {}),
+    ...(remoteBranch ? { remoteBranch } : {}),
+    useDefaultDestination: parsed.useDefaultDestination === true,
+    pushTags: parsed.pushTags === true,
+    force: parsed.force === true,
+  };
+}
+
 export type GitResetMode = "soft" | "mixed" | "hard";
 
 export function parseGitCommitActionPayload(body: string): { readonly cwd: string; readonly hash: string; readonly mode: GitResetMode } {
@@ -5293,8 +5352,44 @@ export function buildGitCommitArgs(message: string): string[] {
   return ["commit", "-m", trimmed];
 }
 
-export function buildGitPushArgs(): string[] {
-  return ["push"];
+function normalizeGitArg(value: string | undefined, label: "Git remote" | "Git ref"): string {
+  const trimmed = value?.trim() ?? "";
+  if (!trimmed) {
+    throw new Error(`${label} is required.`);
+  }
+  if (trimmed.includes("\0")) {
+    throw new Error(`${label} contains an invalid null byte.`);
+  }
+  if (trimmed.startsWith("-")) {
+    throw new Error(`${label} cannot start with '-'.`);
+  }
+  return trimmed;
+}
+
+function remoteBranchRef(remoteBranch: string, remote: string): string {
+  return remoteBranch.startsWith(`${remote}/`) ? remoteBranch.slice(remote.length + 1) : remoteBranch;
+}
+
+export function buildGitFetchArgs(options: { readonly remote?: string; readonly all?: boolean } = {}): string[] {
+  return options.all === true ? ["fetch", "--all"] : ["fetch", normalizeGitArg(options.remote, "Git remote")];
+}
+
+export function buildGitPullArgs(options: { readonly remote: string; readonly branch: string; readonly rebase?: boolean; readonly autostash?: boolean }): string[] {
+  const remote = normalizeGitArg(options.remote, "Git remote");
+  const branch = normalizeGitArg(remoteBranchRef(options.branch, remote), "Git ref");
+  return ["pull", ...(options.rebase === true ? ["--rebase"] : []), ...(options.autostash === true ? ["--autostash"] : []), remote, branch];
+}
+
+export function buildGitPushArgs(options: { readonly localBranch?: string; readonly remote?: string; readonly remoteBranch?: string; readonly useDefaultDestination?: boolean; readonly pushTags?: boolean; readonly force?: boolean } = {}): string[] {
+  const args = ["push", ...(options.pushTags === true ? ["--tags"] : []), ...(options.force === true ? ["--force"] : [])];
+  const usesImplicitDefaultDestination = options.localBranch === undefined && options.remote === undefined && options.remoteBranch === undefined;
+  if (options.useDefaultDestination !== true && !usesImplicitDefaultDestination) {
+    const remote = normalizeGitArg(options.remote, "Git remote");
+    const localBranch = normalizeGitArg(options.localBranch, "Git ref");
+    const branch = normalizeGitArg(remoteBranchRef(options.remoteBranch ?? "", remote), "Git ref");
+    args.push(remote, `${localBranch}:${branch}`);
+  }
+  return args;
 }
 
 export function gitHardResetDirtyError(mode: GitResetMode, statusPorcelain: string): string | null {
@@ -5378,36 +5473,53 @@ function runGit(cwd: string, args: readonly string[], onDone: (result: GitComman
   });
 }
 
+function gitLines(output: string): readonly string[] {
+  return output
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+}
+
+async function buildGitStatusPayload(cwd: string): Promise<GitStatusPayload> {
+  const statusResult = await runGitP(cwd, ["status", "--porcelain=v1", "-b", "-uall"]);
+  if (!statusResult.ok) {
+    throw new Error(statusResult.error);
+  }
+  const payload = parseGitStatusPorcelain(statusResult.stdout);
+  const [numstatResult, logResult, branchResult, remoteResult, remoteBranchResult] = await Promise.all([
+    runGitP(cwd, ["diff", "--numstat"]),
+    runGitP(cwd, ["log", "-1", "--pretty=format:%h\n%s"]),
+    runGitP(cwd, ["branch", "--format=%(refname:short)"]),
+    runGitP(cwd, ["remote"]),
+    runGitP(cwd, ["branch", "-r", "--format=%(refname:short)"]),
+  ]);
+  if (!branchResult.ok) {
+    throw new Error(branchResult.error);
+  }
+  const totals = numstatResult.ok ? parseNumstatTotals(numstatResult.stdout) : { additions: 0, deletions: 0 };
+  const logLines = logResult.ok ? logResult.stdout.split("\n") : [];
+  const commitHash = logLines[0]?.trim() || undefined;
+  const commitTitle = logLines.slice(1).join("\n").trim() || undefined;
+  const branches = gitLines(branchResult.stdout);
+  const remotes = remoteResult.ok ? gitLines(remoteResult.stdout) : [];
+  const remoteBranches = remoteBranchResult.ok ? gitLines(remoteBranchResult.stdout).filter((branch) => !branch.endsWith("/HEAD")) : [];
+  const uniqueBranches = Array.from(new Set(branches.includes(payload.branch) || payload.branch === "HEAD" ? branches : [payload.branch, ...branches]));
+  return {
+    ...payload,
+    branches: uniqueBranches,
+    remotes,
+    remoteBranches,
+    unstagedAdditions: totals.additions,
+    unstagedDeletions: totals.deletions,
+    commitHash,
+    commitTitle,
+  };
+}
+
 function respondWithGitStatus(cwd: string, res: ServerResponse): void {
-  runGit(cwd, ["status", "--porcelain=v1", "-b", "-uall"], (statusResult) => {
-    if (!statusResult.ok) {
-      sendJson(res, 500, { error: statusResult.error });
-      return;
-    }
-    const payload = parseGitStatusPorcelain(statusResult.stdout);
-    // A second cheap pass for unstaged line totals (the header badge shows +/-).
-    runGit(cwd, ["diff", "--numstat"], (numstatResult) => {
-      const totals = numstatResult.ok ? parseNumstatTotals(numstatResult.stdout) : { additions: 0, deletions: 0 };
-      // A third pass for the latest commit hash and title shown in the Git panel header.
-      runGit(cwd, ["log", "-1", "--pretty=format:%h\n%s"], (logResult) => {
-        const lines = logResult.ok ? logResult.stdout.split("\n") : [];
-        const commitHash = lines[0]?.trim() || undefined;
-        const commitTitle = lines.slice(1).join("\n").trim() || undefined;
-        runGit(cwd, ["branch", "--format=%(refname:short)"], (branchResult) => {
-          if (!branchResult.ok) {
-            sendJson(res, 500, { error: branchResult.error });
-            return;
-          }
-          const branches = branchResult.stdout
-            .split(/\r?\n/)
-            .map((branch) => branch.trim())
-            .filter((branch) => branch.length > 0);
-          const uniqueBranches = Array.from(new Set(branches.includes(payload.branch) || payload.branch === "HEAD" ? branches : [payload.branch, ...branches]));
-          sendJson(res, 200, { ...payload, branches: uniqueBranches, unstagedAdditions: totals.additions, unstagedDeletions: totals.deletions, commitHash, commitTitle });
-        });
-      });
-    });
-  });
+  void buildGitStatusPayload(cwd)
+    .then((payload) => sendJson(res, 200, payload))
+    .catch((error) => sendJson(res, 500, { error: errorMessage(error) }));
 }
 
 function sendGitStatusAfterMutation(cwd: string, res: ServerResponse): void {
@@ -5878,21 +5990,71 @@ function handleGitInit(req: IncomingMessage, res: ServerResponse): void {
   });
 }
 
-function handleGitPush(req: IncomingMessage, res: ServerResponse): void {
+function validateRemoteActionCwd(cwd: string, res: ServerResponse): boolean {
+  const cwdError = validateGitCwd(cwd);
+  if (cwdError) {
+    sendJson(res, workspacePathErrorStatus(cwdError), { error: cwdError });
+    return false;
+  }
+  return true;
+}
+
+function handleGitFetch(req: IncomingMessage, res: ServerResponse): void {
   readJsonBody(req, res, (body) => {
     try {
-      const { cwd } = parseGitCwdPayload(body);
-      const cwdError = validateGitCwd(cwd);
-      if (cwdError) {
-        sendJson(res, workspacePathErrorStatus(cwdError), { error: cwdError });
+      const payload = parseGitFetchPayload(body);
+      if (!validateRemoteActionCwd(payload.cwd, res)) {
         return;
       }
-      runGit(cwd, buildGitPushArgs(), (result) => {
+      const args = buildGitFetchArgs(payload);
+      runGit(payload.cwd, args, (result) => {
         if (!result.ok) {
           sendJson(res, 500, { error: result.error });
           return;
         }
-        sendGitStatusAfterMutation(cwd, res);
+        sendGitStatusAfterMutation(payload.cwd, res);
+      });
+    } catch (error) {
+      sendJson(res, gitErrorStatus(error), { error: errorMessage(error) });
+    }
+  });
+}
+
+function handleGitPull(req: IncomingMessage, res: ServerResponse): void {
+  readJsonBody(req, res, (body) => {
+    try {
+      const payload = parseGitPullPayload(body);
+      if (!validateRemoteActionCwd(payload.cwd, res)) {
+        return;
+      }
+      const args = buildGitPullArgs(payload);
+      runGit(payload.cwd, args, (result) => {
+        if (!result.ok) {
+          sendJson(res, 500, { error: result.error });
+          return;
+        }
+        sendGitStatusAfterMutation(payload.cwd, res);
+      });
+    } catch (error) {
+      sendJson(res, gitErrorStatus(error), { error: errorMessage(error) });
+    }
+  });
+}
+
+function handleGitPush(req: IncomingMessage, res: ServerResponse): void {
+  readJsonBody(req, res, (body) => {
+    try {
+      const payload = parseGitPushPayload(body);
+      if (!validateRemoteActionCwd(payload.cwd, res)) {
+        return;
+      }
+      const args = buildGitPushArgs(payload);
+      runGit(payload.cwd, args, (result) => {
+        if (!result.ok) {
+          sendJson(res, 500, { error: result.error });
+          return;
+        }
+        sendGitStatusAfterMutation(payload.cwd, res);
       });
     } catch (error) {
       sendJson(res, gitPushRequestErrorStatus(error), { error: errorMessage(error) });
@@ -6800,6 +6962,7 @@ export interface ActiveBackgroundRunUpdate {
   readonly userMessageId: string;
   readonly userMessage?: ChatMessage;
   readonly agentMessageId: string;
+  readonly profile?: AgentProfile;
   readonly startedAtMs?: number;
   readonly status: ConversationStatus;
   readonly time: string;
@@ -6823,6 +6986,7 @@ export interface BackgroundRunHandle {
 
 interface BackgroundRunAccumulator extends RunEventAccumulator {
   agent?: AgentId;
+  profile?: AgentProfile;
   lastPersistedAt: number;
   persistTimer: ReturnType<typeof setTimeout> | null;
 }
@@ -6835,9 +6999,10 @@ interface RunSpec {
 }
 
 const TASK_WAKEUP_TOOL_NAME = "TaskWakeup";
+const TASK_TRACKER_TOOL_NAME = "TaskTracker";
 const TASK_GOAL_TOOL_NAME = "TaskGoal";
 const CLAUDE_SAFE_READ_TOOLS = ["Read", "Glob", "Grep", "LS"] as const;
-const CLAUDE_READ_ONLY_TOOLS = ["Read", "Glob", "Grep", "LS", "AskUserQuestion", TASK_WAKEUP_TOOL_NAME, TASK_GOAL_TOOL_NAME] as const;
+const CLAUDE_READ_ONLY_TOOLS = ["Read", "Glob", "Grep", "LS", "AskUserQuestion", TASK_WAKEUP_TOOL_NAME, TASK_TRACKER_TOOL_NAME, TASK_GOAL_TOOL_NAME] as const;
 // rlab's chat tools are described to the model in RLAB_CHAT_TOOLS_PROMPT and must
 // also be *registered* so agents don't reject the call with "No such tool
 // available" (which would also stop the stream translator from scheduling the
@@ -6849,6 +7014,7 @@ const RLAB_MCP_SERVER_NAME = "rlab";
 // tool names so a bare `TaskWakeup` call isn't rejected as unknown.
 const RLAB_CHAT_TOOL_ALIASES: Record<string, string> = {
   [TASK_WAKEUP_TOOL_NAME]: `mcp__${RLAB_MCP_SERVER_NAME}__${TASK_WAKEUP_TOOL_NAME}`,
+  [TASK_TRACKER_TOOL_NAME]: `mcp__${RLAB_MCP_SERVER_NAME}__${TASK_TRACKER_TOOL_NAME}`,
   [TASK_GOAL_TOOL_NAME]: `mcp__${RLAB_MCP_SERVER_NAME}__${TASK_GOAL_TOOL_NAME}`,
   ScheduleWakeup: `mcp__${RLAB_MCP_SERVER_NAME}__${TASK_WAKEUP_TOOL_NAME}`,
 };
@@ -6876,6 +7042,12 @@ const TASK_GOAL_PROMPT_LINES = [
   "A TaskGoal is a persistent queue item. The user can reorder it among queued messages; rlab sends it back to the agent as a 🎯 goal turn when it reaches the front of the queue.",
 ] as const;
 
+const TASK_TRACKER_PROMPT_LINES = [
+  "When a chat needs a persistent actionable task list, use TaskTracker.",
+  "TaskTracker supports action='add'/'set' with tasks as an array of strings or {id,text}, action='complete' with trackerId/id and optional taskIds/taskId to mark tasks done, and action='list' to inspect open task trackers.",
+  "A TaskTracker is a persistent queue item. It runs after wakeups and before TaskGoal items; rlab sends it back as a 📋 tracker turn until all tasks are completed.",
+] as const;
+
 function rlabChatToolsPrompt(tools: unknown): string {
   const lines: string[] = [];
   if (rlabChatToolEnabled(tools, "AskUserQuestion")) {
@@ -6883,6 +7055,9 @@ function rlabChatToolsPrompt(tools: unknown): string {
   }
   if (rlabChatToolEnabled(tools, "TaskWakeup")) {
     lines.push(...TASK_WAKEUP_PROMPT_LINES);
+  }
+  if (rlabChatToolEnabled(tools, "TaskTracker")) {
+    lines.push(...TASK_TRACKER_PROMPT_LINES);
   }
   if (rlabChatToolEnabled(tools, "TaskGoal")) {
     lines.push(...TASK_GOAL_PROMPT_LINES);
@@ -6965,6 +7140,65 @@ const CODEX_RLAB_DYNAMIC_TOOLS: readonly CodexDynamicToolSpec[] = [
     },
   },
   {
+    name: TASK_TRACKER_TOOL_NAME,
+    description:
+      "Create or manage a persistent task tracker in the current rlab chat queue. Trackers are queue items that run after wakeups and before TaskGoal items until their tasks are completed. Use add/set with tasks, list to inspect open tasks, and complete with trackerId/id plus optional taskIds/taskId to mark tasks done.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        action: {
+          type: "string",
+          enum: ["add", "set", "list", "complete"],
+          description: "Use add/set for a new tracker, complete to mark tasks done, list to inspect open trackers.",
+        },
+        title: {
+          type: "string",
+          description: "Optional short tracker title shown in the queue.",
+        },
+        tasks: {
+          type: "array",
+          description: "Task list for action='add' or action='set'. Items can be strings or objects with id and text.",
+          items: {
+            anyOf: [
+              { type: "string" },
+              {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  id: { type: "string" },
+                  text: { type: "string" },
+                },
+                required: ["text"],
+              },
+            ],
+          },
+        },
+        trackerId: {
+          type: "string",
+          description: "Tracker id for action='complete'.",
+        },
+        id: {
+          type: "string",
+          description: "Alias for trackerId.",
+        },
+        taskIds: {
+          type: "array",
+          items: { type: "string" },
+          description: "Optional task ids to complete. Omit to complete all open tasks in the tracker.",
+        },
+        taskId: {
+          type: "string",
+          description: "Alias for a single task id to complete.",
+        },
+        afterItemId: {
+          type: "string",
+          description: "Optional queue item id after which the new tracker should be placed.",
+        },
+      },
+    },
+  },
+  {
     name: TASK_GOAL_TOOL_NAME,
     description:
       "Create or manage a persistent standing goal in the current rlab chat queue. Goals are queue items that the user can reorder among pending messages. Use add with description, update with goalId/id and description, list to inspect goals, and complete/remove when achieved.",
@@ -6999,9 +7233,6 @@ const CODEX_RLAB_DYNAMIC_TOOLS: readonly CodexDynamicToolSpec[] = [
 ];
 
 export function codexRlabDynamicTools(tools?: readonly RlabChatToolId[]): readonly CodexDynamicToolSpec[] {
-  if (rlabChatToolEnabled(tools, "TaskWakeup") && rlabChatToolEnabled(tools, "TaskGoal")) {
-    return CODEX_RLAB_DYNAMIC_TOOLS;
-  }
   return CODEX_RLAB_DYNAMIC_TOOLS.filter((tool) => rlabChatToolEnabled(tools, tool.name));
 }
 
@@ -7157,6 +7388,7 @@ function rlabChatToolsPromptAppendix(tools: unknown): string {
     "This rlab chat has server-side tools that are handled by the application, not by the user's project.",
     prompt,
     ...(rlabChatToolEnabled(tools, "TaskWakeup") ? ["Tool names accepted by rlab for task wakeups: TaskWakeup."] : []),
+    ...(rlabChatToolEnabled(tools, "TaskTracker") ? ["Tool names accepted by rlab for persistent task trackers: TaskTracker."] : []),
     ...(rlabChatToolEnabled(tools, "TaskGoal") ? ["Tool names accepted by rlab for persistent queue goals: TaskGoal."] : []),
     "</rlab-chat-tools>",
   ].join("\n");
@@ -7221,7 +7453,7 @@ function ensureGeminiMcpConfig(): void {
 
 /** Extra env for CLI agents so they load rlab's external MCP server (chat tools). */
 function rlabAgentMcpRunEnv(agent: string, tools?: readonly RlabChatToolId[]): NodeJS.ProcessEnv {
-  if (!rlabChatToolEnabled(tools, "TaskWakeup") && !rlabChatToolEnabled(tools, "TaskGoal")) {
+  if (!rlabChatToolEnabled(tools, "TaskWakeup") && !rlabChatToolEnabled(tools, "TaskTracker") && !rlabChatToolEnabled(tools, "TaskGoal")) {
     return {};
   }
   if (agent === "opencode") {
@@ -7460,6 +7692,7 @@ function claudeToolsForRequest(request: RunRequest): ClaudeQueryOptions["tools"]
       ...CLAUDE_SAFE_READ_TOOLS,
       ...(rlabChatToolEnabled(request.tools, "AskUserQuestion") ? ["AskUserQuestion" as const] : []),
       ...(rlabChatToolEnabled(request.tools, "TaskWakeup") ? [TASK_WAKEUP_TOOL_NAME] : []),
+      ...(rlabChatToolEnabled(request.tools, "TaskTracker") ? [TASK_TRACKER_TOOL_NAME] : []),
       ...(rlabChatToolEnabled(request.tools, "TaskGoal") ? [TASK_GOAL_TOOL_NAME] : []),
     ];
   }
@@ -7488,7 +7721,7 @@ export function buildClaudeSdkOptions(
     permissionMode,
     systemPrompt: { type: "preset", preset: "claude_code", append: claudeSdkSystemPromptAppend(request) },
     tools: claudeToolsForRequest(request),
-    ...(rlabChatToolEnabled(request.tools, "TaskWakeup") || rlabChatToolEnabled(request.tools, "TaskGoal")
+    ...(rlabChatToolEnabled(request.tools, "TaskWakeup") || rlabChatToolEnabled(request.tools, "TaskTracker") || rlabChatToolEnabled(request.tools, "TaskGoal")
       ? {
           mcpServers: { [RLAB_MCP_SERVER_NAME]: { type: "stdio", command: "node", args: [RLAB_MCP_STDIO_SCRIPT], alwaysLoad: true } },
           toolAliases: RLAB_CHAT_TOOL_ALIASES,
@@ -8451,6 +8684,9 @@ export function createRunApprovalHandler(send: (event: RunEvent) => void, scopeI
     if (isWakeupToolName(toolName) && !rlabChatToolEnabled(tools, "TaskWakeup")) {
       return Promise.resolve<PermissionResult>({ behavior: "deny", message: "TaskWakeup is disabled for this chat.", toolUseID: context.toolUseID });
     }
+    if (isTrackerToolName(toolName) && !rlabChatToolEnabled(tools, "TaskTracker")) {
+      return Promise.resolve<PermissionResult>({ behavior: "deny", message: "TaskTracker is disabled for this chat.", toolUseID: context.toolUseID });
+    }
     if (isGoalToolName(toolName) && !rlabChatToolEnabled(tools, "TaskGoal")) {
       return Promise.resolve<PermissionResult>({ behavior: "deny", message: "TaskGoal is disabled for this chat.", toolUseID: context.toolUseID });
     }
@@ -8461,6 +8697,9 @@ export function createRunApprovalHandler(send: (event: RunEvent) => void, scopeI
       }
     }
     if (isWakeupToolName(toolName)) {
+      return Promise.resolve<PermissionResult>({ behavior: "allow", updatedInput: input, toolUseID: context.toolUseID });
+    }
+    if (isTrackerToolName(toolName)) {
       return Promise.resolve<PermissionResult>({ behavior: "allow", updatedInput: input, toolUseID: context.toolUseID });
     }
     if (isGoalToolName(toolName)) {
@@ -8628,6 +8867,14 @@ function scheduledGoalId(): string {
   return `goal-${Date.now()}-${randomUUID().slice(0, 8)}`;
 }
 
+function scheduledTrackerId(): string {
+  return `tracker-${Date.now()}-${randomUUID().slice(0, 8)}`;
+}
+
+function scheduledTrackerTaskId(index: number): string {
+  return `task-${index + 1}-${randomUUID().slice(0, 8)}`;
+}
+
 function scheduledRunId(prefix: "run" | "u" | "a"): string {
   return `${prefix}-${Date.now()}-${randomUUID().slice(0, 8)}`;
 }
@@ -8661,6 +8908,7 @@ export function retryScheduledWakeupDispatchRecord(record: ScheduledWakeupRecord
 
 const serverQueueDrainInFlight = new Set<string>();
 const serverQueueDelayedDrainTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const serverQueueDelayedResumeTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 function scheduleServerQueueDrain(conversationId: string, delayMs: number): void {
   const existing = serverQueueDelayedDrainTimers.get(conversationId);
@@ -8673,6 +8921,58 @@ function scheduleServerQueueDrain(conversationId: string, delayMs: number): void
   }, Math.max(0, delayMs));
   timer.unref?.();
   serverQueueDelayedDrainTimers.set(conversationId, timer);
+}
+
+function clearServerQueueResume(conversationId: string): void {
+  const existing = serverQueueDelayedResumeTimers.get(conversationId);
+  if (!existing) {
+    return;
+  }
+  clearTimeout(existing);
+  serverQueueDelayedResumeTimers.delete(conversationId);
+}
+
+function scheduleServerQueueResume(conversationId: string, resumeAtMs: number | undefined): void {
+  clearServerQueueResume(conversationId);
+  if (resumeAtMs === undefined) {
+    return;
+  }
+  const timer = setTimeout(() => {
+    serverQueueDelayedResumeTimers.delete(conversationId);
+    try {
+      ensureWorkspaceDb();
+      const queue = resumePendingTurnQueueIfDue(conversationId);
+      if (!queue.paused) {
+        emitPendingQueueChange(conversationId);
+        scheduleServerQueueDrain(conversationId, 0);
+      }
+    } catch (error) {
+      appendRunAuditEvent(RUN_AUDIT_FILE, {
+        type: "error",
+        message: `Server queue resume failed for ${conversationId}: ${errorMessage(error)}`,
+      });
+    }
+  }, Math.max(0, resumeAtMs - Date.now()));
+  timer.unref?.();
+  serverQueueDelayedResumeTimers.set(conversationId, timer);
+}
+
+function scheduleServerQueueFromSnapshot(conversationId: string): void {
+  const queue = readPendingTurnQueue(conversationId);
+  if (queue.paused && queue.resumeAtMs !== undefined) {
+    if (queue.resumeAtMs <= Date.now()) {
+      const resumed = resumePendingTurnQueueIfDue(conversationId);
+      if (!resumed.paused) {
+        emitPendingQueueChange(conversationId);
+        scheduleServerQueueDrain(conversationId, 0);
+      }
+      return;
+    }
+    scheduleServerQueueResume(conversationId, queue.resumeAtMs);
+    return;
+  }
+  clearServerQueueResume(conversationId);
+  scheduleServerQueueDrain(conversationId, 0);
 }
 
 function activeBackgroundRunForConversation(conversationId: string): BackgroundRunHandle | null {
@@ -8739,9 +9039,33 @@ function queuedGoalPrompt(record: Extract<PendingQueueDispatchItem, { readonly k
   ].join("\n");
 }
 
+function queuedTrackerPrompt(record: Extract<PendingQueueDispatchItem, { readonly kind: "tracker" }>): string {
+  const openTasks = record.tasks.filter((task) => !task.done);
+  const instructions = `Work on these open tasks. When a task is done, call TaskTracker with action="complete", trackerId="${record.id}", and taskIds set to the completed task ids. To inspect open tasks, call TaskTracker with action="list".`;
+  return [
+    `📋 <rlab-task-tracker id="${escapeXmlAttribute(record.id)}">`,
+    "<summary>TaskTracker queue item.</summary>",
+    ...(record.title ? [`<title>${escapeXmlText(record.title)}</title>`] : []),
+    "<tasks>",
+    ...openTasks.map((task) => `<task id="${escapeXmlAttribute(task.id)}">${escapeXmlText(task.text)}</task>`),
+    "</tasks>",
+    `<instructions>${escapeXmlText(instructions)}</instructions>`,
+    "</rlab-task-tracker>",
+  ].join("\n");
+}
+
 function pendingQueueDispatchMessage(record: PendingQueueDispatchItem | PendingTurnRecord): ChatMessage {
   if (!("kind" in record) || record.kind === "message") {
     return record.message;
+  }
+  if (record.kind === "tracker") {
+    return {
+      id: scheduledRunId("u"),
+      role: "user",
+      text: queuedTrackerPrompt(record),
+      time: serverNowLabel(),
+      createdAtMs: Date.now(),
+    };
   }
   return {
     id: scheduledRunId("u"),
@@ -8753,10 +9077,16 @@ function pendingQueueDispatchMessage(record: PendingQueueDispatchItem | PendingT
 }
 
 function queuedRunTools(record: PendingQueueDispatchItem | PendingTurnRecord, tools: readonly RlabChatToolId[] | undefined): readonly RlabChatToolId[] | undefined {
-  if (!("kind" in record) || record.kind !== "goal" || tools === undefined || rlabChatToolEnabled(tools, "TaskGoal")) {
+  if (!("kind" in record) || tools === undefined) {
     return tools;
   }
-  return [...activeRlabChatToolIds(tools), "TaskGoal"];
+  if (record.kind === "goal" && !rlabChatToolEnabled(tools, "TaskGoal")) {
+    return [...activeRlabChatToolIds(tools), "TaskGoal"];
+  }
+  if (record.kind === "tracker" && !rlabChatToolEnabled(tools, "TaskTracker")) {
+    return [...activeRlabChatToolIds(tools), "TaskTracker"];
+  }
+  return tools;
 }
 
 export function queuedTurnRunBody(record: PendingQueueDispatchItem | PendingTurnRecord, runId: string): Record<string, unknown> {
@@ -8799,7 +9129,7 @@ export function queuedTurnRunBody(record: PendingQueueDispatchItem | PendingTurn
 async function startQueuedTurn(record: PendingQueueDispatchItem, runId: string, onAccepted: () => void): Promise<void> {
   const body = queuedTurnRunBody(record, runId);
   appendRunAuditEvent(RUN_AUDIT_FILE, {
-    type: record.kind === "goal" ? "queued_goal_started" : "queued_turn_started",
+    type: record.kind === "goal" ? "queued_goal_started" : record.kind === "tracker" ? "queued_tracker_started" : "queued_turn_started",
     runId,
     conversationId: record.conversationId,
     userMessageId: body.userMessageId,
@@ -8832,7 +9162,7 @@ function drainServerQueue(conversationId: string): void {
         const record = claimNextPendingQueueItem(conversationId, runId);
         if (!record) {
           const head = readPendingQueueHead(conversationId);
-          if (head?.kind === "goal" && head.nextDispatchAtMs !== undefined && head.nextDispatchAtMs > Date.now()) {
+          if ((head?.kind === "goal" || head?.kind === "tracker") && head.nextDispatchAtMs !== undefined && head.nextDispatchAtMs > Date.now()) {
             scheduleServerQueueDrain(conversationId, head.nextDispatchAtMs - Date.now());
           }
           return;
@@ -8878,6 +9208,7 @@ function drainServerQueue(conversationId: string): void {
 function pauseQueueForStoppedRun(conversationId: string): void {
   try {
     setPendingTurnQueuePaused(conversationId, true);
+    clearServerQueueResume(conversationId);
     emitPendingQueueChange(conversationId);
   } catch {
     // Missing/deleted conversation: nothing to pause.
@@ -9063,6 +9394,66 @@ function goalActionStatusText(action: Extract<RunEvent, { type: "goal" }>["actio
     case "list":
       return "TaskGoal list fetched.";
   }
+}
+
+function trackerActionStatusText(action: Extract<RunEvent, { type: "tracker" }>["action"], locale: Locale): string {
+  if (locale === "ru") {
+    switch (action) {
+      case "add":
+        return "TaskTracker добавлен в очередь.";
+      case "complete":
+        return "TaskTracker обновлён.";
+      case "list":
+        return "TaskTracker список получен.";
+    }
+  }
+  switch (action) {
+    case "add":
+      return "TaskTracker added to the queue.";
+    case "complete":
+      return "TaskTracker updated.";
+    case "list":
+      return "TaskTracker list fetched.";
+  }
+}
+
+function applyTrackerRunEvent(
+  event: Extract<RunEvent, { type: "tracker" }>,
+  binding: BackgroundRunBinding | null,
+  origin: string,
+  locale: Locale,
+): RunEvent[] {
+  if (!binding) {
+    return [{ type: "error", text: "TaskTracker requires a conversation-bound run." }];
+  }
+  const conversationId = binding.conversationId;
+  if (event.action === "list") {
+    return event.toolId ? [{ type: "tool_result", id: event.toolId, ok: true, output: trackerListToolText(conversationId) }] : [{ type: "status", level: "ok", text: trackerActionStatusText("list", locale) }];
+  }
+  if (event.action === "add") {
+    const taskInputs = event.tasks ?? [];
+    if (taskInputs.length === 0) {
+      return [{ type: "error", text: "TaskTracker add requires a non-empty tasks array." }];
+    }
+    const id = scheduledTrackerId();
+    const tasks = taskInputs.map((task, index): PendingTrackerTaskInput => ({ id: task.id?.trim() || scheduledTrackerTaskId(index), text: task.text }));
+    enqueuePendingTracker({ id, conversationId, createdAtMs: Date.now(), ...(event.title ? { title: event.title } : {}), tasks, origin });
+    if (event.afterItemId !== undefined) {
+      movePendingQueueItemAfter(conversationId, id, event.afterItemId);
+    }
+  } else {
+    const trackerId = event.trackerId?.trim();
+    if (!trackerId) {
+      return [{ type: "error", text: "TaskTracker complete requires trackerId/id." }];
+    }
+    completePendingTrackerTasks(conversationId, trackerId, event.taskIds ?? []);
+  }
+  emitPendingQueueChange(conversationId);
+  const output = [trackerActionStatusText(event.action, locale), trackerListToolText(conversationId)].join("\n\n");
+  return [
+    ...(event.toolId ? [{ type: "tool_result" as const, id: event.toolId, ok: true, output }] : []),
+    { type: "status" as const, level: "ok" as const, text: trackerActionStatusText(event.action, locale) },
+  ];
 }
 
 function applyGoalRunEvent(
@@ -9418,7 +9809,7 @@ function finishBackgroundHandle(binding: BackgroundRunBinding, canceled: boolean
       if (released) {
         emitPendingQueueChange(binding.conversationId);
       }
-      if (released?.kind === "goal") {
+      if (released?.kind === "goal" || released?.kind === "tracker") {
         scheduleServerQueueDrain(binding.conversationId, Math.max(0, nextDispatchAtMs - Date.now()));
       }
     }
@@ -9435,9 +9826,14 @@ function finishBackgroundHandle(binding: BackgroundRunBinding, canceled: boolean
   }
 }
 
-function createBackgroundAccumulator(): BackgroundRunAccumulator {
+function runRequestProfile(request: RunRequest): AgentProfile | undefined {
+  return isAgentId(request.agent) ? normalizeAgentProfile(request, request.agent) : undefined;
+}
+
+function createBackgroundAccumulator(profile?: AgentProfile): BackgroundRunAccumulator {
   return {
     ...createRunEventAccumulator(),
+    ...(profile === undefined ? {} : { profile }),
     lastPersistedAt: 0,
     persistTimer: null,
   };
@@ -9606,6 +10002,7 @@ function buildActiveRunUpdate(
     userMessageId: binding.userMessageId,
     ...(userMessage === undefined ? {} : { userMessage }),
     agentMessageId: binding.agentMessageId,
+    ...(agentMessage?.profile === undefined ? {} : { profile: agentMessage.profile }),
     ...(startedAtMs === undefined ? {} : { startedAtMs }),
     status: conversation.status,
     time: conversation.time,
@@ -9812,16 +10209,19 @@ function putBackgroundAgentMessage(
   state: WorkspaceState,
   binding: BackgroundRunBinding,
   blocks: readonly AgentBlock[],
-  metadata: Pick<BackgroundRunAccumulator, "costUsd" | "usage"> = {},
+  metadata: Pick<BackgroundRunAccumulator, "costUsd" | "usage" | "profile"> = {},
 ): WorkspaceState {
   const messages = state.threads[binding.conversationId] ?? [];
-  const previousBlocks = messages.find((message) => message.id === binding.agentMessageId)?.blocks;
+  const previousMessage = messages.find((message) => message.id === binding.agentMessageId);
+  const previousBlocks = previousMessage?.blocks;
   const mergedBlocks = mergeInputBlockState(blocks, previousBlocks);
+  const profile = metadata.profile ?? previousMessage?.profile;
   const message: ChatMessage = {
     id: binding.agentMessageId,
     role: "agent",
     time: binding.agentMessageTime,
     startedAtMs: backgroundRunStartedAtMs(binding),
+    ...(profile === undefined ? {} : { profile }),
     blocks: mergedBlocks,
     ...(metadata.costUsd === undefined ? {} : { costUsd: metadata.costUsd }),
     ...(metadata.usage === undefined ? {} : { usage: metadata.usage }),
@@ -9850,6 +10250,7 @@ function persistBackgroundRunSnapshot(binding: BackgroundRunBinding, accumulator
     role: "agent",
     time: binding.agentMessageTime,
     startedAtMs: accumulator.startMs,
+    ...(accumulator.profile === undefined ? {} : { profile: accumulator.profile }),
     blocks,
     ...(accumulator.costUsd === undefined ? {} : { costUsd: accumulator.costUsd }),
     ...(accumulator.usage === undefined ? {} : { usage: accumulator.usage }),
@@ -9930,6 +10331,7 @@ function scheduleBackgroundRunPersist(binding: BackgroundRunBinding, accumulator
 function startBackgroundRunState(state: WorkspaceState, binding: BackgroundRunBinding, request: RunRequest, accumulator: BackgroundRunAccumulator): WorkspaceState {
   const agent = isAgentId(request.agent) ? request.agent : undefined;
   accumulator.agent = agent;
+  accumulator.profile ??= runRequestProfile(request);
   accumulator.sessionId = request.sessionId;
   const withUserMessage = ensureBackgroundUserMessage(state, binding, request.prompt, request.boundUserMessage);
   const snippetText = request.boundUserMessage?.text ?? request.prompt;
@@ -9943,7 +10345,7 @@ function startBackgroundRunState(state: WorkspaceState, binding: BackgroundRunBi
     usage: undefined,
   });
   const withSession = agent && request.sessionId ? patchWorkspaceConversationAgentSession(started, binding.conversationId, agent, request.sessionId) : started;
-  return putBackgroundAgentMessage(withSession, binding, backgroundBlocks(accumulator));
+  return putBackgroundAgentMessage(withSession, binding, backgroundBlocks(accumulator), { profile: accumulator.profile });
 }
 
 /** A settings object carrying just the persisted locale (the run lifecycle only
@@ -9987,7 +10389,7 @@ function minimalRunState(conversation: WorkspaceConversation | undefined, conver
 }
 
 function startPersistedBackgroundRun(binding: BackgroundRunBinding, request: RunRequest): BackgroundRunAccumulator {
-  const accumulator = createBackgroundAccumulator();
+  const accumulator = createBackgroundAccumulator(runRequestProfile(request));
   ensureWorkspaceDb();
   if (request.boundUserMessage && request.boundUserMessage.id === binding.userMessageId && request.boundUserMessage.role === "user") {
     restartUserTurn(binding.conversationId, request.boundUserMessage);
@@ -10055,7 +10457,7 @@ export function finishBackgroundRunState(state: WorkspaceState, binding: Backgro
   const warningOnlyFailure = accumulator.statuses.some((status) => status.level === "warn") && !hadOutput;
   const failed = hadError || warningOnlyFailure;
   const waiting = !canceled && !failed && blocksNeedInput(blocks);
-  const withMessage = putBackgroundAgentMessage(state, binding, blocks, { costUsd: accumulator.costUsd, usage: accumulator.usage });
+  const withMessage = putBackgroundAgentMessage(state, binding, blocks, { costUsd: accumulator.costUsd, usage: accumulator.usage, profile: accumulator.profile });
   const snippet = conversationPreviewSnippet(withMessage.threads[binding.conversationId] ?? [], 60);
   const activity = {
     time: binding.userMessageTime,
@@ -10106,7 +10508,7 @@ export function settleEarlyBackgroundRunState(
   events: readonly RunEvent[],
   canceled = false,
 ): WorkspaceState {
-  const accumulator = createBackgroundAccumulator();
+  const accumulator = createBackgroundAccumulator(runRequestProfile(request));
   const started = startBackgroundRunState(state, binding, request, accumulator);
   for (const event of events) {
     accumulateBackgroundRunEvent(accumulator, event);
@@ -10188,6 +10590,11 @@ function isWakeupToolName(name: string): boolean {
   // only strips the double-underscore form, so match on the trailing tool name.
   const leaf = normalizedToolName(name);
   return leaf === "wakeup" || leaf.endsWith("taskwakeup") || leaf.endsWith("schedulewakeup");
+}
+
+function isTrackerToolName(name: string): boolean {
+  const leaf = normalizedToolName(name);
+  return leaf === "tracker" || leaf.endsWith("tasktracker");
 }
 
 function isGoalToolName(name: string): boolean {
@@ -10293,6 +10700,74 @@ function goalListToolText(conversationId: string | undefined): string {
   return ["TaskGoal entries for this chat:", ...lines].join("\n");
 }
 
+function trackerListToolText(conversationId: string | undefined): string {
+  if (!conversationId) {
+    return "TaskTracker list requires a conversation-bound run.";
+  }
+  const queue = readPendingTurnQueue(conversationId);
+  const trackers = queue.items.filter((item) => item.kind === "tracker");
+  const lines = trackers.flatMap((tracker, trackerIndex) => {
+    const openTasks = tracker.tasks.filter((task) => !task.done);
+    if (openTasks.length === 0) {
+      return [];
+    }
+    const title = tracker.title ? `; title: ${tracker.title}` : "";
+    return [
+      `${trackerIndex + 1}. trackerId: ${tracker.id}; state: ${tracker.state}${title}`,
+      ...openTasks.map((task) => `   - taskId: ${task.id}; task: ${task.text}`),
+    ];
+  });
+  if (lines.length === 0) {
+    return "No open TaskTracker tasks for this chat.";
+  }
+  return ["Open TaskTracker tasks for this chat:", ...lines].join("\n");
+}
+
+function trackerAction(input: Record<string, unknown> | undefined): Extract<RunEvent, { type: "tracker" }>["action"] {
+  const action = firstString(input, ["action", "operation", "mode"])?.toLowerCase();
+  if (action === "list" || action === "show" || action === "get" || action === "status") {
+    return "list";
+  }
+  if (action === "complete" || action === "done" || action === "close" || action === "finish") {
+    return "complete";
+  }
+  return "add";
+}
+
+function trackerTaskInputs(input: Record<string, unknown> | undefined): readonly PendingTrackerTaskInput[] {
+  const rawTasks = Array.isArray(input?.tasks)
+    ? input.tasks
+    : Array.isArray(input?.items)
+      ? input.items
+      : [];
+  return rawTasks.flatMap((task) => {
+    if (typeof task === "string") {
+      const text = task.trim();
+      return text ? [{ text }] : [];
+    }
+    if (!isRecord(task)) {
+      return [];
+    }
+    const text = firstString(task, ["text", "task", "description", "title"]);
+    if (!text) {
+      return [];
+    }
+    const id = firstString(task, ["id", "taskId", "task_id"]);
+    return [{ ...(id ? { id } : {}), text }];
+  });
+}
+
+function trackerTaskIds(input: Record<string, unknown> | undefined): readonly string[] {
+  const rawTaskIds = Array.isArray(input?.taskIds) ? input.taskIds : Array.isArray(input?.task_ids) ? input.task_ids : [];
+  const taskIds = rawTaskIds.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim());
+  const taskId = firstString(input, ["taskId", "task_id"]);
+  return taskId ? [...taskIds, taskId] : taskIds;
+}
+
+function isTrackerListRequested(_name: string, input: Record<string, unknown> | undefined): boolean {
+  return trackerAction(input) === "list";
+}
+
 function isGoalListRequested(_name: string, input: Record<string, unknown> | undefined): boolean {
   const action = firstString(input, ["action", "operation", "mode"])?.toLowerCase();
   return action === "list" || action === "show" || action === "get" || action === "status";
@@ -10339,6 +10814,24 @@ function goalInputValidationError(name: string, input: Record<string, unknown> |
   return goalId ? null : `${name} ${action} requires goalId/id.`;
 }
 
+function trackerInputValidationError(name: string, input: Record<string, unknown> | undefined): string | null {
+  if (!isTrackerToolName(name)) {
+    return `${name} is not a supported rlab dynamic tool.`;
+  }
+  if (!input) {
+    return `${name} requires a JSON object input.`;
+  }
+  const action = trackerAction(input);
+  if (action === "list") {
+    return null;
+  }
+  if (action === "add") {
+    return trackerTaskInputs(input).length > 0 ? null : `${name} add requires a non-empty tasks array.`;
+  }
+  const trackerId = firstString(input, ["trackerId", "tracker_id", "id"]);
+  return trackerId ? null : `${name} complete requires trackerId/id.`;
+}
+
 export function codexDynamicToolCallResponse(params: Record<string, unknown>, context: CodexDynamicToolCallContext = {}): Record<string, unknown> {
   const tool = firstString(params, ["tool"]) ?? "";
   if (isWakeupToolName(tool) && !rlabChatToolEnabled(context.tools, "TaskWakeup")) {
@@ -10348,6 +10841,31 @@ export function codexDynamicToolCallResponse(params: Record<string, unknown>, co
     };
   }
   const input = isRecord(params.arguments) ? params.arguments : undefined;
+  if (isTrackerToolName(tool)) {
+    if (!rlabChatToolEnabled(context.tools, "TaskTracker")) {
+      return {
+        contentItems: [{ type: "inputText", text: "TaskTracker is disabled for this chat." }],
+        success: false,
+      };
+    }
+    const validationError = trackerInputValidationError(tool, input);
+    if (validationError) {
+      return {
+        contentItems: [{ type: "inputText", text: validationError }],
+        success: false,
+      };
+    }
+    if (isTrackerListRequested(tool, input)) {
+      return {
+        contentItems: [{ type: "inputText", text: trackerListToolText(context.conversationId) }],
+        success: Boolean(context.conversationId),
+      };
+    }
+    return {
+      contentItems: [{ type: "inputText", text: "rlab accepted the TaskTracker update. Finish this turn after reporting the update." }],
+      success: true,
+    };
+  }
   if (isGoalToolName(tool)) {
     if (!rlabChatToolEnabled(context.tools, "TaskGoal")) {
       return {
@@ -10431,6 +10949,34 @@ function goalFollowupEvents(id: string, name: string, input: Record<string, unkn
   ];
 }
 
+function trackerFollowupEvents(id: string, name: string, input: Record<string, unknown> | undefined, ok: boolean): RunEvent[] {
+  if (!isTrackerToolName(name)) {
+    return [];
+  }
+  if (!ok) {
+    return [{ type: "error", text: `${name} failed; TaskTracker was not updated.` }];
+  }
+  const validationError = trackerInputValidationError(name, input);
+  if (validationError) {
+    return [{ type: "error", text: validationError }];
+  }
+  const action = trackerAction(input);
+  const trackerId = firstString(input, ["trackerId", "tracker_id", "id"]);
+  const afterItemId = firstString(input, ["afterItemId", "after_item_id", "after"]);
+  return [
+    {
+      type: "tracker",
+      action,
+      toolId: id,
+      ...(trackerId ? { trackerId } : {}),
+      ...(firstString(input, ["title", "summary", "description"]) ? { title: firstString(input, ["title", "summary", "description"]) } : {}),
+      ...(action === "add" ? { tasks: trackerTaskInputs(input) } : {}),
+      ...(action === "complete" ? { taskIds: trackerTaskIds(input) } : {}),
+      ...(afterItemId === undefined ? {} : { afterItemId }),
+    },
+  ];
+}
+
 function wakeupFollowupEvents(id: string, name: string, input: Record<string, unknown> | undefined, ok: boolean): RunEvent[] {
   if (!isWakeupToolName(name)) {
     return [];
@@ -10478,7 +11024,7 @@ function wakeupFollowupEvents(id: string, name: string, input: Record<string, un
 }
 
 function rlabToolFollowupEvents(id: string, name: string, input: Record<string, unknown> | undefined, ok: boolean): RunEvent[] {
-  return [...wakeupFollowupEvents(id, name, input, ok), ...goalFollowupEvents(id, name, input, ok)];
+  return [...wakeupFollowupEvents(id, name, input, ok), ...trackerFollowupEvents(id, name, input, ok), ...goalFollowupEvents(id, name, input, ok)];
 }
 
 /** A running card for a diff tool, with the bulky diff-trigger fields stripped
@@ -11273,9 +11819,9 @@ function geminiToolUseEvents(msg: Record<string, unknown>, fallbackIndex: number
     const reasoning = geminiUpdateTopicReasoning(input);
     return reasoning ? [reasoning] : [];
   }
-  // The rlab MCP TaskWakeup tool always acks, so schedule from the call itself —
-  // Gemini's tool-result event carries no tool name to key off later.
-  if (isWakeupToolName(name)) {
+  // The rlab MCP tools always ack, so apply from the call itself — Gemini's
+  // tool-result event carries no tool name to key off later.
+  if (isWakeupToolName(name) || isTrackerToolName(name) || isGoalToolName(name)) {
     return rlabToolFollowupEvents(id, name, input, true);
   }
   const rich = richToolEvents(id, name, input, "running");
@@ -13203,6 +13749,25 @@ function startServerRunFromParsedPayload(parsedPayload: ParsedRunRequestSuccess,
       }
       return;
     }
+    if (event.type === "tracker") {
+      const publicEvents: RunEvent[] = (() => {
+        try {
+          return applyTrackerRunEvent(event, binding, origin, cachedWorkspaceLocale);
+        } catch (error) {
+          return [{ type: "error", text: errorMessage(error) }];
+        }
+      })();
+      for (const publicEvent of publicEvents) {
+        sender.send(publicEvent);
+        if (binding && accumulator) {
+          applyBackgroundRunEvent(binding, accumulator, publicEvent);
+        }
+      }
+      if (binding) {
+        drainServerQueue(binding.conversationId);
+      }
+      return;
+    }
     sender.send(event);
     if (binding && accumulator) {
       applyBackgroundRunEvent(binding, accumulator, event);
@@ -13445,7 +14010,7 @@ type PendingQueuePayload =
   | { readonly action: "enqueueGoal"; readonly conversationId: string; readonly description: string; readonly afterItemId?: string | null; readonly pauseQueue?: boolean }
   | { readonly action: "cancelItem"; readonly conversationId: string; readonly itemId: string }
   | { readonly action: "moveAfter"; readonly conversationId: string; readonly itemId: string; readonly afterItemId: string | null }
-  | { readonly action: "setPaused"; readonly conversationId: string; readonly paused: boolean }
+  | { readonly action: "setPaused"; readonly conversationId: string; readonly paused: boolean; readonly resumeAtMs?: number }
   | { readonly action: "sendNext"; readonly conversationId: string };
 
 function parsePendingQueuePayload(body: string): PendingQueuePayload {
@@ -13499,7 +14064,11 @@ function parsePendingQueuePayload(body: string): PendingQueuePayload {
     if (typeof parsed.paused !== "boolean") {
       throw new Error("Missing paused flag.");
     }
-    return { action, conversationId, paused: parsed.paused };
+    const resumeAtMs = typeof parsed.resumeAtMs === "number" && Number.isFinite(parsed.resumeAtMs) && parsed.resumeAtMs > 0 ? Math.trunc(parsed.resumeAtMs) : undefined;
+    if (parsed.resumeAtMs !== undefined && resumeAtMs === undefined) {
+      throw new Error("Invalid queue resume time.");
+    }
+    return { action, conversationId, paused: parsed.paused, ...(resumeAtMs === undefined ? {} : { resumeAtMs }) };
   }
   if (action === "sendNext") {
     return { action, conversationId };
@@ -13600,9 +14169,14 @@ function handlePendingQueue(req: IncomingMessage, res: ServerResponse): void {
         return;
       }
       if (payload.action === "setPaused") {
-        const queue = setPendingTurnQueuePaused(payload.conversationId, payload.paused);
+        const queue = setPendingTurnQueuePaused(payload.conversationId, payload.paused, { resumeAtMs: payload.resumeAtMs });
         sendJson(res, 200, { queue });
         emitPendingQueueChange(payload.conversationId);
+        if (payload.paused && queue.resumeAtMs !== undefined) {
+          scheduleServerQueueResume(payload.conversationId, queue.resumeAtMs);
+        } else {
+          clearServerQueueResume(payload.conversationId);
+        }
         if (!payload.paused) {
           scheduleServerQueueDrain(payload.conversationId, 0);
         }
@@ -13930,6 +14504,8 @@ export function attachRlabApi(server: RlabApiAttachTarget): void {
     { path: "/api/git-cherry-pick", handler: methodOnly("POST", handleGitCherryPick) },
     { path: "/api/git-revert", handler: methodOnly("POST", handleGitRevert) },
     { path: "/api/git-reset", handler: methodOnly("POST", handleGitReset) },
+    { path: "/api/git-fetch", handler: methodOnly("POST", handleGitFetch) },
+    { path: "/api/git-pull", handler: methodOnly("POST", handleGitPull) },
     { path: "/api/git-push", handler: methodOnly("POST", handleGitPush) },
     { path: "/api/git-worktree-create", handler: methodOnly("POST", handleGitWorktreeCreate) },
     { path: "/api/git-worktree-merge", handler: methodOnly("POST", handleGitWorktreeMerge) },

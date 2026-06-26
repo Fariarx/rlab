@@ -27,6 +27,7 @@ export type RunEvent =
   | { type: "session"; id: string }
   | { type: "wakeup"; prompt: string; reason?: string; toolId?: string; delaySeconds?: number; fireAt?: string; cron?: string; script?: string; intervalSeconds?: number }
   | { type: "cancel_wakeup"; wakeupId?: string; all?: boolean; reason?: string; toolId?: string }
+  | { type: "tracker"; action: "add" | "complete" | "list"; trackerId?: string; title?: string; tasks?: readonly { readonly id?: string; readonly text: string }[]; taskIds?: readonly string[]; afterItemId?: string | null; toolId?: string }
   | { type: "goal"; action: "add" | "update" | "remove" | "complete" | "list"; goalId?: string; description?: string; afterItemId?: string | null; toolId?: string }
   | { type: "done"; costUsd?: number; usage?: RunUsage; usageDebug?: unknown };
 

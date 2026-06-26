@@ -361,7 +361,7 @@ export function patchActiveRunUpdate(state: WorkspaceState, update: ActiveRunUpd
   const messages = stateWithUserMessage.threads[update.conversationId] ?? [];
   const previousMessage = messages.find((message) => message.id === update.agentMessageId);
   const previousBlocks = previousMessage?.blocks;
-  const profile = previousMessage?.profile ?? conversationProfile(findConversation(state, update.conversationId));
+  const profile = update.profile ?? previousMessage?.profile ?? conversationProfile(findConversation(state, update.conversationId));
   const mergedBlocks = mergeInputBlockState(update.blocks, previousBlocks);
   const blocks = update.done || !isLiveRunStatus(update.status) ? finishBlocks(mergedBlocks, update.status === "error" || update.status === "idle" ? "error" : "ok") : mergedBlocks;
   const message: ChatMessage = {

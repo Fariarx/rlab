@@ -32,6 +32,7 @@ const Probe = observer(function Probe() {
       <div data-testid="context-usage">{selected?.usage?.contextTokens ?? "none"}</div>
       <div data-testid="queued">{workspace.pendingMessageCount(workspace.selectedId)}</div>
       <div data-testid="queued-items">{workspace.pendingQueueItemCount(workspace.selectedId)}</div>
+      <div data-testid="queue-resume-at">{workspace.queueResumeAtMs(workspace.selectedId) ?? "none"}</div>
       <div data-testid="archived">{[...workspace.chats, ...workspace.projects.flatMap((project) => project.conversations)].filter((conversation) => conversation.archived).map((conversation) => conversation.id).join(",")}</div>
       <div data-testid="thread-ids">{(workspace.threads[workspace.selectedId] ?? []).map((message) => message.id).join(",")}</div>
       <div data-testid="agent-blocks">{JSON.stringify((workspace.threads[workspace.selectedId] ?? []).filter((message) => message.role === "agent").map((message) => message.blocks ?? []))}</div>
@@ -70,6 +71,9 @@ const Probe = observer(function Probe() {
       </button>
       <button type="button" onClick={() => workspace.sendQueuedMessageNow(workspace.selectedId)}>
         send-queued-now
+      </button>
+      <button type="button" onClick={() => workspace.setQueuePaused(workspace.selectedId, true, { resumeAtMs: 1_800_000_300_000 })}>
+        pause-queue-later
       </button>
       <button type="button" onClick={() => workspace.remove("chat-1")}>
         remove-chat-1
@@ -152,6 +156,7 @@ interface RunRequestRecord {
 
 interface TestPendingQueue {
   paused: boolean;
+  resumeAtMs?: number;
   messages: ChatMessage[];
   items: PendingQueueItem[];
 }
@@ -163,6 +168,7 @@ interface QueueRequestRecord {
   readonly messageId?: string;
   readonly paused?: boolean;
   readonly pauseQueue?: boolean;
+  readonly resumeAtMs?: number;
   readonly text?: string;
 }
 
@@ -183,7 +189,7 @@ function queueFor(queues: Map<string, TestPendingQueue>, conversationId: string)
 
 function queuePayload(queues: Map<string, TestPendingQueue>, conversationId: string) {
   const queue = queueFor(queues, conversationId);
-  return { queue: { conversationId, paused: queue.paused, messages: queue.messages, items: queue.items } };
+  return { queue: { conversationId, paused: queue.paused, ...(queue.resumeAtMs === undefined ? {} : { resumeAtMs: queue.resumeAtMs }), messages: queue.messages, items: queue.items } };
 }
 
 function applyWorkspaceMutationRequest(state: WorkspaceState, init: RequestInit | undefined): WorkspaceState {
@@ -264,8 +270,10 @@ describe("useWorkspace", () => {
         queue.items = queue.items.filter((item) => item.id !== request.messageId);
       } else if (request.action === "setPaused") {
         queue.paused = request.paused === true;
+        queue.resumeAtMs = queue.paused ? request.resumeAtMs : undefined;
       } else if (request.action === "sendNext") {
         queue.paused = false;
+        queue.resumeAtMs = undefined;
         const [firstItem] = queue.items;
         queue.items = queue.items.slice(1);
         if (firstItem?.kind === "message") {
@@ -1439,6 +1447,25 @@ describe("useWorkspace", () => {
     expect(queueRequests.find((request) => request.action === "enqueueGoal")).not.toHaveProperty("pauseQueue");
     expect(queueFor(pendingQueues, "chat-2").paused).toBe(true);
     await waitFor(() => expect(screen.getByTestId("queued-items")).toHaveTextContent("2"));
+  });
+
+  it("stores delayed queue resume times from the server queue snapshot", async () => {
+    render(<Probe />);
+
+    await screen.findByText("chat-2");
+    screen.getByRole("button", { name: "pause-queue-later" }).click();
+
+    await waitFor(() =>
+      expect(queueRequests).toContainEqual(
+        expect.objectContaining({
+          action: "setPaused",
+          conversationId: "chat-2",
+          paused: true,
+          resumeAtMs: 1_800_000_300_000,
+        }),
+      ),
+    );
+    expect(screen.getByTestId("queue-resume-at")).toHaveTextContent("1800000300000");
   });
 
   it("queues messages on the server after switching agent during a run", async () => {

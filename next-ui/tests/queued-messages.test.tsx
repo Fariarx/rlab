@@ -47,6 +47,8 @@ describe("QueuedMessages", () => {
     expect(onCancel).toHaveBeenCalledWith("q1");
 
     fireEvent.click(screen.getByRole("button", { name: "Остановить" }));
+    expect(screen.getByText("Остановить очередь")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Пока не возобновлю" }));
     expect(onTogglePause).toHaveBeenCalledTimes(1);
 
     fireEvent.click(screen.getByRole("button", { name: "Отправить сейчас" }));
@@ -60,6 +62,39 @@ describe("QueuedMessages", () => {
 
     expect(screen.getByText("В очереди · 2 · пауза")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Возобновить" })).toBeInTheDocument();
+  });
+
+  it("supports delayed queue resume options from the pause menu", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-26T10:00:00.000Z"));
+    try {
+      const onTogglePause = vi.fn();
+      renderWithTheme(<QueuedMessages messages={messages} paused={false} onCancel={vi.fn()} onCopy={vi.fn()} onSendNow={vi.fn()} onTogglePause={onTogglePause} />);
+
+      fireEvent.click(screen.getByRole("button", { name: "Остановить" }));
+      expect(screen.getByText("Запустить через")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("menuitem", { name: /15 минут/ }));
+
+      expect(onTogglePause).toHaveBeenCalledWith(Date.parse("2026-06-26T10:15:00.000Z"));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("shows delayed resume time in the paused title", () => {
+    renderWithTheme(
+      <QueuedMessages
+        messages={messages}
+        paused
+        resumeAtMs={Date.parse("2026-06-26T10:15:00.000Z")}
+        onCancel={vi.fn()}
+        onCopy={vi.fn()}
+        onSendNow={vi.fn()}
+        onTogglePause={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(/В очереди · 2 · до /)).toBeInTheDocument();
   });
 
   it("scrolls the queued turn list only after five messages", () => {
@@ -237,6 +272,50 @@ describe("QueuedMessages", () => {
         onTogglePause={vi.fn()}
       />,
     );
+
+    fireEvent.click(screen.getByRole("button", { name: "Отправить сейчас" }));
+    expect(onSendNow).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders task tracker items with open task labels and tracker controls", () => {
+    const onCancelItem = vi.fn();
+    const onSendNow = vi.fn();
+    renderWithTheme(
+      <QueuedMessages
+        messages={[]}
+        items={[
+          {
+            id: "tracker-1",
+            conversationId: "c1",
+            position: 0,
+            kind: "tracker",
+            createdAtMs: 100,
+            updatedAtMs: 100,
+            state: "queued",
+            title: "Release",
+            tasks: [
+              { id: "task-1", text: "Fix queue", done: false },
+              { id: "task-2", text: "Already done", done: true, completedAtMs: 150 },
+              { id: "task-3", text: "Add tests", done: false },
+            ],
+            origin: "http://127.0.0.1:4280",
+            dispatchCount: 0,
+          },
+        ]}
+        paused={false}
+        onCancel={vi.fn()}
+        onCancelItem={onCancelItem}
+        onCopy={vi.fn()}
+        onSendNow={onSendNow}
+        onTogglePause={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Release · Fix queue · Add tests")).toBeInTheDocument();
+    expect(screen.queryByText("Already done")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Удалить трекер задач" }));
+    expect(onCancelItem).toHaveBeenCalledWith("tracker-1");
 
     fireEvent.click(screen.getByRole("button", { name: "Отправить сейчас" }));
     expect(onSendNow).toHaveBeenCalledTimes(1);

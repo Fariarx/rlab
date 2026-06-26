@@ -24,7 +24,7 @@ import { useI18n } from "../../../i18n/I18nProvider";
 import { localFileUrl } from "../../../lib/external-url";
 import type { ComposerPluginLink } from "../../../lib/rlab-plugins";
 import { Button, IconButton, ImageLightbox, KeyHint } from "../../ui";
-import { AttachmentTile } from "./AttachmentTile";
+import { AttachmentTile, AttachmentUploadSkeletonTile } from "./AttachmentTile";
 import { ComposerTag } from "./ComposerTag";
 import { WakeupTile, type WakeupTileProps } from "./WakeupTile";
 import { ComposerLimitsPanel } from "./ComposerLimitsPanel";
@@ -376,6 +376,7 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
   const {
     addFiles,
     applySuggestion,
+    attachmentUploadCount,
     canSend,
     handleBeforeInput,
     handleComposerChange,
@@ -443,8 +444,10 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
   const visualExpanded = expanded || voiceState === "recording";
   const effectiveOverlayLift = voiceState === "recording" ? Math.max(overlayLift, 38) : overlayLift;
   const floatingAttachments = editChrome ? [] : composerAttachments;
-  const hasInlineAttachments = editChrome && composerAttachments.length > 0;
-  const hasFloatingTags = (!editChrome && scheduledWakeups.length > 0) || (!editChrome && effectiveReviewCount > 0) || floatingAttachments.length > 0;
+  const floatingAttachmentUploadCount = editChrome ? 0 : attachmentUploadCount;
+  const inlineAttachmentUploadCount = editChrome ? attachmentUploadCount : 0;
+  const hasInlineAttachments = editChrome && (composerAttachments.length > 0 || inlineAttachmentUploadCount > 0);
+  const hasFloatingTags = (!editChrome && scheduledWakeups.length > 0) || (!editChrome && effectiveReviewCount > 0) || floatingAttachments.length > 0 || floatingAttachmentUploadCount > 0;
   useLayoutEffect(() => {
     onOverlayLiftChange?.(effectiveOverlayLift);
   }, [effectiveOverlayLift, onOverlayLiftChange]);
@@ -522,6 +525,13 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
       />
     );
   };
+  const renderAttachmentUploadSkeletons = (count: number) =>
+    Array.from({ length: count }, (_, index) => (
+      <AttachmentUploadSkeletonTile
+        key={`attachment-upload-${index}`}
+        label={t("attachmentUploading")}
+      />
+    ));
 
   const floatingPanelSx: SxProps<Theme> = {
     pointerEvents: "auto",
@@ -622,6 +632,7 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
               />
             )}
             {floatingAttachments.map(renderAttachmentTag)}
+            {renderAttachmentUploadSkeletons(floatingAttachmentUploadCount)}
           </Box>
         )}
       </Box>
@@ -1161,6 +1172,7 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
           }}
         >
           {composerAttachments.map(renderAttachmentTag)}
+          {renderAttachmentUploadSkeletons(inlineAttachmentUploadCount)}
         </Box>
       )}
       {/* Full-screen preview of a clicked image attachment; closes on the X or a

@@ -33,6 +33,27 @@ export interface GitGraphCommit {
 
 export type GitDiffMode = GitDiffPayload["mode"];
 
+export interface GitFetchOptions {
+  readonly remote?: string;
+  readonly all?: boolean;
+}
+
+export interface GitPullOptions {
+  readonly remote: string;
+  readonly branch: string;
+  readonly rebase?: boolean;
+  readonly autostash?: boolean;
+}
+
+export interface GitPushOptions {
+  readonly localBranch?: string;
+  readonly remote?: string;
+  readonly remoteBranch?: string;
+  readonly useDefaultDestination?: boolean;
+  readonly pushTags?: boolean;
+  readonly force?: boolean;
+}
+
 async function readGitApiPayload<T>(label: string, response: Response): Promise<T> {
   if (!response.ok) {
     throw new Error(await responseErrorMessage(response, `${label} failed (${response.status})`));
@@ -124,6 +145,18 @@ export function revertGitCommit(cwd: string, hash: string): Promise<GitStatusPay
 
 export function resetGitTo(cwd: string, hash: string, mode: GitResetMode): Promise<GitStatusPayload> {
   return postGitCommitAction("/api/git-reset", "Git reset", { cwd, hash, mode });
+}
+
+export function fetchGitRemote(cwd: string, options: GitFetchOptions): Promise<GitStatusPayload> {
+  return postGitCommitAction("/api/git-fetch", "Git fetch", { cwd, ...options });
+}
+
+export function pullGitRemote(cwd: string, options: GitPullOptions): Promise<GitStatusPayload> {
+  return postGitCommitAction("/api/git-pull", "Git pull", { cwd, ...options });
+}
+
+export function pushGitRemote(cwd: string, options: GitPushOptions): Promise<GitStatusPayload> {
+  return postGitCommitAction("/api/git-push", "Git push", { cwd, ...options });
 }
 
 export function branchOptionsFor(status: GitStatusPayload): readonly string[] {

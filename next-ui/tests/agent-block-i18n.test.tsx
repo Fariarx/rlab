@@ -1,5 +1,5 @@
 import { fireEvent, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { AgentBlockRenderer } from "../src/components/agent";
 import { UserAvatar } from "../src/components/agent/blocks/parts";
 import { Toast } from "../src/components/ui";
@@ -7,6 +7,12 @@ import { renderWithTheme } from "./util/render-with-theme";
 
 describe("agent block i18n", () => {
   it("renders agent block chrome in Russian by default", async () => {
+    const writeText = vi.fn(() => Promise.resolve());
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+
     renderWithTheme(
       <>
         <AgentBlockRenderer block={{ kind: "reasoning", text: "checking constraints", active: true }} />
@@ -34,8 +40,11 @@ describe("agent block i18n", () => {
     expect(screen.getByText("Результатов: 1")).toBeInTheDocument();
 
     fireEvent.click(screen.getByText("Вариант A"));
+    fireEvent.click(screen.getByRole("button", { name: "Скопировать вопрос" }));
     fireEvent.click(screen.getByRole("button", { name: "Подтвердить" }));
 
+    expect(writeText).toHaveBeenCalledWith("Выберите стратегию\n1. Вариант A");
+    expect(await screen.findByText("Вопрос скопирован")).toBeInTheDocument();
     expect(await screen.findByText("Выбрано: Вариант A")).toBeInTheDocument();
   });
 

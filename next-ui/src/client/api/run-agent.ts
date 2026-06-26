@@ -100,6 +100,7 @@ export interface ActiveRunUpdate {
   readonly userMessageId: string;
   readonly userMessage?: ChatMessage;
   readonly agentMessageId: string;
+  readonly profile?: AgentProfile;
   readonly startedAtMs?: number;
   readonly status: ConversationStatus;
   /** Stable conversation-list time: the bound user message time. */
@@ -216,6 +217,19 @@ function isChatMessage(value: unknown): value is ChatMessage {
   );
 }
 
+function isAgentProfile(value: unknown): value is AgentProfile {
+  return (
+    isRecord(value) &&
+    typeof value.agent === "string" &&
+    typeof value.model === "string" &&
+    typeof value.reasoning === "string" &&
+    typeof value.mode === "string" &&
+    (value.fast === undefined || typeof value.fast === "boolean") &&
+    (value.autoConfirm === undefined || typeof value.autoConfirm === "boolean") &&
+    (value.tools === undefined || Array.isArray(value.tools))
+  );
+}
+
 function isActiveRunUpdate(value: unknown): value is ActiveRunUpdate {
   return (
     isRecord(value) &&
@@ -224,6 +238,7 @@ function isActiveRunUpdate(value: unknown): value is ActiveRunUpdate {
     typeof value.userMessageId === "string" &&
     (value.userMessage === undefined || isChatMessage(value.userMessage)) &&
     typeof value.agentMessageId === "string" &&
+    (value.profile === undefined || isAgentProfile(value.profile)) &&
     (value.startedAtMs === undefined || typeof value.startedAtMs === "number") &&
     isConversationStatus(value.status) &&
     typeof value.time === "string" &&

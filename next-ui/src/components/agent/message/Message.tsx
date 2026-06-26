@@ -3,6 +3,7 @@ import EditIcon from "@mui/icons-material/Edit";
 import AccountTreeIcon from "@mui/icons-material/AccountTree";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import CloseIcon from "@mui/icons-material/Close";
+import ChecklistRoundedIcon from "@mui/icons-material/ChecklistRounded";
 import FlagRoundedIcon from "@mui/icons-material/FlagRounded";
 import { Box, Stack, Typography } from "@mui/material";
 import { observer } from "mobx-react-lite";
@@ -23,7 +24,17 @@ import type { AgentProfile } from "../core/agents";
 import { rise } from "../core/anim";
 import { keyedAgentBlocks } from "./message-block-keys";
 import { createAgentMessageBlockModel, isMessageLive } from "./message-block-model";
-import { basename, parseTaskGoalUserMessage, parseUserDraft, readOnlyImageToolPath, splitUserContent, type MessageAttachment, type TaskGoalUserMessage } from "./message-content-model";
+import {
+  basename,
+  parseTaskGoalUserMessage,
+  parseTaskTrackerUserMessage,
+  parseUserDraft,
+  readOnlyImageToolPath,
+  splitUserContent,
+  type MessageAttachment,
+  type TaskGoalUserMessage,
+  type TaskTrackerUserMessage,
+} from "./message-content-model";
 import { agentMessageProfileLabel, formatElapsedSeconds } from "./message-display-model";
 import type { MessageActionHandlers } from "./message-actions";
 import { AgentAvatar, MessageText, TypingDots, UserAvatar } from "../blocks/parts";
@@ -124,6 +135,47 @@ function TaskGoalUserMessageCard({ goal }: { readonly goal: TaskGoalUserMessage 
           </Typography>
         </Stack>
         <MessageText text={goal.description} />
+      </Stack>
+    </Box>
+  );
+}
+
+function TaskTrackerUserMessageCard({ tracker }: { readonly tracker: TaskTrackerUserMessage }) {
+  const { t } = useI18n();
+  return (
+    <Box
+      data-testid="task-tracker-user-message"
+      sx={{
+        minWidth: 0,
+        maxWidth: "100%",
+        px: 1.5,
+        py: 1.15,
+        borderRadius: (theme) => `${theme.custom.radii.lg}px`,
+        borderTopRightRadius: (theme) => `${theme.custom.radii.sm}px`,
+        backgroundColor: (theme) => theme.custom.surfaces.s3,
+        border: (theme) => `1px solid ${theme.custom.borders.subtle}`,
+      }}
+    >
+      <Stack spacing={0.75} sx={{ minWidth: 0 }}>
+        <Stack direction="row" spacing={0.75} sx={{ alignItems: "center", minWidth: 0 }}>
+          <ChecklistRoundedIcon sx={{ flex: "0 0 auto", fontSize: 15, color: (theme) => theme.palette.status.ok.main }} />
+          <Typography component="span" sx={{ flex: "0 0 auto", fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.72rem", fontWeight: 700, color: "text.secondary" }}>
+            {t("taskTrackerMessageTitle")}
+          </Typography>
+        </Stack>
+        {tracker.title && <MessageText text={tracker.title} />}
+        <Stack spacing={0.35} sx={{ minWidth: 0 }}>
+          {tracker.tasks.map((task) => (
+            <Stack key={task.id} direction="row" spacing={0.65} sx={{ alignItems: "flex-start", minWidth: 0 }}>
+              <Typography component="span" sx={{ mt: "0.18rem", flex: "0 0 auto", color: "text.secondary", fontSize: "0.76rem", lineHeight: 1.35 }}>
+                •
+              </Typography>
+              <Box sx={{ minWidth: 0 }}>
+                <MessageText text={task.text} />
+              </Box>
+            </Stack>
+          ))}
+        </Stack>
       </Stack>
     </Box>
   );
@@ -238,7 +290,9 @@ const UserMessage = observer(function UserMessage({
   readonly actions?: MessageActionHandlers;
 }) {
   const taskGoal = parseTaskGoalUserMessage(message.text ?? "");
-  const { text: displayText, attachments } = taskGoal ? { text: "", attachments: [] } : splitUserContent(message.text ?? "");
+  const taskTracker = taskGoal ? null : parseTaskTrackerUserMessage(message.text ?? "");
+  const systemQueueMessage = taskGoal || taskTracker;
+  const { text: displayText, attachments } = systemQueueMessage ? { text: "", attachments: [] } : splitUserContent(message.text ?? "");
   const reviewBlocks = (message.blocks ?? []).filter((block) => block.kind === "review");
   const [store] = useState(() => new MessageShellStore(displayText));
   const editDraft = useMemo(() => parseUserDraft(message.text ?? ""), [message.text]);
@@ -264,6 +318,7 @@ const UserMessage = observer(function UserMessage({
         ) : (
           <Stack spacing={0.75} sx={{ alignItems: "flex-end", minWidth: 0, maxWidth: "100%" }}>
             {taskGoal && <TaskGoalUserMessageCard goal={taskGoal} />}
+            {taskTracker && <TaskTrackerUserMessageCard tracker={taskTracker} />}
             {displayText && (
               <Box
                 sx={{
@@ -337,12 +392,14 @@ const AgentMessage = observer(function AgentMessage({
   actions,
   displayPrefs = DEFAULT_DISPLAY_PREFS,
   agentProfile,
+  visible = true,
 }: {
   readonly message: ChatMessage;
   readonly delay: number;
   readonly actions?: MessageActionHandlers;
   readonly displayPrefs?: MessageDisplayPrefs;
   readonly agentProfile?: AgentProfile;
+  readonly visible?: boolean;
 }) {
   const { t } = useI18n();
   const blocks = message.blocks ?? [];
@@ -403,7 +460,7 @@ const AgentMessage = observer(function AgentMessage({
           )}
           {blockModel.detailBlocks.length > 0 && (
             <Box sx={{ minWidth: 0, maxWidth: "100%", ...rise(delay + 40) }}>
-              <AgentDetails blocks={blockModel.detailBlocks} actions={actions} autoExpand={(displayPrefs.reasoningAutoExpand ?? false) && blockModel.answerBlocks.length === 0} live={live} showSpinner={showDetailSpinner} hasResultAfter={blockModel.answerBlocks.length > 0} startedAtMs={message.startedAtMs} />
+              <AgentDetails blocks={blockModel.detailBlocks} actions={actions} autoExpand={(displayPrefs.reasoningAutoExpand ?? false) && blockModel.answerBlocks.length === 0} live={live} showSpinner={showDetailSpinner} hasResultAfter={blockModel.answerBlocks.length > 0} startedAtMs={message.startedAtMs} visible={visible} />
             </Box>
           )}
           {/* Plan stays pinned and visible under the message, even mid-run. */}
@@ -444,12 +501,14 @@ export const Message = memo(function Message({
   actions,
   displayPrefs,
   agentProfile,
+  visible = true,
 }: {
   readonly message: ChatMessage;
   readonly index?: number;
   readonly actions?: MessageActionHandlers;
   readonly displayPrefs?: MessageDisplayPrefs;
   readonly agentProfile?: AgentProfile;
+  readonly visible?: boolean;
 }) {
   // No per-index cascade: in a long thread `index` is large, so `index * 120`
   // delayed message 30 by 3.6s on open. Every message fades in immediately; only
@@ -458,6 +517,6 @@ export const Message = memo(function Message({
   return message.role === "user" ? (
     <UserMessage message={message} delay={delay} actions={actions} />
   ) : (
-    <AgentMessage message={message} delay={delay} actions={actions} displayPrefs={displayPrefs} agentProfile={agentProfile} />
+    <AgentMessage message={message} delay={delay} actions={actions} displayPrefs={displayPrefs} agentProfile={agentProfile} visible={visible} />
   );
 });

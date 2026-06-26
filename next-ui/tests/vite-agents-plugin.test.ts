@@ -21,6 +21,8 @@ import {
   createScheduledWakeupDispatch,
   buildGeminiRunArgs,
   buildGitCommitArgs,
+  buildGitFetchArgs,
+  buildGitPullArgs,
   buildGitPushArgs,
   gitHardResetDirtyError,
   buildOpenCodeRunArgs,
@@ -61,6 +63,9 @@ import {
   parseGitDiscardFilePayload,
   parseGitCommitPayload,
   parseGitCheckoutPayload,
+  parseGitFetchPayload,
+  parseGitPullPayload,
+  parseGitPushPayload,
   parseGitCommitActionPayload,
     gitGraphBranchHeads,
     parseGitGraphLog,
@@ -142,6 +147,7 @@ import {
   claimNextPendingQueueItem,
   closeWorkspaceDb,
   enqueuePendingGoal,
+  enqueuePendingTracker,
   initializeWorkspaceStateInDb,
   initWorkspaceDb,
   readConversation,
@@ -375,6 +381,107 @@ describe("vite agents plugin", () => {
     }
   });
 
+  it("builds queued task tracker run bodies with task ids and completion instructions", () => {
+    const dir = mkdtempSync(join(tmpdir(), "rlab-queued-tracker-body-"));
+    try {
+      closeWorkspaceDb();
+      initWorkspaceDb(join(dir, "workspace.db"));
+      initializeWorkspaceStateInDb({
+        ...buildEmptyWorkspaceState(),
+        chats: [
+          {
+            id: "chat-tracker",
+            title: "Tracker",
+            snippet: "",
+            time: "12:00",
+            status: "idle",
+            agent: "codex",
+            profile: { agent: "codex", model: "default", reasoning: "default", mode: "default" },
+          },
+        ],
+        threads: { "chat-tracker": [] },
+        selectedId: "chat-tracker",
+      });
+      const record: PendingQueueDispatchItem = {
+        id: "tracker-123",
+        conversationId: "chat-tracker",
+        position: 0,
+        kind: "tracker",
+        createdAtMs: 456,
+        updatedAtMs: 456,
+        state: "dispatching",
+        runId: "run-tracker",
+        title: "Release checklist",
+        tasks: [
+          { id: "task-1", text: "Fix queue", done: false },
+          { id: "task-2", text: "Already done", done: true, completedAtMs: 500 },
+          { id: "task-3", text: "Add tests", done: false },
+        ],
+        origin: "http://127.0.0.1:4280",
+        dispatchCount: 1,
+      };
+
+      const body = queuedTurnRunBody(record, "run-tracker");
+      const trackerText = String((body.serverPrompt as { userMessage?: { text?: string } }).userMessage?.text ?? "");
+
+      expect(trackerText).toContain('📋 <rlab-task-tracker id="tracker-123">');
+      expect(trackerText).toContain("<summary>TaskTracker queue item.</summary>");
+      expect(trackerText).toContain("<title>Release checklist</title>");
+      expect(trackerText).toContain('<task id="task-1">Fix queue</task>');
+      expect(trackerText).not.toContain("Already done");
+      expect(trackerText).toContain('TaskTracker with action="complete", trackerId="tracker-123"');
+      expect(String(body.prompt)).toContain(trackerText);
+    } finally {
+      closeWorkspaceDb();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps TaskTracker enabled for queued tracker dispatches", () => {
+    const dir = mkdtempSync(join(tmpdir(), "rlab-queued-tracker-tools-"));
+    try {
+      closeWorkspaceDb();
+      initWorkspaceDb(join(dir, "workspace.db"));
+      initializeWorkspaceStateInDb({
+        ...buildEmptyWorkspaceState(),
+        chats: [
+          {
+            id: "chat-tracker-tools",
+            title: "Tracker",
+            snippet: "",
+            time: "12:00",
+            status: "idle",
+            agent: "codex",
+            profile: { agent: "codex", model: "default", reasoning: "default", mode: "default", tools: ["AskUserQuestion"] },
+          },
+        ],
+        threads: { "chat-tracker-tools": [] },
+        selectedId: "chat-tracker-tools",
+      });
+      const record: PendingQueueDispatchItem = {
+        id: "tracker-tools",
+        conversationId: "chat-tracker-tools",
+        position: 0,
+        kind: "tracker",
+        createdAtMs: 456,
+        updatedAtMs: 456,
+        state: "dispatching",
+        runId: "run-tracker-tools",
+        title: "Release checklist",
+        tasks: [{ id: "task-1", text: "Fix queue", done: false }],
+        origin: "http://127.0.0.1:4280",
+        dispatchCount: 1,
+      };
+
+      const body = queuedTurnRunBody(record, "run-tracker-tools");
+
+      expect(body.tools).toEqual(["AskUserQuestion", "TaskTracker"]);
+    } finally {
+      closeWorkspaceDb();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("normalizes seed project paths when building queued run bodies", () => {
     const dir = mkdtempSync(join(tmpdir(), "rlab-queued-seed-path-"));
     try {
@@ -533,6 +640,8 @@ describe("vite agents plugin", () => {
     expect(withTools).toContain("<rlab-chat-tools>");
     expect(withTools).toContain("TaskWakeup supports delaySeconds/fireAt/cron");
     expect(withTools).toContain('TaskWakeup with action="list"');
+    expect(withTools).toContain("TaskTracker supports action='add'/'set'");
+    expect(withTools).toContain("Tool names accepted by rlab for persistent task trackers: TaskTracker");
     expect(withTools).toContain("{ prompt, script, intervalSeconds, reason }");
     expect(appendRlabChatToolsPrompt(withTools).match(/<rlab-chat-tools>/g)).toHaveLength(1);
   });
@@ -1206,7 +1315,7 @@ Built-in agents:
       "--permission-mode",
       "plan",
       "--tools",
-      "Read,Glob,Grep,LS,AskUserQuestion,TaskWakeup,TaskGoal",
+      "Read,Glob,Grep,LS,AskUserQuestion,TaskWakeup,TaskTracker,TaskGoal",
     ]);
   });
 
@@ -1278,7 +1387,7 @@ Built-in agents:
     expect(readOnlyOptions).toMatchObject({
       permissionMode: "plan",
       settings: { autoCompactEnabled: false, autoCompactWindow: 120000 },
-      tools: ["Read", "Glob", "Grep", "LS", "AskUserQuestion", "TaskWakeup", "TaskGoal"],
+      tools: ["Read", "Glob", "Grep", "LS", "AskUserQuestion", "TaskWakeup", "TaskTracker", "TaskGoal"],
     });
   });
 
@@ -1299,6 +1408,7 @@ Built-in agents:
     expect(options.mcpServers?.rlab).toMatchObject({ args: [expect.stringContaining("rlab-mcp-stdio.mjs")] });
     expect(options.toolAliases).toMatchObject({
       TaskWakeup: "mcp__rlab__TaskWakeup",
+      TaskTracker: "mcp__rlab__TaskTracker",
       TaskGoal: "mcp__rlab__TaskGoal",
     });
     expect(options.toolAliases).not.toHaveProperty("TaskAwait");
@@ -1326,6 +1436,28 @@ Built-in agents:
     // The mcp__rlab__ prefix is normalized, so the translator recognizes the tool
     // and emits a wakeup event instead of leaving the call unhandled.
     expect(done.some((event) => event.type === "wakeup" && event.prompt === "check later" && event.delaySeconds === 600)).toBe(true);
+  });
+
+  it("adds a task tracker from an MCP-prefixed TaskTracker tool call", () => {
+    const translate = createClaudeStreamTranslator();
+    translate(
+      JSON.stringify({
+        type: "assistant",
+        message: { content: [{ type: "tool_use", id: "t1", name: "mcp__rlab__TaskTracker", input: { action: "add", title: "Release", tasks: ["Fix queue"] } }] },
+      }),
+    );
+    const done = translate(
+      JSON.stringify({
+        type: "user",
+        message: { content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }] },
+      }),
+    );
+
+    expect(done).toEqual(
+      expect.arrayContaining([
+        { type: "tracker", action: "add", toolId: "t1", title: "Release", tasks: [{ text: "Fix queue" }] },
+      ]),
+    );
   });
 
   it("translates Claude text deltas without duplicating the final assistant message", () => {
@@ -1839,7 +1971,7 @@ Built-in agents:
       "--permission-mode",
       "plan",
       "--tools",
-      "Read,Glob,Grep,LS,AskUserQuestion,TaskWakeup,TaskGoal",
+      "Read,Glob,Grep,LS,AskUserQuestion,TaskWakeup,TaskTracker,TaskGoal",
     ]);
     expect(buildCodexRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" })).toEqual([
       "exec",
@@ -2137,7 +2269,7 @@ Built-in agents:
 
   it("registers enabled rlab dynamic tools for Codex app-server threads", () => {
     const tools = codexRlabDynamicTools();
-    expect(tools).toHaveLength(2);
+    expect(tools).toHaveLength(3);
     expect(tools).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -2164,6 +2296,19 @@ Built-in agents:
             }),
           }),
         }),
+        expect.objectContaining({
+          name: "TaskTracker",
+          inputSchema: expect.objectContaining({
+            type: "object",
+            properties: expect.objectContaining({
+              action: expect.objectContaining({ enum: ["add", "set", "list", "complete"] }),
+              title: expect.objectContaining({ type: "string" }),
+              trackerId: expect.objectContaining({ type: "string" }),
+              taskIds: expect.objectContaining({ type: "array" }),
+              tasks: expect.objectContaining({ type: "array" }),
+            }),
+          }),
+        }),
       ]),
     );
     expect(tools.some((tool) => tool.name === "TaskAwait")).toBe(false);
@@ -2177,7 +2322,7 @@ Built-in agents:
         prompt: "hello",
         accessMode: "read-only",
       }).dynamicTools,
-    ).toBe(tools);
+    ).toEqual(tools);
 
     expect(codexRlabDynamicTools(["AskUserQuestion"])).toEqual([]);
     expect(
@@ -2244,6 +2389,85 @@ Built-in agents:
       contentItems: [{ type: "inputText", text: "No scheduled TaskWakeup entries for this chat." }],
       success: true,
     });
+  });
+
+  it("answers Codex dynamic TaskTracker calls with validation, ack, and open-task lists", () => {
+    const dir = mkdtempSync(join(tmpdir(), "rlab-codex-tracker-response-"));
+    try {
+      closeWorkspaceDb();
+      initWorkspaceDb(join(dir, "workspace.db"));
+      initializeWorkspaceStateInDb({
+        ...buildEmptyWorkspaceState(),
+        chats: [{ id: "chat-tracker", title: "Tracker", snippet: "", time: "12:00", status: "idle", agent: "codex" }],
+        threads: { "chat-tracker": [] },
+        selectedId: "chat-tracker",
+      });
+      enqueuePendingTracker({
+        id: "tracker-1",
+        conversationId: "chat-tracker",
+        createdAtMs: 100,
+        title: "Release",
+        tasks: [
+          { id: "task-1", text: "Fix queue" },
+          { id: "task-2", text: "Add tests" },
+        ],
+        origin: "http://127.0.0.1:4280",
+      });
+
+      expect(
+        codexDynamicToolCallResponse({
+          tool: "TaskTracker",
+          arguments: { action: "add", tasks: ["Review queue"] },
+        }),
+      ).toEqual({
+        contentItems: [{ type: "inputText", text: "rlab accepted the TaskTracker update. Finish this turn after reporting the update." }],
+        success: true,
+      });
+
+      expect(
+        codexDynamicToolCallResponse(
+          {
+            tool: "TaskTracker",
+            arguments: { action: "add", tasks: ["Review queue"] },
+          },
+          { tools: ["AskUserQuestion"] },
+        ),
+      ).toEqual({
+        contentItems: [{ type: "inputText", text: "TaskTracker is disabled for this chat." }],
+        success: false,
+      });
+
+      expect(
+        codexDynamicToolCallResponse({
+          tool: "TaskTracker",
+          arguments: { action: "add" },
+        }),
+      ).toEqual({
+        contentItems: [{ type: "inputText", text: "TaskTracker add requires a non-empty tasks array." }],
+        success: false,
+      });
+
+      expect(
+        codexDynamicToolCallResponse(
+          {
+            tool: "TaskTracker",
+            arguments: { action: "list" },
+          },
+          { conversationId: "chat-tracker" },
+        ),
+      ).toEqual({
+        contentItems: [
+          {
+            type: "inputText",
+            text: "Open TaskTracker tasks for this chat:\n1. trackerId: tracker-1; state: queued; title: Release\n   - taskId: task-1; task: Fix queue\n   - taskId: task-2; task: Add tests",
+          },
+        ],
+        success: true,
+      });
+    } finally {
+      closeWorkspaceDb();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("captures each agent's native session id from its stream", () => {
@@ -2329,6 +2553,42 @@ Built-in agents:
       { type: "tool", id: "wake-1", name: "TaskWakeup", summary: "send OK", args: { prompt: "send OK", delaySeconds: "180" } },
       { type: "tool_result", id: "wake-1", ok: true, output: "accepted" },
       { type: "wakeup", toolId: "wake-1", prompt: "send OK", delaySeconds: 180 },
+    ]);
+    expect(
+      codexAppServerItemEvents(
+        {
+          type: "dynamicToolCall",
+          id: "tracker-1",
+          tool: "TaskTracker",
+          status: "completed",
+          arguments: { action: "add", title: "Release", tasks: [{ id: "task-1", text: "Fix queue" }] },
+          contentItems: [{ type: "inputText", text: "accepted" }],
+          success: true,
+        },
+        true,
+      ),
+    ).toEqual([
+      { type: "tool", id: "tracker-1", name: "TaskTracker", summary: "TaskTracker", args: { action: "add", title: "Release", tasks: '[{"id":"task-1","text":"Fix queue"}]' } },
+      { type: "tool_result", id: "tracker-1", ok: true, output: "accepted" },
+      { type: "tracker", action: "add", toolId: "tracker-1", title: "Release", tasks: [{ id: "task-1", text: "Fix queue" }] },
+    ]);
+    expect(
+      codexAppServerItemEvents(
+        {
+          type: "dynamicToolCall",
+          id: "tracker-2",
+          tool: "TaskTracker",
+          status: "completed",
+          arguments: { action: "complete", trackerId: "tracker-queue-1", taskIds: ["task-1"] },
+          contentItems: [{ type: "inputText", text: "accepted" }],
+          success: true,
+        },
+        true,
+      ),
+    ).toEqual([
+      { type: "tool", id: "tracker-2", name: "TaskTracker", summary: "TaskTracker", args: { action: "complete", trackerId: "tracker-queue-1", taskIds: '["task-1"]' } },
+      { type: "tool_result", id: "tracker-2", ok: true, output: "accepted" },
+      { type: "tracker", action: "complete", toolId: "tracker-2", trackerId: "tracker-queue-1", taskIds: ["task-1"] },
     ]);
     // webSearch -> search
     expect(codexAppServerItemEvents({ type: "webSearch", id: "w1", query: "rust" }, true)).toEqual([{ type: "search", id: "w1", query: "rust", state: "ok" }]);
@@ -3329,8 +3589,16 @@ Built-in agents:
     ).toBe(false);
   });
 
-  it("builds safe git push arguments", () => {
+  it("builds safe git fetch, pull and push arguments", () => {
+    expect(buildGitFetchArgs({ remote: "origin" })).toEqual(["fetch", "origin"]);
+    expect(buildGitFetchArgs({ all: true })).toEqual(["fetch", "--all"]);
+    expect(buildGitPullArgs({ remote: "origin", branch: "origin/release/1.4.2", rebase: true, autostash: true })).toEqual(["pull", "--rebase", "--autostash", "origin", "release/1.4.2"]);
     expect(buildGitPushArgs()).toEqual(["push"]);
+    expect(buildGitPushArgs({ useDefaultDestination: true })).toEqual(["push"]);
+    expect(buildGitPushArgs({ useDefaultDestination: true, pushTags: true, force: true })).toEqual(["push", "--tags", "--force"]);
+    expect(buildGitPushArgs({ localBranch: "local3", remote: "origin", remoteBranch: "origin/release/1.4.2" })).toEqual(["push", "origin", "local3:release/1.4.2"]);
+    expect(() => buildGitFetchArgs({ remote: "-bad" })).toThrow("Git remote cannot start with '-'.");
+    expect(() => buildGitPushArgs({ remote: "origin", localBranch: "-bad", remoteBranch: "origin/main" })).toThrow("Git ref cannot start with '-'.");
   });
 
   it("validates git cwd payloads without accepting non-object JSON", () => {
@@ -3417,6 +3685,35 @@ Built-in agents:
     expect(parseGitCheckoutPayload(JSON.stringify({ cwd: " C:\\repo ", branch: " feature/ui " }))).toEqual({
       cwd: "C:\\repo",
       branch: "feature/ui",
+    });
+  });
+
+  it("validates git remote action payloads", () => {
+    expect(() => parseGitFetchPayload(JSON.stringify(null))).toThrow("Invalid git request payload.");
+    expect(parseGitFetchPayload(JSON.stringify({ cwd: " /repo ", remote: " origin ", all: false }))).toEqual({ cwd: "/repo", remote: "origin", all: false });
+    expect(parseGitFetchPayload(JSON.stringify({ cwd: "/repo", all: true }))).toEqual({ cwd: "/repo", all: true });
+    expect(() => parseGitPullPayload(JSON.stringify({ cwd: "" }))).toThrow("Project directory is required.");
+    expect(parseGitPullPayload(JSON.stringify({ cwd: " /repo ", remote: " origin ", branch: " origin/main ", rebase: true, autostash: true }))).toEqual({
+      cwd: "/repo",
+      remote: "origin",
+      branch: "origin/main",
+      rebase: true,
+      autostash: true,
+    });
+    expect(parseGitPushPayload(JSON.stringify({ cwd: " /repo ", localBranch: " main ", remote: " origin ", remoteBranch: " origin/main ", pushTags: true, force: true }))).toEqual({
+      cwd: "/repo",
+      localBranch: "main",
+      remote: "origin",
+      remoteBranch: "origin/main",
+      useDefaultDestination: false,
+      pushTags: true,
+      force: true,
+    });
+    expect(parseGitPushPayload(JSON.stringify({ cwd: "/repo", useDefaultDestination: true }))).toEqual({
+      cwd: "/repo",
+      useDefaultDestination: true,
+      pushTags: false,
+      force: false,
     });
   });
 
@@ -3870,7 +4167,7 @@ Built-in agents:
     });
   });
 
-  it("allows rlab TaskWakeup MCP callbacks without a UI approval prompt", async () => {
+  it("allows rlab queue MCP callbacks without a UI approval prompt", async () => {
     const sentEvents: Array<{ readonly type: string }> = [];
     const handler = createRunApprovalHandler((event) => sentEvents.push(event));
     const abort = new AbortController();
@@ -3881,6 +4178,13 @@ Built-in agents:
       behavior: "allow",
       updatedInput: { prompt: "check later", delaySeconds: 60 },
       toolUseID: "wake-1",
+    });
+    await expect(
+      handler("mcp__rlab__TaskTracker", { action: "add", tasks: ["Fix queue"] }, { signal: abort.signal, toolUseID: "tracker-1" }),
+    ).resolves.toEqual({
+      behavior: "allow",
+      updatedInput: { action: "add", tasks: ["Fix queue"] },
+      toolUseID: "tracker-1",
     });
     expect(sentEvents).toEqual([]);
   });
@@ -5032,7 +5336,13 @@ Built-in agents:
         ...state.threads,
         "chat-2": [
           ...state.threads["chat-2"],
-          { id: binding.agentMessageId, role: "agent" as const, time: binding.agentMessageTime, blocks: [{ kind: "text" as const, text: "live" }] },
+          {
+            id: binding.agentMessageId,
+            role: "agent" as const,
+            time: binding.agentMessageTime,
+            profile: { agent: "codex" as const, model: "default", reasoning: "high", mode: "review" },
+            blocks: [{ kind: "text" as const, text: "live" }],
+          },
         ],
       },
     };
@@ -5042,6 +5352,7 @@ Built-in agents:
       conversationId: binding.conversationId,
       userMessageId: binding.userMessageId,
       agentMessageId: binding.agentMessageId,
+      profile: { agent: "codex", model: "default", reasoning: "high", mode: "review" },
       status: "running",
       time: binding.userMessageTime,
       agentMessageTime: binding.agentMessageTime,
@@ -5135,6 +5446,41 @@ Built-in agents:
     expect(ids).not.toContain("a-repeat-old");
     expect(ids.slice(ids.indexOf("u-repeat"), ids.indexOf("u-later") + 1)).toEqual(["u-repeat", "a-repeat-new", "u-later"]);
     expect(settled.threads["chat-2"].find((message) => message.id === "a-later")).toBeDefined();
+  });
+
+  it("stores the runtime profile on bound background agent replies", () => {
+    const state = buildInitialWorkspaceState();
+    const binding: BackgroundRunBinding = {
+      conversationId: "chat-2",
+      runId: "run-profile",
+      userMessageId: "u-profile",
+      userMessageTime: "10:00",
+      agentMessageId: "a-profile",
+      agentMessageTime: "10:01",
+    };
+
+    const settled = settleEarlyBackgroundRunState(
+      state,
+      binding,
+      {
+        agent: "codex",
+        model: "default",
+        reasoning: "high",
+        mode: "review",
+        fast: true,
+        autoConfirm: true,
+        prompt: "Use current chat profile when dispatching",
+        accessMode: "read-only",
+      },
+      [{ type: "text", text: "done" }],
+    );
+
+    expect(settled.threads["chat-2"].find((message) => message.id === binding.agentMessageId)).toMatchObject({
+      id: binding.agentMessageId,
+      role: "agent",
+      profile: { agent: "codex", model: "default", reasoning: "high", mode: "review", fast: true, autoConfirm: true },
+      blocks: [{ kind: "text", text: "done", streaming: false }],
+    });
   });
 
   it("settles bound background runs that fail before an agent process starts", () => {

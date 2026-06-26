@@ -24,6 +24,18 @@ describe("reasoning auto-expand", () => {
     expect(screen.queryByText("weighing the options carefully")).not.toBeInTheDocument();
   });
 
+  it("expands active reasoning when a hidden conversation becomes visible", async () => {
+    const { rerender } = renderWithTheme(<Message message={thinkingMessage(true)} index={0} displayPrefs={{ reasoningAutoExpand: true }} visible={false} />);
+
+    expect(screen.queryByText("weighing the options carefully")).not.toBeInTheDocument();
+
+    rerender(<Message message={thinkingMessage(true)} index={0} displayPrefs={{ reasoningAutoExpand: true }} visible />);
+
+    await waitFor(() => {
+      expect(screen.getByText("weighing the options carefully")).toBeInTheDocument();
+    });
+  });
+
   it("collapses reasoning once the turn is no longer active, even with auto-expand on", () => {
     renderWithTheme(<Message message={thinkingMessage(false)} index={0} displayPrefs={{ reasoningAutoExpand: true }} />);
     expect(screen.queryByText("weighing the options carefully")).not.toBeInTheDocument();

@@ -1,10 +1,11 @@
 import CheckIcon from "@mui/icons-material/Check";
+import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import SendRoundedIcon from "@mui/icons-material/SendRounded";
 import { Box, InputBase, Stack, Typography } from "@mui/material";
 import { observer } from "mobx-react-lite";
 import { useEffect, useState } from "react";
 import { useI18n } from "../../../i18n/I18nProvider";
-import { Button, IconButton } from "../../ui";
+import { Button, IconButton, useToast } from "../../ui";
 import { OptionSelectStore } from "../stores/agent-local-stores";
 import { pop } from "../core/anim";
 import { StatusNote } from "./parts";
@@ -12,6 +13,14 @@ import type { OptionsBlock } from "../core/types";
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function optionQuestionClipboardText(block: OptionsBlock): string {
+  const options = block.options.map((option, index) => {
+    const label = `${index + 1}. ${option.label}`;
+    return option.description ? `${label} — ${option.description}` : label;
+  });
+  return [block.prompt, ...options].join("\n");
 }
 
 /** OptionSelect — the agent offers choices; the user picks one or several. */
@@ -26,6 +35,7 @@ export const OptionSelect = observer(function OptionSelect({
   const { selected, setSelected, confirmed, setConfirmed, pending, setPending, selectionError, setSelectionError } = store;
   const [customAnswer, setCustomAnswer] = useState("");
   const { t } = useI18n();
+  const { toast } = useToast();
   const canPersistSelection = Boolean(block.id && onSelection);
 
   useEffect(() => {
@@ -75,6 +85,14 @@ export const OptionSelect = observer(function OptionSelect({
       return;
     }
     submitSelection([answer]);
+  };
+  const copyQuestion = async () => {
+    try {
+      await navigator.clipboard.writeText(optionQuestionClipboardText(block));
+      toast({ message: t("questionCopied"), severity: "success", duration: 1800 });
+    } catch {
+      toast({ message: t("clipboardUnavailable"), severity: "error", duration: 2500 });
+    }
   };
 
   return (
@@ -200,9 +218,14 @@ export const OptionSelect = observer(function OptionSelect({
         {confirmed ? (
           <StatusNote level="ok">{t("selectedOptions", { items: chosenLabels.join(", ") })}</StatusNote>
         ) : (
-          <Button variant="contained" size="small" disabled={selected.length === 0 || pending || !canPersistSelection} onClick={confirm}>
-            {block.multi && selected.length > 0 ? t("confirmSelectionCount", { count: selected.length }) : t("confirm")}
-          </Button>
+          <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
+            <Button variant="contained" size="small" disabled={selected.length === 0 || pending || !canPersistSelection} onClick={confirm}>
+              {block.multi && selected.length > 0 ? t("confirmSelectionCount", { count: selected.length }) : t("confirm")}
+            </Button>
+            <IconButton tone="subtle" aria-label={t("copyQuestion")} onClick={copyQuestion} sx={{ width: 30, height: 30 }}>
+              <ContentCopyIcon sx={{ fontSize: 15 }} />
+            </IconButton>
+          </Stack>
         )}
         {(selectionError || (!canPersistSelection && !confirmed)) && (
           <Box sx={{ mt: 1 }}>

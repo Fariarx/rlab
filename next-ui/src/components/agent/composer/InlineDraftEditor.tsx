@@ -9,7 +9,7 @@ import { useI18n } from "../../../i18n/I18nProvider";
 import { localFileUrl } from "../../../lib/external-url";
 import type { ComposerAttachmentDraft, ComposerDraft } from "../core/types";
 import { Button, IconButton, ImageLightbox, Tooltip, type ButtonProps } from "../../ui";
-import { AttachmentTile } from "./AttachmentTile";
+import { AttachmentTile, AttachmentUploadSkeletonTile } from "./AttachmentTile";
 import { VoiceRecordingStrip, VOICE_IDLE_LEVELS } from "./ComposerVoice";
 import { clipboardFilesForComposer, composerSendPayload, mergeComposerAttachments, pastedTextFileForComposer, pastedTextFileFromBeforeInput } from "./composer-attachments-model";
 import { ComposerStore } from "./composer-store";
@@ -114,6 +114,7 @@ export const InlineDraftEditor = observer(function InlineDraftEditor({
   const [previewAttachment, setPreviewAttachment] = useState<ComposerAttachmentDraft | null>(null);
   const [editorFocused, setEditorFocused] = useState(false);
   const [voiceStartPending, setVoiceStartPending] = useState(false);
+  const [attachmentUploadCount, setAttachmentUploadCount] = useState(0);
   const value = editorStore.internalValue;
   const attachments = editorStore.internalAttachments;
   latestDraftRef.current = { text: value, attachments };
@@ -188,17 +189,22 @@ export const InlineDraftEditor = observer(function InlineDraftEditor({
     if (files.length === 0) {
       return;
     }
-    const results = await Promise.allSettled(files.map(fileToAttachmentDraft));
-    const ready: ComposerAttachmentDraft[] = [];
-    results.forEach((result, index) => {
-      if (result.status === "fulfilled") {
-        ready.push(result.value);
-      } else {
-        shared?.onAttachmentError?.(t("attachmentFailed", { name: files[index].name }));
+    setAttachmentUploadCount((current) => current + files.length);
+    try {
+      const results = await Promise.allSettled(files.map(fileToAttachmentDraft));
+      const ready: ComposerAttachmentDraft[] = [];
+      results.forEach((result, index) => {
+        if (result.status === "fulfilled") {
+          ready.push(result.value);
+        } else {
+          shared?.onAttachmentError?.(t("attachmentFailed", { name: files[index].name }));
+        }
+      });
+      if (ready.length > 0) {
+        setAttachments(mergeComposerAttachments(latestDraftRef.current.attachments, ready));
       }
-    });
-    if (ready.length > 0) {
-      setAttachments(mergeComposerAttachments(latestDraftRef.current.attachments, ready));
+    } finally {
+      setAttachmentUploadCount((current) => Math.max(0, current - files.length));
     }
   }, [setAttachments, shared, t]);
 
@@ -336,8 +342,15 @@ export const InlineDraftEditor = observer(function InlineDraftEditor({
       />
     );
   };
+  const renderAttachmentUploadSkeletons = () =>
+    Array.from({ length: attachmentUploadCount }, (_, index) => (
+      <AttachmentUploadSkeletonTile
+        key={`inline-attachment-upload-${index}`}
+        label={t("attachmentUploading")}
+      />
+    ));
 
-  const canSend = (value.trim().length > 0 || attachments.length > 0 || voiceState === "recording") && voiceState !== "transcribing";
+  const canSend = (value.trim().length > 0 || attachments.length > 0 || voiceState === "recording") && voiceState !== "transcribing" && attachmentUploadCount === 0;
 
   return (
     <Stack data-testid={`${testIdPrefix}-editor`} spacing={1.25} onFocusCapture={handleEditorFocus} onBlurCapture={handleEditorBlur} sx={rootSx}>
@@ -385,9 +398,10 @@ export const InlineDraftEditor = observer(function InlineDraftEditor({
           dockBottom
         />
       )}
-      {attachments.length > 0 && (
+      {(attachments.length > 0 || attachmentUploadCount > 0) && (
         <Box data-testid={`${testIdPrefix}-attachments`} sx={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 0.75 }}>
           {attachments.map(renderAttachment)}
+          {renderAttachmentUploadSkeletons()}
         </Box>
       )}
       <Stack direction="row" spacing={0.75} sx={composeSx(inlineEditorActionsSx, actionsSx)}>

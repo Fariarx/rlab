@@ -141,7 +141,8 @@ export interface Workspace {
   readonly hasOlderThreadMessages: (id: string) => boolean;
   readonly loadOlderThread: (id: string) => Promise<void>;
   readonly isQueuePaused: (id: string) => boolean;
-  readonly setQueuePaused: (id: string, paused: boolean) => void;
+  readonly queueResumeAtMs: (id: string) => number | undefined;
+  readonly setQueuePaused: (id: string, paused: boolean, options?: { readonly resumeAtMs?: number }) => void;
   readonly setCompaction: (id: string, patch: Partial<CompactionSettings>) => void;
   readonly setConversationView: (id: string, view: ConversationView) => void;
   readonly compactConversation: (id: string) => boolean;
@@ -1233,8 +1234,12 @@ export class WorkspaceStore implements Workspace {
 
   /** Pause/resume the server-owned queue. Resuming asks the server to drain; the
    *  client never dispatches queued turns itself. */
-  setQueuePaused(id: string, paused: boolean): void {
-    void setServerPendingTurnQueuePaused(id, paused)
+  queueResumeAtMs(id: string): number | undefined {
+    return this.queueSnapshot(id).resumeAtMs;
+  }
+
+  setQueuePaused(id: string, paused: boolean, options: { readonly resumeAtMs?: number } = {}): void {
+    void setServerPendingTurnQueuePaused(id, paused, options)
       .then((snapshot) => {
         runInAction(() => this.setQueueSnapshot(snapshot));
         if (!paused) {

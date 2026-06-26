@@ -3,8 +3,14 @@ import { useEffect } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { type ConversationAutoScrollController, useConversationAutoScroll } from "../src/components/agent/conversation/use-conversation-auto-scroll";
 
-function Harness({ capture }: { readonly capture: (controller: ConversationAutoScrollController) => void }) {
-  const controller = useConversationAutoScroll([{ id: "message-1" }]);
+function Harness({
+  capture,
+  itemCount = 1,
+}: {
+  readonly capture: (controller: ConversationAutoScrollController) => void;
+  readonly itemCount?: number;
+}) {
+  const controller = useConversationAutoScroll(Array.from({ length: itemCount }, (_, index) => ({ id: `message-${index + 1}` })));
   useEffect(() => {
     capture(controller);
   }, [capture, controller]);
@@ -96,6 +102,46 @@ describe("useConversationAutoScroll", () => {
       element.dispatchEvent(new Event("scroll"));
     });
 
+    expect(captured.current?.showScrollToBottom).toBe(true);
+  });
+
+  it("keeps following when a submitted turn appends while pinned", async () => {
+    const captured: { current: ConversationAutoScrollController | null } = { current: null };
+    const rendered = render(<Harness capture={(controller) => { captured.current = controller; }} />);
+
+    await waitFor(() => expect(captured.current).not.toBeNull());
+    const element = captured.current?.containerRef.current as HTMLElement;
+    sizeContainer(element, { scrollHeight: 1000, clientHeight: 300, scrollTop: 700 });
+    await act(async () => {
+      element.dispatchEvent(new Event("scroll"));
+    });
+
+    Object.defineProperty(element, "scrollHeight", { value: 1250, configurable: true });
+    rendered.rerender(<Harness itemCount={2} capture={(controller) => { captured.current = controller; }} />);
+
+    expect(element.scrollTop).toBe(1250);
+    expect(captured.current?.showScrollToBottom).toBe(false);
+  });
+
+  it("does not force-scroll appended items after the user has scrolled up", async () => {
+    const captured: { current: ConversationAutoScrollController | null } = { current: null };
+    const rendered = render(<Harness capture={(controller) => { captured.current = controller; }} />);
+
+    await waitFor(() => expect(captured.current).not.toBeNull());
+    const element = captured.current?.containerRef.current as HTMLElement;
+    sizeContainer(element, { scrollHeight: 1000, clientHeight: 300, scrollTop: 700 });
+    await act(async () => {
+      element.dispatchEvent(new Event("scroll"));
+    });
+    element.scrollTop = 300;
+    await act(async () => {
+      element.dispatchEvent(new Event("scroll"));
+    });
+
+    Object.defineProperty(element, "scrollHeight", { value: 1250, configurable: true });
+    rendered.rerender(<Harness itemCount={2} capture={(controller) => { captured.current = controller; }} />);
+
+    expect(element.scrollTop).toBe(300);
     expect(captured.current?.showScrollToBottom).toBe(true);
   });
 

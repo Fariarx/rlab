@@ -93,6 +93,20 @@ export function useConversationAutoScroll(items: readonly unknown[], options?: C
     }
   }, [hasItems, snapInstant]);
 
+  // When the user submits a message, the new user turn and the composer's
+  // height shrink can land in the same frame. If we wait for ResizeObserver, a
+  // browser scroll clamp from the shrink can look like a user scroll-up and
+  // release the pin before the first agent response arrives. New tail items are
+  // an explicit "keep following" signal only while the thread is already pinned.
+  const lastItemCount = useRef(items.length);
+  useLayoutEffect(() => {
+    const previousCount = lastItemCount.current;
+    lastItemCount.current = items.length;
+    if (items.length > previousCount && pinnedToBottom.current) {
+      snapInstant();
+    }
+  }, [items.length, snapInstant]);
+
   // Release the pin only on a genuine upward user scroll, and re-pin once the
   // user returns to the bottom. Deriving release from `isAtBottom` alone is
   // fragile: when the agent appends tool blocks faster than we re-snap, the

@@ -75,6 +75,7 @@ export function Conversation({
   contentMaxWidth,
   contentPaddingX,
   bottomInset = 0,
+  visible = true,
   hasMoreBefore = false,
   onLoadEarlier,
 }: {
@@ -89,6 +90,7 @@ export function Conversation({
   readonly contentPaddingX?: { readonly xs: number; readonly sm: number };
   /** Extra bottom space (px) reserved for the composer's floating tags row. */
   readonly bottomInset?: number;
+  readonly visible?: boolean;
   readonly hasMoreBefore?: boolean;
   readonly onLoadEarlier?: () => void | Promise<void>;
 }) {
@@ -156,7 +158,7 @@ export function Conversation({
               sx={{ width: "100%", minWidth: 0, maxWidth: contentMaxWidth, mx: "auto", px: contentPaddingX, pt: index === 0 && hiddenCount === 0 ? { xs: 2.5, sm: 4 } : 0, pb: 3, overflowX: "clip" }}
             >
               {item.kind === "message" ? (
-                <Message actions={actions} displayPrefs={displayPrefs} agentProfile={agentProfile} message={item.message} index={hiddenCount + index} />
+                <Message actions={actions} displayPrefs={displayPrefs} agentProfile={agentProfile} message={item.message} index={hiddenCount + index} visible={visible} />
               ) : (
                 <TypingRow delay={messages.length * 120} />
               )}

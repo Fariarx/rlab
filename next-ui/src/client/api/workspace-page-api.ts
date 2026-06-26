@@ -25,6 +25,7 @@ export interface WakeupSummary {
 export interface PendingTurnQueueSnapshot {
   readonly conversationId: string;
   readonly paused: boolean;
+  readonly resumeAtMs?: number;
   readonly messages: readonly ChatMessage[];
   readonly items: readonly PendingQueueItem[];
 }
@@ -55,6 +56,21 @@ export interface PendingQueueGoalItem extends PendingQueueItemBase {
   readonly dispatchCount: number;
 }
 
+export interface PendingTrackerTask {
+  readonly id: string;
+  readonly text: string;
+  readonly done: boolean;
+  readonly completedAtMs?: number;
+}
+
+export interface PendingQueueTrackerItem extends PendingQueueItemBase {
+  readonly kind: "tracker";
+  readonly title?: string;
+  readonly tasks: readonly PendingTrackerTask[];
+  readonly origin: string;
+  readonly dispatchCount: number;
+}
+
 export interface PendingQueueWakeupItem extends PendingQueueItemBase {
   readonly kind: "wakeup";
   readonly wakeupId: string;
@@ -64,7 +80,7 @@ export interface PendingQueueWakeupItem extends PendingQueueItemBase {
   readonly trigger?: WakeupTrigger;
 }
 
-export type PendingQueueItem = PendingQueueMessageItem | PendingQueueGoalItem | PendingQueueWakeupItem;
+export type PendingQueueItem = PendingQueueMessageItem | PendingQueueGoalItem | PendingQueueTrackerItem | PendingQueueWakeupItem;
 
 export interface CliUpdateInfo {
   readonly agent: string;
@@ -150,6 +166,7 @@ function normalizePendingTurnQueue(payload: unknown, conversationId: string): Pe
   return {
     conversationId: typeof queue.conversationId === "string" ? queue.conversationId : conversationId,
     paused: queue.paused === true,
+    ...(typeof queue.resumeAtMs === "number" && Number.isFinite(queue.resumeAtMs) ? { resumeAtMs: queue.resumeAtMs } : {}),
     messages: rawMessages.filter(isRecord).map((message) => message as unknown as ChatMessage),
     items: rawItems.filter(isRecord).map((item) => item as unknown as PendingQueueItem),
   };
@@ -244,11 +261,11 @@ export async function movePendingQueueItemAfter(conversationId: string, itemId: 
   return normalizePendingTurnQueue(payload, conversationId);
 }
 
-export async function setPendingTurnQueuePaused(conversationId: string, paused: boolean): Promise<PendingTurnQueueSnapshot> {
+export async function setPendingTurnQueuePaused(conversationId: string, paused: boolean, options: { readonly resumeAtMs?: number } = {}): Promise<PendingTurnQueueSnapshot> {
   const response = await fetch("/api/queue", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action: "setPaused", conversationId, paused }),
+    body: JSON.stringify({ action: "setPaused", conversationId, paused, ...(options.resumeAtMs === undefined ? {} : { resumeAtMs: options.resumeAtMs }) }),
   });
   const payload = await readJsonPayload(response);
   if (!response.ok) {

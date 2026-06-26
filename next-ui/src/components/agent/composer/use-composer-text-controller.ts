@@ -1,5 +1,5 @@
 import type { ChangeEvent, ClipboardEvent, FormEvent, KeyboardEvent, RefObject } from "react";
-import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { I18nApi } from "../../../i18n/I18nProvider";
 import { clipboardFilesForComposer, composerSendPayload, isLargePasteInputType, mergeComposerAttachments, pastedTextFileForComposer, pastedTextFileFromBeforeInput } from "./composer-attachments-model";
 import { emptyComposerHistoryState, navigateComposerHistory, resetComposerHistoryState, type ComposerHistoryState } from "./composer-history-model";
@@ -52,6 +52,7 @@ interface UseComposerTextControllerInput {
 interface UseComposerTextControllerResult {
   readonly addFiles: (files: readonly File[]) => Promise<void>;
   readonly applySuggestion: (suggestion: ComposerSuggestion) => void;
+  readonly attachmentUploadCount: number;
   readonly canSend: boolean;
   readonly handleBeforeInput: (event: FormEvent<HTMLInputElement | HTMLTextAreaElement>) => void;
   readonly handleComposerChange: (event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => void;
@@ -148,6 +149,7 @@ export function useComposerTextController({
   const localDraftDirtyRef = useRef(false);
   const latestDraftRef = useRef<ComposerDraft>({ text: composerValue, attachments: composerAttachments });
   const staleSubmitChangeGuardRef = useRef<StaleSubmitChangeGuard | null>(submittedChangeGuard(recentlySubmittedValue));
+  const [attachmentUploadCount, setAttachmentUploadCount] = useState(0);
   latestDraftRef.current = { text: composerValue, attachments: composerAttachments };
 
   const clearStaleSubmitChangeGuard = useCallback(() => {
@@ -332,17 +334,22 @@ export function useComposerTextController({
     if (files.length === 0) {
       return;
     }
-    const results = await Promise.allSettled(files.map(fileToAttachmentDraft));
-    const ready: ComposerAttachmentDraft[] = [];
-    results.forEach((result, index) => {
-      if (result.status === "fulfilled") {
-        ready.push(result.value);
-      } else {
-        onAttachmentError?.(t("attachmentFailed", { name: files[index].name }));
+    setAttachmentUploadCount((current) => current + files.length);
+    try {
+      const results = await Promise.allSettled(files.map(fileToAttachmentDraft));
+      const ready: ComposerAttachmentDraft[] = [];
+      results.forEach((result, index) => {
+        if (result.status === "fulfilled") {
+          ready.push(result.value);
+        } else {
+          onAttachmentError?.(t("attachmentFailed", { name: files[index].name }));
+        }
+      });
+      if (ready.length > 0) {
+        setComposerAttachments(mergeComposerAttachments(latestDraftRef.current.attachments, ready));
       }
-    });
-    if (ready.length > 0) {
-      setComposerAttachments(mergeComposerAttachments(latestDraftRef.current.attachments, ready));
+    } finally {
+      setAttachmentUploadCount((current) => Math.max(0, current - files.length));
     }
   }, [onAttachmentError, setComposerAttachments, t]);
 
@@ -509,7 +516,8 @@ export function useComposerTextController({
   return {
     addFiles,
     applySuggestion,
-    canSend: (hasComposerPayload || reviewCount > 0 || canSendWithoutPayload) && !sending,
+    attachmentUploadCount,
+    canSend: (hasComposerPayload || reviewCount > 0 || canSendWithoutPayload) && !sending && attachmentUploadCount === 0,
     handleBeforeInput,
     handleComposerChange,
     handleKeyDown,

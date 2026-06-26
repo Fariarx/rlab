@@ -9,6 +9,7 @@ import { VOICE_IDLE_LEVELS } from "../composer/ComposerVoice";
 import { ComposerStore } from "../composer/composer-store";
 import { Message, type MessageDisplayPrefs } from "./Message";
 import type { ChatMessage } from "../core/types";
+import { ToastProvider } from "../../ui";
 
 function renderMessage(
   message: ChatMessage,
@@ -21,7 +22,7 @@ function renderMessage(
   return render(
     <ThemeProvider theme={appTheme}>
       <I18nProvider locale="ru">
-        {composerShared ? <ComposerSharedProvider value={composerShared}>{node}</ComposerSharedProvider> : node}
+        <ToastProvider>{composerShared ? <ComposerSharedProvider value={composerShared}>{node}</ComposerSharedProvider> : node}</ToastProvider>
       </I18nProvider>
     </ThemeProvider>,
   );
@@ -102,6 +103,33 @@ describe("Message", () => {
     expect(screen.getByTestId("task-goal-user-message")).not.toHaveTextContent("goal-123");
     expect(screen.getByTestId("task-goal-user-message")).not.toHaveTextContent("Служебное описание TaskGoal скрыто");
     expect(screen.queryByText(/TaskGoal with action="complete"/)).not.toBeInTheDocument();
+  });
+
+  it("collapses structured TaskTracker user prompts", () => {
+    renderMessage({
+      id: "user-tracker",
+      role: "user",
+      text: [
+        '📋 <rlab-task-tracker id="tracker-123">',
+        "<summary>TaskTracker queue item.</summary>",
+        "<title>Release checklist</title>",
+        "<tasks>",
+        '<task id="task-1">Проверить очередь</task>',
+        '<task id="task-2">Обновить тесты</task>',
+        "</tasks>",
+        '<instructions>Work on these open tasks. When a task is done, call TaskTracker with action="complete".</instructions>',
+        "</rlab-task-tracker>",
+      ].join("\n"),
+    });
+
+    const card = screen.getByTestId("task-tracker-user-message");
+    expect(card).toHaveTextContent("Трекер задач");
+    expect(card).toHaveTextContent("Release checklist");
+    expect(card).toHaveTextContent("Проверить очередь");
+    expect(card).toHaveTextContent("Обновить тесты");
+    expect(card).not.toHaveTextContent("tracker-123");
+    expect(card).not.toHaveTextContent("task-1");
+    expect(screen.queryByText(/TaskTracker with action="complete"/)).not.toBeInTheDocument();
   });
 
   it("collapses legacy TaskGoal user prompts", () => {

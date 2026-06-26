@@ -12,7 +12,9 @@ import {
   claimNextPendingQueueItem,
   claimNextPendingTurn,
   deletePendingTurn,
+  completePendingTrackerTasks,
   enqueuePendingGoal,
+  enqueuePendingTracker,
   enqueuePendingTurn,
   initializeWorkspaceStateInDb,
   initWorkspaceDb,
@@ -163,6 +165,46 @@ describe("workspace-db", () => {
     expect(claimNextPendingQueueItem("c1", "run-goal-again")?.id).toBe("goal-1");
   });
 
+  it("dispatches task trackers before goals and removes them after all tasks are complete", () => {
+    initializeWorkspaceStateInDb({ ...buildEmptyWorkspaceState(), chats: [conv("c1")], threads: { c1: [] }, selectedId: "c1" });
+
+    enqueuePendingGoal({ id: "goal-1", conversationId: "c1", createdAtMs: 100, description: "keep improving", origin: "http://127.0.0.1:4280" });
+    enqueuePendingTracker({
+      id: "tracker-1",
+      conversationId: "c1",
+      createdAtMs: 200,
+      title: "Release checklist",
+      tasks: [
+        { id: "task-1", text: "Fix queue" },
+        { id: "task-2", text: "Add tests" },
+      ],
+      origin: "http://127.0.0.1:4280",
+    });
+
+    expect(readPendingTurnQueue("c1").items.map((item) => [item.kind, item.id])).toEqual([
+      ["goal", "goal-1"],
+      ["tracker", "tracker-1"],
+    ]);
+
+    const claimed = claimNextPendingQueueItem("c1", "run-tracker");
+    expect(claimed).toMatchObject({ id: "tracker-1", kind: "tracker", state: "dispatching", runId: "run-tracker" });
+    expect(readPendingTurnQueue("c1").items).toEqual([
+      expect.objectContaining({ id: "goal-1", kind: "goal", state: "queued" }),
+      expect.objectContaining({ id: "tracker-1", kind: "tracker", state: "dispatching" }),
+    ]);
+
+    completePendingTrackerTasks("c1", "tracker-1", ["task-1"]);
+    const afterPartialComplete = readPendingTurnQueue("c1").items.find((item) => item.id === "tracker-1");
+    expect(afterPartialComplete).toMatchObject({ kind: "tracker" });
+    expect(afterPartialComplete?.kind === "tracker" ? afterPartialComplete.tasks.map((task) => [task.id, task.done]) : []).toEqual([
+      ["task-1", true],
+      ["task-2", false],
+    ]);
+
+    completePendingTrackerTasks("c1", "tracker-1", ["task-2"]);
+    expect(readPendingTurnQueue("c1").items.map((item) => item.id)).toEqual(["goal-1"]);
+  });
+
   it("can enqueue message and goal items while atomically pausing the queue", () => {
     initializeWorkspaceStateInDb({ ...buildEmptyWorkspaceState(), chats: [conv("c1")], threads: { c1: [] }, selectedId: "c1" });
 
@@ -182,6 +224,22 @@ describe("workspace-db", () => {
 
     expect(readPendingTurnQueue("c1")).toMatchObject({ paused: true, items: [expect.objectContaining({ id: "goal-paused", kind: "goal" })] });
     expect(claimNextPendingQueueItem("c1", "run-paused-goal")).toBeNull();
+  });
+
+  it("stores delayed queue resume times and claims items after the resume time", () => {
+    initializeWorkspaceStateInDb({ ...buildEmptyWorkspaceState(), chats: [conv("c1")], threads: { c1: [] }, selectedId: "c1" });
+    enqueuePendingTurn({ id: "u-delayed", conversationId: "c1", createdAtMs: 100, message: userMsg("u-delayed", "later"), origin: "http://127.0.0.1:4280" });
+
+    setPendingTurnQueuePaused("c1", true, { resumeAtMs: 1_800_000_300_000 });
+
+    expect(readPendingTurnQueue("c1")).toMatchObject({ paused: true, resumeAtMs: 1_800_000_300_000 });
+    expect(claimNextPendingQueueItem("c1", "run-before", 1_800_000_299_000)).toBeNull();
+
+    const claimed = claimNextPendingQueueItem("c1", "run-after", 1_800_000_300_000);
+
+    expect(claimed).toMatchObject({ id: "u-delayed", kind: "message" });
+    expect(readPendingTurnQueue("c1").paused).toBe(false);
+    expect(readPendingTurnQueue("c1").resumeAtMs).toBeUndefined();
   });
 
   it("represents waiting wakeups as queue head blockers", () => {

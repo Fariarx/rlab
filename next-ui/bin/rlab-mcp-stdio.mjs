@@ -38,6 +38,25 @@ server.registerTool(
 );
 
 server.registerTool(
+  "TaskTracker",
+  {
+    description:
+      "Create or manage a persistent rlab task tracker in the current chat queue. Use action='add' or action='set' with tasks as strings or {id,text}. Use action='complete' with trackerId/id and optional taskIds/taskId. action='list' inspects open tasks.",
+    inputSchema: {
+      action: z.string().optional(),
+      title: z.string().optional(),
+      tasks: z.array(z.union([z.string(), z.object({ id: z.string().optional(), text: z.string() })])).optional(),
+      trackerId: z.string().optional(),
+      id: z.string().optional(),
+      taskIds: z.array(z.string()).optional(),
+      taskId: z.string().optional(),
+      afterItemId: z.string().optional(),
+    },
+  },
+  async () => ({ content: [{ type: "text", text: ACK }] }),
+);
+
+server.registerTool(
   "TaskGoal",
   {
     description:

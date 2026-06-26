@@ -1,4 +1,4 @@
-export type RlabChatToolId = "AskUserQuestion" | "TaskWakeup" | "TaskGoal" | "BrowserPreview";
+export type RlabChatToolId = "AskUserQuestion" | "TaskWakeup" | "TaskTracker" | "TaskGoal" | "BrowserPreview";
 
 export interface RlabChatToolDef {
   readonly id: RlabChatToolId;
@@ -8,12 +8,13 @@ export interface RlabChatToolDef {
 export const RLAB_CHAT_TOOLS: readonly RlabChatToolDef[] = [
   { id: "AskUserQuestion", token: "$AskUserQuestion" },
   { id: "TaskWakeup", token: "$TaskWakeup" },
+  { id: "TaskTracker", token: "$TaskTracker" },
   { id: "TaskGoal", token: "$TaskGoal" },
   { id: "BrowserPreview", token: "$BrowserPreview" },
 ];
 
 export const RLAB_CHAT_TOOL_IDS: readonly RlabChatToolId[] = RLAB_CHAT_TOOLS.map((tool) => tool.id);
-export const DEFAULT_RLAB_CHAT_TOOL_IDS: readonly RlabChatToolId[] = ["AskUserQuestion", "TaskWakeup", "TaskGoal"];
+export const DEFAULT_RLAB_CHAT_TOOL_IDS: readonly RlabChatToolId[] = ["AskUserQuestion", "TaskWakeup", "TaskTracker", "TaskGoal"];
 
 const RLAB_CHAT_TOOL_ID_SET = new Set<string>(RLAB_CHAT_TOOL_IDS);
 

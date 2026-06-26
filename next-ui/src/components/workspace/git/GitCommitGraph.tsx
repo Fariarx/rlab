@@ -253,12 +253,31 @@ export function GitCommitGraph({
               >
                 <MoreHorizRoundedIcon />
               </IconButton>
-              <Typography component="span" sx={{ flex: "0 0 auto", fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.68rem", fontWeight: 700, color: "text.secondary" }}>
-                {commit.shortHash}
-              </Typography>
-              <Typography component="span" sx={{ display: { xs: "none", md: "inline" }, flex: "0 0 auto", fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.66rem", color: "text.secondary", opacity: 0.75, maxWidth: 150, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {commit.author} · {commit.date}
-              </Typography>
+              <Stack component="span" direction="row" spacing={0.75} sx={{ flex: "0 0 auto", alignItems: "center", minWidth: "max-content" }}>
+                <Typography component="span" sx={{ flex: "0 0 auto", fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.68rem", fontWeight: 700, color: "text.secondary" }}>
+                  {commit.shortHash}
+                </Typography>
+                <Typography
+                  component="span"
+                  sx={{
+                    display: { xs: "none", md: "inline-block" },
+                    flex: "0 1 auto",
+                    maxWidth: { md: 92, xl: 150 },
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    fontFamily: (theme) => theme.custom.fonts.mono,
+                    fontSize: "0.66rem",
+                    color: "text.secondary",
+                    opacity: 0.75,
+                  }}
+                >
+                  {commit.author}
+                </Typography>
+                <Typography component="span" sx={{ display: { xs: "none", md: "inline" }, flex: "0 0 auto", fontFamily: (theme) => theme.custom.fonts.mono, fontSize: "0.66rem", color: "text.secondary", opacity: 0.75 }}>
+                  · {commit.date}
+                </Typography>
+              </Stack>
             </Box>
           );
         })}

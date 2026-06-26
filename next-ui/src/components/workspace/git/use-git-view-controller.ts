@@ -6,10 +6,16 @@ import {
   commitGit,
   fetchGitStatus,
   fetchGitTree,
+  fetchGitRemote,
   initGitRepo,
   mutateGitFile,
+  pullGitRemote,
+  pushGitRemote,
   resetGitTo,
   revertGitCommit,
+  type GitFetchOptions,
+  type GitPullOptions,
+  type GitPushOptions,
 } from "../../../client/api/git-panel-api";
 import type { I18nApi } from "../../../i18n/I18nProvider";
 import type { GitFileStatus, GitStatusPayload } from "../../../lib/git-status";
@@ -46,6 +52,9 @@ export interface GitViewController {
   readonly commitStagedFiles: () => void;
   readonly checkoutRef: (ref: string) => void;
   readonly commitAction: (action: GitCommitAction, hash: string) => void;
+  readonly fetchRemote: (options: GitFetchOptions) => void;
+  readonly pullRemote: (options: GitPullOptions) => void;
+  readonly pushRemote: (options: GitPushOptions) => void;
   readonly initRepo: () => void;
 }
 
@@ -290,6 +299,21 @@ export function useGitViewController({
       runGitAction(() => resetGitTo(cwd, hash, action === "reset-soft" ? "soft" : action === "reset-hard" ? "hard" : "mixed"));
     }
   };
+  const fetchRemote = (options: GitFetchOptions) => {
+    if (cwd) {
+      runGitAction(() => fetchGitRemote(cwd, options));
+    }
+  };
+  const pullRemote = (options: GitPullOptions) => {
+    if (cwd) {
+      runGitAction(() => pullGitRemote(cwd, options));
+    }
+  };
+  const pushRemote = (options: GitPushOptions) => {
+    if (cwd) {
+      runGitAction(() => pushGitRemote(cwd, options));
+    }
+  };
   const initRepo = () => {
     if (cwd) {
       runGitAction(() => initGitRepo(cwd));
@@ -313,6 +337,9 @@ export function useGitViewController({
     commitStagedFiles,
     checkoutRef,
     commitAction,
+    fetchRemote,
+    pullRemote,
+    pushRemote,
     initRepo,
   };
 }

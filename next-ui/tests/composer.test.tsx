@@ -962,6 +962,34 @@ describe("Composer", () => {
     });
   });
 
+  it("shows an attachment skeleton while selected files are still loading", async () => {
+    const onSend = vi.fn();
+    renderWithTheme(<Composer placeholder="Написать" onSend={onSend} />);
+
+    let resolveText!: (value: string) => void;
+    const textPromise = new Promise<string>((resolve) => {
+      resolveText = resolve;
+    });
+    const file = new File(["pending"], "slow.txt", { type: "text/plain" });
+    vi.spyOn(file, "text").mockImplementation(() => textPromise);
+
+    fireEvent.change(screen.getByLabelText("Выбрать файлы"), { target: { files: [file] } });
+    fireEvent.change(screen.getByPlaceholderText("Написать"), { target: { value: "Read this" } });
+
+    expect(await screen.findByTestId("attachment-upload-skeleton")).toHaveAccessibleName("Файл прикрепляется…");
+    expect(screen.queryByText("slow.txt")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Отправить" })).toBeDisabled();
+
+    await act(async () => {
+      resolveText("loaded file text");
+      await textPromise;
+    });
+
+    expect(await screen.findByText("slow.txt")).toBeInTheDocument();
+    expect(screen.queryByTestId("attachment-upload-skeleton")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Отправить" })).toBeEnabled();
+  });
+
   it("converts large mobile paste input into a text attachment", async () => {
     const onSend = vi.fn();
     renderWithTheme(<Composer placeholder="Написать" onSend={onSend} />);

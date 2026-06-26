@@ -2,7 +2,7 @@ import CodeOutlinedIcon from "@mui/icons-material/CodeOutlined";
 import DescriptionOutlinedIcon from "@mui/icons-material/DescriptionOutlined";
 import ImageOutlinedIcon from "@mui/icons-material/ImageOutlined";
 import InsertDriveFileOutlinedIcon from "@mui/icons-material/InsertDriveFileOutlined";
-import { Typography } from "@mui/material";
+import { Box, Skeleton, Typography } from "@mui/material";
 import type { Theme } from "@mui/material/styles";
 import { ComposerTag } from "./ComposerTag";
 
@@ -71,5 +71,30 @@ export function AttachmentTile({ name, mime, sizeBytes, onOpen, onRemove, remove
         ) : undefined
       }
     />
+  );
+}
+
+export function AttachmentUploadSkeletonTile({ label }: { readonly label: string }) {
+  return (
+    <Box
+      aria-label={label}
+      data-testid="attachment-upload-skeleton"
+      sx={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 0.5,
+        width: 156,
+        height: 28,
+        px: 0.875,
+        flex: "0 0 auto",
+        pointerEvents: "auto",
+        borderRadius: (t) => `${t.custom.radii.md}px`,
+        border: (t) => `1px solid ${t.custom.borders.strong}`,
+        backgroundColor: (t) => t.custom.surfaces.s2,
+      }}
+    >
+      <Skeleton variant="circular" width={15} height={15} sx={{ flex: "0 0 auto" }} />
+      <Skeleton variant="text" width={104} height={16} sx={{ flex: "1 1 auto", minWidth: 0 }} />
+    </Box>
   );
 }

@@ -2,7 +2,7 @@ import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
 import PsychologyIcon from "@mui/icons-material/Psychology";
 import { Box, ButtonBase, Collapse, Stack, Typography } from "@mui/material";
 import { observer } from "mobx-react-lite";
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { useI18n } from "../../../i18n/I18nProvider";
 import { AgentBlockRenderer } from "../blocks/AgentBlockRenderer";
 import { ResolvedOptionSummary } from "../blocks/ResolvedOptionSummary";
@@ -24,6 +24,7 @@ export interface AgentDetailsProps {
   readonly live?: boolean;
   readonly showSpinner?: boolean;
   readonly startedAtMs?: number;
+  readonly visible?: boolean;
 }
 
 /** Collapsed-by-default container holding an agent turn's intermediate work. */
@@ -35,12 +36,12 @@ export const AgentDetails = observer(function AgentDetails({
   showSpinner = false,
   hasResultAfter = false,
   startedAtMs,
+  visible = true,
 }: AgentDetailsProps) {
-  // `autoExpand` only seeds the initial open state. Afterwards the user's manual
-  // toggle wins, so the container can be collapsed mid-thought.
-  const [store] = useState(() => new AgentDetailsStore(autoExpand && live));
+  // `autoExpand` opens live reasoning when the conversation becomes visible.
+  // Afterwards the user's manual toggle wins until visibility/live state changes.
+  const [store] = useState(() => new AgentDetailsStore(autoExpand && live && visible));
   const { open, setOpen } = store;
-  const previousLive = useRef(live);
   const detailsId = useId();
   const { t } = useI18n();
   const reasoning = blocks.find((block) => block.kind === "reasoning");
@@ -51,9 +52,12 @@ export const AgentDetails = observer(function AgentDetails({
   useEffect(() => {
     if (hasResultAfter) {
       setOpen(false);
+      return;
     }
-    previousLive.current = live;
-  }, [hasResultAfter, live, setOpen]);
+    if (autoExpand && live && visible) {
+      setOpen(true);
+    }
+  }, [autoExpand, hasResultAfter, live, setOpen, visible]);
 
   const liveAnchor = startedAtMs ?? blockStartedAtMs;
   // Tie the timer to the whole live turn, not to the spinner. The spinner toggles

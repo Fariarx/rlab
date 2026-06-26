@@ -819,6 +819,7 @@ export const WorkspacePageView = observer(function WorkspacePageView({
                     contentMaxWidth={THREAD_MAX_WIDTH}
                     contentPaddingX={THREAD_PADDING_X}
                     bottomInset={contentBottomInset}
+                    visible={view === "chat"}
                     hasMoreBefore={selectedHasOlderMessages}
                     onLoadEarlier={loadOlderSelectedThread}
                   />
@@ -929,6 +930,7 @@ export const WorkspacePageView = observer(function WorkspacePageView({
                     messages={selectedQueuedMessages}
                     items={selectedQueuedItems}
                     paused={ws.isQueuePaused(selected.id)}
+                    resumeAtMs={ws.queueResumeAtMs(selected.id)}
                     onCancel={(messageId) => ws.cancelQueuedMessage(selected.id, messageId)}
                     onCancelItem={(itemId) => ws.cancelQueuedItem(selected.id, itemId)}
                     onCopy={(message) => messageActions.onCopy?.(message)}
@@ -938,7 +940,7 @@ export const WorkspacePageView = observer(function WorkspacePageView({
                       composerRef.current?.setDraft(draft);
                     }}
                     onSendNow={() => ws.sendQueuedMessageNow(selected.id)}
-                    onTogglePause={() => ws.setQueuePaused(selected.id, !ws.isQueuePaused(selected.id))}
+                    onTogglePause={(resumeAtMs) => ws.setQueuePaused(selected.id, !ws.isQueuePaused(selected.id), { resumeAtMs })}
                     onMoveItemAfter={(itemId, afterItemId) => ws.moveQueuedItemAfter(selected.id, itemId, afterItemId)}
                   />
                 ) : undefined}

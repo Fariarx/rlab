@@ -9,7 +9,7 @@ import { type RunNotificationController, useRunNotifications } from "../src/comp
 
 const t: I18nApi["t"] = (key, params) => (typeof params?.title === "string" ? `${key}:${params.title}` : key);
 
-function conversation(id: string, status: ConversationSummary["status"], title = id): ConversationSummary {
+function conversation(id: string, status: ConversationSummary["status"], title = id, patch: Partial<ConversationSummary> = {}): ConversationSummary {
   return {
     id,
     title,
@@ -18,6 +18,7 @@ function conversation(id: string, status: ConversationSummary["status"], title =
     time: "now",
     agent: DEFAULT_PROFILE.agent,
     profile: DEFAULT_PROFILE,
+    ...patch,
   };
 }
 
@@ -94,5 +95,45 @@ describe("useRunNotifications", () => {
 
     expect(toast).toHaveBeenNthCalledWith(1, { message: "runNeedsInputToast:Deploy", severity: "warning", duration: 3500 });
     expect(toast).toHaveBeenNthCalledWith(2, { message: "runCompletedToast:Deploy", severity: "success", duration: 3500 });
+  });
+
+  it("does not repeat the waiting notification when the same run flaps back to waiting", () => {
+    const toast = vi.fn(() => "toast-1");
+    const controller: { current: RunNotificationController | null } = { current: null };
+    const capture = (next: RunNotificationController) => {
+      controller.current = next;
+    };
+    const waitingPatch = { activeRunId: "run-1", snippet: "Need approval" };
+    const { rerender } = render(
+      <Harness conversations={[conversation("chat-1", "running", "Deploy", waitingPatch)]} selectedId="chat-2" toast={toast} capture={capture} />,
+    );
+
+    controller.current?.mark("chat-1");
+    rerender(<Harness conversations={[conversation("chat-1", "waiting", "Deploy", waitingPatch)]} selectedId="chat-2" toast={toast} capture={capture} />);
+    rerender(<Harness conversations={[conversation("chat-1", "running", "Deploy", waitingPatch)]} selectedId="chat-2" toast={toast} capture={capture} />);
+    rerender(<Harness conversations={[conversation("chat-1", "waiting", "Deploy", waitingPatch)]} selectedId="chat-2" toast={toast} capture={capture} />);
+
+    expect(toast).toHaveBeenCalledTimes(1);
+    expect(toast).toHaveBeenCalledWith({ message: "runNeedsInputToast:Deploy", severity: "warning", duration: 3500 });
+  });
+
+  it("notifies again when the same run waits on a different prompt", () => {
+    const toast = vi.fn(() => "toast-1");
+    const controller: { current: RunNotificationController | null } = { current: null };
+    const capture = (next: RunNotificationController) => {
+      controller.current = next;
+    };
+    const { rerender } = render(
+      <Harness conversations={[conversation("chat-1", "running", "Deploy", { activeRunId: "run-1", snippet: "First question" })]} selectedId="chat-2" toast={toast} capture={capture} />,
+    );
+
+    controller.current?.mark("chat-1");
+    rerender(<Harness conversations={[conversation("chat-1", "waiting", "Deploy", { activeRunId: "run-1", snippet: "First question" })]} selectedId="chat-2" toast={toast} capture={capture} />);
+    rerender(<Harness conversations={[conversation("chat-1", "running", "Deploy", { activeRunId: "run-1", snippet: "Second question" })]} selectedId="chat-2" toast={toast} capture={capture} />);
+    rerender(<Harness conversations={[conversation("chat-1", "waiting", "Deploy", { activeRunId: "run-1", snippet: "Second question" })]} selectedId="chat-2" toast={toast} capture={capture} />);
+
+    expect(toast).toHaveBeenCalledTimes(2);
+    expect(toast).toHaveBeenNthCalledWith(1, { message: "runNeedsInputToast:Deploy", severity: "warning", duration: 3500 });
+    expect(toast).toHaveBeenNthCalledWith(2, { message: "runNeedsInputToast:Deploy", severity: "warning", duration: 3500 });
   });
 });
