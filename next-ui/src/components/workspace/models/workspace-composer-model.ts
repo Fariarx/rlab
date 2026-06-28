@@ -22,14 +22,14 @@ export function wakeupTagDetail(wakeup: WakeupSummary, locale: Locale): WakeupTa
   let script: { readonly label: string; readonly body: string } | undefined;
   let heading: string;
   if (wakeup.trigger.type === "time") {
-    heading = ru ? "TaskWakeup · по времени" : "TaskWakeup · time";
+    heading = ru ? "TaskAwaiter · по времени" : "TaskAwaiter · time";
     rows.push({ label: ru ? "Сработает" : "Fires at", value: formatDateTime24(new Date(wakeup.trigger.fireAtMs)) });
   } else if (wakeup.trigger.type === "cron") {
-    heading = "TaskWakeup · cron";
+    heading = "TaskAwaiter · cron";
     rows.push({ label: "Cron", value: wakeup.trigger.cron });
     rows.push({ label: ru ? "Следующий запуск" : "Next run", value: formatDateTime24(new Date(wakeup.trigger.nextFireMs)) });
   } else {
-    heading = "TaskWakeup · script";
+    heading = "TaskAwaiter · script";
     rows.push({
       label: ru ? "Расписание" : "Schedule",
       value: wakeup.trigger.cron ? `cron ${wakeup.trigger.cron}` : ru ? `каждые ${wakeup.trigger.intervalSeconds}с` : `every ${wakeup.trigger.intervalSeconds}s`,
@@ -131,7 +131,7 @@ export function scheduledWakeupComposerTags({
   return wakeups.map((wakeup) => ({
     id: wakeup.id,
     label: wakeupLabel(wakeup, locale),
-    removeLabel: locale === "ru" ? "Убрать запланированную задачу" : "Remove scheduled wakeup",
+    removeLabel: locale === "ru" ? "Убрать Task Awaiter" : "Remove Task Awaiter",
     onRemove: () => removeWakeup(wakeup.id),
     detail: wakeupTagDetail(wakeup, locale),
   }));

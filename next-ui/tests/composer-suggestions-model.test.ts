@@ -4,7 +4,7 @@ import type { ComposerPluginLink } from "../src/lib/rlab-plugins";
 
 const plugins: readonly ComposerPluginLink[] = [
   { id: "AskUserQuestion", label: "Ask User", token: "$AskUserQuestion" },
-  { id: "TaskWakeup", label: "Task Wakeup", token: "$TaskWakeup" },
+  { id: "TaskAwaiter", label: "Task Awaiter", token: "$TaskAwaiter" },
 ];
 
 describe("composer-suggestions-model", () => {
@@ -15,8 +15,8 @@ describe("composer-suggestions-model", () => {
   });
 
   it("finds plugin suggestions from id, label, or token", () => {
-    expect(composerPluginSuggestions("$", plugins).map((plugin) => plugin.id)).toEqual(["AskUserQuestion", "TaskWakeup"]);
-    expect(composerPluginSuggestions("$wake", plugins).map((plugin) => plugin.id)).toEqual(["TaskWakeup"]);
+    expect(composerPluginSuggestions("$", plugins).map((plugin) => plugin.id)).toEqual(["AskUserQuestion", "TaskAwaiter"]);
+    expect(composerPluginSuggestions("$await", plugins).map((plugin) => plugin.id)).toEqual(["TaskAwaiter"]);
     expect(composerPluginSuggestions("plain", plugins)).toEqual([]);
   });
 
@@ -24,10 +24,10 @@ describe("composer-suggestions-model", () => {
     expect(composerSuggestions("$", ["README.md"], plugins, false, 99)).toMatchObject({
       open: true,
       activeIndex: 1,
-      key: "AskUserQuestion|TaskWakeup",
+      key: "AskUserQuestion|TaskAwaiter",
       suggestions: [
         { id: "AskUserQuestion", label: "$AskUserQuestion", kind: "plugin", mono: true, value: "$AskUserQuestion" },
-        { id: "TaskWakeup", label: "$TaskWakeup", kind: "plugin", mono: true, value: "$TaskWakeup" },
+        { id: "TaskAwaiter", label: "$TaskAwaiter", kind: "plugin", mono: true, value: "$TaskAwaiter" },
       ],
     });
     expect(composerSuggestions("Read @", ["README.md"], plugins, true, 0)).toMatchObject({
@@ -42,7 +42,7 @@ describe("composer-suggestions-model", () => {
       "Read @src/auth.ts ",
     );
     expect(
-      applyComposerSuggestion("Use $wake", { id: "TaskWakeup", label: "$TaskWakeup", kind: "plugin", mono: true, value: "$TaskWakeup" }),
-    ).toBe("Use $TaskWakeup ");
+      applyComposerSuggestion("Use $await", { id: "TaskAwaiter", label: "$TaskAwaiter", kind: "plugin", mono: true, value: "$TaskAwaiter" }),
+    ).toBe("Use $TaskAwaiter ");
   });
 });

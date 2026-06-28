@@ -83,6 +83,7 @@ import {
   workspaceDbHasState,
   WorkspaceRevisionConflictError,
   type PendingQueueDispatchItem,
+  type PendingQueuePauseReason,
   type PendingTrackerTaskInput,
   type PendingTurnRecord,
   type WorkspaceDbMutation,
@@ -6998,11 +6999,11 @@ interface RunSpec {
   readonly createTranslator: () => (line: string) => RunEvent[];
 }
 
-const TASK_WAKEUP_TOOL_NAME = "TaskWakeup";
+const TASK_AWAITER_TOOL_NAME = "TaskAwaiter";
 const TASK_TRACKER_TOOL_NAME = "TaskTracker";
 const TASK_GOAL_TOOL_NAME = "TaskGoal";
 const CLAUDE_SAFE_READ_TOOLS = ["Read", "Glob", "Grep", "LS"] as const;
-const CLAUDE_READ_ONLY_TOOLS = ["Read", "Glob", "Grep", "LS", "AskUserQuestion", TASK_WAKEUP_TOOL_NAME, TASK_TRACKER_TOOL_NAME, TASK_GOAL_TOOL_NAME] as const;
+const CLAUDE_READ_ONLY_TOOLS = ["Read", "Glob", "Grep", "LS", "AskUserQuestion", TASK_AWAITER_TOOL_NAME, TASK_TRACKER_TOOL_NAME, TASK_GOAL_TOOL_NAME] as const;
 // rlab's chat tools are described to the model in RLAB_CHAT_TOOLS_PROMPT and must
 // also be *registered* so agents don't reject the call with "No such tool
 // available" (which would also stop the stream translator from scheduling the
@@ -7011,12 +7012,12 @@ const CLAUDE_READ_ONLY_TOOLS = ["Read", "Glob", "Grep", "LS", "AskUserQuestion",
 // watching the resulting tool calls.
 const RLAB_MCP_SERVER_NAME = "rlab";
 // Model-facing names (per RLAB_CHAT_TOOLS_PROMPT) resolve to the registered MCP
-// tool names so a bare `TaskWakeup` call isn't rejected as unknown.
+// tool names so a bare `TaskAwaiter` call isn't rejected as unknown.
 const RLAB_CHAT_TOOL_ALIASES: Record<string, string> = {
-  [TASK_WAKEUP_TOOL_NAME]: `mcp__${RLAB_MCP_SERVER_NAME}__${TASK_WAKEUP_TOOL_NAME}`,
+  [TASK_AWAITER_TOOL_NAME]: `mcp__${RLAB_MCP_SERVER_NAME}__${TASK_AWAITER_TOOL_NAME}`,
   [TASK_TRACKER_TOOL_NAME]: `mcp__${RLAB_MCP_SERVER_NAME}__${TASK_TRACKER_TOOL_NAME}`,
   [TASK_GOAL_TOOL_NAME]: `mcp__${RLAB_MCP_SERVER_NAME}__${TASK_GOAL_TOOL_NAME}`,
-  ScheduleWakeup: `mcp__${RLAB_MCP_SERVER_NAME}__${TASK_WAKEUP_TOOL_NAME}`,
+  ScheduleAwaiter: `mcp__${RLAB_MCP_SERVER_NAME}__${TASK_AWAITER_TOOL_NAME}`,
 };
 const CLAUDE_EFFORT_LEVELS: ReadonlySet<EffortLevel> = new Set(["low", "medium", "high", "xhigh", "max"]);
 const ASK_USER_QUESTION_PROMPT_LINES = [
@@ -7026,14 +7027,14 @@ const ASK_USER_QUESTION_PROMPT_LINES = [
   "Do not create a numbered question list in prose when the question can be represented with AskUserQuestion options.",
 ] as const;
 
-const TASK_WAKEUP_PROMPT_LINES = [
-  "When you need rlab to wake you later in this same chat for an automation task, use TaskWakeup with the exact follow-up prompt; rlab persists and fires that wakeup server-side.",
-  "Use TaskWakeup instead of sleeping, polling inside the agent, or keeping the turn open. After TaskWakeup succeeds, finish the current turn and wait for rlab to re-run you.",
-  "TaskWakeup supports delaySeconds/fireAt/cron for time wakeups and script plus intervalSeconds or cron for condition wakeups; the script runs server-side in the project cwd, exit code 0 fires the wakeup, and non-zero exit codes keep polling.",
-  "After scheduling or cancelling, TaskWakeup returns the current wakeup list for this chat so duplicate timers are visible.",
-  "For condition wakeups, write a deterministic shell script in the TaskWakeup input: { prompt, script, intervalSeconds, reason } or { prompt, script, cron, reason }. Do not describe the script in prose instead of calling the tool.",
-  "To cancel task wakeups in this chat, call TaskWakeup with action=\"cancel\" and either wakeupId/id or all=true.",
-  "To inspect scheduled wakeups in this chat, call TaskWakeup with action=\"list\". The tool result returns wakeup ids, trigger type, next fire/check time, prompt, and reason.",
+const TASK_AWAITER_PROMPT_LINES = [
+  "When you need rlab to re-run you later in this same chat for an automation task, use TaskAwaiter with the exact follow-up prompt; rlab persists and fires that awaiter server-side.",
+  "Use TaskAwaiter instead of sleeping, polling inside the agent, or keeping the turn open. After TaskAwaiter succeeds, finish the current turn and wait for rlab to re-run you.",
+  "TaskAwaiter supports delaySeconds/fireAt/cron for time awaiters and script plus intervalSeconds or cron for condition awaiters; the script runs server-side in the project cwd, exit code 0 fires the awaiter, and non-zero exit codes keep polling.",
+  "After scheduling or cancelling, TaskAwaiter returns the current awaiter list for this chat so duplicate timers are visible.",
+  "For condition awaiters, write a deterministic shell script in the TaskAwaiter input: { prompt, script, intervalSeconds, reason } or { prompt, script, cron, reason }. Do not describe the script in prose instead of calling the tool.",
+  "To cancel task awaiters in this chat, call TaskAwaiter with action=\"cancel\" and either wakeupId/id or all=true.",
+  "To inspect scheduled awaiters in this chat, call TaskAwaiter with action=\"list\". The tool result returns awaiter ids, trigger type, next fire/check time, prompt, and reason.",
 ] as const;
 
 const TASK_GOAL_PROMPT_LINES = [
@@ -7045,7 +7046,7 @@ const TASK_GOAL_PROMPT_LINES = [
 const TASK_TRACKER_PROMPT_LINES = [
   "When a chat needs a persistent actionable task list, use TaskTracker.",
   "TaskTracker supports action='add'/'set' with tasks as an array of strings or {id,text}, action='complete' with trackerId/id and optional taskIds/taskId to mark tasks done, and action='list' to inspect open task trackers.",
-  "A TaskTracker is a persistent queue item. It runs after wakeups and before TaskGoal items; rlab sends it back as a 📋 tracker turn until all tasks are completed.",
+  "A TaskTracker is a persistent queue item. It runs after TaskAwaiter items and before TaskGoal items; rlab sends it back as a 📋 tracker turn until all tasks are completed.",
 ] as const;
 
 function rlabChatToolsPrompt(tools: unknown): string {
@@ -7053,8 +7054,8 @@ function rlabChatToolsPrompt(tools: unknown): string {
   if (rlabChatToolEnabled(tools, "AskUserQuestion")) {
     lines.push(...ASK_USER_QUESTION_PROMPT_LINES);
   }
-  if (rlabChatToolEnabled(tools, "TaskWakeup")) {
-    lines.push(...TASK_WAKEUP_PROMPT_LINES);
+  if (rlabChatToolEnabled(tools, "TaskAwaiter")) {
+    lines.push(...TASK_AWAITER_PROMPT_LINES);
   }
   if (rlabChatToolEnabled(tools, "TaskTracker")) {
     lines.push(...TASK_TRACKER_PROMPT_LINES);
@@ -7082,9 +7083,9 @@ interface RlabPluginLink {
 
 const CODEX_RLAB_DYNAMIC_TOOLS: readonly CodexDynamicToolSpec[] = [
   {
-    name: TASK_WAKEUP_TOOL_NAME,
+    name: TASK_AWAITER_TOOL_NAME,
     description:
-      "Set or cancel a server-side task wakeup in the current rlab chat. To set a wakeup, provide prompt plus delaySeconds, fireAt, cron, or script with intervalSeconds/cron. To cancel, provide action='cancel' plus wakeupId/id or all=true. Schedule/cancel results include the current wakeup list for this chat. The script is syntax-checked before acceptance, runs server-side in the project cwd, exit code 0 fires the wakeup, and non-zero keeps polling.",
+      "Set or cancel a server-side task awaiter in the current rlab chat. To set an awaiter, provide prompt plus delaySeconds, fireAt, cron, or script with intervalSeconds/cron. To cancel, provide action='cancel' plus wakeupId/id or all=true. Schedule/cancel results include the current awaiter list for this chat. The script is syntax-checked before acceptance, runs server-side in the project cwd, exit code 0 fires the awaiter, and non-zero keeps polling.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -7092,11 +7093,11 @@ const CODEX_RLAB_DYNAMIC_TOOLS: readonly CodexDynamicToolSpec[] = [
         action: {
           type: "string",
           enum: ["schedule", "cancel", "list"],
-          description: "Use 'schedule' or omit for a new wakeup. Use 'cancel' to remove scheduled wakeups. Use 'list' to inspect scheduled wakeups in this chat.",
+          description: "Use 'schedule' or omit for a new awaiter. Use 'cancel' to remove scheduled awaiters. Use 'list' to inspect scheduled awaiters in this chat.",
         },
         prompt: {
           type: "string",
-          description: "Exact follow-up prompt rlab should send when the wakeup fires.",
+          description: "Exact follow-up prompt rlab should send when the awaiter fires.",
         },
         reason: {
           type: "string",
@@ -7105,7 +7106,7 @@ const CODEX_RLAB_DYNAMIC_TOOLS: readonly CodexDynamicToolSpec[] = [
         delaySeconds: {
           type: "number",
           minimum: 1,
-          description: "Wake up after this many seconds.",
+          description: "Run again after this many seconds.",
         },
         fireAt: {
           type: "string",
@@ -7122,7 +7123,7 @@ const CODEX_RLAB_DYNAMIC_TOOLS: readonly CodexDynamicToolSpec[] = [
         intervalSeconds: {
           type: "number",
           minimum: 1,
-          description: "Polling interval for script wakeups. Use either intervalSeconds or cron with script.",
+          description: "Polling interval for script awaiters. Use either intervalSeconds or cron with script.",
         },
         wakeupId: {
           type: "string",
@@ -7134,7 +7135,7 @@ const CODEX_RLAB_DYNAMIC_TOOLS: readonly CodexDynamicToolSpec[] = [
         },
         all: {
           type: "boolean",
-          description: "Cancel all wakeups for this chat when action is 'cancel'.",
+          description: "Cancel all awaiters for this chat when action is 'cancel'.",
         },
       },
     },
@@ -7142,7 +7143,7 @@ const CODEX_RLAB_DYNAMIC_TOOLS: readonly CodexDynamicToolSpec[] = [
   {
     name: TASK_TRACKER_TOOL_NAME,
     description:
-      "Create or manage a persistent task tracker in the current rlab chat queue. Trackers are queue items that run after wakeups and before TaskGoal items until their tasks are completed. Use add/set with tasks, list to inspect open tasks, and complete with trackerId/id plus optional taskIds/taskId to mark tasks done.",
+      "Create or manage a persistent task tracker in the current rlab chat queue. Trackers are queue items that run after TaskAwaiter items and before TaskGoal items until their tasks are completed. Use add/set with tasks, list to inspect open tasks, and complete with trackerId/id plus optional taskIds/taskId to mark tasks done.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -7387,7 +7388,7 @@ function rlabChatToolsPromptAppendix(tools: unknown): string {
     "<rlab-chat-tools>",
     "This rlab chat has server-side tools that are handled by the application, not by the user's project.",
     prompt,
-    ...(rlabChatToolEnabled(tools, "TaskWakeup") ? ["Tool names accepted by rlab for task wakeups: TaskWakeup."] : []),
+    ...(rlabChatToolEnabled(tools, "TaskAwaiter") ? ["Tool names accepted by rlab for task awaiters: TaskAwaiter."] : []),
     ...(rlabChatToolEnabled(tools, "TaskTracker") ? ["Tool names accepted by rlab for persistent task trackers: TaskTracker."] : []),
     ...(rlabChatToolEnabled(tools, "TaskGoal") ? ["Tool names accepted by rlab for persistent queue goals: TaskGoal."] : []),
     "</rlab-chat-tools>",
@@ -7453,7 +7454,7 @@ function ensureGeminiMcpConfig(): void {
 
 /** Extra env for CLI agents so they load rlab's external MCP server (chat tools). */
 function rlabAgentMcpRunEnv(agent: string, tools?: readonly RlabChatToolId[]): NodeJS.ProcessEnv {
-  if (!rlabChatToolEnabled(tools, "TaskWakeup") && !rlabChatToolEnabled(tools, "TaskTracker") && !rlabChatToolEnabled(tools, "TaskGoal")) {
+  if (!rlabChatToolEnabled(tools, "TaskAwaiter") && !rlabChatToolEnabled(tools, "TaskTracker") && !rlabChatToolEnabled(tools, "TaskGoal")) {
     return {};
   }
   if (agent === "opencode") {
@@ -7691,7 +7692,7 @@ function claudeToolsForRequest(request: RunRequest): ClaudeQueryOptions["tools"]
     return [
       ...CLAUDE_SAFE_READ_TOOLS,
       ...(rlabChatToolEnabled(request.tools, "AskUserQuestion") ? ["AskUserQuestion" as const] : []),
-      ...(rlabChatToolEnabled(request.tools, "TaskWakeup") ? [TASK_WAKEUP_TOOL_NAME] : []),
+      ...(rlabChatToolEnabled(request.tools, "TaskAwaiter") ? [TASK_AWAITER_TOOL_NAME] : []),
       ...(rlabChatToolEnabled(request.tools, "TaskTracker") ? [TASK_TRACKER_TOOL_NAME] : []),
       ...(rlabChatToolEnabled(request.tools, "TaskGoal") ? [TASK_GOAL_TOOL_NAME] : []),
     ];
@@ -7721,7 +7722,7 @@ export function buildClaudeSdkOptions(
     permissionMode,
     systemPrompt: { type: "preset", preset: "claude_code", append: claudeSdkSystemPromptAppend(request) },
     tools: claudeToolsForRequest(request),
-    ...(rlabChatToolEnabled(request.tools, "TaskWakeup") || rlabChatToolEnabled(request.tools, "TaskTracker") || rlabChatToolEnabled(request.tools, "TaskGoal")
+    ...(rlabChatToolEnabled(request.tools, "TaskAwaiter") || rlabChatToolEnabled(request.tools, "TaskTracker") || rlabChatToolEnabled(request.tools, "TaskGoal")
       ? {
           mcpServers: { [RLAB_MCP_SERVER_NAME]: { type: "stdio", command: "node", args: [RLAB_MCP_STDIO_SCRIPT], alwaysLoad: true } },
           toolAliases: RLAB_CHAT_TOOL_ALIASES,
@@ -8681,8 +8682,8 @@ export function createRunApprovalHandler(send: (event: RunEvent) => void, scopeI
     if (toolName === "AskUserQuestion" && !rlabChatToolEnabled(tools, "AskUserQuestion")) {
       return Promise.resolve<PermissionResult>({ behavior: "deny", message: "AskUserQuestion is disabled for this chat.", toolUseID: context.toolUseID });
     }
-    if (isWakeupToolName(toolName) && !rlabChatToolEnabled(tools, "TaskWakeup")) {
-      return Promise.resolve<PermissionResult>({ behavior: "deny", message: "TaskWakeup is disabled for this chat.", toolUseID: context.toolUseID });
+    if (isWakeupToolName(toolName) && !rlabChatToolEnabled(tools, "TaskAwaiter")) {
+      return Promise.resolve<PermissionResult>({ behavior: "deny", message: "TaskAwaiter is disabled for this chat.", toolUseID: context.toolUseID });
     }
     if (isTrackerToolName(toolName) && !rlabChatToolEnabled(tools, "TaskTracker")) {
       return Promise.resolve<PermissionResult>({ behavior: "deny", message: "TaskTracker is disabled for this chat.", toolUseID: context.toolUseID });
@@ -9029,7 +9030,7 @@ function escapeXmlAttribute(value: string): string {
 }
 
 function queuedGoalPrompt(record: Extract<PendingQueueDispatchItem, { readonly kind: "goal" }>): string {
-  const instructions = `Work on this standing goal. When it is achieved, call TaskGoal with action="complete" and goalId="${record.id}"; to cancel it, call TaskGoal with action="remove" and goalId="${record.id}".`;
+  const instructions = `Work on this standing goal. If progress is blocked by time, a long-running external process, or a requested check interval, call TaskAwaiter with a follow-up prompt and delaySeconds, fireAt, cron, or script; the awaiter blocks this goal from immediately re-running until it fires. When the goal is achieved, call TaskGoal with action="complete" and goalId="${record.id}"; to cancel it, call TaskGoal with action="remove" and goalId="${record.id}".`;
   return [
     `🎯 <rlab-task-goal id="${escapeXmlAttribute(record.id)}">`,
     "<summary>TaskGoal queue item.</summary>",
@@ -9080,8 +9081,9 @@ function queuedRunTools(record: PendingQueueDispatchItem | PendingTurnRecord, to
   if (!("kind" in record) || tools === undefined) {
     return tools;
   }
-  if (record.kind === "goal" && !rlabChatToolEnabled(tools, "TaskGoal")) {
-    return [...activeRlabChatToolIds(tools), "TaskGoal"];
+  if (record.kind === "goal") {
+    const activeTools = activeRlabChatToolIds(tools);
+    return activeRlabChatToolIds([...activeTools, "TaskAwaiter", "TaskGoal"]);
   }
   if (record.kind === "tracker" && !rlabChatToolEnabled(tools, "TaskTracker")) {
     return [...activeRlabChatToolIds(tools), "TaskTracker"];
@@ -9178,7 +9180,7 @@ function drainServerQueue(conversationId: string): void {
           });
         } catch (error) {
           if (!accepted) {
-            releasePendingQueueItem(record.id, { pause: true });
+            releasePendingQueueItem(record.id, { pause: true, pauseReason: "dispatch-error" });
             emitPendingQueueChange(record.conversationId);
           }
           appendRunAuditEvent(RUN_AUDIT_FILE, {
@@ -9207,7 +9209,7 @@ function drainServerQueue(conversationId: string): void {
 
 function pauseQueueForStoppedRun(conversationId: string): void {
   try {
-    setPendingTurnQueuePaused(conversationId, true);
+    setPendingTurnQueuePaused(conversationId, true, { reason: "stop" });
     clearServerQueueResume(conversationId);
     emitPendingQueueChange(conversationId);
   } catch {
@@ -9344,19 +9346,19 @@ function updateScheduledWakeupRecord(record: ScheduledWakeupRecord): void {
 function wakeupStatusText(record: ScheduledWakeupRecord, locale: Locale): string {
   if (record.trigger.type === "time") {
     const when = formatDateTime24(new Date(record.trigger.fireAtMs));
-    return locale === "ru" ? `TaskWakeup установлен · ${when}` : `TaskWakeup set · ${when}`;
+    return locale === "ru" ? `TaskAwaiter установлен · ${when}` : `TaskAwaiter set · ${when}`;
   }
   if (record.trigger.type === "cron") {
     const when = formatDateTime24(new Date(record.trigger.nextFireMs));
-    return locale === "ru" ? `TaskWakeup cron · ${when}` : `TaskWakeup cron · ${when}`;
+    return locale === "ru" ? `TaskAwaiter cron · ${when}` : `TaskAwaiter cron · ${when}`;
   }
   const schedule = record.trigger.cron ? `cron ${record.trigger.cron}` : `каждые ${record.trigger.intervalSeconds}s`;
   const scheduleEn = record.trigger.cron ? `cron ${record.trigger.cron}` : `every ${record.trigger.intervalSeconds}s`;
-  return locale === "ru" ? `TaskWakeup script установлен · ${schedule}` : `TaskWakeup script set · ${scheduleEn}`;
+  return locale === "ru" ? `TaskAwaiter script установлен · ${schedule}` : `TaskAwaiter script set · ${scheduleEn}`;
 }
 
 function wakeupCancelStatusText(count: number, locale: Locale): string {
-  return locale === "ru" ? `TaskWakeup отменён · ${count}` : `TaskWakeup canceled · ${count}`;
+  return locale === "ru" ? `TaskAwaiter отменён · ${count}` : `TaskAwaiter canceled · ${count}`;
 }
 
 function wakeupScheduleToolResultText(record: ScheduledWakeupRecord, locale: Locale): string {
@@ -9661,21 +9663,21 @@ export function normalizeWakeupTrigger(event: Extract<RunEvent, { type: "wakeup"
   if (event.script) {
     const scriptError = shellScriptSyntaxError(event.script);
     if (scriptError) {
-      throw new Error(`TaskWakeup script syntax error: ${scriptError}`);
+      throw new Error(`TaskAwaiter script syntax error: ${scriptError}`);
     }
     if (event.cron) {
       const cronError = cronValidationError(event.cron);
       if (cronError) {
-        throw new Error(`Invalid TaskWakeup cron: ${cronError}`);
+        throw new Error(`Invalid TaskAwaiter cron: ${cronError}`);
       }
     } else if (event.intervalSeconds === undefined || event.intervalSeconds <= 0 || !Number.isFinite(event.intervalSeconds)) {
-      throw new Error("Script TaskWakeup requires positive intervalSeconds or cron.");
+      throw new Error("Script TaskAwaiter requires positive intervalSeconds or cron.");
     }
     let initialCheckMs = event.cron ? nextCronMs(event.cron, now) : now + (event.intervalSeconds ?? 1) * 1000;
     if (event.fireAt) {
       const fireAtMs = Date.parse(event.fireAt);
       if (!Number.isFinite(fireAtMs)) {
-        throw new Error(`Invalid TaskWakeup fireAt: ${event.fireAt}`);
+        throw new Error(`Invalid TaskAwaiter fireAt: ${event.fireAt}`);
       }
       initialCheckMs = fireAtMs;
     } else if (event.delaySeconds !== undefined) {
@@ -9689,19 +9691,19 @@ export function normalizeWakeupTrigger(event: Extract<RunEvent, { type: "wakeup"
   if (event.cron) {
     const cronError = cronValidationError(event.cron);
     if (cronError) {
-      throw new Error(`Invalid TaskWakeup cron: ${cronError}`);
+      throw new Error(`Invalid TaskAwaiter cron: ${cronError}`);
     }
     return { type: "cron", cron: event.cron, nextFireMs: nextCronMs(event.cron, now) };
   }
   if (event.fireAt) {
     const fireAtMs = Date.parse(event.fireAt);
     if (!Number.isFinite(fireAtMs)) {
-      throw new Error(`Invalid TaskWakeup fireAt: ${event.fireAt}`);
+      throw new Error(`Invalid TaskAwaiter fireAt: ${event.fireAt}`);
     }
     return { type: "time", fireAtMs };
   }
   if (event.delaySeconds === undefined || event.delaySeconds <= 0 || !Number.isFinite(event.delaySeconds)) {
-    throw new Error("TaskWakeup requires positive delaySeconds, fireAt, cron, or script.");
+    throw new Error("TaskAwaiter requires positive delaySeconds, fireAt, cron, or script.");
   }
   return { type: "time", fireAtMs: now + event.delaySeconds * 1000 };
 }
@@ -9790,7 +9792,7 @@ function notifyBackgroundRunUpdate(binding: BackgroundRunBinding, done: boolean)
 }
 
 export function releaseCanceledQueuedRun(runId: string): PendingQueueDispatchItem | null {
-  const released = releaseDispatchingQueueItemByRunId(runId, { pause: true, rotateToEnd: true });
+  const released = releaseDispatchingQueueItemByRunId(runId, { pause: true, pauseReason: "stop", rotateToEnd: true });
   if (released) {
     emitPendingQueueChange(released.conversationId);
   }
@@ -10585,11 +10587,11 @@ function numericWakeupField(value: unknown): number | undefined {
 }
 
 function isWakeupToolName(name: string): boolean {
-  // Agents prefix MCP tool names differently — Claude `mcp__rlab__TaskWakeup`,
-  // Gemini `mcp_rlab_TaskWakeup`, OpenCode `rlab_TaskWakeup` — and normalizedToolName
+  // Agents prefix MCP tool names differently — Claude `mcp__rlab__TaskAwaiter`,
+  // Gemini `mcp_rlab_TaskAwaiter`, OpenCode `rlab_TaskAwaiter` — and normalizedToolName
   // only strips the double-underscore form, so match on the trailing tool name.
   const leaf = normalizedToolName(name);
-  return leaf === "wakeup" || leaf.endsWith("taskwakeup") || leaf.endsWith("schedulewakeup");
+  return leaf === "wakeup" || leaf === "awaiter" || leaf.endsWith("taskawaiter") || leaf.endsWith("scheduleawaiter") || leaf.endsWith("taskwakeup") || leaf.endsWith("schedulewakeup");
 }
 
 function isTrackerToolName(name: string): boolean {
@@ -10674,17 +10676,17 @@ function wakeupTriggerLabel(trigger: ScheduledWakeupTrigger): string {
 
 function scheduledWakeupListToolText(conversationId: string | undefined): string {
   if (!conversationId) {
-    return "TaskWakeup list requires a conversation-bound run.";
+    return "TaskAwaiter list requires a conversation-bound run.";
   }
   const wakeups = scheduledWakeupSummaries(conversationId);
   if (wakeups.length === 0) {
-    return "No scheduled TaskWakeup entries for this chat.";
+    return "No scheduled TaskAwaiter entries for this chat.";
   }
   const lines = wakeups.map((wakeup, index) => {
     const reason = wakeup.reason ? `; reason: ${wakeup.reason}` : "";
     return `${index + 1}. id: ${wakeup.id}; ${wakeupTriggerLabel(wakeup.trigger)}; prompt: ${wakeup.prompt}${reason}`;
   });
-  return ["Scheduled TaskWakeup entries for this chat:", ...lines].join("\n");
+  return ["Scheduled TaskAwaiter entries for this chat:", ...lines].join("\n");
 }
 
 function goalListToolText(conversationId: string | undefined): string {
@@ -10834,9 +10836,9 @@ function trackerInputValidationError(name: string, input: Record<string, unknown
 
 export function codexDynamicToolCallResponse(params: Record<string, unknown>, context: CodexDynamicToolCallContext = {}): Record<string, unknown> {
   const tool = firstString(params, ["tool"]) ?? "";
-  if (isWakeupToolName(tool) && !rlabChatToolEnabled(context.tools, "TaskWakeup")) {
+  if (isWakeupToolName(tool) && !rlabChatToolEnabled(context.tools, "TaskAwaiter")) {
     return {
-      contentItems: [{ type: "inputText", text: "TaskWakeup is disabled for this chat." }],
+      contentItems: [{ type: "inputText", text: "TaskAwaiter is disabled for this chat." }],
       success: false,
     };
   }
@@ -10911,8 +10913,8 @@ export function codexDynamicToolCallResponse(params: Record<string, unknown>, co
       {
         type: "inputText",
         text: cancelRequested
-          ? "rlab accepted the TaskWakeup cancellation. Finish this turn after reporting the cancellation."
-          : "rlab accepted the TaskWakeup. Finish this turn now and wait for rlab to re-run you when it fires.",
+          ? "rlab accepted the TaskAwaiter cancellation. Finish this turn after reporting the cancellation."
+          : "rlab accepted the TaskAwaiter. Finish this turn now and wait for rlab to re-run you when it fires.",
       },
     ],
     success: true,
@@ -10985,7 +10987,7 @@ function wakeupFollowupEvents(id: string, name: string, input: Record<string, un
     return [];
   }
   if (!ok) {
-    return [{ type: "error", text: `${name} failed; TaskWakeup was not set.` }];
+    return [{ type: "error", text: `${name} failed; TaskAwaiter was not set.` }];
   }
   const validationError = wakeupInputValidationError(name, input);
   if (validationError) {
@@ -14010,8 +14012,12 @@ type PendingQueuePayload =
   | { readonly action: "enqueueGoal"; readonly conversationId: string; readonly description: string; readonly afterItemId?: string | null; readonly pauseQueue?: boolean }
   | { readonly action: "cancelItem"; readonly conversationId: string; readonly itemId: string }
   | { readonly action: "moveAfter"; readonly conversationId: string; readonly itemId: string; readonly afterItemId: string | null }
-  | { readonly action: "setPaused"; readonly conversationId: string; readonly paused: boolean; readonly resumeAtMs?: number }
+  | { readonly action: "setPaused"; readonly conversationId: string; readonly paused: boolean; readonly resumeAtMs?: number; readonly reason?: PendingQueuePauseReason }
   | { readonly action: "sendNext"; readonly conversationId: string };
+
+function pendingQueuePauseReason(value: unknown): PendingQueuePauseReason | undefined {
+  return value === "manual" || value === "stop" || value === "dispatch-error" ? value : undefined;
+}
 
 function parsePendingQueuePayload(body: string): PendingQueuePayload {
   const parsed = JSON.parse(body || "{}") as unknown;
@@ -14068,7 +14074,8 @@ function parsePendingQueuePayload(body: string): PendingQueuePayload {
     if (parsed.resumeAtMs !== undefined && resumeAtMs === undefined) {
       throw new Error("Invalid queue resume time.");
     }
-    return { action, conversationId, paused: parsed.paused, ...(resumeAtMs === undefined ? {} : { resumeAtMs }) };
+    const reason = parsed.paused ? pendingQueuePauseReason(parsed.reason) : undefined;
+    return { action, conversationId, paused: parsed.paused, ...(resumeAtMs === undefined ? {} : { resumeAtMs }), ...(reason === undefined ? {} : { reason }) };
   }
   if (action === "sendNext") {
     return { action, conversationId };
@@ -14169,7 +14176,7 @@ function handlePendingQueue(req: IncomingMessage, res: ServerResponse): void {
         return;
       }
       if (payload.action === "setPaused") {
-        const queue = setPendingTurnQueuePaused(payload.conversationId, payload.paused, { resumeAtMs: payload.resumeAtMs });
+        const queue = setPendingTurnQueuePaused(payload.conversationId, payload.paused, { resumeAtMs: payload.resumeAtMs, reason: payload.reason });
         sendJson(res, 200, { queue });
         emitPendingQueueChange(payload.conversationId);
         if (payload.paused && queue.resumeAtMs !== undefined) {

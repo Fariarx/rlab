@@ -3,7 +3,7 @@ import type { GitStatusPayload } from "../../../lib/git-status";
 import type { DiffViewerLine } from "./GitDiffViewer";
 import type { GitGraphBranchHead, GitGraphCommit } from "../../../client/api/git-panel-api";
 
-export type GitPanelTab = "tree" | "unstaged" | "staged" | "last-turn";
+export type GitPanelTab = "tree" | "files" | "unstaged" | "staged" | "last-turn";
 
 type StateUpdater<T> = T | ((current: T) => T);
 
@@ -113,6 +113,12 @@ export class GitViewStore {
 
   treeError: string | null = null;
 
+  projectFiles: readonly string[] = [];
+
+  projectFilesLoading = false;
+
+  projectFilesError: string | null = null;
+
   reloadKey = 0;
 
   activeTab: GitPanelTab = "unstaged";
@@ -135,6 +141,9 @@ export class GitViewStore {
       graphBranchHeads: observable.ref,
       treeLoading: observable,
       treeError: observable,
+      projectFiles: observable.ref,
+      projectFilesLoading: observable,
+      projectFilesError: observable,
       reloadKey: observable,
       activeTab: observable,
       refPickerOpen: observable,
@@ -150,6 +159,9 @@ export class GitViewStore {
       setGraphBranchHeads: action.bound,
       setTreeLoading: action.bound,
       setTreeError: action.bound,
+      setProjectFiles: action.bound,
+      setProjectFilesLoading: action.bound,
+      setProjectFilesError: action.bound,
       setReloadKey: action.bound,
       setActiveTab: action.bound,
       setRefPickerOpen: action.bound,
@@ -197,6 +209,18 @@ export class GitViewStore {
     this.treeError = resolveState(this.treeError, value);
   }
 
+  setProjectFiles(value: StateUpdater<readonly string[]>): void {
+    this.projectFiles = resolveState(this.projectFiles, value);
+  }
+
+  setProjectFilesLoading(value: StateUpdater<boolean>): void {
+    this.projectFilesLoading = resolveState(this.projectFilesLoading, value);
+  }
+
+  setProjectFilesError(value: StateUpdater<string | null>): void {
+    this.projectFilesError = resolveState(this.projectFilesError, value);
+  }
+
   setReloadKey(value: StateUpdater<number>): void {
     this.reloadKey = resolveState(this.reloadKey, value);
   }
@@ -228,6 +252,9 @@ export class GitViewStore {
     this.graphCommits = [];
     this.treeError = null;
     this.treeLoading = false;
+    this.projectFiles = [];
+    this.projectFilesError = null;
+    this.projectFilesLoading = false;
     this.refPickerOpen = false;
     this.activeTab = "unstaged";
     this.focused = { path: "", tick: 0 };

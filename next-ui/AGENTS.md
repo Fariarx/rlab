@@ -51,6 +51,9 @@ The prod service is named **`rlab`** (not `rlab-prod` or anything else).
 npm run build && sudo systemctl restart rlab
 ```
 
+### Deploy to devprod / stand
+The public `rlabdevprod.*` host is served from port `4281` by **`rlab-dev.service`** with `RLAB_DATA_DIR=/home/kanban/.rlab-dev` and `RLAB_DIST_DIR=dist-dev`. Build the dev frontend into `dist-dev` before restarting this service. A stale `rlab-devprod.service` may exist on shared hosts; it points at `/root/workspace/rlab-devprod/next-ui`, conflicts on port `4281`, and should stay disabled unless that separate checkout is restored intentionally.
+
 ### Health / debugging
 ```bash
 systemctl is-active rlab

@@ -63,6 +63,16 @@ describe("GitView diff card state", () => {
       if (path === "/api/git-diff") {
         return jsonResponse({ diff: unifiedDiff, mode: "worktree", path: "src/auth.ts" });
       }
+      if (path === "/api/project-files") {
+        return jsonResponse({
+          files: [
+            "src/auth.ts",
+            "src/components/Button.tsx",
+            "src/components/Dialog.tsx",
+            "README.md",
+          ],
+        });
+      }
       return jsonResponse({ commits: [], branchHeads: [] });
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -92,5 +102,32 @@ describe("GitView diff card state", () => {
 
     await waitFor(() => expect(fetchMock.mock.calls.filter(([input]) => requestPath(input) === "/api/git-status")).toHaveLength(2));
     expect(screen.getByTestId("git-comment-input")).toHaveValue("keep this draft");
+  });
+
+  it("renders project files as a separate expandable tree tab", async () => {
+    const review: DiffCommentApi = {
+      comments: [],
+      onAddComment: vi.fn(),
+      onDeleteComment: vi.fn(),
+      onUpdateComment: vi.fn(),
+    };
+    render(renderGitView(review));
+
+    fireEvent.click(await screen.findByRole("tab", { name: /Файлы/ }));
+
+    const tree = await screen.findByTestId("git-project-file-tree");
+    expect(tree).toBeInTheDocument();
+    expect(await screen.findByRole("treeitem", { name: "repo" })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("treeitem", { name: "src" })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("treeitem", { name: "components" })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("treeitem", { name: "auth.ts" })).toBeInTheDocument();
+    expect(screen.getByRole("treeitem", { name: "Button.tsx" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Развернуть все изменения" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("treeitem", { name: "components" }));
+
+    expect(screen.getByRole("treeitem", { name: "components" })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("treeitem", { name: "Button.tsx" })).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([input]) => requestPath(input) === "/api/project-files")).toBe(true);
   });
 });

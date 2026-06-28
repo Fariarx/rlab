@@ -328,6 +328,8 @@ describe("vite agents plugin", () => {
       expect(goalText).toContain('🎯 <rlab-task-goal id="goal-123">');
       expect(goalText).toContain("<summary>TaskGoal queue item.</summary>");
       expect(goalText).toContain("<description>Keep reviewing the queue UX.</description>");
+      expect(goalText).toContain("TaskAwaiter with a follow-up prompt");
+      expect(goalText).toContain("blocks this goal from immediately re-running until it fires");
       expect(goalText).toContain('TaskGoal with action="complete" and goalId="goal-123"');
       expect(goalText).toContain('TaskGoal with action="remove" and goalId="goal-123"');
       expect(goalText).toContain("</rlab-task-goal>");
@@ -338,7 +340,7 @@ describe("vite agents plugin", () => {
     }
   });
 
-  it("keeps TaskGoal enabled for queued goal dispatches", () => {
+  it("keeps TaskAwaiter and TaskGoal enabled for queued goal dispatches", () => {
     const dir = mkdtempSync(join(tmpdir(), "rlab-queued-goal-tools-"));
     try {
       initWorkspaceDb(join(dir, "workspace.db"));
@@ -374,7 +376,7 @@ describe("vite agents plugin", () => {
 
       const body = queuedTurnRunBody(record, "run-goal-tools");
 
-      expect(body.tools).toEqual(["AskUserQuestion", "TaskGoal"]);
+      expect(body.tools).toEqual(["AskUserQuestion", "TaskAwaiter", "TaskGoal"]);
     } finally {
       closeWorkspaceDb();
       rmSync(dir, { recursive: true, force: true });
@@ -638,8 +640,8 @@ describe("vite agents plugin", () => {
     const withTools = appendRlabChatToolsPrompt("wait until the deployment is ready");
 
     expect(withTools).toContain("<rlab-chat-tools>");
-    expect(withTools).toContain("TaskWakeup supports delaySeconds/fireAt/cron");
-    expect(withTools).toContain('TaskWakeup with action="list"');
+    expect(withTools).toContain("TaskAwaiter supports delaySeconds/fireAt/cron");
+    expect(withTools).toContain('TaskAwaiter with action="list"');
     expect(withTools).toContain("TaskTracker supports action='add'/'set'");
     expect(withTools).toContain("Tool names accepted by rlab for persistent task trackers: TaskTracker");
     expect(withTools).toContain("{ prompt, script, intervalSeconds, reason }");
@@ -764,7 +766,7 @@ describe("vite agents plugin", () => {
 
     expect(withQuestionOnly).toContain("<rlab-chat-tools>");
     expect(withQuestionOnly).toContain("AskUserQuestion supports single-select");
-    expect(withQuestionOnly).not.toContain("TaskWakeup supports delaySeconds/fireAt/cron");
+    expect(withQuestionOnly).not.toContain("TaskAwaiter supports delaySeconds/fireAt/cron");
     expect(withQuestionOnly).not.toContain("BrowserPreview");
   });
 
@@ -777,7 +779,7 @@ describe("vite agents plugin", () => {
       agentMessageId: "a-browser",
       agentMessageTime: "10:01",
     };
-    const prompt = prepareAgentPrompt("use preview", binding, "https://rlab.example", ["AskUserQuestion", "TaskWakeup", "BrowserPreview"]);
+    const prompt = prepareAgentPrompt("use preview", binding, "https://rlab.example", ["AskUserQuestion", "TaskAwaiter", "BrowserPreview"]);
 
     expect(prompt.indexOf("<rlab-chat-tools>")).toBeGreaterThan(-1);
     expect(prompt.indexOf("<browser-preview-bridge>")).toBeGreaterThan(prompt.indexOf("</rlab-chat-tools>"));
@@ -1315,7 +1317,7 @@ Built-in agents:
       "--permission-mode",
       "plan",
       "--tools",
-      "Read,Glob,Grep,LS,AskUserQuestion,TaskWakeup,TaskTracker,TaskGoal",
+      "Read,Glob,Grep,LS,AskUserQuestion,TaskAwaiter,TaskTracker,TaskGoal",
     ]);
   });
 
@@ -1387,7 +1389,7 @@ Built-in agents:
     expect(readOnlyOptions).toMatchObject({
       permissionMode: "plan",
       settings: { autoCompactEnabled: false, autoCompactWindow: 120000 },
-      tools: ["Read", "Glob", "Grep", "LS", "AskUserQuestion", "TaskWakeup", "TaskTracker", "TaskGoal"],
+      tools: ["Read", "Glob", "Grep", "LS", "AskUserQuestion", "TaskAwaiter", "TaskTracker", "TaskGoal"],
     });
   });
 
@@ -1407,7 +1409,7 @@ Built-in agents:
     });
     expect(options.mcpServers?.rlab).toMatchObject({ args: [expect.stringContaining("rlab-mcp-stdio.mjs")] });
     expect(options.toolAliases).toMatchObject({
-      TaskWakeup: "mcp__rlab__TaskWakeup",
+      TaskAwaiter: "mcp__rlab__TaskAwaiter",
       TaskTracker: "mcp__rlab__TaskTracker",
       TaskGoal: "mcp__rlab__TaskGoal",
     });
@@ -1419,12 +1421,12 @@ Built-in agents:
     expect(resolveRlabMcpStdioScript(resolve("/repo/next-ui/dist-server"))).toBe(resolve("/repo/next-ui/bin/rlab-mcp-stdio.mjs"));
   });
 
-  it("schedules a wakeup from an MCP-prefixed TaskWakeup tool call", () => {
+  it("schedules a wakeup from an MCP-prefixed TaskAwaiter tool call", () => {
     const translate = createClaudeStreamTranslator();
     translate(
       JSON.stringify({
         type: "assistant",
-        message: { content: [{ type: "tool_use", id: "w1", name: "mcp__rlab__TaskWakeup", input: { prompt: "check later", delaySeconds: 600 } }] },
+        message: { content: [{ type: "tool_use", id: "w1", name: "mcp__rlab__TaskAwaiter", input: { prompt: "check later", delaySeconds: 600 } }] },
       }),
     );
     const done = translate(
@@ -1577,7 +1579,7 @@ Built-in agents:
     ).toEqual([{ type: "tool", id: "tool-1", name: "Bash", summary: "npm test", args: { command: "npm test" } }]);
   });
 
-  it("translates Claude TaskWakeup tool results into scheduler events", () => {
+  it("translates Claude TaskAwaiter tool results into scheduler events", () => {
     const translate = createClaudeStreamTranslator();
 
     expect(
@@ -1589,14 +1591,14 @@ Built-in agents:
               {
                 type: "tool_use",
                 id: "wake-1",
-                name: "TaskWakeup",
+                name: "TaskAwaiter",
                 input: { delaySeconds: "180", prompt: "send OK", reason: "user asked for a reminder" },
               },
             ],
           },
         }),
       ),
-    ).toEqual([{ type: "tool", id: "wake-1", name: "TaskWakeup", summary: "", args: { delaySeconds: "180", prompt: "send OK", reason: "user asked for a reminder" } }]);
+    ).toEqual([{ type: "tool", id: "wake-1", name: "TaskAwaiter", summary: "", args: { delaySeconds: "180", prompt: "send OK", reason: "user asked for a reminder" } }]);
 
     expect(
       translate(
@@ -1613,22 +1615,22 @@ Built-in agents:
     ]);
   });
 
-  it("lets server-side TaskWakeup results replace the initial MCP ack with the timer list", () => {
+  it("lets server-side TaskAwaiter results replace the initial MCP ack with the timer list", () => {
     const accumulator = createRunEventAccumulator();
 
-    accumulateRunEvent(accumulator, { type: "tool", id: "wake-1", name: "TaskWakeup", summary: "send OK" });
+    accumulateRunEvent(accumulator, { type: "tool", id: "wake-1", name: "TaskAwaiter", summary: "send OK" });
     accumulateRunEvent(accumulator, { type: "tool_result", id: "wake-1", ok: true, output: "rlab accepted the request" });
     accumulateRunEvent(accumulator, {
       type: "tool_result",
       id: "wake-1",
       ok: true,
-      output: "TaskWakeup set · 2026-06-18 19:30\n\nScheduled TaskWakeup entries for this chat:\n1. id: wakeup-1; time 2026-06-18T17:30:00.000Z; prompt: send OK",
+      output: "TaskAwaiter set · 2026-06-18 19:30\n\nScheduled TaskAwaiter entries for this chat:\n1. id: wakeup-1; time 2026-06-18T17:30:00.000Z; prompt: send OK",
     });
 
     expect(accumulator.tools[0]).toMatchObject({
       id: "wake-1",
       state: "ok",
-      output: expect.stringContaining("Scheduled TaskWakeup entries for this chat:"),
+      output: expect.stringContaining("Scheduled TaskAwaiter entries for this chat:"),
     });
     expect(accumulator.tools[0]?.output).not.toBe("rlab accepted the request");
   });
@@ -1706,7 +1708,7 @@ Built-in agents:
             {
               type: "tool_use",
               id: "wake-script",
-              name: "TaskWakeup",
+              name: "TaskAwaiter",
               input: { script: "test -f /tmp/ready", intervalSeconds: 15, prompt: "continue after ready file exists" },
             },
           ],
@@ -1729,7 +1731,7 @@ Built-in agents:
     ]);
   });
 
-  it("translates TaskWakeup cancel tool input into a scheduler cancellation event", () => {
+  it("translates TaskAwaiter cancel tool input into a scheduler cancellation event", () => {
     const translate = createClaudeStreamTranslator();
 
     translate(
@@ -1740,7 +1742,7 @@ Built-in agents:
             {
               type: "tool_use",
               id: "wake-cancel",
-              name: "TaskWakeup",
+              name: "TaskAwaiter",
               input: { action: "cancel", wakeupId: "wakeup-123", reason: "user canceled it" },
             },
           ],
@@ -1971,7 +1973,7 @@ Built-in agents:
       "--permission-mode",
       "plan",
       "--tools",
-      "Read,Glob,Grep,LS,AskUserQuestion,TaskWakeup,TaskTracker,TaskGoal",
+      "Read,Glob,Grep,LS,AskUserQuestion,TaskAwaiter,TaskTracker,TaskGoal",
     ]);
     expect(buildCodexRunArgs({ prompt: "hello", model: "default", reasoning: "default", mode: "default", accessMode: "unrestricted" })).toEqual([
       "exec",
@@ -2273,7 +2275,7 @@ Built-in agents:
     expect(tools).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          name: "TaskWakeup",
+          name: "TaskAwaiter",
           inputSchema: expect.objectContaining({
             type: "object",
             properties: expect.objectContaining({
@@ -2338,17 +2340,17 @@ Built-in agents:
     ).toEqual([]);
   });
 
-  it("answers Codex dynamic TaskWakeup calls with tool-call results", () => {
+  it("answers Codex dynamic TaskAwaiter calls with tool-call results", () => {
     expect(
       codexDynamicToolCallResponse({
-        tool: "TaskWakeup",
+        tool: "TaskAwaiter",
         arguments: { prompt: "report result", delaySeconds: 60 },
       }),
     ).toEqual({
       contentItems: [
         {
           type: "inputText",
-          text: "rlab accepted the TaskWakeup. Finish this turn now and wait for rlab to re-run you when it fires.",
+          text: "rlab accepted the TaskAwaiter. Finish this turn now and wait for rlab to re-run you when it fires.",
         },
       ],
       success: true,
@@ -2357,36 +2359,36 @@ Built-in agents:
     expect(
       codexDynamicToolCallResponse(
         {
-          tool: "TaskWakeup",
+          tool: "TaskAwaiter",
           arguments: { prompt: "report result", delaySeconds: 60 },
         },
         { tools: ["AskUserQuestion"] },
       ),
     ).toEqual({
-      contentItems: [{ type: "inputText", text: "TaskWakeup is disabled for this chat." }],
+      contentItems: [{ type: "inputText", text: "TaskAwaiter is disabled for this chat." }],
       success: false,
     });
 
     expect(
       codexDynamicToolCallResponse({
-        tool: "TaskWakeup",
+        tool: "TaskAwaiter",
         arguments: { prompt: "missing trigger" },
       }),
     ).toEqual({
-      contentItems: [{ type: "inputText", text: "TaskWakeup requires delaySeconds, fireAt, cron, or script." }],
+      contentItems: [{ type: "inputText", text: "TaskAwaiter requires delaySeconds, fireAt, cron, or script." }],
       success: false,
     });
 
     expect(
       codexDynamicToolCallResponse(
         {
-          tool: "TaskWakeup",
+          tool: "TaskAwaiter",
           arguments: { action: "list" },
         },
         { conversationId: "chat-empty" },
       ),
     ).toEqual({
-      contentItems: [{ type: "inputText", text: "No scheduled TaskWakeup entries for this chat." }],
+      contentItems: [{ type: "inputText", text: "No scheduled TaskAwaiter entries for this chat." }],
       success: true,
     });
   });
@@ -2533,15 +2535,15 @@ Built-in agents:
       { type: "tool", id: "t1", name: "srv/fetch" },
       { type: "tool_result", id: "t1", ok: false, output: JSON.stringify({ message: "boom" }) },
     ]);
-    expect(codexAppServerItemEvents({ type: "dynamicToolCall", id: "wake-1", tool: "TaskWakeup", arguments: { prompt: "send OK", delaySeconds: 180 } }, false)).toEqual([
-      { type: "tool", id: "wake-1", name: "TaskWakeup", summary: "send OK", args: { prompt: "send OK", delaySeconds: "180" } },
+    expect(codexAppServerItemEvents({ type: "dynamicToolCall", id: "wake-1", tool: "TaskAwaiter", arguments: { prompt: "send OK", delaySeconds: 180 } }, false)).toEqual([
+      { type: "tool", id: "wake-1", name: "TaskAwaiter", summary: "send OK", args: { prompt: "send OK", delaySeconds: "180" } },
     ]);
     expect(
       codexAppServerItemEvents(
         {
           type: "dynamicToolCall",
           id: "wake-1",
-          tool: "TaskWakeup",
+          tool: "TaskAwaiter",
           status: "completed",
           arguments: { prompt: "send OK", delaySeconds: 180 },
           contentItems: [{ type: "inputText", text: "accepted" }],
@@ -2550,7 +2552,7 @@ Built-in agents:
         true,
       ),
     ).toEqual([
-      { type: "tool", id: "wake-1", name: "TaskWakeup", summary: "send OK", args: { prompt: "send OK", delaySeconds: "180" } },
+      { type: "tool", id: "wake-1", name: "TaskAwaiter", summary: "send OK", args: { prompt: "send OK", delaySeconds: "180" } },
       { type: "tool_result", id: "wake-1", ok: true, output: "accepted" },
       { type: "wakeup", toolId: "wake-1", prompt: "send OK", delaySeconds: 180 },
     ]);
@@ -2914,7 +2916,7 @@ Built-in agents:
     ).toEqual([{ type: "tool_result", id: "shell-1", ok: true, output: "C:\\Users\\Admin\\Git\\Workspace\\rlab" }]);
   });
 
-  it("schedules a wakeup from a Gemini TaskWakeup tool call", () => {
+  it("schedules a wakeup from a Gemini TaskAwaiter tool call", () => {
     const translate = createGeminiStreamTranslator();
 
     // Gemini's tool-result event carries no tool name, so the wakeup is scheduled
@@ -2923,7 +2925,7 @@ Built-in agents:
       translate(
         JSON.stringify({
           type: "tool_use",
-          tool_name: "mcp_rlab_TaskWakeup",
+          tool_name: "mcp_rlab_TaskAwaiter",
           tool_id: "wake-gem",
           parameters: { prompt: "check later", delaySeconds: 600, reason: "user asked for a reminder" },
         }),
@@ -4173,7 +4175,7 @@ Built-in agents:
     const abort = new AbortController();
 
     await expect(
-      handler("mcp__rlab__TaskWakeup", { prompt: "check later", delaySeconds: 60 }, { signal: abort.signal, toolUseID: "wake-1" }),
+      handler("mcp__rlab__TaskAwaiter", { prompt: "check later", delaySeconds: 60 }, { signal: abort.signal, toolUseID: "wake-1" }),
     ).resolves.toEqual({
       behavior: "allow",
       updatedInput: { prompt: "check later", delaySeconds: 60 },

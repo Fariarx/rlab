@@ -673,7 +673,7 @@ describe("Composer", () => {
     expect(screen.getByTestId("composer-input-area")).toHaveAttribute("data-expanded", "true");
     expect(screen.getByTestId("composer-voice-input-panel")).toBeInTheDocument();
     expect(screen.getByTestId("composer-voice-recording-strip")).toHaveAttribute("data-layout", "inline");
-    expect(screen.getByTestId("composer-input-root")).toHaveStyle({ paddingRight: "0px" });
+    expect(screen.getByTestId("composer-input-root")).toHaveStyle({ paddingRight: "8px" });
     expect(screen.getByTestId("composer-placeholder-hint")).toHaveTextContent("Голосовой ввод");
     expect(screen.getByTestId("composer-placeholder-hint")).toHaveStyle({ top: "calc(100% - 59px)" });
     expect(screen.getByTestId("composer-placeholder-icon")).toBeInTheDocument();
@@ -1055,7 +1055,7 @@ describe("Composer", () => {
   });
 
   it("does not show composer suggestions for slash commands", () => {
-    renderWithTheme(<Composer placeholder="Написать" registeredPlugins={[{ id: "TaskWakeup", label: "TaskWakeup", token: "$TaskWakeup" }]} />);
+    renderWithTheme(<Composer placeholder="Написать" registeredPlugins={[{ id: "TaskAwaiter", label: "TaskAwaiter", token: "$TaskAwaiter" }]} />);
 
     fireEvent.change(screen.getByPlaceholderText("Написать"), { target: { value: "/" } });
 
@@ -1068,7 +1068,7 @@ describe("Composer", () => {
         placeholder="Написать"
         registeredPlugins={[
           { id: "AskUserQuestion", label: "AskUserQuestion", token: "$AskUserQuestion" },
-          { id: "TaskWakeup", label: "TaskWakeup", token: "$TaskWakeup" },
+          { id: "TaskAwaiter", label: "TaskAwaiter", token: "$TaskAwaiter" },
         ]}
       />,
     );
@@ -1079,35 +1079,35 @@ describe("Composer", () => {
     expect(screen.getByRole("option", { name: "$AskUserQuestion" })).toHaveAttribute("aria-selected", "true");
 
     fireEvent.keyDown(input, { key: "ArrowDown" });
-    expect(screen.getByRole("option", { name: "$TaskWakeup" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("option", { name: "$TaskAwaiter" })).toHaveAttribute("aria-selected", "true");
 
     fireEvent.keyDown(input, { key: "Enter" });
-    expect(input).toHaveValue("$TaskWakeup ");
+    expect(input).toHaveValue("$TaskAwaiter ");
     // The token lives as plain visible text in the textarea — no transparent
     // overlay — so the native caret can never drift on mobile.
     expect(screen.queryByTestId("composer-plugin-preview")).not.toBeInTheDocument();
   });
 
   it("deletes parsed plugin tool links as atomic composer tokens", () => {
-    renderWithTheme(<Composer placeholder="Написать" registeredPlugins={[{ id: "TaskWakeup", label: "TaskWakeup", token: "$TaskWakeup" }]} />);
+    renderWithTheme(<Composer placeholder="Написать" registeredPlugins={[{ id: "TaskAwaiter", label: "TaskAwaiter", token: "$TaskAwaiter" }]} />);
     const input = screen.getByPlaceholderText("Написать") as HTMLTextAreaElement;
 
-    fireEvent.change(input, { target: { value: "Run $TaskWakeup now" } });
-    input.setSelectionRange("Run $TaskWakeup".length, "Run $TaskWakeup".length);
+    fireEvent.change(input, { target: { value: "Run $TaskAwaiter now" } });
+    input.setSelectionRange("Run $TaskAwaiter".length, "Run $TaskAwaiter".length);
     fireEvent.keyDown(input, { key: "Backspace" });
     expect(input).toHaveValue("Run  now");
 
-    fireEvent.change(input, { target: { value: "Run $TaskWakeup now" } });
+    fireEvent.change(input, { target: { value: "Run $TaskAwaiter now" } });
     input.setSelectionRange("Run $Ta".length, "Run $Ta".length);
     fireEvent.keyDown(input, { key: "Delete" });
     expect(input).toHaveValue("Run  now");
   });
 
   it("normalizes mobile partial deletion inside a plugin tool link", () => {
-    renderWithTheme(<Composer placeholder="Написать" registeredPlugins={[{ id: "TaskWakeup", label: "TaskWakeup", token: "$TaskWakeup" }]} />);
+    renderWithTheme(<Composer placeholder="Написать" registeredPlugins={[{ id: "TaskAwaiter", label: "TaskAwaiter", token: "$TaskAwaiter" }]} />);
     const input = screen.getByPlaceholderText("Написать");
 
-    fireEvent.change(input, { target: { value: "Run $TaskWakeup now" } });
+    fireEvent.change(input, { target: { value: "Run $TaskAwaiter now" } });
     fireEvent.change(input, { target: { value: "Run $TaskWakeu now" } });
 
     expect(input).toHaveValue("Run  now");
@@ -1269,7 +1269,7 @@ describe("Composer", () => {
 
   it("dismisses the suggestion popover with Escape without sending", () => {
     const onSend = vi.fn();
-    renderWithTheme(<Composer placeholder="Написать" onSend={onSend} registeredPlugins={[{ id: "TaskWakeup", label: "TaskWakeup", token: "$TaskWakeup" }]} />);
+    renderWithTheme(<Composer placeholder="Написать" onSend={onSend} registeredPlugins={[{ id: "TaskAwaiter", label: "TaskAwaiter", token: "$TaskAwaiter" }]} />);
     const input = screen.getByPlaceholderText("Написать");
 
     fireEvent.change(input, { target: { value: "$" } });
@@ -1563,11 +1563,11 @@ describe("Composer", () => {
         scheduledWakeups={[
           {
             id: "wake-1",
-            label: "Wakeup установлен: 10.06.2026, 14:18:00",
-            removeLabel: "Убрать запланированную задачу",
+            label: "Task Awaiter установлен: 10.06.2026, 14:18:00",
+            removeLabel: "Убрать Task Awaiter",
             onRemove: vi.fn(),
             detail: {
-              heading: "TaskWakeup · по времени",
+              heading: "TaskAwaiter · по времени",
               rows: [
                 { label: "Сработает", value: "10.06.2026, 14:18:00" },
                 { label: "Агент", value: "claude-code" },
@@ -1614,17 +1614,17 @@ describe("Composer", () => {
     });
     expect(floatingAccessories).toHaveStyle({ paddingLeft: "94px", paddingRight: "172px" });
 
-    // The wakeup is a compact tag (like an attachment), not a 76px square, and
+    // The awaiter is a compact tag (like an attachment), not a 76px square, and
     // its label is width-capped so a long schedule string can't blow out the row.
-    const wakeupTile = screen.getByTestId("scheduled-wakeup-tile-wake-1");
-    expect(wakeupTile).toHaveStyle({ height: "28px", maxWidth: "220px", borderRadius: "999px" });
+    const awaiterTile = screen.getByTestId("scheduled-wakeup-tile-wake-1");
+    expect(awaiterTile).toHaveStyle({ height: "28px", maxWidth: "220px", borderRadius: "999px" });
 
     // Clicking the tag opens a popover with the full wakeup details.
-    fireEvent.click(screen.getByRole("button", { name: "Wakeup установлен: 10.06.2026, 14:18:00" }));
+    fireEvent.click(screen.getByRole("button", { name: "Task Awaiter установлен: 10.06.2026, 14:18:00" }));
     const popover = screen.getByTestId("scheduled-wakeup-popover-wake-1");
     expect(popover).toBeInTheDocument();
     expect(within(popover).getByText("проверь деплой")).toBeInTheDocument();
-    expect(within(popover).getByText("TaskWakeup · по времени")).toBeInTheDocument();
+    expect(within(popover).getByText("TaskAwaiter · по времени")).toBeInTheDocument();
 
     // The active agent mode is shown as a small icon on the options (gear)
     // button — not a square tile and not an inline chip that eats input width.

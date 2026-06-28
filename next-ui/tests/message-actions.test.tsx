@@ -1,4 +1,4 @@
-import { fireEvent, screen } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { AgentBlockRenderer, ApprovalRequest, Conversation, messageToPlainText, type ChatMessage } from "../src/components/agent";
 import { renderWithTheme } from "./util/render-with-theme";
@@ -29,7 +29,7 @@ describe("message actions", () => {
     expect(messageToPlainText(message)).not.toContain(rawOutput);
   });
 
-  it("exposes copy and edit controls for user messages without duplicate resend", () => {
+  it("exposes copy and edit controls for user messages without duplicate resend", async () => {
     const onCopy = vi.fn();
     const onRetry = vi.fn();
     const onEditAndResend = vi.fn();
@@ -48,11 +48,13 @@ describe("message actions", () => {
     fireEvent.click(screen.getAllByRole("button", { name: "Скопировать сообщение" })[0]);
     fireEvent.click(screen.getByRole("button", { name: "Изменить и отправить" }));
     fireEvent.change(screen.getByRole("textbox", { name: "Изменить сообщение" }), { target: { value: "Edited prompt" } });
-    fireEvent.click(screen.getByRole("button", { name: "Отправить изменённое сообщение" }));
+    const submitButton = screen.getByRole("button", { name: "Отправить изменённое сообщение" });
+    await waitFor(() => expect(submitButton).not.toBeDisabled());
+    fireEvent.click(submitButton);
 
     expect(onCopy).toHaveBeenCalledWith(messages[0]);
     expect(onRetry).not.toHaveBeenCalled();
-    expect(onEditAndResend).toHaveBeenCalledWith(messages[0], "Edited prompt");
+    await waitFor(() => expect(onEditAndResend).toHaveBeenCalledWith(messages[0], "Edited prompt"));
   });
 
   it("exposes copy and retry for agent messages", () => {

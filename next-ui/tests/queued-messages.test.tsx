@@ -82,19 +82,25 @@ describe("QueuedMessages", () => {
   });
 
   it("shows delayed resume time in the paused title", () => {
-    renderWithTheme(
-      <QueuedMessages
-        messages={messages}
-        paused
-        resumeAtMs={Date.parse("2026-06-26T10:15:00.000Z")}
-        onCancel={vi.fn()}
-        onCopy={vi.fn()}
-        onSendNow={vi.fn()}
-        onTogglePause={vi.fn()}
-      />,
-    );
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-26T10:00:00.000Z"));
+    try {
+      renderWithTheme(
+        <QueuedMessages
+          messages={messages}
+          paused
+          resumeAtMs={Date.parse("2026-06-26T10:15:00.000Z")}
+          onCancel={vi.fn()}
+          onCopy={vi.fn()}
+          onSendNow={vi.fn()}
+          onTogglePause={vi.fn()}
+        />,
+      );
 
-    expect(screen.getByText(/В очереди · 2 · до /)).toBeInTheDocument();
+      expect(screen.getByText(/В очереди · 2 · до /)).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("scrolls the queued turn list only after five messages", () => {
@@ -180,7 +186,7 @@ describe("QueuedMessages", () => {
       />,
     );
 
-    expect(screen.getByText("Ожидание Wakeup · 4")).toBeInTheDocument();
+    expect(screen.getByText("Ожидание Task Awaiter · 4")).toBeInTheDocument();
     expect(screen.getByTestId("queued-header-schedule-icon")).toBeInTheDocument();
     expect(screen.getByText("Keep improving")).toBeInTheDocument();
     expect(screen.getByText("Keep testing")).toBeInTheDocument();
@@ -196,7 +202,7 @@ describe("QueuedMessages", () => {
     expect(screen.queryByRole("button", { name: "Возобновить элемент" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Отправить сейчас" })).toBeDisabled();
 
-    fireEvent.click(screen.getByRole("button", { name: "Отменить Wakeup" }));
+    fireEvent.click(screen.getByRole("button", { name: "Отменить Task Awaiter" }));
     expect(onCancelItem).toHaveBeenCalledWith("wakeup-1");
     expect(screen.getAllByRole("button", { name: "Удалить цель" })).toHaveLength(3);
 

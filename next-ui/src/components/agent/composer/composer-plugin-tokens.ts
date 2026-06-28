@@ -33,8 +33,8 @@ export function pluginTokenPattern(plugins: readonly Pick<ComposerPluginLink, "t
       tokens.add(plugin.token);
     }
   });
-  if (tokens.has("$TaskWakeup")) {
-    tokens.add("$ScheduleWakeup");
+  if (tokens.has("$TaskAwaiter")) {
+    tokens.add("$ScheduleAwaiter");
   }
   if (tokens.size === 0) {
     return null;

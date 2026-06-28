@@ -53,7 +53,7 @@ import {
   useAgentStatus,
   useAgentStatusError,
   useAgentStatusLive,
-  useReloadAgentStatus,
+  useRefreshAgentStatus,
   accessModeForAgentProfile,
 } from "../agent";
 import { dropIn } from "../agent/core/anim";
@@ -154,7 +154,7 @@ export const WorkspacePageView = observer(function WorkspacePageView({
   const cliInfoOf = useAgentCliInfo();
   const agentStatusLive = useAgentStatusLive();
   const agentStatusError = useAgentStatusError();
-  const reloadAgentStatus = useReloadAgentStatus();
+  const refreshAgentStatus = useRefreshAgentStatus();
 
   const [pageStore] = useState(() => new WorkspacePageStore(ws.settings.agents.defaultProfile ?? DEFAULT_PROFILE, normalizeSidebarWidth(ws.settings.appearance.sidebarWidth)));
   const {
@@ -282,7 +282,7 @@ export const WorkspacePageView = observer(function WorkspacePageView({
     toast,
   });
   const cliUpdates = useCliUpdates({
-    reloadAgentStatus,
+    reloadAgentStatus: refreshAgentStatus,
     t,
     toast,
   });
@@ -768,7 +768,7 @@ export const WorkspacePageView = observer(function WorkspacePageView({
               <Alert
                 severity="error"
                 action={
-                  <Button variant="subtle" size="small" onClick={reloadAgentStatus}>
+                  <Button variant="subtle" size="small" onClick={refreshAgentStatus}>
                     {t("retryAgentDetection")}
                   </Button>
                 }

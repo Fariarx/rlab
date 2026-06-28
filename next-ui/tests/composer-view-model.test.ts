@@ -15,7 +15,7 @@ const labels: Record<string, string> = {
 const t: I18nApi["t"] = (key) => labels[key] ?? key;
 
 const plugins: readonly ComposerPluginLink[] = [
-  { id: "TaskWakeup", label: "Task Wakeup", token: "$TaskWakeup" },
+  { id: "TaskAwaiter", label: "Task Awaiter", token: "$TaskAwaiter" },
   { id: "Git.Commit", label: "Commit", token: "$Git.Commit" },
 ];
 
@@ -28,7 +28,7 @@ describe("composerViewModel", () => {
       agentLimitLoaded: false,
       agentLimitRefreshError: null,
       agentLimitRefreshing: false,
-      composerValue: "Use $TaskWakeup now",
+      composerValue: "Use $TaskAwaiter now",
       limitOpen: false,
       mentionableFiles: ["README.md"],
       registeredPlugins: plugins,
@@ -37,11 +37,11 @@ describe("composerViewModel", () => {
     });
 
     expect(model.suggestionsState.open).toBe(false);
-    expect(model.pluginTokenRanges).toEqual([{ token: "$TaskWakeup", start: 4, end: 15 }]);
+    expect(model.pluginTokenRanges).toEqual([{ token: "$TaskAwaiter", start: 4, end: 16 }]);
     expect(model.pluginPreviewParts).toEqual([
       { type: "text", text: "Use ", start: 0, end: 4 },
-      { type: "plugin", token: "$TaskWakeup", start: 4, end: 15 },
-      { type: "text", text: " now", start: 15, end: 19 },
+      { type: "plugin", token: "$TaskAwaiter", start: 4, end: 16 },
+      { type: "text", text: " now", start: 16, end: 20 },
     ]);
   });
 

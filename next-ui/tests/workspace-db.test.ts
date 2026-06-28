@@ -281,6 +281,57 @@ describe("workspace-db", () => {
     expect(claimNextPendingQueueItem("c1", "run-now")?.id).toBe("goal-1");
   });
 
+  it("resumes stale technical pauses when a persistent queue item completes normally", () => {
+    initializeWorkspaceStateInDb({ ...buildEmptyWorkspaceState(), chats: [conv("c1")], threads: { c1: [] }, selectedId: "c1" });
+    enqueuePendingGoal({ id: "goal-1", conversationId: "c1", createdAtMs: 100, description: "keep improving", origin: "http://127.0.0.1:4280" });
+
+    expect(claimNextPendingQueueItem("c1", "run-goal")?.id).toBe("goal-1");
+    setPendingTurnQueuePaused("c1", true, { reason: "stop" });
+    expect(readPendingTurnQueue("c1").paused).toBe(true);
+
+    releasePendingQueueItem("goal-1", { pause: false, rotateToEnd: true, nextDispatchAtMs: 1_800_000_000_000 });
+
+    expect(readPendingTurnQueue("c1")).toMatchObject({
+      paused: false,
+      items: [expect.objectContaining({ id: "goal-1", kind: "goal", state: "queued", nextDispatchAtMs: 1_800_000_000_000 })],
+    });
+    expect(claimNextPendingQueueItem("c1", "run-too-early", 1_799_999_999_999)).toBeNull();
+    expect(claimNextPendingQueueItem("c1", "run-next", 1_800_000_000_000)?.id).toBe("goal-1");
+  });
+
+  it("keeps manual pauses when a persistent queue item completes normally", () => {
+    initializeWorkspaceStateInDb({ ...buildEmptyWorkspaceState(), chats: [conv("c1")], threads: { c1: [] }, selectedId: "c1" });
+    enqueuePendingGoal({ id: "goal-1", conversationId: "c1", createdAtMs: 100, description: "keep improving", origin: "http://127.0.0.1:4280" });
+
+    expect(claimNextPendingQueueItem("c1", "run-goal")?.id).toBe("goal-1");
+    setPendingTurnQueuePaused("c1", true);
+
+    releasePendingQueueItem("goal-1", { pause: false, rotateToEnd: true, nextDispatchAtMs: 1_800_000_000_000 });
+
+    expect(readPendingTurnQueue("c1")).toMatchObject({
+      paused: true,
+      items: [expect.objectContaining({ id: "goal-1", kind: "goal", state: "queued", nextDispatchAtMs: 1_800_000_000_000 })],
+    });
+    expect(claimNextPendingQueueItem("c1", "run-blocked", 1_800_000_000_000)).toBeNull();
+  });
+
+  it("repairs legacy paused persistent cooldowns on database init", () => {
+    const dueAtMs = Date.now() - 1_000;
+    initializeWorkspaceStateInDb({ ...buildEmptyWorkspaceState(), chats: [conv("c1")], threads: { c1: [] }, selectedId: "c1" });
+    enqueuePendingGoal({ id: "goal-1", conversationId: "c1", createdAtMs: 100, description: "keep improving", origin: "http://127.0.0.1:4280" });
+
+    expect(claimNextPendingQueueItem("c1", "run-goal", dueAtMs)?.id).toBe("goal-1");
+    releasePendingQueueItem("goal-1", { pause: false, rotateToEnd: true, nextDispatchAtMs: dueAtMs });
+    setPendingTurnQueuePaused("c1", true, { reason: "legacy" });
+    expect(readPendingTurnQueue("c1").paused).toBe(true);
+
+    closeWorkspaceDb();
+    initWorkspaceDb(join(dir, "workspace.db"));
+
+    expect(readPendingTurnQueue("c1").paused).toBe(false);
+    expect(claimNextPendingQueueItem("c1", "run-next", dueAtMs)?.id).toBe("goal-1");
+  });
+
   it("does not bypass or unpause a waiting wakeup for immediate dispatch", () => {
     initializeWorkspaceStateInDb({ ...buildEmptyWorkspaceState(), chats: [conv("c1")], threads: { c1: [] }, selectedId: "c1" });
     upsertPendingWakeupItem({ id: "wakeup-1", conversationId: "c1", createdAtMs: 100, prompt: "continue later", trigger: { type: "time", fireAtMs: 1_000 } });

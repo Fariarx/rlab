@@ -14,6 +14,7 @@ import {
   sendNextPendingTurn,
   setPendingTurnQueuePaused as setServerPendingTurnQueuePaused,
   type PendingQueueItem,
+  type PendingQueuePauseReason,
   type PendingTurnQueueSnapshot,
 } from "../../client/api/workspace-page-api";
 import { loadConversationThread, loadConversationThreadPage, loadWorkspaceRevision, loadWorkspaceState, subscribeWorkspaceEvents, type WorkspaceChangeEvent } from "../../client/api/workspace-api";
@@ -142,7 +143,7 @@ export interface Workspace {
   readonly loadOlderThread: (id: string) => Promise<void>;
   readonly isQueuePaused: (id: string) => boolean;
   readonly queueResumeAtMs: (id: string) => number | undefined;
-  readonly setQueuePaused: (id: string, paused: boolean, options?: { readonly resumeAtMs?: number }) => void;
+  readonly setQueuePaused: (id: string, paused: boolean, options?: { readonly resumeAtMs?: number; readonly reason?: PendingQueuePauseReason }) => void;
   readonly setCompaction: (id: string, patch: Partial<CompactionSettings>) => void;
   readonly setConversationView: (id: string, view: ConversationView) => void;
   readonly compactConversation: (id: string) => boolean;
@@ -394,8 +395,9 @@ export class WorkspaceStore implements Workspace {
   }
 
   private enqueueThreadMessageUpserts(conversationId: string, messages: readonly ChatMessage[]): void {
-    if (messages.length > 0) {
-      this.enqueueMutations({ type: "upsertMessages", conversationId, messages });
+    const agentMessages = messages.filter((message) => message.role !== "user");
+    if (agentMessages.length > 0) {
+      this.enqueueMutations({ type: "upsertMessages", conversationId, messages: agentMessages });
     }
   }
 
@@ -1238,7 +1240,7 @@ export class WorkspaceStore implements Workspace {
     return this.queueSnapshot(id).resumeAtMs;
   }
 
-  setQueuePaused(id: string, paused: boolean, options: { readonly resumeAtMs?: number } = {}): void {
+  setQueuePaused(id: string, paused: boolean, options: { readonly resumeAtMs?: number; readonly reason?: PendingQueuePauseReason } = {}): void {
     void setServerPendingTurnQueuePaused(id, paused, options)
       .then((snapshot) => {
         runInAction(() => this.setQueueSnapshot(snapshot));
@@ -1497,7 +1499,7 @@ export class WorkspaceStore implements Workspace {
     // something is queued) so a pending turn doesn't immediately start after the
     // user explicitly hit stop.
     if (options.pauseQueue && this.pendingQueueItemCount(id) > 0) {
-      this.setQueuePaused(id, true);
+      this.setQueuePaused(id, true, { reason: "stop" });
     }
     const active = this.runs.get(id);
     let cancelPromise: Promise<void> = Promise.resolve();

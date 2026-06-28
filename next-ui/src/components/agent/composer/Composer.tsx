@@ -1010,6 +1010,7 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
               fontSize: "0.84rem",
               lineHeight: 1.45,
               py: 0.25,
+              pr: 1,
               ...hiddenNativePlaceholderSx,
               ...(visualExpanded && {
                 position: "absolute",
@@ -1019,7 +1020,7 @@ const ComposerInner = forwardRef<ComposerHandle, ComposerProps>(function Compose
                 zIndex: 5,
                 minHeight: voiceState === "recording" ? VOICE_INPUT_OVERLAY_MIN_HEIGHT_PX : undefined,
                 pl: 1,
-                pr: 0,
+                pr: 1,
                 pt: 0.75,
                 pb: voiceState === "recording" ? `${VOICE_INPUT_OVERLAY_BOTTOM_PADDING_PX}px` : 0.75,
                 borderRadius: (t) => `${t.custom.radii.md}px`,

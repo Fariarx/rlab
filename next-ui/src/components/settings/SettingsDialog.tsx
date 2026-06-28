@@ -20,7 +20,7 @@ import {
   AgentGlyph,
   agentStatusKey,
   useAgentStatus,
-  useReloadAgentStatus,
+  useRefreshAgentStatus,
 } from "../agent";
 import { Button, IconButton, StatusDot, TagSelect } from "../ui";
 import { SettingsDialogStore } from "./settings-dialog-store";
@@ -203,9 +203,9 @@ const AgentsSection = observer(function AgentsSection({
   readonly onDefaultProfileChange: (profile: AgentProfile) => void;
 }) {
   const statusOf = useAgentStatus();
-  const reloadAgentStatus = useReloadAgentStatus();
+  const refreshAgentStatus = useRefreshAgentStatus();
   const { t, agentStatus } = useI18n();
-  const { store, retryLoadConfig, saveApiKey, installAgent } = useAgentsSectionController(reloadAgentStatus);
+  const { store, retryLoadConfig, saveApiKey, installAgent } = useAgentsSectionController(refreshAgentStatus);
   const {
     config,
     configError,

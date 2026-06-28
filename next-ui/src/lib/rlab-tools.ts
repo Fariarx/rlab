@@ -1,4 +1,4 @@
-export type RlabChatToolId = "AskUserQuestion" | "TaskWakeup" | "TaskTracker" | "TaskGoal" | "BrowserPreview";
+export type RlabChatToolId = "AskUserQuestion" | "TaskAwaiter" | "TaskTracker" | "TaskGoal" | "BrowserPreview";
 
 export interface RlabChatToolDef {
   readonly id: RlabChatToolId;
@@ -7,16 +7,29 @@ export interface RlabChatToolDef {
 
 export const RLAB_CHAT_TOOLS: readonly RlabChatToolDef[] = [
   { id: "AskUserQuestion", token: "$AskUserQuestion" },
-  { id: "TaskWakeup", token: "$TaskWakeup" },
+  { id: "TaskAwaiter", token: "$TaskAwaiter" },
   { id: "TaskTracker", token: "$TaskTracker" },
   { id: "TaskGoal", token: "$TaskGoal" },
   { id: "BrowserPreview", token: "$BrowserPreview" },
 ];
 
 export const RLAB_CHAT_TOOL_IDS: readonly RlabChatToolId[] = RLAB_CHAT_TOOLS.map((tool) => tool.id);
-export const DEFAULT_RLAB_CHAT_TOOL_IDS: readonly RlabChatToolId[] = ["AskUserQuestion", "TaskWakeup", "TaskTracker", "TaskGoal"];
+export const DEFAULT_RLAB_CHAT_TOOL_IDS: readonly RlabChatToolId[] = ["AskUserQuestion", "TaskAwaiter", "TaskTracker", "TaskGoal"];
 
 const RLAB_CHAT_TOOL_ID_SET = new Set<string>(RLAB_CHAT_TOOL_IDS);
+const LEGACY_RLAB_CHAT_TOOL_IDS: Readonly<Record<string, RlabChatToolId>> = {
+  TaskWakeup: "TaskAwaiter",
+};
+
+function normalizeRlabChatToolId(value: unknown): RlabChatToolId | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  if (RLAB_CHAT_TOOL_ID_SET.has(value)) {
+    return value as RlabChatToolId;
+  }
+  return LEGACY_RLAB_CHAT_TOOL_IDS[value] ?? null;
+}
 
 export function isRlabChatToolId(value: unknown): value is RlabChatToolId {
   return typeof value === "string" && RLAB_CHAT_TOOL_ID_SET.has(value);
@@ -28,8 +41,9 @@ export function activeRlabChatToolIds(value: unknown): readonly RlabChatToolId[]
   }
   const seen = new Set<RlabChatToolId>();
   for (const item of value) {
-    if (isRlabChatToolId(item)) {
-      seen.add(item);
+    const normalized = normalizeRlabChatToolId(item);
+    if (normalized) {
+      seen.add(normalized);
     }
   }
   return RLAB_CHAT_TOOL_IDS.filter((id) => seen.has(id));
@@ -44,5 +58,6 @@ export function persistedRlabChatToolIds(value: unknown): readonly RlabChatToolI
 }
 
 export function rlabChatToolEnabled(value: unknown, id: unknown): boolean {
-  return isRlabChatToolId(id) && activeRlabChatToolIds(value).includes(id);
+  const normalized = normalizeRlabChatToolId(id);
+  return normalized !== null && activeRlabChatToolIds(value).includes(normalized);
 }

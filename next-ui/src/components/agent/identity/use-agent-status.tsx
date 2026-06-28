@@ -14,6 +14,7 @@ interface AgentStatusValue {
   readonly strict: boolean;
   readonly error: string | null;
   readonly reload: () => void;
+  readonly refresh: () => void;
 }
 
 const AgentStatusContext = createContext<AgentStatusValue>({
@@ -22,6 +23,7 @@ const AgentStatusContext = createContext<AgentStatusValue>({
   strict: false,
   error: null,
   reload: () => undefined,
+  refresh: () => undefined,
 });
 
 const AGENT_IDS = new Set<AgentId>(AGENTS.map((agent) => agent.id));
@@ -222,11 +224,14 @@ const AgentStatusProviderInner = observer(function AgentStatusProviderInner({
   readonly store: AgentStatusStore;
 }) {
   const reload = useMemo(() => () => {
-    void store.reload();
+    void store.reload({ liveModels: true });
+  }, [store]);
+  const refresh = useMemo(() => () => {
+    void store.reload({ liveModels: false });
   }, [store]);
   const value = useMemo<AgentStatusValue>(
-    () => ({ agents: store.agents, live: store.live, strict: true, error: store.error, reload }),
-    [reload, store.agents, store.error, store.live],
+    () => ({ agents: store.agents, live: store.live, strict: true, error: store.error, reload, refresh }),
+    [refresh, reload, store.agents, store.error, store.live],
   );
   return <AgentStatusContext.Provider value={value}>{children}</AgentStatusContext.Provider>;
 });
@@ -274,4 +279,9 @@ export function useAgentStatusError(): string | null {
 /** Retries the live agent detection API request. */
 export function useReloadAgentStatus(): () => void {
   return useContext(AgentStatusContext).reload;
+}
+
+/** Refreshes cheap agent availability without live model discovery. */
+export function useRefreshAgentStatus(): () => void {
+  return useContext(AgentStatusContext).refresh;
 }

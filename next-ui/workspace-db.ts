@@ -70,7 +70,8 @@ CREATE TABLE IF NOT EXISTS composer_drafts (
 CREATE TABLE IF NOT EXISTS pending_queue_state (
   conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
   paused INTEGER NOT NULL DEFAULT 0,
-  resume_at_ms INTEGER
+  resume_at_ms INTEGER,
+  pause_reason TEXT
 );
 CREATE TABLE IF NOT EXISTS pending_turns (
   id TEXT PRIMARY KEY,
@@ -210,10 +211,59 @@ function migratePendingQueueStateResumeAt(handle: DatabaseHandle): void {
   handle.prepare("ALTER TABLE pending_queue_state ADD COLUMN resume_at_ms INTEGER").run();
 }
 
+function migratePendingQueueStatePauseReason(handle: DatabaseHandle): void {
+  if (!tableExists(handle, "pending_queue_state") || tableHasColumn(handle, "pending_queue_state", "pause_reason")) {
+    return;
+  }
+  handle.prepare("ALTER TABLE pending_queue_state ADD COLUMN pause_reason TEXT").run();
+  handle.prepare("UPDATE pending_queue_state SET pause_reason = 'legacy' WHERE paused = 1 AND pause_reason IS NULL").run();
+}
+
 function normalizeLegacyPausedGoals(handle: DatabaseHandle): void {
   handle.exec("BEGIN");
   try {
     const result = handle.prepare("UPDATE pending_queue_items SET state = 'queued', run_id = NULL, updated_at_ms = ? WHERE kind = 'goal' AND state = 'paused'").run(Date.now());
+    if (result.changes > 0) {
+      bumpWorkspaceRevisionInTransaction(handle);
+    }
+    handle.exec("COMMIT");
+  } catch (error) {
+    try {
+      handle.exec("ROLLBACK");
+    } catch {
+      // ignore rollback failure; surface the original error
+    }
+    throw error;
+  }
+}
+
+function normalizeLegacyPausedPersistentCooldowns(handle: DatabaseHandle): void {
+  handle.exec("BEGIN");
+  try {
+    const result = handle
+      .prepare(
+        `UPDATE pending_queue_state
+         SET paused = 0, resume_at_ms = NULL, pause_reason = NULL
+         WHERE paused = 1
+           AND resume_at_ms IS NULL
+           AND (pause_reason IS NULL OR pause_reason = 'legacy')
+           AND EXISTS (
+             SELECT 1
+             FROM pending_queue_items head
+             WHERE head.conversation_id = pending_queue_state.conversation_id
+               AND head.position = (
+                 SELECT MIN(position)
+                 FROM pending_queue_items candidate
+                 WHERE candidate.conversation_id = pending_queue_state.conversation_id
+                   AND (candidate.state IN ('queued', 'waiting_wakeup') OR (candidate.kind IN ('goal', 'tracker') AND candidate.state = 'paused'))
+               )
+               AND head.kind IN ('goal', 'tracker')
+               AND head.state IN ('queued', 'paused')
+               AND head.next_dispatch_at_ms IS NOT NULL
+               AND head.next_dispatch_at_ms <= ?
+           )`,
+      )
+      .run(Date.now());
     if (result.changes > 0) {
       bumpWorkspaceRevisionInTransaction(handle);
     }
@@ -243,12 +293,14 @@ export function initWorkspaceDb(file: string): void {
   try {
     handle.exec(TABLE_SCHEMA);
     migratePendingQueueStateResumeAt(handle);
+    migratePendingQueueStatePauseReason(handle);
     migratePendingQueueItemsTrackerKind(handle);
     handle.exec(INDEX_SCHEMA);
     assertCurrentSchema(handle);
     assertForeignKeyIntegrity(handle);
     migratePendingTurnsToQueueItems(handle);
     normalizeLegacyPausedGoals(handle);
+    normalizeLegacyPausedPersistentCooldowns(handle);
     backfillConversationResourcesIfNeeded(handle);
     db = handle;
   } catch (error) {
@@ -932,34 +984,47 @@ function pendingQueueItemFromRow(row: PendingQueueItemRow): PendingQueueItem {
 interface PendingQueuePauseState {
   readonly paused: boolean;
   readonly resumeAtMs?: number;
+  readonly reason?: PendingQueuePauseReason;
 }
+
+export type PendingQueuePauseReason = "manual" | "stop" | "dispatch-error" | "legacy";
 
 function normalizeQueueResumeAtMs(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.trunc(value) : undefined;
 }
 
+function normalizeQueuePauseReason(value: unknown): PendingQueuePauseReason | undefined {
+  return value === "manual" || value === "stop" || value === "dispatch-error" || value === "legacy" ? value : undefined;
+}
+
+function persistentReleaseShouldResumeQueue(pauseState: PendingQueuePauseState): boolean {
+  return pauseState.paused && pauseState.resumeAtMs === undefined && pauseState.reason !== "manual";
+}
+
 function pendingQueuePauseState(handle: DatabaseHandle, conversationId: string): PendingQueuePauseState {
-  const row = handle.prepare("SELECT paused, resume_at_ms AS resumeAtMs FROM pending_queue_state WHERE conversation_id = ?").get(conversationId) as
-    | { readonly paused: number; readonly resumeAtMs: number | null }
+  const row = handle.prepare("SELECT paused, resume_at_ms AS resumeAtMs, pause_reason AS pauseReason FROM pending_queue_state WHERE conversation_id = ?").get(conversationId) as
+    | { readonly paused: number; readonly resumeAtMs: number | null; readonly pauseReason: string | null }
     | undefined;
   const paused = row?.paused === 1;
   const resumeAtMs = paused ? normalizeQueueResumeAtMs(row?.resumeAtMs) : undefined;
-  return { paused, ...(resumeAtMs === undefined ? {} : { resumeAtMs }) };
+  const reason = paused ? normalizeQueuePauseReason(row?.pauseReason) ?? "legacy" : undefined;
+  return { paused, ...(resumeAtMs === undefined ? {} : { resumeAtMs }), ...(reason === undefined ? {} : { reason }) };
 }
 
 function setPendingTurnQueuePausedInTransaction(
   handle: DatabaseHandle,
   conversationId: string,
   paused: boolean,
-  options: { readonly resumeAtMs?: number } = {},
+  options: { readonly resumeAtMs?: number; readonly reason?: PendingQueuePauseReason } = {},
 ): void {
   ensureConversationExists(handle, conversationId);
   const resumeAtMs = paused ? normalizeQueueResumeAtMs(options.resumeAtMs) : undefined;
+  const pauseReason = paused ? options.reason ?? "manual" : undefined;
   handle
     .prepare(
-      "INSERT INTO pending_queue_state(conversation_id, paused, resume_at_ms) VALUES(?, ?, ?) ON CONFLICT(conversation_id) DO UPDATE SET paused = excluded.paused, resume_at_ms = excluded.resume_at_ms",
+      "INSERT INTO pending_queue_state(conversation_id, paused, resume_at_ms, pause_reason) VALUES(?, ?, ?, ?) ON CONFLICT(conversation_id) DO UPDATE SET paused = excluded.paused, resume_at_ms = excluded.resume_at_ms, pause_reason = excluded.pause_reason",
     )
-    .run(conversationId, paused ? 1 : 0, resumeAtMs ?? null);
+    .run(conversationId, paused ? 1 : 0, resumeAtMs ?? null, pauseReason ?? null);
 }
 
 function nextPendingTurnPosition(handle: DatabaseHandle, conversationId: string): number {
@@ -1656,7 +1721,7 @@ export function movePendingQueueItemAfter(conversationId: string, itemId: string
   return readPendingTurnQueue(conversationId);
 }
 
-export function setPendingTurnQueuePaused(conversationId: string, paused: boolean, options: { readonly resumeAtMs?: number } = {}): PendingTurnQueueSnapshot {
+export function setPendingTurnQueuePaused(conversationId: string, paused: boolean, options: { readonly resumeAtMs?: number; readonly reason?: PendingQueuePauseReason } = {}): PendingTurnQueueSnapshot {
   const handle = database();
   transaction(() => {
     setPendingTurnQueuePausedInTransaction(handle, conversationId, paused, options);
@@ -1785,7 +1850,7 @@ export function releasePendingTurn(id: string, options: { readonly pause: boolea
 
 export function releasePendingQueueItem(
   id: string,
-  options: { readonly pause: boolean; readonly rotateToEnd?: boolean; readonly nextDispatchAtMs?: number },
+  options: { readonly pause: boolean; readonly rotateToEnd?: boolean; readonly nextDispatchAtMs?: number; readonly pauseReason?: PendingQueuePauseReason },
 ): PendingQueueDispatchItem | null {
   const handle = database();
   let released: PendingQueueDispatchItem | null = null;
@@ -1817,7 +1882,9 @@ export function releasePendingQueueItem(
       .prepare("UPDATE pending_queue_items SET state = ?, run_id = NULL, position = ?, updated_at_ms = ?, next_dispatch_at_ms = ?, data = ? WHERE id = ?")
       .run(nextState, nextPosition, Date.now(), options.nextDispatchAtMs ?? null, nextData, id);
     if (options.pause) {
-      setPendingTurnQueuePausedInTransaction(handle, row.conversationId, true);
+      setPendingTurnQueuePausedInTransaction(handle, row.conversationId, true, { reason: options.pauseReason ?? "stop" });
+    } else if (pendingPersistentQueueKind(item.kind) && options.nextDispatchAtMs !== undefined && persistentReleaseShouldResumeQueue(pendingQueuePauseState(handle, row.conversationId))) {
+      setPendingTurnQueuePausedInTransaction(handle, row.conversationId, false);
     }
     const nextRow = { ...row, state: nextState, runId: null, position: nextPosition, updatedAtMs: Date.now(), nextDispatchAtMs: options.nextDispatchAtMs ?? null, data: nextData };
     const nextItem = pendingQueueItemFromRow(nextRow);
@@ -1831,7 +1898,7 @@ export function releasePendingQueueItem(
 
 export function releaseDispatchingQueueItemByRunId(
   runId: string,
-  options: { readonly pause: boolean; readonly rotateToEnd?: boolean; readonly nextDispatchAtMs?: number },
+  options: { readonly pause: boolean; readonly rotateToEnd?: boolean; readonly nextDispatchAtMs?: number; readonly pauseReason?: PendingQueuePauseReason },
 ): PendingQueueDispatchItem | null {
   const handle = database();
   const row = handle
@@ -1850,7 +1917,7 @@ export function resetDispatchingPendingTurns(): void {
     const result = handle.prepare("UPDATE pending_queue_items SET state = 'queued', run_id = NULL WHERE state = 'dispatching'").run();
     if (result.changes > 0) {
       for (const row of rows) {
-        setPendingTurnQueuePausedInTransaction(handle, row.conversationId, true);
+        setPendingTurnQueuePausedInTransaction(handle, row.conversationId, true, { reason: "dispatch-error" });
       }
       bumpWorkspaceRevisionInTransaction(handle);
     }

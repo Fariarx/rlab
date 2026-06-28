@@ -79,10 +79,10 @@ describe("Message", () => {
   });
 
   it("renders rlab tool tokens as inline tool links", () => {
-    renderMessage({ id: "user-plugin-link", role: "user", text: "$TaskWakeup что это" });
+    renderMessage({ id: "user-plugin-link", role: "user", text: "$TaskAwaiter что это" });
 
-    const link = screen.getByRole("link", { name: "TaskWakeup" });
-    expect(link).toHaveAttribute("href", "rlab-tool:TaskWakeup");
+    const link = screen.getByRole("link", { name: "TaskAwaiter" });
+    expect(link).toHaveAttribute("href", "rlab-tool:TaskAwaiter");
   });
 
   it("collapses structured TaskGoal user prompts", () => {

@@ -207,13 +207,13 @@ describe("ConversationList status dots", () => {
   it("shows a warning status for idle conversations with an active wakeup", () => {
     render([{ ...base, id: "wakeup", title: "Wakeup chat", status: "idle" }], noopActions(), new Set(["wakeup"]));
 
-    expect(screen.getByRole("img", { name: "Wakeup запланирован" })).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "Task Awaiter запланирован" })).toBeInTheDocument();
   });
 
   it("lets an active wakeup override an existing error status visually", () => {
     render([{ ...base, id: "wakeup", title: "Wakeup chat", status: "error" }], noopActions(), new Set(["wakeup"]));
 
-    expect(screen.getByRole("img", { name: "Wakeup запланирован" })).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "Task Awaiter запланирован" })).toBeInTheDocument();
     expect(screen.queryByRole("img", { name: "Ошибка" })).not.toBeInTheDocument();
   });
 
@@ -226,7 +226,7 @@ describe("ConversationList status dots", () => {
 
     rendered.rerender(<ConversationList projects={[]} chats={[chat]} selectedId="wakeup" onSelect={vi.fn()} actions={actions} wakeupConversationIds={new Set(["wakeup"])} />);
 
-    expect(screen.getByRole("img", { name: "Wakeup запланирован" })).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "Task Awaiter запланирован" })).toBeInTheDocument();
     expect(screen.queryByRole("img", { name: "Ошибка" })).not.toBeInTheDocument();
   });
 });
@@ -383,7 +383,7 @@ describe("ConversationList collapsed group indicators", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /Чаты/ }));
 
-    expect(screen.getByRole("img", { name: "Wakeup запланирован" })).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "Task Awaiter запланирован" })).toBeInTheDocument();
   });
 
   it("does not render a conversation-count badge on group headers", () => {

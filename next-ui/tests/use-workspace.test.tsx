@@ -621,6 +621,40 @@ describe("useWorkspace", () => {
     expect(localStorageSetItem).not.toHaveBeenCalledWith(expect.stringContaining("rlab-workspace"), expect.any(String));
   });
 
+  it("does not resend existing user messages when persisting agent-input thread changes", async () => {
+    state = {
+      ...state,
+      selectedId: "chat-2",
+      chats: state.chats.map((chat) => (chat.id === "chat-2" ? { ...chat, status: "waiting" as const } : chat)),
+      threads: {
+        ...state.threads,
+        "chat-2": [
+          { id: "u-existing", role: "user", text: "Approve the pending action", time: "10:00", createdAtMs: 10 },
+          { id: "a-existing", role: "agent", time: "10:01", blocks: [{ kind: "approval", id: "approval-1", title: "Approve Bash command?", detail: "npm test" }] },
+        ],
+      },
+    };
+
+    render(<Probe />);
+
+    await screen.findByText("chat-2");
+    const savesBefore = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace/mutations" && init?.method === "POST").length;
+    screen.getByRole("button", { name: "approve" }).click();
+
+    await waitFor(() => {
+      const saves = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace/mutations" && init?.method === "POST");
+      expect(saves).toHaveLength(savesBefore + 1);
+    });
+
+    const saves = vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace/mutations" && init?.method === "POST");
+    const payload = JSON.parse(String(saves.at(-1)?.[1]?.body ?? "{}")) as { mutations?: WorkspaceMutation[] };
+    const savedMessages = payload.mutations?.flatMap((mutation) => (mutation.type === "upsertMessages" ? mutation.messages : mutation.type === "upsertMessage" ? [mutation.message] : [])) ?? [];
+    expect(savedMessages).toHaveLength(1);
+    expect(savedMessages[0]).toMatchObject({ id: "a-existing", role: "agent" });
+    expect(savedMessages.some((message) => message.id === "u-existing")).toBe(false);
+    expect(JSON.stringify(state.threads["chat-2"])).toContain("\"decision\":\"approved\"");
+  });
+
   it("persists conversation deletion without resending unchanged loaded threads", async () => {
     render(<Probe />);
 

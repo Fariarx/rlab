@@ -7,7 +7,7 @@ export { AgentMonogram } from "./identity/AgentMonogram";
 export { AgentGlyph } from "./identity/AgentGlyph";
 export { AgentBadge } from "./identity/AgentBadge";
 export { AgentPicker } from "./identity/AgentPicker";
-export { AgentStatusProvider, useAgentCliInfo, useAgentStatus, useAgentStatusError, useAgentStatusLive, useReloadAgentStatus } from "./identity/use-agent-status";
+export { AgentStatusProvider, useAgentCliInfo, useAgentStatus, useAgentStatusError, useAgentStatusLive, useRefreshAgentStatus, useReloadAgentStatus } from "./identity/use-agent-status";
 export { Conversation } from "./conversation/Conversation";
 export { QueuedMessages, type QueuedMessagesProps } from "./conversation/QueuedMessages";
 export { ConversationList, conversationMatches, type ConversationActions } from "./conversation/ConversationList";

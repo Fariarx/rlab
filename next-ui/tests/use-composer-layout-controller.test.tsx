@@ -111,6 +111,9 @@ describe("useComposerLayoutController", () => {
       configurable: true,
       get: () => 44,
     });
+    HTMLElement.prototype.getBoundingClientRect = function getBoundingClientRect() {
+      return { bottom: 44, height: 44, left: 0, right: 0, top: 0, width: 0, x: 0, y: 0, toJSON: () => ({}) };
+    };
     const onTagsHeightChange = vi.fn();
 
     render(<Harness composerValue="" expanded={false} onTagsHeightChange={onTagsHeightChange} />);
@@ -214,7 +217,7 @@ describe("useComposerLayoutController", () => {
     });
 
     expect(setLimitOpen).toHaveBeenCalledWith(false);
-    expect(setOptionsMenuMaxHeight).toHaveBeenCalledWith(38);
+    expect(setOptionsMenuMaxHeight).toHaveBeenCalledWith(30);
     expect(setModeMenuAnchor).toHaveBeenCalledWith(anchor);
   });
 });

@@ -9,10 +9,10 @@ import ContentCopyRoundedIcon from "@mui/icons-material/ContentCopyRounded";
 import DragIndicatorRoundedIcon from "@mui/icons-material/DragIndicatorRounded";
 import EditRoundedIcon from "@mui/icons-material/EditRounded";
 import FlagRoundedIcon from "@mui/icons-material/FlagRounded";
+import KeyboardDoubleArrowRightRoundedIcon from "@mui/icons-material/KeyboardDoubleArrowRightRounded";
 import PauseRoundedIcon from "@mui/icons-material/PauseRounded";
 import PlayArrowRoundedIcon from "@mui/icons-material/PlayArrowRounded";
 import ScheduleSendRoundedIcon from "@mui/icons-material/ScheduleSendRounded";
-import SendRoundedIcon from "@mui/icons-material/SendRounded";
 import { Box, Divider, Menu, MenuItem, Stack, Typography, type SxProps, type Theme } from "@mui/material";
 import type { PendingQueueItem, PendingQueueMessageItem, PendingQueueWakeupItem } from "../../../client/api/workspace-page-api";
 import { useI18n } from "../../../i18n/I18nProvider";
@@ -542,7 +542,7 @@ export function QueuedMessages({ messages, items, paused, resumeAtMs, onCancel, 
           onClick={onSendNow}
           disabled={!canSendNow}
           aria-label={t("sendQueuedNow")}
-          startIcon={<SendRoundedIcon sx={{ fontSize: 16 }} />}
+          startIcon={<KeyboardDoubleArrowRightRoundedIcon sx={{ fontSize: 16 }} />}
           sx={{
             ...queuedHeaderButtonSx,
             gridArea: "send",

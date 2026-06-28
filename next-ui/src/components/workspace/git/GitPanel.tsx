@@ -21,6 +21,7 @@ import type { DiffBlock, ReviewCommentAnchor, ReviewCommentEntry } from "../../a
 import { Button, EmptyState, IconButton } from "../../ui";
 import type { GitDiffMode } from "../../../client/api/git-panel-api";
 import { countDiffChanges, type DiffViewerLine, GitDiffLines, gitDiffViewerLinesFromBlock } from "./GitDiffViewer";
+import { GitProjectFileTreeTab } from "./GitProjectFileTreeTab";
 import { GitRefPicker } from "./GitRefPicker";
 import { GitTreeTab } from "./GitTreeTab";
 import { gitCommitActionConfirmation, gitCommitActionLabelKey, type GitCommitAction } from "./git-panel-model";
@@ -409,6 +410,9 @@ export const GitView = observer(function GitView({ cwd, lastTurnDiffs = [], revi
     graphBranchHeads,
     treeLoading,
     treeError,
+    projectFiles,
+    projectFilesLoading,
+    projectFilesError,
     activeTab,
     actionLoading,
     commitMessage,
@@ -448,6 +452,7 @@ export const GitView = observer(function GitView({ cwd, lastTurnDiffs = [], revi
   const worktreeConfirmOpen = Boolean(worktreeConfirmAnchor);
   const scrollBottomPadding = bottomInset + GIT_DIFF_SCROLL_END_GAP;
   const visibleDiffCount = activeTab === "unstaged" ? unstagedFiles.length : activeTab === "staged" ? stagedFiles.length : activeTab === "last-turn" ? lastTurnDiffs.length : 0;
+  const activeTabHasDiffControls = activeTab === "unstaged" || activeTab === "staged" || activeTab === "last-turn";
   const diffOpenControlsDisabled = visibleDiffCount === 0;
   const remoteActionDisabled = !cwd || !status || loading || actionLoading;
   const remotes = remotesForStatus(status);
@@ -636,7 +641,7 @@ export const GitView = observer(function GitView({ cwd, lastTurnDiffs = [], revi
                 <GitRemoteActionButton title={t("gitPull")} count={status?.behind ?? 0} disabled={remoteActionDisabled || pullBranchOptions.length === 0} onClick={() => openRemoteDialog("pull")} icon={<CloudDownloadIcon sx={{ fontSize: 17 }} />} />
                 <GitRemoteActionButton title={t("gitPush")} count={status?.ahead ?? 0} disabled={remoteActionDisabled || (status?.upstream ? false : pushBranchOptions.length === 0)} onClick={() => openRemoteDialog("push")} icon={<CloudUploadIcon sx={{ fontSize: 17 }} />} />
               </>
-            ) : (
+            ) : activeTabHasDiffControls ? (
               <>
                 <Tooltip title={t("gitExpandAllDiffs")}>
                   <span>
@@ -653,7 +658,7 @@ export const GitView = observer(function GitView({ cwd, lastTurnDiffs = [], revi
                   </span>
                 </Tooltip>
               </>
-            )}
+            ) : null}
             <Tooltip title={t("refresh")}>
               <span>
                 <IconButton aria-label={t("refresh")} disabled={!cwd || loading} onClick={refreshStatus}>
@@ -680,6 +685,7 @@ export const GitView = observer(function GitView({ cwd, lastTurnDiffs = [], revi
             }}
           >
             <Tab value="tree" label={tabLabel(t("gitTreeTab"), graphCommits.length)} />
+            <Tab value="files" label={tabLabel(t("gitFilesTab"), projectFiles.length)} />
             <Tab value="unstaged" label={tabLabel(t("gitUnstagedTab"), unstagedFiles.length)} />
             <Tab value="staged" label={tabLabel(t("gitStagedTab"), stagedFiles.length)} />
             <Tab value="last-turn" label={tabLabel(t("gitLastTurnTab"), lastTurnDiffs.length)} />
@@ -718,6 +724,8 @@ export const GitView = observer(function GitView({ cwd, lastTurnDiffs = [], revi
           {status && (
             <Stack spacing={1.5} sx={{ minHeight: 0, pt: 1.5 }}>
               {activeTab === "tree" && <GitTreeTab commits={graphCommits} branchHeads={graphBranchHeads} currentBranch={status.branch} branches={status.branches} currentHash={status.commitHash} error={treeError} loading={treeLoading} onCheckoutBranch={checkoutRef} onCommitAction={requestCommitAction} actionsDisabled={!cwd || loading || actionLoading} canCheckout={Boolean(cwd) && status.clean && !loading && !actionLoading} t={t} />}
+
+              {activeTab === "files" && <GitProjectFileTreeTab cwd={cwd} files={projectFiles} loading={projectFilesLoading} error={projectFilesError} t={t} />}
 
               {activeTab === "unstaged" &&
                 cwd &&

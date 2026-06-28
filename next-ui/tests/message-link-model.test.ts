@@ -2,22 +2,24 @@ import { describe, expect, it } from "vitest";
 import { fileBaseName, isFilePathLike, messageMarkdownUrlTransform, normalizedRlabToolName, rlabToolMarkdownLinks } from "../src/components/agent/message/message-link-model";
 
 describe("message-link-model", () => {
-  it("normalizes legacy ScheduleWakeup tool references to TaskWakeup", () => {
-    expect(normalizedRlabToolName("ScheduleWakeup")).toBe("TaskWakeup");
+  it("normalizes awaiter aliases and legacy wakeup tool references to TaskAwaiter", () => {
+    expect(normalizedRlabToolName("ScheduleAwaiter")).toBe("TaskAwaiter");
+    expect(normalizedRlabToolName("ScheduleWakeup")).toBe("TaskAwaiter");
+    expect(normalizedRlabToolName("TaskWakeup")).toBe("TaskAwaiter");
     expect(normalizedRlabToolName("AskUserQuestion")).toBe("AskUserQuestion");
   });
 
   it("turns supported rlab tool tokens into markdown links", () => {
-    expect(rlabToolMarkdownLinks("Use $TaskWakeup then $AskUserQuestion.")).toBe("Use [TaskWakeup](rlab-tool:TaskWakeup) then [AskUserQuestion](rlab-tool:AskUserQuestion).");
-    expect(rlabToolMarkdownLinks("Legacy $ScheduleWakeup works.")).toBe("Legacy [TaskWakeup](rlab-tool:TaskWakeup) works.");
+    expect(rlabToolMarkdownLinks("Use $TaskAwaiter then $AskUserQuestion.")).toBe("Use [TaskAwaiter](rlab-tool:TaskAwaiter) then [AskUserQuestion](rlab-tool:AskUserQuestion).");
+    expect(rlabToolMarkdownLinks("Legacy $ScheduleWakeup works.")).toBe("Legacy [TaskAwaiter](rlab-tool:TaskAwaiter) works.");
   });
 
   it("leaves non-tool dollar tokens untouched", () => {
-    expect(rlabToolMarkdownLinks("Keep $UnknownTool and $TaskWakeupNow as text.")).toBe("Keep $UnknownTool and $TaskWakeupNow as text.");
+    expect(rlabToolMarkdownLinks("Keep $UnknownTool and $TaskAwaiterNow as text.")).toBe("Keep $UnknownTool and $TaskAwaiterNow as text.");
   });
 
   it("allows internal rlab tool links through markdown URL sanitization", () => {
-    expect(messageMarkdownUrlTransform("rlab-tool:TaskWakeup")).toBe("rlab-tool:TaskWakeup");
+    expect(messageMarkdownUrlTransform("rlab-tool:TaskAwaiter")).toBe("rlab-tool:TaskAwaiter");
     expect(messageMarkdownUrlTransform("https://example.com/docs")).toBe("https://example.com/docs");
   });
 

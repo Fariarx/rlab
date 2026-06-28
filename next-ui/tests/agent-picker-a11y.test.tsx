@@ -189,7 +189,7 @@ describe("AgentPicker a11y", () => {
     expect(screen.getByText("Альфа-версия")).toBeInTheDocument();
     expect(screen.getByRole("switch", { name: "Просмотр: выключен" })).not.toBeChecked();
 
-    fireEvent.click(screen.getByRole("switch", { name: "Отложенные задачи: включён" }));
+    fireEvent.click(screen.getByRole("switch", { name: "Task Awaiter: включён" }));
     fireEvent.click(screen.getByRole("button", { name: "Применить" }));
 
     expect(onSelect).toHaveBeenCalledWith(expect.objectContaining({ tools: ["AskUserQuestion", "TaskTracker", "TaskGoal"] }));

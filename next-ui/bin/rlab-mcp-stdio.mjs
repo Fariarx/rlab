@@ -16,10 +16,10 @@ const ACK = "rlab accepted the request and handles it server-side. Finish this t
 const server = new McpServer({ name: "rlab", version: "1.0.0" });
 
 server.registerTool(
-  "TaskWakeup",
+  "TaskAwaiter",
   {
     description:
-      "Schedule, cancel, or list an rlab task wakeup in the current chat. To schedule, provide prompt plus delaySeconds, fireAt, cron, or script (with intervalSeconds/cron). To cancel, provide action='cancel' plus wakeupId/id or all=true. To inspect, action='list'. rlab fires the wakeup server-side and updates the tool result with the current wakeup list after schedule/cancel.",
+      "Schedule, cancel, or list an rlab task awaiter in the current chat. To schedule, provide prompt plus delaySeconds, fireAt, cron, or script (with intervalSeconds/cron). To cancel, provide action='cancel' plus wakeupId/id or all=true. To inspect, action='list'. rlab fires the awaiter server-side and updates the tool result with the current awaiter list after schedule/cancel.",
     inputSchema: {
       action: z.string().optional(),
       prompt: z.string().optional(),

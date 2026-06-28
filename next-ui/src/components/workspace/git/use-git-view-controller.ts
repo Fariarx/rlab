@@ -17,6 +17,7 @@ import {
   type GitPullOptions,
   type GitPushOptions,
 } from "../../../client/api/git-panel-api";
+import { loadProjectFiles } from "../../../client/api/workspace-page-api";
 import type { I18nApi } from "../../../i18n/I18nProvider";
 import type { GitFileStatus, GitStatusPayload } from "../../../lib/git-status";
 import type { DiffBlock } from "../../agent";
@@ -79,6 +80,9 @@ export function useGitViewController({
     setGraphBranchHeads,
     setTreeLoading,
     setTreeError,
+    setProjectFiles,
+    setProjectFilesLoading,
+    setProjectFilesError,
     reloadKey,
     setReloadKey,
     activeTab,
@@ -224,6 +228,39 @@ export function useGitViewController({
       alive = false;
     };
   }, [active, activeTab, cwd, refPickerOpen, setGraphBranchHeads, setGraphCommits, setTreeError, setTreeLoading, status, statusVersion, t]);
+
+  useEffect(() => {
+    void statusVersion;
+    if (!active || !cwd || !status || activeTab !== "files") {
+      setProjectFilesLoading(false);
+      return;
+    }
+
+    let alive = true;
+    setProjectFilesLoading(true);
+    setProjectFilesError(null);
+    void loadProjectFiles(cwd)
+      .then((files) => {
+        if (alive) {
+          setProjectFiles(files);
+        }
+      })
+      .catch((loadError) => {
+        if (alive) {
+          setProjectFiles([]);
+          setProjectFilesError(gitOperationErrorMessage(loadError, t("gitProjectFilesUnavailable")));
+        }
+      })
+      .finally(() => {
+        if (alive) {
+          setProjectFilesLoading(false);
+        }
+      });
+
+    return () => {
+      alive = false;
+    };
+  }, [active, activeTab, cwd, setProjectFiles, setProjectFilesError, setProjectFilesLoading, status, statusVersion, t]);
 
   const unstagedFiles = useMemo(() => changedFilesForTab(status, "unstaged"), [status]);
   const stagedFiles = useMemo(() => changedFilesForTab(status, "staged"), [status]);

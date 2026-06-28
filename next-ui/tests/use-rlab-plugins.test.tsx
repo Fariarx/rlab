@@ -32,7 +32,7 @@ describe("useRlabPlugins", () => {
   });
 
   it("loads plugin links on mount", async () => {
-    const plugins = [{ id: "TaskWakeup", label: "TaskWakeup", token: "$TaskWakeup" }];
+    const plugins = [{ id: "TaskAwaiter", label: "TaskAwaiter", token: "$TaskAwaiter" }];
     loadRlabPluginsMock.mockResolvedValueOnce(plugins);
     const captured: { current: readonly ComposerPluginLink[] } = { current: [] };
 

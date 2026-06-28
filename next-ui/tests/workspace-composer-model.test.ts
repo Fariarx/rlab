@@ -76,8 +76,8 @@ describe("workspace-composer-model", () => {
     expect(tags).toHaveLength(1);
     expect(tags[0]?.id).toBe("wakeup-1");
     expect(tags[0]?.label).toMatch(/^02\.01 \d{2}:04$/);
-    expect(tags[0]?.label).not.toContain("TaskWakeup");
-    expect(tags[0]?.removeLabel).toBe("Remove scheduled wakeup");
+    expect(tags[0]?.label).not.toContain("TaskAwaiter");
+    expect(tags[0]?.removeLabel).toBe("Remove Task Awaiter");
 
     tags[0]?.onRemove();
 
@@ -101,7 +101,7 @@ describe("workspace-composer-model", () => {
     });
 
     expect(tags[0]?.label).toBe("каждые 15с");
-    expect(tags[0]?.label).not.toContain("TaskWakeup");
+    expect(tags[0]?.label).not.toContain("TaskAwaiter");
     expect(tags[0]?.label).not.toContain("script");
     expect(tags[0]?.detail.rows).toContainEqual({ label: "Расписание", value: "каждые 15с" });
   });
