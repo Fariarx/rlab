@@ -3,6 +3,7 @@ import { dirname } from "node:path";
 import process from "node:process";
 import type { AgentBlock, ChatMessage, ComposerDraft, ConversationSummary, Project } from "./src/domain/agent-types";
 import type { AgentProfile } from "./src/lib/agent-catalog";
+import { cloneAppSettings, defaultAppSettings, isAppSettings } from "./src/lib/app-settings";
 import { conversationPreviewSnippet, messagePreviewText, previewSnippet } from "./src/lib/conversation-preview";
 import { collectMessageResources, type ConversationResource } from "./src/lib/conversation-resources";
 import { inferConversationUpdatedAtMs, normalizeConversationUpdatedAtMs } from "./src/lib/time-format";
@@ -787,7 +788,8 @@ export function readWorkspaceStateFromDb(includeThreadIds?: ReadonlySet<string>)
   }
   const kv = new Map(kvRows.map((row) => [row.key, row.value] as const));
   const selectedId = kv.has("selectedId") ? (JSON.parse(kv.get("selectedId") as string) as string) : "";
-  const settings = JSON.parse(kv.get("settings") ?? "null") as WorkspaceState["settings"];
+  const rawSettings = JSON.parse(kv.get("settings") ?? "null") as unknown;
+  const settings = isAppSettings(rawSettings) ? cloneAppSettings(rawSettings) : cloneAppSettings(defaultAppSettings);
   return { chats: conversationsForProject(null), projects, threads, composerDrafts, selectedId, settings };
 }
 
@@ -1850,7 +1852,7 @@ export function releasePendingTurn(id: string, options: { readonly pause: boolea
 
 export function releasePendingQueueItem(
   id: string,
-  options: { readonly pause: boolean; readonly rotateToEnd?: boolean; readonly nextDispatchAtMs?: number; readonly pauseReason?: PendingQueuePauseReason },
+  options: { readonly pause: boolean; readonly rotateToEnd?: boolean; readonly nextDispatchAtMs?: number; readonly pauseReason?: PendingQueuePauseReason; readonly pauseResumeAtMs?: number },
 ): PendingQueueDispatchItem | null {
   const handle = database();
   let released: PendingQueueDispatchItem | null = null;
@@ -1882,7 +1884,7 @@ export function releasePendingQueueItem(
       .prepare("UPDATE pending_queue_items SET state = ?, run_id = NULL, position = ?, updated_at_ms = ?, next_dispatch_at_ms = ?, data = ? WHERE id = ?")
       .run(nextState, nextPosition, Date.now(), options.nextDispatchAtMs ?? null, nextData, id);
     if (options.pause) {
-      setPendingTurnQueuePausedInTransaction(handle, row.conversationId, true, { reason: options.pauseReason ?? "stop" });
+      setPendingTurnQueuePausedInTransaction(handle, row.conversationId, true, { reason: options.pauseReason ?? "stop", resumeAtMs: options.pauseResumeAtMs });
     } else if (pendingPersistentQueueKind(item.kind) && options.nextDispatchAtMs !== undefined && persistentReleaseShouldResumeQueue(pendingQueuePauseState(handle, row.conversationId))) {
       setPendingTurnQueuePausedInTransaction(handle, row.conversationId, false);
     }
@@ -1898,7 +1900,7 @@ export function releasePendingQueueItem(
 
 export function releaseDispatchingQueueItemByRunId(
   runId: string,
-  options: { readonly pause: boolean; readonly rotateToEnd?: boolean; readonly nextDispatchAtMs?: number; readonly pauseReason?: PendingQueuePauseReason },
+  options: { readonly pause: boolean; readonly rotateToEnd?: boolean; readonly nextDispatchAtMs?: number; readonly pauseReason?: PendingQueuePauseReason; readonly pauseResumeAtMs?: number },
 ): PendingQueueDispatchItem | null {
   const handle = database();
   const row = handle

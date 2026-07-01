@@ -1,6 +1,6 @@
 import type { AgentConfigResponse, VoiceConfigResponse } from "../../client/api/settings-api";
 import type { I18nApi } from "../../i18n/I18nProvider";
-import type { AppSettingsPatch, DensityMode, Locale, ThemeMode } from "../../lib/app-settings";
+import { normalizeQueueInterruptionPauseMs, type AppSettingsPatch, type DensityMode, type Locale, type ThemeMode } from "../../lib/app-settings";
 import { voiceLanguageForLocale, type VoiceProviderDef, type VoiceProviderId, type VoiceSettings } from "../../lib/voice-providers";
 import { defaultProfileForAgent, normalizeAgentProfile, type AgentId, type AgentProfile } from "../agent";
 import type { AgentOperationNotice } from "./settings-dialog-store";
@@ -101,6 +101,10 @@ export function generalConfirmDestructiveActionsPatch(confirmDestructiveActions:
 
 export function generalTelemetryPatch(telemetry: boolean): AppSettingsPatch {
   return { general: { telemetry } };
+}
+
+export function generalQueueInterruptionPauseMsPatch(queueInterruptionPauseMs: number): AppSettingsPatch {
+  return { general: { queueInterruptionPauseMs: normalizeQueueInterruptionPauseMs(queueInterruptionPauseMs) } };
 }
 
 export function generalPreviewServerHostPatch(previewServerHost: string): AppSettingsPatch {

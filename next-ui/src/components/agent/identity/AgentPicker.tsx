@@ -103,6 +103,7 @@ export const AgentPicker = observer(function AgentPicker({
   const reasoningOptions = liveOptionsOrCatalog(def.reasoning, selectedCli?.reasoning);
   const canUse = selectedCli?.selectable ?? (selectedStatus !== "unavailable" && selectedStatus !== "unsupported");
   const titleId = "agent-picker-title";
+  const selectedUnavailableText = selectedCli?.modelDiscoveryError ?? t(selectedStatus === "unsupported" ? "agentUnsupported" : "notInstalled", { agent: def.name });
 
   useEffect(() => {
     if (open) {
@@ -327,7 +328,7 @@ export const AgentPicker = observer(function AgentPicker({
         <Box sx={{ flex: 1 }}>
           {!canUse && (
             <Typography sx={{ fontSize: "0.74rem", color: (t) => t.palette.status.warn.main }}>
-              {t(selectedStatus === "unsupported" ? "agentUnsupported" : "notInstalled", { agent: def.name })}
+              {selectedUnavailableText}
             </Typography>
           )}
         </Box>

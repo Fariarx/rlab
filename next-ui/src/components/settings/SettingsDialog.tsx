@@ -10,7 +10,15 @@ import { Alert, Box, Chip, Dialog, Divider, Popover, Radio, Stack, Switch, Tab, 
 import { observer } from "mobx-react-lite";
 import { type ReactNode, useCallback, useState } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
-import type { AppSettings, AppSettingsPatch, DensityMode, Locale, ThemeMode } from "../../lib/app-settings";
+import {
+  MAX_QUEUE_INTERRUPTION_PAUSE_MS,
+  MIN_QUEUE_INTERRUPTION_PAUSE_MS,
+  type AppSettings,
+  type AppSettingsPatch,
+  type DensityMode,
+  type Locale,
+  type ThemeMode,
+} from "../../lib/app-settings";
 import { getVoiceProvider, VOICE_PROVIDERS, type VoiceProviderId } from "../../lib/voice-providers";
 import {
   AGENTS,
@@ -38,6 +46,7 @@ import {
   generalDesktopNotificationsPatch,
   generalLocalePatch,
   generalPreviewServerHostPatch,
+  generalQueueInterruptionPauseMsPatch,
   generalSystemPromptPatch,
   generalTelemetryPatch,
   generalVoiceLanguagePatch,
@@ -469,6 +478,9 @@ function GeneralSection({ settings, onSettingsChange }: Pick<SettingsDialogProps
   const { t } = useI18n();
   const locale = settings.general.locale;
   const setLocale = (nextLocale: Locale) => onSettingsChange(generalLocalePatch(settings.general.voice, nextLocale));
+  const queueInterruptionPauseMinutes = Math.round(settings.general.queueInterruptionPauseMs / 60_000);
+  const queueInterruptionPauseMinMinutes = Math.round(MIN_QUEUE_INTERRUPTION_PAUSE_MS / 60_000);
+  const queueInterruptionPauseMaxMinutes = Math.round(MAX_QUEUE_INTERRUPTION_PAUSE_MS / 60_000);
   return (
     <Stack divider={<Divider flexItem />}>
       <SettingRow
@@ -493,6 +505,25 @@ function GeneralSection({ settings, onSettingsChange }: Pick<SettingsDialogProps
       <SettingRow title={t("desktopNotifications")} description={t("desktopNotificationsDescription")} control={<Switch checked={settings.general.desktopNotifications} onChange={(e) => { if (e.target.checked) { ensureBrowserNotificationPermission(true); } onSettingsChange(generalDesktopNotificationsPatch(e.target.checked)); }} />} />
       <SettingRow title={t("confirmDestructive")} description={t("confirmDestructiveDescription")} control={<Switch checked={settings.general.confirmDestructiveActions} onChange={(e) => onSettingsChange(generalConfirmDestructiveActionsPatch(e.target.checked))} />} />
       <SettingRow title={t("telemetry")} description={t("telemetryDescription")} control={<Switch checked={settings.general.telemetry} onChange={(e) => onSettingsChange(generalTelemetryPatch(e.target.checked))} />} />
+      <SettingRow
+        title={t("queueInterruptionPause")}
+        description={t("queueInterruptionPauseDescription")}
+        control={
+          <TextField
+            size="small"
+            type="number"
+            value={queueInterruptionPauseMinutes}
+            onChange={(e) => {
+              const minutes = Number(e.target.value);
+              if (Number.isFinite(minutes)) {
+                onSettingsChange(generalQueueInterruptionPauseMsPatch(minutes * 60_000));
+              }
+            }}
+            slotProps={{ htmlInput: { "aria-label": t("queueInterruptionPause"), min: queueInterruptionPauseMinMinutes, max: queueInterruptionPauseMaxMinutes, step: 1 } }}
+            sx={{ width: 120 }}
+          />
+        }
+      />
       <SettingRow
         title={t("previewServerHost")}
         description={t("previewServerHostDescription")}

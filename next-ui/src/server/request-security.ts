@@ -5,6 +5,10 @@ export interface RequestSecurityFailure {
   readonly message: string;
 }
 
+export interface RequestSecurityOptions {
+  readonly trustedUnsafeRequest?: (req: IncomingMessage) => boolean;
+}
+
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
 const UNSAFE_METHODS = new Set(["DELETE", "PATCH", "POST", "PUT"]);
 
@@ -92,7 +96,7 @@ function isSameOriginFetchSite(fetchSite: string): boolean {
   return fetchSite === "same-origin" || fetchSite === "none";
 }
 
-export function validateRlabRequest(req: IncomingMessage, env: NodeJS.ProcessEnv = process.env): RequestSecurityFailure | null {
+export function validateRlabRequest(req: IncomingMessage, env: NodeJS.ProcessEnv = process.env, options: RequestSecurityOptions = {}): RequestSecurityFailure | null {
   const host = firstHeader(req.headers.host);
   if (!host) {
     return { statusCode: 400, message: "Host header is required." };
@@ -114,7 +118,7 @@ export function validateRlabRequest(req: IncomingMessage, env: NodeJS.ProcessEnv
   if (fetchSite === "cross-site") {
     return { statusCode: 403, message: "Cross-site requests are not allowed." };
   }
-  if (UNSAFE_METHODS.has(method) && !origin && !referer && !isSameOriginFetchSite(fetchSite)) {
+  if (UNSAFE_METHODS.has(method) && !origin && !referer && !isSameOriginFetchSite(fetchSite) && options.trustedUnsafeRequest?.(req) !== true) {
     return { statusCode: 403, message: "Unsafe requests require a same-origin browser signal." };
   }
   return null;

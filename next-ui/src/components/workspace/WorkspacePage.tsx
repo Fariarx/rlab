@@ -272,8 +272,8 @@ export const WorkspacePageView = observer(function WorkspacePageView({
     toast,
   });
   const conversations = useMemo(() => workspaceConversations({ chats: ws.chats, projects: ws.projects }), [ws.chats, ws.projects]);
-  const appAttentionStatus = workspaceAttentionStatus(conversations, ws.activeRunIds);
-  useAppStatusFavicon(appAttentionStatus, ws.settings.appearance.reduceMotion);
+  const appAttentionStatus = workspaceAttentionStatus(conversations);
+  useAppStatusFavicon(appAttentionStatus);
   const runNotifications = useRunNotifications({
     conversations,
     selectedId: ws.selectedId,

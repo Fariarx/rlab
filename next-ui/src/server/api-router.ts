@@ -20,6 +20,7 @@ function sendRouteJson(res: ServerResponse, statusCode: number, payload: unknown
   res.statusCode = statusCode;
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   res.setHeader("Content-Length", Buffer.byteLength(body));
+  res.setHeader("X-Content-Type-Options", "nosniff");
   res.end(body);
 }
 

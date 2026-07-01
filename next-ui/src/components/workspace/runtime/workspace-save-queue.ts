@@ -1,6 +1,6 @@
 import { applyWorkspaceMutationsToState, parseWorkspaceMutation, type WorkspaceMutation } from "../../../lib/workspace-mutations";
 import { cloneWorkspaceState, type WorkspaceState } from "../../../lib/workspace-state";
-import { saveWorkspaceMutations, WorkspaceMutationConflictError, WorkspaceMutationRejectedError } from "../../../client/api/workspace-api";
+import { saveWorkspaceMutations, WorkspaceMutationConflictError, WorkspaceMutationRejectedError, type WorkspaceMutationSaveResult } from "../../../client/api/workspace-api";
 import { mergeRemoteWorkspaceShell } from "../models/workspace-server-sync-model";
 import type { RemoteWorkspaceShellMerge } from "../models/workspace-server-sync-model";
 import type { RunMessageHandle } from "../models/workspace-run-state";
@@ -195,6 +195,45 @@ export class WorkspaceSaveQueue {
     this.startSaveRetryTimer();
   }
 
+  private mergeAcceptedServerStateAfterSave(serverState: WorkspaceState, revision: number): void {
+    const localState = this.host.getState();
+    const unsavedMutations = withoutStaleActiveRunMessageMutations(localState, this.host.activeRuns, this.pendingMutations);
+    const remoteMerge = mergeRemoteWorkspaceShell({
+      current: localState,
+      serverState: cloneWorkspaceState(serverState),
+      preferredSelectedId: localState.selectedId,
+      activeRuns: this.host.activeRuns,
+    });
+    const rebasedState = preserveLiveActiveRunMessages(applyWorkspaceMutationsToState(remoteMerge.state, unsavedMutations), localState, this.host.activeRuns);
+    const rebasedConversationIds = new Set(workspaceConversations(rebasedState).map((conversation) => conversation.id));
+    const rebasedMerge: RemoteWorkspaceShellMerge = {
+      ...remoteMerge,
+      state: rebasedState,
+      selectedId: rebasedState.selectedId,
+      knownConversationIds: rebasedConversationIds,
+      stalePreservedThreadIds: new Set([...remoteMerge.stalePreservedThreadIds].filter((id) => rebasedConversationIds.has(id))),
+    };
+    this.host.setRevision(revision);
+    if (this.host.applyRemoteMergedState) {
+      this.host.applyRemoteMergedState(rebasedState, rebasedMerge);
+    } else {
+      this.host.applyServerState(rebasedState);
+    }
+    this.pendingMutations = unsavedMutations;
+    this.persistMutationLog();
+  }
+
+  private applySuccessfulSaveResult(result: WorkspaceMutationSaveResult | undefined): void {
+    if (!result || typeof result.revision !== "number") {
+      return;
+    }
+    if (result.workspace) {
+      this.mergeAcceptedServerStateAfterSave(result.workspace, result.revision);
+      return;
+    }
+    this.host.setRevision(result.revision);
+  }
+
   rebasePendingMutationsAfterRemoteShell(serverState: WorkspaceState, revision: number): RemoteWorkspaceShellMerge {
     if (this.saveInFlight) {
       throw new Error("Cannot rebase pending workspace mutations while a save is in flight.");
@@ -258,10 +297,7 @@ export class WorkspaceSaveQueue {
         continue;
       }
       try {
-        const revision = await saveWorkspaceMutations([mutation], this.host.getRevision());
-        if (revision !== undefined) {
-          this.host.setRevision(revision);
-        }
+        this.applySuccessfulSaveResult(await saveWorkspaceMutations([mutation], this.host.getRevision()));
       } catch (salvageError) {
         if (salvageError instanceof WorkspaceMutationRejectedError) {
           rejectedMessages.push(salvageError.message);
@@ -327,10 +363,7 @@ export class WorkspaceSaveQueue {
     this.saveInFlight = true;
     let saveFailed = false;
     try {
-      const revision = await saveWorkspaceMutations(mutations, this.host.getRevision());
-      if (revision !== undefined) {
-        this.host.setRevision(revision);
-      }
+      this.applySuccessfulSaveResult(await saveWorkspaceMutations(mutations, this.host.getRevision()));
       if (this.host.getLoadError()?.startsWith("Workspace save failed")) {
         this.host.setLoadError(null);
       }

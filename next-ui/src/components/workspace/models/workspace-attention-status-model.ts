@@ -1,17 +1,14 @@
 import type { ConversationSummary } from "../../agent";
 import { dark } from "../../../theme/tokens";
 
-export type WorkspaceAttentionStatus = "error" | "action" | "working" | "done";
+export type WorkspaceAttentionStatus = "error" | "action" | "done";
 
-export function workspaceAttentionStatus(conversations: readonly ConversationSummary[], activeRunIds: ReadonlySet<string>): WorkspaceAttentionStatus | null {
+export function workspaceAttentionStatus(conversations: readonly ConversationSummary[]): WorkspaceAttentionStatus | null {
   if (conversations.some((conversation) => conversation.status === "error" && conversation.unread === true)) {
     return "error";
   }
   if (conversations.some((conversation) => conversation.status === "waiting" && conversation.unread === true)) {
     return "action";
-  }
-  if (conversations.some((conversation) => conversation.status === "running" && Boolean(conversation.activeRunId && activeRunIds.has(conversation.activeRunId)))) {
-    return "working";
   }
   if (conversations.some((conversation) => conversation.status === "done" && conversation.unread === true)) {
     return "done";
@@ -22,20 +19,16 @@ export function workspaceAttentionStatus(conversations: readonly ConversationSum
 const STATUS_COLOR: Record<WorkspaceAttentionStatus, string> = {
   error: dark.status.error.main,
   action: dark.status.warn.main,
-  working: dark.status.running.main,
   done: dark.status.ok.main,
 };
 
 const STATUS_RING: Record<WorkspaceAttentionStatus, string> = {
   error: dark.status.error.border,
   action: dark.status.warn.border,
-  working: dark.status.running.border,
   done: dark.status.ok.border,
 };
 
-export function workspaceAttentionStatusAnimates(status: WorkspaceAttentionStatus): boolean {
-  return status !== "done";
-}
+const FAVICON_ANIMATION_ENABLED = false;
 
 function wave(progress: number): { readonly radius: string; readonly opacity: string } {
   const radius = 8.25 + progress * 6.75;
@@ -46,7 +39,7 @@ function wave(progress: number): { readonly radius: string; readonly opacity: st
 export function workspaceAttentionFaviconHref(status: WorkspaceAttentionStatus, animated: boolean, frame = 0): string {
   const color = STATUS_COLOR[status];
   const ring = STATUS_RING[status];
-  const shouldAnimate = animated && workspaceAttentionStatusAnimates(status);
+  const shouldAnimate = FAVICON_ANIMATION_ENABLED && animated;
   const normalizedFrame = ((frame % 12) + 12) % 12;
   const progressA = normalizedFrame / 12;
   const progressB = (progressA + 0.5) % 1;

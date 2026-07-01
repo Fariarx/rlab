@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { workspaceAttentionFaviconHref, workspaceAttentionStatusAnimates, type WorkspaceAttentionStatus } from "../models/workspace-attention-status-model";
+import { workspaceAttentionFaviconHref, type WorkspaceAttentionStatus } from "../models/workspace-attention-status-model";
 
 interface FaviconSnapshot {
   readonly link: HTMLLinkElement | null;
@@ -45,7 +45,7 @@ function restoreFavicon(snapshot: FaviconSnapshot): void {
   current?.remove();
 }
 
-export function useAppStatusFavicon(status: WorkspaceAttentionStatus | null, reduceMotion: boolean): void {
+export function useAppStatusFavicon(status: WorkspaceAttentionStatus | null): void {
   const initialFaviconRef = useRef<FaviconSnapshot | null>(null);
 
   useEffect(() => {
@@ -69,21 +69,8 @@ export function useAppStatusFavicon(status: WorkspaceAttentionStatus | null, red
 
     const link = ensureFaviconLink();
     link.setAttribute("type", "image/svg+xml");
-    const animated = !reduceMotion && workspaceAttentionStatusAnimates(status);
-    if (!animated) {
-      link.setAttribute("href", workspaceAttentionFaviconHref(status, false));
-      return;
-    }
-
-    let frame = 0;
-    const updateFrame = () => {
-      link.setAttribute("href", workspaceAttentionFaviconHref(status, true, frame));
-      frame = (frame + 1) % 12;
-    };
-    updateFrame();
-    const timer = window.setInterval(updateFrame, 130);
-    return () => window.clearInterval(timer);
-  }, [reduceMotion, status]);
+    link.setAttribute("href", workspaceAttentionFaviconHref(status, false));
+  }, [status]);
 
   useEffect(() => {
     return () => {

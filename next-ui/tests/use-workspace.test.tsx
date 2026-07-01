@@ -1,4 +1,4 @@
-﻿import { act, render, screen, waitFor } from "@testing-library/react";
+﻿import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { observer } from "mobx-react-lite";
 import { useWorkspace } from "../src/components/workspace/use-workspace";
@@ -8,6 +8,8 @@ import { buildInitialWorkspaceState, type WorkspaceState } from "../src/lib/work
 import { applyWorkspaceMutationsToState, type WorkspaceMutation } from "../src/lib/workspace-mutations";
 
 const WORKSPACE_SYNC_TICK_MS = 2_000;
+const WORKSPACE_FOREGROUND_SYNC_DEBOUNCE_MS = 250;
+const WORKSPACE_TRANSIENT_SYNC_RETRY_MS = 1_500;
 
 const Probe = observer(function Probe() {
   const workspace = useWorkspace();
@@ -175,6 +177,7 @@ interface QueueRequestRecord {
 interface RunCancelRequestRecord {
   readonly runId?: string;
   readonly pauseQueue?: boolean;
+  readonly pauseResumeAtMs?: number;
 }
 
 function queueFor(queues: Map<string, TestPendingQueue>, conversationId: string): TestPendingQueue {
@@ -606,6 +609,122 @@ describe("useWorkspace", () => {
     expect(screen.getByText("chat-2")).toBeInTheDocument();
     expect(screen.getByTestId("error")).toHaveTextContent("none");
     expect(workspaceReads).toBe(2);
+  });
+
+  it("coalesces foreground workspace sync events after restoring the browser tab", async () => {
+    vi.useFakeTimers();
+    const { unmount } = render(<Probe />);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    const revisionCallCount = () => vi.mocked(fetch).mock.calls.filter(([url, init]) => String(url) === "/api/workspace/revision" && (!init || init.method === "GET")).length;
+    expect(revisionCallCount()).toBe(0);
+
+    fireEvent(window, new Event("focus"));
+    fireEvent(window, new Event("pageshow"));
+    fireEvent(document, new Event("visibilitychange"));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(WORKSPACE_FOREGROUND_SYNC_DEBOUNCE_MS - 1);
+    });
+    expect(revisionCallCount()).toBe(0);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(revisionCallCount()).toBe(1);
+    unmount();
+  });
+
+  it("retries transient foreground workspace sync failures without showing a workspace error", async () => {
+    vi.useFakeTimers();
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const defaultFetchImplementation = vi.mocked(fetch).getMockImplementation();
+    if (!defaultFetchImplementation) {
+      throw new Error("Expected default fetch mock implementation.");
+    }
+    let failNextRevisionRead = false;
+    let revisionReads = 0;
+    vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/workspace/revision" && (!init || init.method === "GET")) {
+        revisionReads += 1;
+        if (failNextRevisionRead) {
+          failNextRevisionRead = false;
+          throw new TypeError("Failed to fetch");
+        }
+      }
+      return defaultFetchImplementation(input, init);
+    });
+
+    const { unmount } = render(<Probe />);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    failNextRevisionRead = true;
+    fireEvent(window, new Event("pageshow"));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(WORKSPACE_FOREGROUND_SYNC_DEBOUNCE_MS);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(screen.getByTestId("error")).toHaveTextContent("none");
+    expect(revisionReads).toBe(1);
+    expect(consoleWarn).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(WORKSPACE_TRANSIENT_SYNC_RETRY_MS);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(screen.getByTestId("error")).toHaveTextContent("none");
+    expect(revisionReads).toBe(2);
+    unmount();
+    consoleWarn.mockRestore();
+  });
+
+  it("shows foreground workspace sync HTTP errors immediately", async () => {
+    vi.useFakeTimers();
+    const defaultFetchImplementation = vi.mocked(fetch).getMockImplementation();
+    if (!defaultFetchImplementation) {
+      throw new Error("Expected default fetch mock implementation.");
+    }
+    let failRevisionWithHttpError = false;
+    vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/workspace/revision" && (!init || init.method === "GET") && failRevisionWithHttpError) {
+        return new Response("unavailable", { status: 503 });
+      }
+      return defaultFetchImplementation(input, init);
+    });
+
+    const { unmount } = render(<Probe />);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    failRevisionWithHttpError = true;
+    fireEvent(window, new Event("focus"));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(WORKSPACE_FOREGROUND_SYNC_DEBOUNCE_MS);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(screen.getByTestId("error")).toHaveTextContent("Workspace revision load failed (503)");
+    unmount();
   });
 
   it("persists thread changes to the server instead of localStorage", async () => {

@@ -6,6 +6,10 @@ import { isRecord, responseErrorMessage } from "./http";
 
 export type WorkspaceStatePayload = WorkspaceState & { readonly revision?: number };
 export type WorkspaceRevisionPayload = { readonly revision?: number };
+export interface WorkspaceMutationSaveResult {
+  readonly revision?: number;
+  readonly workspace?: WorkspaceState;
+}
 
 export interface ConversationThreadPagePayload {
   readonly messages: readonly ChatMessage[];
@@ -105,7 +109,7 @@ export function subscribeWorkspaceEvents({
   };
 }
 
-export async function saveWorkspaceMutations(mutations: readonly WorkspaceMutation[], baseRevision: number): Promise<number | undefined> {
+export async function saveWorkspaceMutations(mutations: readonly WorkspaceMutation[], baseRevision: number): Promise<WorkspaceMutationSaveResult | undefined> {
   if (mutations.length === 0) {
     return undefined;
   }
@@ -128,7 +132,13 @@ export async function saveWorkspaceMutations(mutations: readonly WorkspaceMutati
     throw new Error(message);
   }
   const payload = (await response.json().catch(() => null)) as unknown;
-  return isRecord(payload) && typeof payload.revision === "number" ? payload.revision : undefined;
+  if (!isRecord(payload)) {
+    return undefined;
+  }
+  return {
+    ...(typeof payload.revision === "number" ? { revision: payload.revision } : {}),
+    ...(isRecord(payload.workspace) ? { workspace: payload.workspace as unknown as WorkspaceState } : {}),
+  };
 }
 
 function validateConversationThreadPage(payload: unknown): ConversationThreadPagePayload {

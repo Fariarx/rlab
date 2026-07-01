@@ -21,6 +21,7 @@ import { loadConversationThread, loadConversationThreadPage, loadWorkspaceRevisi
 import { reviewCommentsPromptText } from "../../lib/agent-prompt";
 import { nowLabel, starterThread, truncate } from "./sample-data";
 import { type AppSettings, type AppSettingsPatch, mergeAppSettings } from "../../lib/app-settings";
+import { runEventIsErrorSignal, runEventWritesAgentMessage, type RunEvent } from "../../lib/run-event-accumulator";
 import type { WorkspaceMutation } from "../../lib/workspace-mutations";
 import { buildEmptyWorkspaceState, buildInitialWorkspaceState, cloneWorkspaceState, type WorkspaceState } from "../../lib/workspace-state";
 import { nextWorkspaceId, syncGeneratedWorkspaceIdSequence } from "../../lib/workspace-ids";
@@ -95,8 +96,20 @@ export { buildAgentPrompt, conversationProfile } from "./models/workspace-state-
 const WORKSPACE_LOAD_RETRY_MS = 15_000;
 const WORKSPACE_SYNC_POLL_MS = 2_000;
 const WORKSPACE_HIDDEN_SYNC_POLL_MS = 30_000;
+const WORKSPACE_FOREGROUND_SYNC_DEBOUNCE_MS = 250;
+const WORKSPACE_TRANSIENT_SYNC_RETRY_MS = 1_500;
+const WORKSPACE_TRANSIENT_SYNC_GRACE_MS = 6_000;
 const ACTIVE_RUN_DISCOVERY_POLL_MS = 30_000;
 const TRACKED_RUN_MISSING_ON_SERVER_RECONCILE_MS = 45_000;
+const RUN_ERROR_IDLE_AUTO_STOP_MS = 10 * 60_000;
+
+function workspaceErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isTransientWorkspaceClientError(error: unknown): boolean {
+  return error instanceof Error && (error instanceof TypeError || error.name === "AbortError" || error.name === "NetworkError");
+}
 
 export interface CreateProjectInput {
   readonly name: string;
@@ -192,6 +205,16 @@ export class WorkspaceStore implements Workspace {
   private loadRetryTimer: ReturnType<typeof setInterval> | null = null;
 
   private unsubscribeWorkspaceEvents: (() => void) | null = null;
+
+  private foregroundSyncTimer: ReturnType<typeof setTimeout> | null = null;
+
+  private transientWorkspaceSyncRetryTimer: ReturnType<typeof setTimeout> | null = null;
+
+  private transientWorkspaceSyncFailureStartedAtMs: number | null = null;
+
+  private transientWorkspaceSyncWarningLogged = false;
+
+  private workspaceClientServerSyncLoadError: string | null = null;
 
   private lastHiddenPollAt = 0;
 
@@ -340,6 +363,72 @@ export class WorkspaceStore implements Workspace {
     return this.saveQueue.hasSaveInFlight();
   }
 
+  private clearForegroundSyncTimer(): void {
+    if (this.foregroundSyncTimer) {
+      clearTimeout(this.foregroundSyncTimer);
+      this.foregroundSyncTimer = null;
+    }
+  }
+
+  private clearTransientWorkspaceSyncRetryTimer(): void {
+    if (this.transientWorkspaceSyncRetryTimer) {
+      clearTimeout(this.transientWorkspaceSyncRetryTimer);
+      this.transientWorkspaceSyncRetryTimer = null;
+    }
+  }
+
+  private clearWorkspaceClientServerSyncIssue(): void {
+    this.transientWorkspaceSyncFailureStartedAtMs = null;
+    this.transientWorkspaceSyncWarningLogged = false;
+    if (this.workspaceClientServerSyncLoadError !== null && this.loadError === this.workspaceClientServerSyncLoadError) {
+      this.loadError = null;
+    }
+    this.workspaceClientServerSyncLoadError = null;
+  }
+
+  private clearWorkspaceLoadIssue(): void {
+    this.clearTransientWorkspaceSyncRetryTimer();
+    this.transientWorkspaceSyncFailureStartedAtMs = null;
+    this.transientWorkspaceSyncWarningLogged = false;
+    this.workspaceClientServerSyncLoadError = null;
+    this.loadError = null;
+  }
+
+  private scheduleTransientWorkspaceSyncRetry(): void {
+    if (this.transientWorkspaceSyncRetryTimer) {
+      return;
+    }
+    this.transientWorkspaceSyncRetryTimer = setTimeout(() => {
+      this.transientWorkspaceSyncRetryTimer = null;
+      this.runForegroundWorkspaceSync();
+    }, WORKSPACE_TRANSIENT_SYNC_RETRY_MS);
+  }
+
+  private handleWorkspaceClientServerSyncError(error: unknown): void {
+    if (this.loaded && isTransientWorkspaceClientError(error)) {
+      const now = Date.now();
+      if (this.transientWorkspaceSyncFailureStartedAtMs === null) {
+        this.transientWorkspaceSyncFailureStartedAtMs = now;
+      }
+      if (!this.transientWorkspaceSyncWarningLogged) {
+        console.warn("[rlab] Transient workspace sync failed; retrying.", error);
+        this.transientWorkspaceSyncWarningLogged = true;
+      }
+      if (now - this.transientWorkspaceSyncFailureStartedAtMs < WORKSPACE_TRANSIENT_SYNC_GRACE_MS) {
+        this.scheduleTransientWorkspaceSyncRetry();
+        return;
+      }
+    }
+    this.clearTransientWorkspaceSyncRetryTimer();
+    const message = workspaceErrorMessage(error);
+    this.workspaceClientServerSyncLoadError = message;
+    this.loadError = message;
+  }
+
+  private reportWorkspaceClientServerSyncError(error: unknown): void {
+    runInAction(() => this.handleWorkspaceClientServerSyncError(error));
+  }
+
   private applyRemoteServerState(serverState: WorkspaceState, preferredSelectedId: string): RemoteWorkspaceShellMerge {
     const merge = mergeRemoteWorkspaceShell({ current: this.state, serverState, preferredSelectedId, activeRuns: this.runs });
     this.applyRemoteMergedState(merge.state, merge);
@@ -409,6 +498,38 @@ export class WorkspaceStore implements Workspace {
     this.pendingQueues.set(snapshot.conversationId, snapshot);
   }
 
+  private queueInterruptionResumeAtMs(): number {
+    return Date.now() + this.state.settings.general.queueInterruptionPauseMs;
+  }
+
+  private clearRunErrorIdleStopTimer(runHandle: RunHandle): void {
+    if (runHandle.errorIdleStopTimer !== null) {
+      clearTimeout(runHandle.errorIdleStopTimer);
+      runHandle.errorIdleStopTimer = null;
+    }
+  }
+
+  private scheduleRunErrorIdleStop(id: string, runHandle: RunHandle): void {
+    this.clearRunErrorIdleStopTimer(runHandle);
+    runHandle.errorIdleStopTimer = setTimeout(() => {
+      runHandle.errorIdleStopTimer = null;
+      if (this.runs.get(id) !== runHandle || runHandle.canceled) {
+        return;
+      }
+      void this.stopRunWithQueuePolicy(id, { pauseQueue: true, resumeAtMs: this.queueInterruptionResumeAtMs() }).catch(() => undefined);
+    }, RUN_ERROR_IDLE_AUTO_STOP_MS);
+  }
+
+  private handleRunEventForErrorIdleStop(id: string, runHandle: RunHandle, event: RunEvent): void {
+    if (runEventIsErrorSignal(event)) {
+      this.scheduleRunErrorIdleStop(id, runHandle);
+      return;
+    }
+    if (runEventWritesAgentMessage(event)) {
+      this.clearRunErrorIdleStopTimer(runHandle);
+    }
+  }
+
   private refreshQueue(id: string): void {
     if (!id || this.queueRefreshInFlight.has(id)) {
       return;
@@ -420,7 +541,7 @@ export class WorkspaceStore implements Workspace {
       })
       .catch((error: unknown) => {
         runInAction(() => {
-          this.loadError = error instanceof Error ? error.message : String(error);
+          this.loadError = workspaceErrorMessage(error);
         });
       })
       .finally(() => {
@@ -478,7 +599,7 @@ export class WorkspaceStore implements Workspace {
     return now - this.lastActiveRunDiscoveryAt >= ACTIVE_RUN_DISCOVERY_POLL_MS;
   }
 
-  private syncForegroundWorkspaceState(): void {
+  private runForegroundWorkspaceSync(): void {
     if (typeof document !== "undefined" && document.visibilityState === "hidden") {
       return;
     }
@@ -488,6 +609,26 @@ export class WorkspaceStore implements Workspace {
     void this.refreshWorkspaceFromServer();
     void this.refreshBackgroundRuns();
     this.refreshSelectedQueueIfNeeded();
+  }
+
+  private scheduleForegroundWorkspaceSync(): void {
+    if (this.foregroundSyncTimer) {
+      return;
+    }
+    this.foregroundSyncTimer = setTimeout(() => {
+      this.foregroundSyncTimer = null;
+      this.runForegroundWorkspaceSync();
+    }, WORKSPACE_FOREGROUND_SYNC_DEBOUNCE_MS);
+  }
+
+  private syncForegroundWorkspaceState(): void {
+    if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+      return;
+    }
+    if (!this.hydrated || this.loading) {
+      return;
+    }
+    this.scheduleForegroundWorkspaceSync();
   }
 
   private readonly handleWindowFocus = (): void => {
@@ -572,6 +713,8 @@ export class WorkspaceStore implements Workspace {
       clearInterval(this.loadRetryTimer);
       this.loadRetryTimer = null;
     }
+    this.clearForegroundSyncTimer();
+    this.clearTransientWorkspaceSyncRetryTimer();
     this.unsubscribeWorkspaceEvents?.();
     this.unsubscribeWorkspaceEvents = null;
     this.saveQueue.dispose();
@@ -588,7 +731,7 @@ export class WorkspaceStore implements Workspace {
   reloadWorkspace(): void {
     const seq = ++this.loadSeq;
     this.loading = true;
-    this.loadError = null;
+    this.clearWorkspaceLoadIssue();
     loadWorkspaceState()
       .then((loadedState) => {
         if (seq !== this.loadSeq) {
@@ -598,7 +741,7 @@ export class WorkspaceStore implements Workspace {
         runInAction(() => {
           this.workspaceRevision = typeof loadedState.revision === "number" ? loadedState.revision : 0;
           this.applyServerState(cloneWorkspaceState(loadedState));
-          this.loadError = null;
+          this.clearWorkspaceLoadIssue();
           this.saveQueue.replayPersistedMutationsAfterServerLoad();
           selectedId = this.state.selectedId;
           this.loaded = true;
@@ -615,7 +758,7 @@ export class WorkspaceStore implements Workspace {
           return;
         }
         runInAction(() => {
-          this.loadError = error instanceof Error ? error.message : String(error);
+          this.loadError = workspaceErrorMessage(error);
           this.loaded = false;
         });
       })
@@ -636,7 +779,11 @@ export class WorkspaceStore implements Workspace {
     this.syncInFlight = true;
     try {
       const revision = event?.revision ?? (await loadWorkspaceRevision());
-      if (seq !== this.loadSeq || revision <= this.workspaceRevision || this.hasWorkspaceSaveInFlight()) {
+      if (seq !== this.loadSeq || this.hasWorkspaceSaveInFlight()) {
+        return;
+      }
+      if (revision <= this.workspaceRevision) {
+        runInAction(() => this.clearWorkspaceClientServerSyncIssue());
         return;
       }
       const loadedState = await loadWorkspaceState();
@@ -648,18 +795,19 @@ export class WorkspaceStore implements Workspace {
       }
       const loadedRevision = loadedState.revision;
       if (loadedRevision <= this.workspaceRevision) {
+        runInAction(() => this.clearWorkspaceClientServerSyncIssue());
         return;
       }
       const merge = runInAction((): RemoteWorkspaceShellMerge => {
         const preferredSelectedId = this.state.selectedId;
         if (this.hasPendingWorkspaceWrites()) {
           const rebasedMerge = this.saveQueue.rebasePendingMutationsAfterRemoteShell(cloneWorkspaceState(loadedState), loadedRevision);
-          this.loadError = null;
+          this.clearWorkspaceClientServerSyncIssue();
           return rebasedMerge;
         }
         this.workspaceRevision = loadedRevision;
         const remoteMerge = this.applyRemoteServerState(cloneWorkspaceState(loadedState), preferredSelectedId);
-        this.loadError = null;
+        this.clearWorkspaceClientServerSyncIssue();
         return remoteMerge;
       });
       const selectedId = merge.selectedId;
@@ -676,9 +824,7 @@ export class WorkspaceStore implements Workspace {
       if (seq !== this.loadSeq) {
         return;
       }
-      runInAction(() => {
-        this.loadError = error instanceof Error ? error.message : String(error);
-      });
+      this.reportWorkspaceClientServerSyncError(error);
     } finally {
       this.syncInFlight = false;
     }
@@ -730,7 +876,7 @@ export class WorkspaceStore implements Workspace {
     } catch (error) {
       if (seq === this.loadSeq && this.runs.size > 0) {
         runInAction(() => {
-          this.loadError = error instanceof Error ? error.message : String(error);
+          this.loadError = workspaceErrorMessage(error);
         });
       }
     } finally {
@@ -775,7 +921,7 @@ export class WorkspaceStore implements Workspace {
         return;
       }
       runInAction(() => {
-        this.loadError = error instanceof Error ? error.message : String(error);
+        this.loadError = workspaceErrorMessage(error);
       });
     }
   }
@@ -1345,6 +1491,7 @@ export class WorkspaceStore implements Workspace {
     const previous = this.runs.get(id);
     if (previous) {
       previous.canceled = true;
+      this.clearRunErrorIdleStopTimer(previous);
       void cancelRun(previous.runId).catch(() => undefined);
       previous.controller.abort();
       this.runs.delete(id);
@@ -1405,7 +1552,7 @@ export class WorkspaceStore implements Workspace {
     };
 
     const controller = new AbortController();
-    const runHandle: RunHandle = { controller, runId, userMessageId: userMsg.id, agentMessageId: aId, lastUpdateAtMs: Date.now(), serverOwned: false, canceled: false };
+    const runHandle: RunHandle = { controller, runId, userMessageId: userMsg.id, agentMessageId: aId, lastUpdateAtMs: Date.now(), errorIdleStopTimer: null, serverOwned: false, canceled: false };
     this.runs.set(id, runHandle);
 
     runConversation({
@@ -1441,6 +1588,7 @@ export class WorkspaceStore implements Workspace {
         }
         this.persistCurrentStateNow();
       },
+      onEvent: (event) => this.handleRunEventForErrorIdleStop(id, runHandle, event),
       onBlocks: applyBlocks,
     })
       .then((result) => {
@@ -1487,6 +1635,7 @@ export class WorkspaceStore implements Workspace {
         }
       })
       .finally(() => {
+        this.clearRunErrorIdleStopTimer(runHandle);
         if (this.runs.get(id) === runHandle) {
           this.runs.delete(id);
         }
@@ -1494,24 +1643,25 @@ export class WorkspaceStore implements Workspace {
       });
   }
 
-  private stopRunWithQueuePolicy(id: string, options: { readonly pauseQueue: boolean }): Promise<void> {
+  private stopRunWithQueuePolicy(id: string, options: { readonly pauseQueue: boolean; readonly resumeAtMs?: number }): Promise<void> {
     // Stopping the run also pauses the server-owned queue (only meaningful when
     // something is queued) so a pending turn doesn't immediately start after the
     // user explicitly hit stop.
-    if (options.pauseQueue && this.pendingQueueItemCount(id) > 0) {
-      this.setQueuePaused(id, true, { reason: "stop" });
+    if (options.pauseQueue && (this.pendingQueueItemCount(id) > 0 || options.resumeAtMs !== undefined)) {
+      this.setQueuePaused(id, true, { reason: "stop", resumeAtMs: options.resumeAtMs });
     }
     const active = this.runs.get(id);
     let cancelPromise: Promise<void> = Promise.resolve();
     if (active) {
       active.canceled = true;
-      cancelPromise = cancelRun(active.runId, { pauseQueue: options.pauseQueue });
+      this.clearRunErrorIdleStopTimer(active);
+      cancelPromise = cancelRun(active.runId, { pauseQueue: options.pauseQueue, pauseResumeAtMs: options.resumeAtMs });
       active.controller.abort();
       this.runs.delete(id);
     } else {
       const activeRunId = this.find(id)?.activeRunId;
       if (activeRunId) {
-        cancelPromise = cancelRun(activeRunId, { pauseQueue: options.pauseQueue });
+        cancelPromise = cancelRun(activeRunId, { pauseQueue: options.pauseQueue, pauseResumeAtMs: options.resumeAtMs });
       }
     }
     // Reset the conversation even when there is no live run handle (e.g. a

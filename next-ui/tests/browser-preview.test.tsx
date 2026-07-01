@@ -74,6 +74,21 @@ function browserPreviewFetch(snapshot: unknown) {
   });
 }
 
+const playwrightSyncedStatus = "Playwright: синхронизировано";
+const playwrightDirtyStatus = "Playwright: страница изменена пользователем";
+
+function syncButtonName(status: string): string {
+  return `Синхронизировать агенту: ${status}`;
+}
+
+function getSyncButton(status: string): HTMLElement {
+  return screen.getByRole("button", { name: syncButtonName(status) });
+}
+
+function findSyncButton(status: string): Promise<HTMLElement> {
+  return screen.findByRole("button", { name: syncButtonName(status) });
+}
+
 class MockEventSource {
   static instances: MockEventSource[] = [];
   readonly url: string | URL;
@@ -156,7 +171,7 @@ describe("BrowserPreview", () => {
     expect(screen.getByRole("button", { name: "Вперёд" })).toBeInTheDocument();
     fireEvent.mouseOver(screen.getByRole("button", { name: "Аннотация" }));
     expect(await screen.findByRole("tooltip")).toHaveTextContent("Аннотация");
-    expect(screen.getByLabelText("Playwright: синхронизировано")).toBeInTheDocument();
+    expect(getSyncButton(playwrightSyncedStatus)).toBeInTheDocument();
     expect(screen.getByTestId("browser-preview-frame-shell")).toHaveStyle({ minHeight: "250px", overflow: "hidden" });
     expect(screen.getByLabelText("URL для просмотра")).toHaveValue("");
     expect(screen.getByLabelText("URL для просмотра").parentElement).toHaveStyle({ height: "30px", maxHeight: "30px" });
@@ -179,7 +194,7 @@ describe("BrowserPreview", () => {
 
     fireEvent.change(screen.getByLabelText("URL для просмотра"), { target: { value: "http://localhost:3000/one" } });
     fireEvent.click(screen.getByRole("button", { name: "Открыть" }));
-    await screen.findByLabelText("Playwright: синхронизировано");
+    await findSyncButton(playwrightSyncedStatus);
     fireEvent.change(screen.getByLabelText("URL для просмотра"), { target: { value: "http://localhost:3000/two" } });
     fireEvent.click(screen.getByRole("button", { name: "Открыть" }));
     expect(screen.getByTitle("Живой просмотр страницы")).toHaveAttribute("src", "http://localhost:3000/two");
@@ -203,7 +218,7 @@ describe("BrowserPreview", () => {
     renderWithTheme(<BrowserPreview sessionId="test-session" active />);
 
     fireEvent.click(screen.getByRole("button", { name: "Открыть" }));
-    await screen.findByLabelText("Playwright: синхронизировано");
+    await findSyncButton(playwrightSyncedStatus);
     Object.defineProperty(screen.getByTitle("Живой просмотр страницы"), "contentWindow", {
       configurable: true,
       value: {
@@ -285,7 +300,7 @@ describe("BrowserPreview", () => {
 
     fireEvent.change(screen.getByLabelText("URL для просмотра"), { target: { value: "http://localhost:3000/" } });
     fireEvent.click(screen.getByRole("button", { name: "Открыть" }));
-    await screen.findByLabelText("Playwright: синхронизировано");
+    await findSyncButton(playwrightSyncedStatus);
 
     expect(String(MockEventSource.instances[0]?.url)).toBe("/api/browser/events?sessionId=test-session");
     MockEventSource.instances[0]?.emitBrowser({
@@ -338,7 +353,7 @@ describe("BrowserPreview", () => {
 
     renderWithTheme(<BrowserPreview sessionId="test-session" active />);
 
-    expect(await screen.findByLabelText("Playwright: страница изменена пользователем")).toBeInTheDocument();
+    expect(await findSyncButton(playwrightDirtyStatus)).toBeInTheDocument();
     expect(screen.getByText("Страница изменена пользователем")).toBeInTheDocument();
   });
 
@@ -357,7 +372,7 @@ describe("BrowserPreview", () => {
 
     renderWithTheme(<BrowserPreview sessionId="test-session" active />);
 
-    expect(await screen.findByLabelText("Playwright: синхронизировано")).toBeInTheDocument();
+    expect(await findSyncButton(playwrightSyncedStatus)).toBeInTheDocument();
     const frame = screen.getByTitle("Живой просмотр страницы") as HTMLIFrameElement;
     const frameDocument = frame.contentDocument;
     if (!frameDocument) {
@@ -392,7 +407,7 @@ describe("BrowserPreview", () => {
 
     renderWithTheme(<BrowserPreview sessionId="test-session" active />);
 
-    expect(await screen.findByLabelText("Playwright: синхронизировано")).toBeInTheDocument();
+    expect(await findSyncButton(playwrightSyncedStatus)).toBeInTheDocument();
     const frame = screen.getByTitle("Живой просмотр страницы") as HTMLIFrameElement;
     Object.defineProperty(frame, "contentWindow", {
       configurable: true,
@@ -405,7 +420,7 @@ describe("BrowserPreview", () => {
 
     fireEvent.load(frame);
 
-    await waitFor(() => expect(screen.getByLabelText("Playwright: синхронизировано")).toBeInTheDocument());
+    await waitFor(() => expect(getSyncButton(playwrightSyncedStatus)).toBeInTheDocument());
     expect(fetchMock.mock.calls.some((call) => String(call[0]).includes("/api/browser/dirty"))).toBe(false);
   });
 
@@ -446,7 +461,7 @@ describe("BrowserPreview", () => {
 
     fireEvent.change(screen.getByLabelText("URL для просмотра"), { target: { value: "http://localhost:3000/" } });
     fireEvent.click(screen.getByRole("button", { name: "Открыть" }));
-    await screen.findByLabelText("Playwright: синхронизировано");
+    await findSyncButton(playwrightSyncedStatus);
 
     const frame = screen.getByTitle("Живой просмотр страницы") as HTMLIFrameElement;
     const frameDocument = frame.contentDocument;
@@ -599,7 +614,7 @@ describe("BrowserPreview", () => {
 
     fireEvent.change(screen.getByLabelText("URL для просмотра"), { target: { value: "http://localhost:3000/" } });
     fireEvent.click(screen.getByRole("button", { name: "Открыть" }));
-    expect(await screen.findByLabelText("Playwright: синхронизировано")).toBeInTheDocument();
+    expect(await findSyncButton(playwrightSyncedStatus)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Аннотация" }));
     const canvas = screen.getByTestId("browser-preview-canvas");
     canvas.getBoundingClientRect = () => ({
@@ -633,7 +648,7 @@ describe("BrowserPreview", () => {
 
     fireEvent.change(screen.getByLabelText("URL для просмотра"), { target: { value: "http://localhost:3000/" } });
     fireEvent.click(screen.getByRole("button", { name: "Открыть" }));
-    expect(await screen.findByLabelText("Playwright: синхронизировано")).toBeInTheDocument();
+    expect(await findSyncButton(playwrightSyncedStatus)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Аннотация" }));
     const canvas = screen.getByTestId("browser-preview-canvas");
     const setPointerCapture = vi.fn();
@@ -667,7 +682,7 @@ describe("BrowserPreview", () => {
 
     fireEvent.change(screen.getByLabelText("URL для просмотра"), { target: { value: "http://localhost:3000/" } });
     fireEvent.click(screen.getByRole("button", { name: "Открыть" }));
-    expect(await screen.findByLabelText("Playwright: синхронизировано")).toBeInTheDocument();
+    expect(await findSyncButton(playwrightSyncedStatus)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Аннотация" }));
     const canvas = screen.getByTestId("browser-preview-canvas");
     canvas.getBoundingClientRect = () => ({
@@ -701,7 +716,7 @@ describe("BrowserPreview", () => {
 
     fireEvent.change(screen.getByLabelText("URL для просмотра"), { target: { value: "http://localhost:3000/" } });
     fireEvent.click(screen.getByRole("button", { name: "Открыть" }));
-    expect(await screen.findByLabelText("Playwright: синхронизировано")).toBeInTheDocument();
+    expect(await findSyncButton(playwrightSyncedStatus)).toBeInTheDocument();
 
     const pickedElement = document.createElement("button");
     pickedElement.id = "save";

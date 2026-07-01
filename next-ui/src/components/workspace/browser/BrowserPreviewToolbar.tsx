@@ -7,8 +7,7 @@ import RefreshIcon from "@mui/icons-material/Refresh";
 import { Box, CircularProgress, IconButton, InputBase, ToggleButton, ToggleButtonGroup, Tooltip } from "@mui/material";
 import type { FormEvent, MouseEvent as ReactMouseEvent, ReactElement } from "react";
 import type { I18nApi } from "../../../i18n/I18nProvider";
-import { browserPreviewDefaultUrl, mirrorStatusDotPulse, mirrorStatusDotStatus, type EventStreamStatus, type MirrorStatus, type PreviewMode } from "../../../lib/browser-preview-model";
-import { StatusDot } from "../../ui";
+import { browserPreviewDefaultUrl, type EventStreamStatus, type PreviewMode } from "../../../lib/browser-preview-model";
 
 const tooltippedControlSx = { display: "inline-flex", flex: "0 0 auto" } as const;
 
@@ -39,7 +38,6 @@ export function BrowserPreviewToolbar({
   canGoForward,
   eventStreamStatus,
   liveUrl,
-  mirrorStatus,
   mirrorStatusText,
   mirrorSyncing,
   mode,
@@ -58,7 +56,6 @@ export function BrowserPreviewToolbar({
   readonly canGoForward: boolean;
   readonly eventStreamStatus: EventStreamStatus;
   readonly liveUrl: string | null;
-  readonly mirrorStatus: MirrorStatus;
   readonly mirrorStatusText: string;
   readonly mirrorSyncing: boolean;
   readonly mode: PreviewMode;
@@ -185,7 +182,6 @@ export function BrowserPreviewToolbar({
             },
           }}
         >
-          <StatusDot status={mirrorStatusDotStatus(mirrorStatus)} label={playwrightStatusLabel} size="sm" pulse={mirrorStatusDotPulse(mirrorStatus)} />
           <Box component="span" aria-hidden="true" sx={{ color: "text.primary", fontWeight: 900 }}>
             pw
           </Box>

@@ -167,11 +167,14 @@ describe("WorkspacePage", () => {
     renderWithThemeAndVirtuoso(<WorkspacePage />);
 
     expect(await screen.findByText("Нужно обновить CLI")).toBeInTheDocument();
-    fireEvent.click(screen.getByTestId("cli-updates-accordion-toggle"));
+    const toggle = screen.getByTestId("cli-updates-accordion-toggle");
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
     expect((await screen.findAllByText("Codex")).length).toBeGreaterThan(0);
     expect(screen.getByText("1.0.0 → 1.1.0")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Обновить" }));
+    await waitFor(() => expect(toggle).toHaveAttribute("aria-expanded", "false"));
 
     await waitFor(() => expect(installRequests).toHaveLength(1));
     expect(JSON.parse(installRequests[0] ?? "{}")).toEqual({ agent: "codex" });

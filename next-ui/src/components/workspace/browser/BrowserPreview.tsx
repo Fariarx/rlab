@@ -316,7 +316,6 @@ export const BrowserPreview = observer(function BrowserPreview({
         canGoForward={canGoForward}
         eventStreamStatus={eventStreamStatus}
         liveUrl={liveUrl}
-        mirrorStatus={mirrorStatus}
         mirrorStatusText={mirrorStatusText}
         mirrorSyncing={mirrorSyncing}
         mode={mode}

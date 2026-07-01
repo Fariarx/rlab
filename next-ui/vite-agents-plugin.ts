@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, type Dirent } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { request as httpRequest, type IncomingHttpHeaders, type IncomingMessage, type OutgoingHttpHeaders, type Server as HttpServer, type ServerResponse } from "node:http";
@@ -23,6 +23,8 @@ import {
   applyRunEventOptionSelection,
   createRunEventAccumulator,
   runEventAccumulatorHasOutput,
+  runEventIsErrorSignal,
+  runEventWritesAgentMessage,
   runEventBlocks,
   type RunEvent as SharedRunEvent,
   type RunEventAccumulator,
@@ -33,6 +35,7 @@ import { validateRlabRequest } from "./src/server/request-security";
 import {
   cloneAppSettings,
   defaultAppSettings,
+  normalizeQueueInterruptionPauseMs,
   type Locale,
 } from "./src/lib/app-settings";
 import { getVoiceProvider, isVoiceProviderId, VOICE_PROVIDERS, type VoiceProviderId } from "./src/lib/voice-providers";
@@ -206,13 +209,19 @@ const MAX_WORKSPACE_MUTATION_BODY_BYTES = 8 * 1024 * 1024;
 const MAX_WORKSPACE_MUTATIONS_PER_REQUEST = 200;
 const MAX_WORKSPACE_MESSAGES_PER_MUTATION = 500;
 const MAX_WORKSPACE_MESSAGE_BYTES = 5 * 1024 * 1024;
+export const MAX_PREVIEW_PROXY_HTML_BYTES = 10 * 1024 * 1024;
 export const JSON_CONTENT_TYPE = "application/json; charset=utf-8";
 export const BROWSER_ACTION_TIMEOUT_MS = 5000;
 const BROWSER_EVAL_SCRIPT_MAX_CHARS = 8000;
 const AGENT_CONFIG_FILE = join(WORKSPACE_STATE_DIR, "agent-config.json");
+const AGENT_AUTH_BLOCKS_FILE = join(WORKSPACE_STATE_DIR, "agent-auth-blocks.json");
 const BACKGROUND_RUN_PERSIST_INTERVAL_MS = 1000;
 const STREAM_HEARTBEAT_INTERVAL_MS = 10_000;
+const AGENT_ERROR_IDLE_AUTO_STOP_MS = 10 * 60_000;
 const DEFAULT_BROWSER_BRIDGE_ORIGIN = "http://127.0.0.1:4280";
+const BROWSER_BRIDGE_TOKEN_HEADER = "x-rlab-browser-bridge-token";
+const BROWSER_BRIDGE_TOKEN_HEADER_DISPLAY = "X-Rlab-Browser-Bridge-Token";
+const BROWSER_BRIDGE_TOKEN = randomUUID();
 const terminalManager = new PtyTerminalManager();
 const terminalWebSocketServers = new WeakSet<object>();
 
@@ -292,6 +301,17 @@ export interface AgentSecretConfig {
   readonly env: Record<string, string>;
 }
 
+interface AgentAuthBlock {
+  readonly reason: string;
+  readonly message: string;
+  readonly authFingerprint?: string;
+  readonly recordedAtMs: number;
+}
+
+interface AgentAuthBlocksFile {
+  readonly agents: Record<string, AgentAuthBlock>;
+}
+
 function readAgentSecretConfig(): AgentSecretConfig {
   if (!existsSync(AGENT_CONFIG_FILE)) {
     return { env: {} };
@@ -311,6 +331,41 @@ function readAgentSecretConfig(): AgentSecretConfig {
 
 export function writeAgentSecretConfig(config: AgentSecretConfig, file = AGENT_CONFIG_FILE): void {
   writeJsonFileAtomic(file, config, 0o600);
+}
+
+function isAgentAuthBlock(value: unknown): value is AgentAuthBlock {
+  return (
+    isRecord(value) &&
+    typeof value.reason === "string" &&
+    typeof value.message === "string" &&
+    (value.authFingerprint === undefined || typeof value.authFingerprint === "string") &&
+    typeof value.recordedAtMs === "number"
+  );
+}
+
+function readAgentAuthBlocks(file = AGENT_AUTH_BLOCKS_FILE): AgentAuthBlocksFile {
+  if (!existsSync(file)) {
+    return { agents: {} };
+  }
+  try {
+    const parsed = JSON.parse(readFileSync(file, "utf8").replace(/^\uFEFF/, "")) as unknown;
+    if (!isRecord(parsed) || !isRecord(parsed.agents)) {
+      return { agents: {} };
+    }
+    const agents: Record<string, AgentAuthBlock> = {};
+    for (const [agent, block] of Object.entries(parsed.agents)) {
+      if (isAgentAuthBlock(block)) {
+        agents[agent] = block;
+      }
+    }
+    return { agents };
+  } catch {
+    return { agents: {} };
+  }
+}
+
+function writeAgentAuthBlocks(blocks: AgentAuthBlocksFile, file = AGENT_AUTH_BLOCKS_FILE): void {
+  writeJsonFileAtomic(file, blocks, 0o600);
 }
 
 function configuredEnvValueFrom(envName: string, config: AgentSecretConfig, env: NodeJS.ProcessEnv): string | undefined {
@@ -413,6 +468,89 @@ export function hasGeminiStoredAuthAt(home: string): boolean {
 
 function hasGeminiStoredAuth(): boolean {
   return hasGeminiStoredAuthAt(geminiHome());
+}
+
+function geminiConfiguredApiKey(config: AgentSecretConfig, env: NodeJS.ProcessEnv): string | undefined {
+  return firstConfiguredEnvValue(AGENT_RUNTIME_DETECTION.gemini.env ?? [], config, env);
+}
+
+function geminiOAuthFingerprintAt(home: string): string | undefined {
+  const oauthFile = join(home, "oauth_creds.json");
+  if (!existsSync(oauthFile)) {
+    return undefined;
+  }
+  try {
+    const oauth = JSON.parse(readFileSync(oauthFile, "utf8").replace(/^\uFEFF/, "")) as unknown;
+    if (!isRecord(oauth)) {
+      return undefined;
+    }
+    const token = typeof oauth.refresh_token === "string" && oauth.refresh_token.trim().length > 0 ? oauth.refresh_token : typeof oauth.access_token === "string" && oauth.access_token.trim().length > 0 ? oauth.access_token : "";
+    return token ? createHash("sha256").update(token).digest("hex").slice(0, 16) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function geminiOAuthFingerprint(): string | undefined {
+  return geminiOAuthFingerprintAt(geminiHome());
+}
+
+export function isGeminiCodeAssistUnsupportedLocationOutput(output: string): boolean {
+  return (
+    output.includes("UNSUPPORTED_LOCATION") ||
+    output.includes("IneligibleTierError") ||
+    output.includes("not eligible for Gemini Code Assist")
+  );
+}
+
+export function normalizedAgentCliExitErrorText(agent: string, stderr: string): string {
+  if (agent === "gemini" && isGeminiCodeAssistUnsupportedLocationOutput(stderr)) {
+    return GEMINI_CODE_ASSIST_UNSUPPORTED_LOCATION_MESSAGE;
+  }
+  return clip(stderr, 400);
+}
+
+function geminiStoredAuthBlock(config: AgentSecretConfig, env: NodeJS.ProcessEnv, file = AGENT_AUTH_BLOCKS_FILE): AgentAuthBlock | null {
+  if (geminiConfiguredApiKey(config, env)) {
+    return null;
+  }
+  const block = readAgentAuthBlocks(file).agents.gemini;
+  if (!block || block.reason !== GEMINI_CODE_ASSIST_UNSUPPORTED_LOCATION_REASON) {
+    return null;
+  }
+  const currentFingerprint = geminiOAuthFingerprint();
+  if (block.authFingerprint && currentFingerprint && block.authFingerprint !== currentFingerprint) {
+    return null;
+  }
+  return block;
+}
+
+function agentAuthBlockForDetection(agent: string, config: AgentSecretConfig, env: NodeJS.ProcessEnv, file = AGENT_AUTH_BLOCKS_FILE): AgentAuthBlock | null {
+  return agent === "gemini" ? geminiStoredAuthBlock(config, env, file) : null;
+}
+
+export function recordGeminiAuthBlockFromOutput(output: string, config: AgentSecretConfig, env: NodeJS.ProcessEnv, file = AGENT_AUTH_BLOCKS_FILE): boolean {
+  if (!isGeminiCodeAssistUnsupportedLocationOutput(output) || geminiConfiguredApiKey(config, env)) {
+    return false;
+  }
+  const blocks = readAgentAuthBlocks(file);
+  const authFingerprint = geminiOAuthFingerprint();
+  writeAgentAuthBlocks(
+    {
+      agents: {
+        ...blocks.agents,
+        gemini: {
+          reason: GEMINI_CODE_ASSIST_UNSUPPORTED_LOCATION_REASON,
+          message: GEMINI_CODE_ASSIST_UNSUPPORTED_LOCATION_MESSAGE,
+          ...(authFingerprint ? { authFingerprint } : {}),
+          recordedAtMs: Date.now(),
+        },
+      },
+    },
+    file,
+  );
+  clearAgentDetectionCache();
+  return true;
 }
 
 function hasConfiguredAgentAuth(detect: Detect, config: AgentSecretConfig, env: NodeJS.ProcessEnv = process.env): boolean {
@@ -544,6 +682,9 @@ const CLI_UPDATE_CHECK_INTERVAL_MS = 60 * 60_000;
 const CLI_UPDATE_CHECK_TIMEOUT_MS = 20_000;
 const DISCOVERY_OUTPUT_LIMIT_CHARS = 1_000_000;
 const STDERR_TAIL_LIMIT_CHARS = 4_000;
+const GEMINI_CODE_ASSIST_UNSUPPORTED_LOCATION_REASON = "gemini-code-assist-unsupported-location";
+const GEMINI_CODE_ASSIST_UNSUPPORTED_LOCATION_MESSAGE =
+  "Gemini authentication failed: the current Gemini Code Assist OAuth account is not eligible in this location (UNSUPPORTED_LOCATION). Configure GEMINI_API_KEY, GOOGLE_API_KEY, or GOOGLE_GENAI_API_KEY, or re-authenticate Gemini with an eligible account before retrying Gemini.";
 
 function geminiCliPackageRootFromBin(resolvedBin: string): string | null {
   const directRoot = join(dirname(resolvedBin), "node_modules", "@google", "gemini-cli");
@@ -803,19 +944,23 @@ export function agentCliInfoForDetection(
   env: NodeJS.ProcessEnv = process.env,
   pathValue = process.env.PATH ?? "",
   platform: NodeJS.Platform = process.platform,
+  authBlocksFile = AGENT_AUTH_BLOCKS_FILE,
 ): AgentCliInfo {
   const resolvedBin = resolvedDetectBin(detect, pathValue, platform);
   const found = resolvedBin !== null || detect.sdkRuntime === true;
   const runAdapter = RUNNABLE_AGENT_IDS.has(id);
-  const status = found && !runAdapter ? "unsupported" : agentStatusForDetection(detect, found, config, env);
+  const baseStatus = found && !runAdapter ? "unsupported" : agentStatusForDetection(detect, found, config, env);
+  const authBlock = baseStatus === "available" ? agentAuthBlockForDetection(id, config, env, authBlocksFile) : null;
+  const status = authBlock ? "needs-setup" : baseStatus;
   return {
     status,
     bins: detect.bins,
     resolvedBin,
     runAdapter,
-    selectable: status !== "unavailable" && status !== "unsupported",
+    selectable: status !== "unavailable" && status !== "unsupported" && !authBlock,
     env: detect.env ?? [],
     installCommand: installCommandForAgent(id)?.join(" ") ?? null,
+    ...(authBlock ? { modelDiscoveryError: authBlock.message } : {}),
   };
 }
 
@@ -1062,8 +1207,17 @@ export interface JsonBodyAccumulator {
   readonly bytes: number;
 }
 
+export interface PreviewProxyHtmlAccumulator {
+  readonly chunks: readonly Buffer[];
+  readonly bytes: number;
+}
+
 function jsonBodyTooLargeMessage(maxBytes: number): string {
   return `JSON request body exceeds ${maxBytes} bytes.`;
+}
+
+function previewProxyHtmlTooLargeMessage(maxBytes: number): string {
+  return `Preview proxy HTML response exceeds ${maxBytes} bytes.`;
 }
 
 export function appendJsonBodyChunk(accumulator: JsonBodyAccumulator, chunk: Buffer | string, maxBytes = MAX_JSON_BODY_BYTES): JsonBodyAccumulator {
@@ -1073,6 +1227,14 @@ export function appendJsonBodyChunk(accumulator: JsonBodyAccumulator, chunk: Buf
     throw new Error(jsonBodyTooLargeMessage(maxBytes));
   }
   return { body: accumulator.body + text, bytes };
+}
+
+export function appendPreviewProxyHtmlChunk(accumulator: PreviewProxyHtmlAccumulator, chunk: Buffer, maxBytes = MAX_PREVIEW_PROXY_HTML_BYTES): PreviewProxyHtmlAccumulator {
+  const bytes = accumulator.bytes + chunk.byteLength;
+  if (bytes > maxBytes) {
+    throw new Error(previewProxyHtmlTooLargeMessage(maxBytes));
+  }
+  return { chunks: [...accumulator.chunks, chunk], bytes };
 }
 
 export function jsonBodyReadErrorStatus(error: unknown): 413 | 500 {
@@ -2820,6 +2982,10 @@ export function sanitizeClientWorkspaceMutations(mutations: readonly WorkspaceDb
   return sanitized;
 }
 
+export function isComposerDraftOnlyWorkspaceMutationBatch(mutations: readonly WorkspaceDbMutation[]): boolean {
+  return mutations.length > 0 && mutations.every((mutation) => mutation.type === "setComposerDraft" || mutation.type === "deleteComposerDraft");
+}
+
 const DEFAULT_THREAD_PAGE_LIMIT = 15;
 
 function parsedThreadPageLimit(value: string | null): number {
@@ -3285,6 +3451,7 @@ function sendJson(res: ServerResponse, statusCode: number, payload: unknown): vo
   res.statusCode = statusCode;
   res.setHeader("Content-Type", JSON_CONTENT_TYPE);
   res.setHeader("Cache-Control", "no-store");
+  res.setHeader("X-Content-Type-Options", "nosniff");
   res.end(JSON.stringify(payload));
 }
 
@@ -4301,9 +4468,13 @@ function handleWorkspaceMutations(req: IncomingMessage, res: ServerResponse): vo
     try {
       ensureWorkspaceDb();
       const { mutations, baseRevision } = parseWorkspaceMutationRequestBody(body);
-      const revision = applyWorkspaceDbMutations(sanitizeClientWorkspaceMutations(mutations), { expectedRevision: baseRevision });
+      const sanitized = sanitizeClientWorkspaceMutations(mutations);
+      const draftOnly = isComposerDraftOnlyWorkspaceMutationBatch(sanitized);
+      const currentRevision = readWorkspaceRevision();
+      const acceptedStaleDraft = draftOnly && baseRevision !== undefined && baseRevision !== currentRevision;
+      const revision = applyWorkspaceDbMutations(sanitized, draftOnly ? {} : { expectedRevision: baseRevision });
       emitWorkspaceChange({ reason: "workspace-mutations" });
-      sendJson(res, 200, { ok: true, revision });
+      sendJson(res, 200, { ok: true, revision, ...(acceptedStaleDraft ? { workspace: readWorkspaceShellForClient() } : {}) });
     } catch (error) {
       if (error instanceof WorkspaceRevisionConflictError) {
         sendJson(res, 409, {
@@ -4499,6 +4670,8 @@ function handleLocalFile(req: IncomingMessage, res: ServerResponse): void {
     res.setHeader("Content-Type", contentType);
     res.setHeader("Content-Length", String(stat.size));
     res.setHeader("Cache-Control", "private, max-age=60");
+    res.setHeader("Content-Security-Policy", "sandbox");
+    res.setHeader("X-Content-Type-Options", "nosniff");
     if (download || contentType === "application/octet-stream") {
       res.setHeader("Content-Disposition", `attachment; filename="${basename(realPath).replace(/[^a-zA-Z0-9._-]+/g, "_")}"`);
     }
@@ -6148,6 +6321,7 @@ interface RunInputSelection {
 interface RunCancelRequest {
   readonly runId: string;
   readonly pauseQueue: boolean;
+  readonly pauseResumeAtMs?: number;
 }
 
 interface RunRequest {
@@ -6982,6 +7156,7 @@ export interface BackgroundRunHandle {
   readonly startedAt: string;
   readonly cancel: () => void;
   readonly accumulator?: BackgroundRunAccumulator;
+  errorIdleStopTimer?: ReturnType<typeof setTimeout> | null;
   subscribers?: Set<BackgroundRunSubscriber>;
 }
 
@@ -7326,6 +7501,11 @@ function firstForwardedHeaderValue(value: string | string[] | undefined): string
   return first && first.length > 0 ? first : undefined;
 }
 
+function requestHeaderValue(req: IncomingMessage, name: string): string {
+  const raw = req.headers[name];
+  return (Array.isArray(raw) ? raw[0] : raw)?.trim() ?? "";
+}
+
 function envBrowserBridgeOrigin(): string | undefined {
   const raw = process.env.RLAB_BROWSER_BRIDGE_ORIGIN?.trim();
   if (!raw) {
@@ -7357,6 +7537,14 @@ export function browserBridgeOrigin(req: IncomingMessage): string {
   return `${protocol}://${host}`;
 }
 
+function isTrustedBrowserBridgeRequest(req: IncomingMessage): boolean {
+  if (requestHeaderValue(req, BROWSER_BRIDGE_TOKEN_HEADER) !== BROWSER_BRIDGE_TOKEN) {
+    return false;
+  }
+  const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
+  return pathname === "/api/browser/bridge/action" || pathname === "/api/browser/bridge/sync";
+}
+
 function browserBridgePromptAppendix(sessionId: string, origin: string): string {
   return [
     "",
@@ -7365,8 +7553,9 @@ function browserBridgePromptAppendix(sessionId: string, origin: string): string 
     "Use the bridge only when the task asks you to inspect or operate the in-app browser.",
     `Base URL: ${origin}`,
     `sessionId: ${sessionId}`,
+    `Required header for POST bridge calls: ${BROWSER_BRIDGE_TOKEN_HEADER_DISPLAY}: ${BROWSER_BRIDGE_TOKEN}`,
     `Snapshot: GET ${origin}/api/browser/bridge/snapshot?sessionId=${encodeURIComponent(sessionId)}`,
-    `Action: POST ${origin}/api/browser/bridge/action with JSON {"sessionId":"${sessionId}","type":"..."}.`,
+    `Action: POST ${origin}/api/browser/bridge/action with headers {"Content-Type":"application/json","${BROWSER_BRIDGE_TOKEN_HEADER_DISPLAY}":"${BROWSER_BRIDGE_TOKEN}"} and JSON {"sessionId":"${sessionId}","type":"..."}.`,
     "Always read snapshot.domTargets first and choose typed actions from DOM targets before coordinates. If the snapshot URL is about:blank or domTargets is empty, navigate to the needed URL first, then read the snapshot again.",
     "Freshness contract: snapshot.freshness is synced, dirty, blocked, syncing, or error. The server automatically resynchronizes dirty/blocked mirrors when it has a Preview URL. If an action returns actionResult.ok=false, read actionResult.error, refresh the snapshot, and report the exact bridge state if it still cannot continue.",
     "Preferred action order: fill, check, uncheck, select, click, press, scroll, wait-for. Use type only to append text. Use x/y coordinates only for canvas or custom widgets without a DOM target.",
@@ -8618,6 +8807,7 @@ export function parseRunCancelPayload(body: string): RunCancelRequest {
   return {
     runId: parsed.runId.trim(),
     pauseQueue: parsed.pauseQueue === false ? false : true,
+    ...(typeof parsed.pauseResumeAtMs === "number" && Number.isFinite(parsed.pauseResumeAtMs) && parsed.pauseResumeAtMs > 0 ? { pauseResumeAtMs: Math.trunc(parsed.pauseResumeAtMs) } : {}),
   };
 }
 
@@ -8744,6 +8934,31 @@ export function createRunApprovalHandler(send: (event: RunEvent) => void, scopeI
 
 const backgroundRunHandles = new Map<string, BackgroundRunHandle>();
 
+function registerBackgroundRunHandle({
+  binding,
+  accumulator,
+  cancel,
+}: {
+  readonly binding: BackgroundRunBinding;
+  readonly accumulator: BackgroundRunAccumulator | null;
+  readonly cancel: () => void;
+}): void {
+  backgroundRunHandles.set(binding.runId, {
+    binding,
+    startedAt: new Date().toISOString(),
+    ...(accumulator ? { accumulator } : {}),
+    errorIdleStopTimer: null,
+    cancel,
+  });
+}
+
+function clearBackgroundRunErrorIdleStopTimer(handle: BackgroundRunHandle): void {
+  if (handle.errorIdleStopTimer) {
+    clearTimeout(handle.errorIdleStopTimer);
+    handle.errorIdleStopTimer = null;
+  }
+}
+
 export function isPersistedBackgroundRunActive<T extends Pick<WorkspaceConversation, "activeRunId" | "status">>(
   conversation: T | null | undefined,
   binding: Pick<BackgroundRunBinding, "runId">,
@@ -8796,6 +9011,7 @@ function cleanupOrphanBackgroundRun(handle: BackgroundRunHandle, reason: string)
   if (!backgroundRunHandles.has(handle.binding.runId)) {
     return;
   }
+  clearBackgroundRunErrorIdleStopTimer(handle);
   backgroundRunHandles.delete(handle.binding.runId);
   try {
     handle.cancel();
@@ -9207,9 +9423,19 @@ function drainServerQueue(conversationId: string): void {
   })();
 }
 
-function pauseQueueForStoppedRun(conversationId: string): void {
+function queueInterruptionResumeAtMs(nowMs = Date.now()): number {
   try {
-    setPendingTurnQueuePaused(conversationId, true, { reason: "stop" });
+    ensureWorkspaceDb();
+    const state = readWorkspaceStateFromDb(new Set<string>());
+    return nowMs + normalizeQueueInterruptionPauseMs(state.settings.general.queueInterruptionPauseMs);
+  } catch {
+    return nowMs + defaultAppSettings.general.queueInterruptionPauseMs;
+  }
+}
+
+function pauseQueueForStoppedRun(conversationId: string, options: { readonly resumeAtMs?: number } = {}): void {
+  try {
+    setPendingTurnQueuePaused(conversationId, true, { reason: "stop", resumeAtMs: options.resumeAtMs });
     clearServerQueueResume(conversationId);
     emitPendingQueueChange(conversationId);
   } catch {
@@ -9791,15 +10017,89 @@ function notifyBackgroundRunUpdate(binding: BackgroundRunBinding, done: boolean)
   }
 }
 
-export function releaseCanceledQueuedRun(runId: string): PendingQueueDispatchItem | null {
-  const released = releaseDispatchingQueueItemByRunId(runId, { pause: true, pauseReason: "stop", rotateToEnd: true });
+export function releaseCanceledQueuedRun(runId: string, options: { readonly resumeAtMs?: number } = {}): PendingQueueDispatchItem | null {
+  const released = releaseDispatchingQueueItemByRunId(runId, { pause: true, pauseReason: "stop", rotateToEnd: true, pauseResumeAtMs: options.resumeAtMs });
   if (released) {
     emitPendingQueueChange(released.conversationId);
   }
   return released;
 }
 
+function stopBackgroundRunAfterErrorIdle(handle: BackgroundRunHandle): void {
+  if (backgroundRunHandles.get(handle.binding.runId) !== handle) {
+    return;
+  }
+  clearBackgroundRunErrorIdleStopTimer(handle);
+  const resumeAtMs = queueInterruptionResumeAtMs();
+  try {
+    appendRunAuditEvent(RUN_AUDIT_FILE, {
+      type: "background_run_error_idle_auto_stopped",
+      runId: handle.binding.runId,
+      conversationId: handle.binding.conversationId,
+      pauseResumeAtMs: resumeAtMs,
+    });
+  } catch {
+    // Audit logging must not block cancellation.
+  }
+  try {
+    handle.cancel();
+  } catch (error) {
+    console.error(`[rlab] Failed to cancel idle errored background run ${handle.binding.runId}: ${errorMessage(error)}`);
+  }
+  try {
+    const currentState = readWorkspaceState();
+    const canceled = cancelBackgroundRunRequestState(currentState, handle.binding.runId, true);
+    if (canceled.canceled) {
+      persistWorkspaceDelta(currentState, canceled.state);
+    }
+  } catch (error) {
+    appendRunAuditEvent(RUN_AUDIT_FILE, {
+      type: "background_run_error_idle_state_cancel_failed",
+      runId: handle.binding.runId,
+      conversationId: handle.binding.conversationId,
+      error: errorMessage(error),
+    });
+  }
+  try {
+    const released = releaseCanceledQueuedRun(handle.binding.runId, { resumeAtMs });
+    if (!released) {
+      pauseQueueForStoppedRun(handle.binding.conversationId, { resumeAtMs });
+    }
+  } catch (error) {
+    appendRunAuditEvent(RUN_AUDIT_FILE, {
+      type: "background_run_error_idle_queue_pause_failed",
+      runId: handle.binding.runId,
+      conversationId: handle.binding.conversationId,
+      error: errorMessage(error),
+    });
+  }
+}
+
+function scheduleBackgroundRunErrorIdleStop(handle: BackgroundRunHandle): void {
+  clearBackgroundRunErrorIdleStopTimer(handle);
+  handle.errorIdleStopTimer = setTimeout(() => stopBackgroundRunAfterErrorIdle(handle), AGENT_ERROR_IDLE_AUTO_STOP_MS);
+  unrefBrowserPreviewTimer(handle.errorIdleStopTimer);
+}
+
+function handleBackgroundRunEventForErrorIdleStop(binding: BackgroundRunBinding, event: RunEvent): void {
+  const handle = backgroundRunHandles.get(binding.runId);
+  if (!handle) {
+    return;
+  }
+  if (runEventIsErrorSignal(event)) {
+    scheduleBackgroundRunErrorIdleStop(handle);
+    return;
+  }
+  if (runEventWritesAgentMessage(event)) {
+    clearBackgroundRunErrorIdleStopTimer(handle);
+  }
+}
+
 function finishBackgroundHandle(binding: BackgroundRunBinding, canceled: boolean): void {
+  const handle = backgroundRunHandles.get(binding.runId);
+  if (handle) {
+    clearBackgroundRunErrorIdleStopTimer(handle);
+  }
   backgroundRunHandles.delete(binding.runId);
   closeIdleBrowserPreviewSession(binding.conversationId);
   try {
@@ -10434,6 +10734,7 @@ export function backgroundRunStatusPatch(
 
 function applyBackgroundRunEvent(binding: BackgroundRunBinding, accumulator: BackgroundRunAccumulator, event: RunEvent): void {
   accumulateBackgroundRunEvent(accumulator, event);
+  handleBackgroundRunEventForErrorIdleStop(binding, event);
   if (event.type === "done") {
     return;
   }
@@ -12555,10 +12856,9 @@ async function runClaudeSdk(
     }
   });
   if (binding) {
-    backgroundRunHandles.set(binding.runId, {
+    registerBackgroundRunHandle({
       binding,
-      startedAt: new Date().toISOString(),
-      ...(accumulator ? { accumulator } : {}),
+      accumulator,
       cancel: () => {
         if (!abortController.signal.aborted) {
           abortController.abort();
@@ -12762,10 +13062,9 @@ async function runOpenCodeServer(
     }
   });
   if (binding) {
-    backgroundRunHandles.set(binding.runId, {
+    registerBackgroundRunHandle({
       binding,
-      startedAt: new Date().toISOString(),
-      ...(accumulator ? { accumulator } : {}),
+      accumulator,
       cancel: () => {
         if (!abortController.signal.aborted) {
           abortController.abort();
@@ -13106,10 +13405,9 @@ async function runCodexAppServer(
     }
   });
   if (binding) {
-    backgroundRunHandles.set(binding.runId, {
+    registerBackgroundRunHandle({
       binding,
-      startedAt: new Date().toISOString(),
-      ...(accumulator ? { accumulator } : {}),
+      accumulator,
       cancel: () => {
         if (!abortController.signal.aborted) {
           abortController.abort();
@@ -13442,9 +13740,9 @@ function handleRunCancel(req: IncomingMessage, res: ServerResponse): void {
       if (!handle) {
         if (canceled.canceled) {
           persistWorkspaceDelta(currentState, canceled.state);
-          const released = releaseCanceledQueuedRun(request.runId);
+          const released = releaseCanceledQueuedRun(request.runId, { resumeAtMs: request.pauseResumeAtMs });
           if (request.pauseQueue && conversationToPause && !released) {
-            pauseQueueForStoppedRun(conversationToPause.id);
+            pauseQueueForStoppedRun(conversationToPause.id, { resumeAtMs: request.pauseResumeAtMs });
           }
           sendJson(res, 200, { runId: request.runId, canceled: true, detached: true });
           return;
@@ -13454,9 +13752,9 @@ function handleRunCancel(req: IncomingMessage, res: ServerResponse): void {
       }
       handle.cancel();
       persistWorkspaceDelta(currentState, canceled.state);
-      const released = releaseCanceledQueuedRun(request.runId);
+      const released = releaseCanceledQueuedRun(request.runId, { resumeAtMs: request.pauseResumeAtMs });
       if (request.pauseQueue && !released) {
-        pauseQueueForStoppedRun(handle.binding.conversationId);
+        pauseQueueForStoppedRun(handle.binding.conversationId, { resumeAtMs: request.pauseResumeAtMs });
       }
       sendJson(res, 200, { runId: request.runId, canceled: true });
     } catch (error) {
@@ -13629,12 +13927,18 @@ function startServerRunFromParsedPayload(parsedPayload: ParsedRunRequestSuccess,
       ? {
           RLAB_BROWSER_BASE_URL: origin,
           RLAB_BROWSER_SESSION_ID: binding.conversationId,
+          RLAB_BROWSER_BRIDGE_TOKEN: BROWSER_BRIDGE_TOKEN,
+          RLAB_BROWSER_BRIDGE_TOKEN_HEADER: BROWSER_BRIDGE_TOKEN_HEADER_DISPLAY,
         }
       : {}),
   };
   const detect = DETECT[agent];
   if (spec.env && detect && !hasConfiguredAgentAuth(detect, config, runEnv)) {
     return serverRunStartError(503, `${agent} needs setup: set one of ${spec.env.join(", ")}.`);
+  }
+  const authBlock = agentAuthBlockForDetection(agent, config, runEnv);
+  if (authBlock) {
+    return serverRunStartError(503, authBlock.message);
   }
 
   // Use the requested working directory when it's a real directory (so the
@@ -13874,10 +14178,9 @@ function startServerRunFromParsedPayload(parsedPayload: ParsedRunRequestSuccess,
   }
   let canceled = false;
   if (binding) {
-    backgroundRunHandles.set(binding.runId, {
+    registerBackgroundRunHandle({
       binding,
-      startedAt: new Date().toISOString(),
-      ...(accumulator ? { accumulator } : {}),
+      accumulator,
       cancel: () => {
         canceled = true;
         if (child.exitCode === null) {
@@ -13960,7 +14263,14 @@ function startServerRunFromParsedPayload(parsedPayload: ParsedRunRequestSuccess,
     if (runTimeout.timedOut()) {
       sendTimeoutError();
     } else if (!canceled && code !== 0 && stderr) {
-      send({ type: "error", text: clip(stderr, 400) });
+      if (agent === "gemini") {
+        try {
+          recordGeminiAuthBlockFromOutput(stderr, config, runEnv);
+        } catch (error) {
+          console.error(`[rlab] Failed to persist Gemini auth failure: ${errorMessage(error)}`);
+        }
+      }
+      send({ type: "error", text: normalizedAgentCliExitErrorText(agent, stderr) });
     }
     finishCliRun(canceled && !runTimeout.timedOut());
   });
@@ -14200,24 +14510,8 @@ function handlePendingQueue(req: IncomingMessage, res: ServerResponse): void {
 }
 
 function handleRun(req: IncomingMessage, res: ServerResponse): void {
-  let bodyAccumulator: JsonBodyAccumulator = { body: "", bytes: 0 };
-  let bodyReadError: Error | null = null;
-  req.on("data", (chunk: Buffer | string) => {
-    if (bodyReadError) {
-      return;
-    }
-    try {
-      bodyAccumulator = appendJsonBodyChunk(bodyAccumulator, chunk);
-    } catch (error) {
-      bodyReadError = error instanceof Error ? error : new Error(String(error));
-    }
-  });
-  req.on("end", () => {
-    if (bodyReadError) {
-      sendJson(res, jsonBodyReadErrorStatus(bodyReadError), { error: errorMessage(bodyReadError) });
-      return;
-    }
-    const parsedPayload = parseRunRequestPayload(bodyAccumulator.body);
+  readJsonBody(req, res, (body) => {
+    const parsedPayload = parseRunRequestPayload(body);
 
     if (!parsedPayload.ok) {
       sendJson(res, 400, { error: parsedPayload.error });
@@ -14262,6 +14556,8 @@ const HOP_BY_HOP_PROXY_HEADERS = new Set([
   "transfer-encoding",
   "upgrade",
 ]);
+const PREVIEW_PROXY_PRIVATE_REQUEST_HEADERS = new Set(["authorization", "cookie"]);
+const PREVIEW_PROXY_PRIVATE_RESPONSE_HEADERS = new Set(["set-cookie", "set-cookie2"]);
 
 /** Strips a `frame-ancestors` directive so a proxied page can be iframed. */
 function stripFrameAncestors(csp: string): string {
@@ -14307,8 +14603,14 @@ function connectionHeaderTokens(value: string | readonly string[] | number | und
   );
 }
 
-function stripHopByHopHeaders(headers: IncomingHttpHeaders | OutgoingHttpHeaders): OutgoingHttpHeaders {
+export function stripHopByHopHeaders(
+  headers: IncomingHttpHeaders | OutgoingHttpHeaders,
+  extraBlockedHeaders: ReadonlySet<string> = new Set(),
+): OutgoingHttpHeaders {
   const blocked = new Set(HOP_BY_HOP_PROXY_HEADERS);
+  for (const header of extraBlockedHeaders) {
+    blocked.add(header.toLowerCase());
+  }
   for (const token of connectionHeaderTokens(headers.connection)) {
     blocked.add(token);
   }
@@ -14346,12 +14648,12 @@ function handlePreviewProxy(req: IncomingMessage, res: ServerResponse): void {
 
   // Point Host at the upstream so dev servers with host checks accept it, and
   // request identity encoding so HTML can be rewritten without gunzipping first.
-  const headers = stripHopByHopHeaders(req.headers);
+  const headers = stripHopByHopHeaders(req.headers, PREVIEW_PROXY_PRIVATE_REQUEST_HEADERS);
   headers.host = `127.0.0.1:${port}`;
   headers["accept-encoding"] = "identity";
 
   const proxyReq = httpRequest({ host: "127.0.0.1", port, method: req.method, path: targetPath, headers }, (proxyRes) => {
-    const outHeaders = stripHopByHopHeaders(proxyRes.headers);
+    const outHeaders = stripHopByHopHeaders(proxyRes.headers, PREVIEW_PROXY_PRIVATE_RESPONSE_HEADERS);
     delete outHeaders["x-frame-options"];
     delete outHeaders["content-security-policy-report-only"];
     if (typeof outHeaders["content-security-policy"] === "string") {
@@ -14362,10 +14664,30 @@ function handlePreviewProxy(req: IncomingMessage, res: ServerResponse): void {
     }
     const contentType = String(proxyRes.headers["content-type"] ?? "");
     if (contentType.includes("text/html")) {
-      const chunks: Buffer[] = [];
-      proxyRes.on("data", (chunk: Buffer) => chunks.push(chunk));
+      let accumulator: PreviewProxyHtmlAccumulator = { chunks: [], bytes: 0 };
+      let failed = false;
+      proxyRes.on("data", (chunk: Buffer) => {
+        if (failed) {
+          return;
+        }
+        try {
+          accumulator = appendPreviewProxyHtmlChunk(accumulator, chunk);
+        } catch (error) {
+          failed = true;
+          if (!res.headersSent && !res.writableEnded) {
+            sendJson(res, 502, { error: errorMessage(error) });
+          } else if (!res.writableEnded) {
+            res.destroy(error instanceof Error ? error : new Error(String(error)));
+          }
+          proxyReq.destroy();
+          proxyRes.destroy();
+        }
+      });
       proxyRes.on("end", () => {
-        let html = Buffer.concat(chunks).toString("utf8");
+        if (failed) {
+          return;
+        }
+        let html = Buffer.concat(accumulator.chunks).toString("utf8");
         if (!/<base\b/i.test(html)) {
           const baseTag = `<base href="${basePrefix}/">`;
           html = /<head[^>]*>/i.test(html) ? html.replace(/<head[^>]*>/i, (open) => `${open}${baseTag}`) : `${baseTag}${html}`;
@@ -14382,6 +14704,12 @@ function handlePreviewProxy(req: IncomingMessage, res: ServerResponse): void {
     proxyRes.pipe(res);
   });
   proxyReq.on("error", (error) => {
+    if (res.headersSent || res.writableEnded) {
+      if (!res.writableEnded) {
+        res.destroy(error);
+      }
+      return;
+    }
     sendJson(res, 502, { error: `Preview proxy could not reach 127.0.0.1:${port} — ${error instanceof Error ? error.message : String(error)}` });
   });
   req.pipe(proxyReq);
@@ -14399,7 +14727,7 @@ export function attachRlabApi(server: RlabApiAttachTarget): void {
     attachPtyTerminalWebSockets(server.httpServer as unknown as HttpServer, terminalManager, validateRlabRequest);
   }
   server.middlewares.use((req, res, next) => {
-    const blocked = validateRlabRequest(req);
+    const blocked = validateRlabRequest(req, process.env, { trustedUnsafeRequest: isTrustedBrowserBridgeRequest });
     if (blocked) {
       sendJson(res, blocked.statusCode, { error: blocked.message });
       return;

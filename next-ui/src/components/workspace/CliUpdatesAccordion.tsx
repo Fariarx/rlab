@@ -94,7 +94,16 @@ export function CliUpdatesAccordion({
                     {update.currentVersion} → {update.latestVersion}
                   </Typography>
                 </Box>
-                <Button variant="subtle" size="small" disabled={busyAgent !== null} onClick={() => onUpdate(update)} sx={{ flex: "0 0 auto", minWidth: 78 }}>
+                <Button
+                  variant="subtle"
+                  size="small"
+                  disabled={busyAgent !== null}
+                  onClick={() => {
+                    setOpen(false);
+                    onUpdate(update);
+                  }}
+                  sx={{ flex: "0 0 auto", minWidth: 78 }}
+                >
                   {t("updateCli")}
                 </Button>
               </Stack>

@@ -73,9 +73,29 @@ describe("QueuedMessages", () => {
 
       fireEvent.click(screen.getByRole("button", { name: "Остановить" }));
       expect(screen.getByText("Запустить через")).toBeInTheDocument();
-      fireEvent.click(screen.getByRole("menuitem", { name: /15 минут/ }));
+      expect(screen.getByRole("menuitem", { name: /10 минут/ })).toBeInTheDocument();
+      expect(screen.getByRole("menuitem", { name: /30 минут/ })).toBeInTheDocument();
+      expect(screen.getByRole("menuitem", { name: /1 час/ })).toBeInTheDocument();
+      expect(screen.getByRole("menuitem", { name: "Ручной выбор" })).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("menuitem", { name: /30 минут/ }));
 
-      expect(onTogglePause).toHaveBeenCalledWith(Date.parse("2026-06-26T10:15:00.000Z"));
+      expect(onTogglePause).toHaveBeenCalledWith(Date.parse("2026-06-26T10:30:00.000Z"));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("supports a manual delayed queue resume time from the pause menu", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-26T10:00:00.000Z"));
+    try {
+      const onTogglePause = vi.fn();
+      renderWithTheme(<QueuedMessages messages={messages} paused={false} onCancel={vi.fn()} onCopy={vi.fn()} onSendNow={vi.fn()} onTogglePause={onTogglePause} />);
+
+      fireEvent.click(screen.getByRole("button", { name: "Остановить" }));
+      fireEvent.change(screen.getByTestId("queued-pause-manual-input"), { target: { value: "2026-06-26T12:45" } });
+
+      expect(onTogglePause).toHaveBeenCalledWith(new Date("2026-06-26T12:45").getTime());
     } finally {
       vi.useRealTimers();
     }
@@ -191,6 +211,8 @@ describe("QueuedMessages", () => {
     expect(screen.getByText("Keep improving")).toBeInTheDocument();
     expect(screen.getByText("Keep testing")).toBeInTheDocument();
     expect(screen.getByText("Active goal")).toBeInTheDocument();
+    expect(screen.getByTestId("queued-item-goal-active").querySelector("[data-testid='FlagRoundedIcon']")).not.toBeNull();
+    expect(screen.getByTestId("queued-item-goal-active").querySelector("[data-testid='ScheduleSendRoundedIcon']")).toBeNull();
     expect(screen.getByTestId("queued-item-wakeup-1")).toHaveTextContent("Агент: codex");
     expect(screen.getByTestId("queued-item-wakeup-1")).toHaveTextContent("Промпт: Continue later");
     expect(screen.getByText("В работе")).toBeInTheDocument();

@@ -8,6 +8,9 @@ export type DensityMode = "comfortable" | "compact";
 export const DEFAULT_SIDEBAR_WIDTH = 300;
 export const MIN_SIDEBAR_WIDTH = 240;
 export const MAX_SIDEBAR_WIDTH = 520;
+export const DEFAULT_QUEUE_INTERRUPTION_PAUSE_MS = 30 * 60_000;
+export const MIN_QUEUE_INTERRUPTION_PAUSE_MS = 1 * 60_000;
+export const MAX_QUEUE_INTERRUPTION_PAUSE_MS = 24 * 60 * 60_000;
 
 export interface AppearanceSettings {
   readonly density: DensityMode;
@@ -23,6 +26,8 @@ export interface GeneralSettings {
   readonly confirmDestructiveActions: boolean;
   readonly desktopNotifications: boolean;
   readonly locale: Locale;
+  /** How long the queue is paused after an error-idle agent run is auto-stopped. */
+  readonly queueInterruptionPauseMs: number;
   readonly telemetry: boolean;
   /** Optional override for where the Preview reaches the agent's dev servers.
    *  When set, localhost/127.0.0.1 URLs the agent opens are rewritten to this
@@ -62,6 +67,7 @@ export const defaultAppSettings: AppSettings = {
     confirmDestructiveActions: true,
     desktopNotifications: true,
     locale: "ru",
+    queueInterruptionPauseMs: DEFAULT_QUEUE_INTERRUPTION_PAUSE_MS,
     telemetry: false,
     previewServerHost: "",
     systemPrompt: "",
@@ -86,6 +92,7 @@ export function cloneAppSettings(settings: AppSettings): AppSettings {
       confirmDestructiveActions: settings.general.confirmDestructiveActions,
       desktopNotifications: settings.general.desktopNotifications,
       locale: settings.general.locale,
+      queueInterruptionPauseMs: normalizeQueueInterruptionPauseMs(settings.general.queueInterruptionPauseMs),
       telemetry: settings.general.telemetry,
       previewServerHost: settings.general.previewServerHost,
       systemPrompt: normalizeSystemPromptSetting(settings.general.systemPrompt),
@@ -106,6 +113,7 @@ export function mergeAppSettings(current: AppSettings, patch: AppSettingsPatch):
   const general = {
     ...current.general,
     ...patch.general,
+    queueInterruptionPauseMs: normalizeQueueInterruptionPauseMs(patch.general?.queueInterruptionPauseMs ?? current.general.queueInterruptionPauseMs),
     systemPrompt: normalizeSystemPromptSetting(patch.general?.systemPrompt ?? current.general.systemPrompt),
     voice: normalizeVoiceSettings({ ...current.general.voice, ...voicePatch }),
   };
@@ -147,6 +155,13 @@ export function normalizeSidebarWidth(value: unknown): number {
   return Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, Math.round(value)));
 }
 
+export function normalizeQueueInterruptionPauseMs(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return DEFAULT_QUEUE_INTERRUPTION_PAUSE_MS;
+  }
+  return Math.min(MAX_QUEUE_INTERRUPTION_PAUSE_MS, Math.max(MIN_QUEUE_INTERRUPTION_PAUSE_MS, Math.round(value)));
+}
+
 function normalizeSystemPromptSetting(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
@@ -184,6 +199,7 @@ export function isAppSettings(value: unknown): value is AppSettings {
     isLocale(general.locale) &&
     typeof general.desktopNotifications === "boolean" &&
     typeof general.confirmDestructiveActions === "boolean" &&
+    (general.queueInterruptionPauseMs === undefined || normalizeQueueInterruptionPauseMs(general.queueInterruptionPauseMs) === general.queueInterruptionPauseMs) &&
     typeof general.telemetry === "boolean" &&
     typeof general.previewServerHost === "string" &&
     (general.systemPrompt === undefined || typeof general.systemPrompt === "string") &&

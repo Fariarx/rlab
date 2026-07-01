@@ -15,6 +15,7 @@ import {
   generalDesktopNotificationsPatch,
   generalLocalePatch,
   generalPreviewServerHostPatch,
+  generalQueueInterruptionPauseMsPatch,
   generalSystemPromptPatch,
   generalTelemetryPatch,
   generalVoiceLanguagePatch,
@@ -143,6 +144,7 @@ describe("settings-dialog-model", () => {
     expect(generalDesktopNotificationsPatch(false)).toEqual({ general: { desktopNotifications: false } });
     expect(generalConfirmDestructiveActionsPatch(false)).toEqual({ general: { confirmDestructiveActions: false } });
     expect(generalTelemetryPatch(true)).toEqual({ general: { telemetry: true } });
+    expect(generalQueueInterruptionPauseMsPatch(45 * 60_000)).toEqual({ general: { queueInterruptionPauseMs: 45 * 60_000 } });
     expect(generalPreviewServerHostPatch("dev.example.com:8080")).toEqual({ general: { previewServerHost: "dev.example.com:8080" } });
     expect(generalSystemPromptPatch("Be concise.")).toEqual({ general: { systemPrompt: "Be concise." } });
   });

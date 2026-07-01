@@ -170,6 +170,39 @@ describe("WorkspaceSaveQueue", () => {
     expect(revisionRef.current).toBe(8);
   });
 
+  it("merges accepted stale draft save responses without retrying", async () => {
+    const original = buildInitialWorkspaceState();
+    const conversationId = original.selectedId;
+    const draft = { text: "draft", attachments: [] };
+    const stateRef = { current: { ...original, composerDrafts: { ...original.composerDrafts, [conversationId]: draft } } };
+    const revisionRef = { current: 3 };
+    const serverState: WorkspaceState = {
+      ...original,
+      chats: original.chats.map((conversation) => (conversation.id === conversationId ? { ...conversation, title: "Remote title" } : conversation)),
+      composerDrafts: { ...original.composerDrafts, [conversationId]: draft },
+    };
+    const mutation: WorkspaceMutation = { type: "setComposerDraft", conversationId, draft };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        mutationRequests.push(JSON.parse(String(init?.body ?? "{}")) as { baseRevision: number; mutations: WorkspaceMutation[] });
+        return Response.json({ ok: true, revision: 7, workspace: serverState });
+      }),
+    );
+    const queue = new WorkspaceSaveQueue(hostFor(stateRef, revisionRef));
+
+    queue.enqueue(mutation);
+    await vi.advanceTimersByTimeAsync(250);
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(2_000);
+    await flushMicrotasks();
+
+    expect(mutationRequests).toEqual([{ baseRevision: 3, mutations: [mutation] }]);
+    expect(revisionRef.current).toBe(7);
+    expect(stateRef.current.chats.find((conversation) => conversation.id === conversationId)?.title).toBe("Remote title");
+    expect(stateRef.current.composerDrafts[conversationId]).toEqual(draft);
+  });
+
   it("preserves loaded threads when rebasing against a shell-only conflict workspace", async () => {
     const original = buildInitialWorkspaceState();
     const selectedId = original.selectedId;

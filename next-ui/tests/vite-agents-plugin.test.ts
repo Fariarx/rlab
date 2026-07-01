@@ -39,6 +39,7 @@ import {
   activeBackgroundRunUpdateFromState,
   activeBackgroundRunSnapshotsFromHandles,
   applyBrowserStorageSnapshot,
+  appendPreviewProxyHtmlChunk,
   appendRunAuditEvent,
   appendRlabChatToolsPrompt,
   BROWSER_ACTION_TIMEOUT_MS,
@@ -91,9 +92,12 @@ import {
   npmPackageNameFromInstallSpec,
   listMentionableFiles,
   normalizeWakeupTrigger,
+  normalizedAgentCliExitErrorText,
   reconcileStaleBackgroundRuns,
   hasGeminiStoredAuthAt,
   installCommandForAgent,
+  isGeminiCodeAssistUnsupportedLocationOutput,
+  isComposerDraftOnlyWorkspaceMutationBatch,
   JSON_CONTENT_TYPE,
   parseClaudeCliModelAliasesSource,
   parseClaudeOAuthUsagePayload,
@@ -109,6 +113,7 @@ import {
   queuedTurnRunBody,
   releaseCanceledQueuedRun,
   readScheduledWakeupRecords,
+  recordGeminiAuthBlockFromOutput,
   retryScheduledWakeupDispatchRecord,
   resolveAgentInstallLaunch,
   resolveBinOnPath,
@@ -120,6 +125,7 @@ import {
   settleEarlyBackgroundRunState,
   shouldUseShellForBin,
   storageHealthSnapshot,
+  stripHopByHopHeaders,
   threadWithBoundUserMessage,
   validateRunAccessModeForAgent,
   withStorageFileLock,
@@ -229,6 +235,32 @@ describe("vite agents plugin", () => {
     const source = readFileSync("vite-agents-plugin.ts", "utf8");
 
     expect(source).toContain('["status", "--porcelain=v1", "-b", "-uall"]');
+  });
+
+  it("allows only composer draft mutation batches to bypass stale workspace conflicts", () => {
+    expect(
+      isComposerDraftOnlyWorkspaceMutationBatch([
+        { type: "setComposerDraft", conversationId: "chat-1", draft: { text: "draft", attachments: [] } },
+        { type: "deleteComposerDraft", conversationId: "chat-2" },
+      ]),
+    ).toBe(true);
+    expect(
+      isComposerDraftOnlyWorkspaceMutationBatch([
+        { type: "setComposerDraft", conversationId: "chat-1", draft: { text: "draft", attachments: [] } },
+        { type: "setSelectedConversation", conversationId: "chat-1" },
+      ]),
+    ).toBe(false);
+    expect(isComposerDraftOnlyWorkspaceMutationBatch([])).toBe(false);
+  });
+
+  it("sandboxes same-origin local file previews", () => {
+    const source = readFileSync("vite-agents-plugin.ts", "utf8");
+    const start = source.indexOf("function handleLocalFile");
+    const end = source.indexOf("const DIST_INDEX_FILE");
+    const handleLocalFileSource = source.slice(start, end);
+
+    expect(handleLocalFileSource).toContain('res.setHeader("Content-Security-Policy", "sandbox")');
+    expect(handleLocalFileSource).toContain('res.setHeader("X-Content-Type-Options", "nosniff")');
   });
 
   it("builds queued turn run bodies from the current persisted conversation profile", () => {
@@ -589,11 +621,13 @@ describe("vite agents plugin", () => {
       expect(claimNextPendingQueueItem("chat-goal", "run-goal")?.id).toBe("goal-1");
       expect(readPendingTurnQueue("chat-goal").items).toEqual([expect.objectContaining({ id: "goal-1", kind: "goal", state: "dispatching" })]);
 
-      const released = releaseCanceledQueuedRun("run-goal");
+      const releaseResumeAtMs = 9_999_999_999_999;
+      const released = releaseCanceledQueuedRun("run-goal", { resumeAtMs: releaseResumeAtMs });
 
       expect(released).toMatchObject({ id: "goal-1", kind: "goal", state: "queued" });
       expect(readPendingTurnQueue("chat-goal")).toMatchObject({
         paused: true,
+        resumeAtMs: releaseResumeAtMs,
         items: [expect.objectContaining({ id: "goal-1", kind: "goal", state: "queued" })],
       });
       expect(claimNextPendingQueueItem("chat-goal", "run-again")).toBeNull();
@@ -783,6 +817,8 @@ describe("vite agents plugin", () => {
 
     expect(prompt.indexOf("<rlab-chat-tools>")).toBeGreaterThan(-1);
     expect(prompt.indexOf("<browser-preview-bridge>")).toBeGreaterThan(prompt.indexOf("</rlab-chat-tools>"));
+    expect(prompt).toContain("X-Rlab-Browser-Bridge-Token");
+    expect(prompt).toContain("Required header for POST bridge calls");
   });
 
   it("only exposes the supported visible agents in backend discovery", () => {
@@ -915,6 +951,82 @@ describe("vite agents plugin", () => {
           {},
         ),
       ).toBe("available");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("normalizes Gemini Code Assist unsupported-location auth errors", () => {
+    const rawError = [
+      "Warning: 256-color support not detected.",
+      "YOLO mode is enabled. All tool calls will be automatically approved.",
+      "Error authenticating: IneligibleTierError: Your current account is not eligible for Gemini Code Assist for individuals because it is not currently available in your location.",
+      "reasonCode: 'UNSUPPORTED_LOCATION'",
+    ].join("\n");
+
+    expect(isGeminiCodeAssistUnsupportedLocationOutput(rawError)).toBe(true);
+    expect(normalizedAgentCliExitErrorText("gemini", rawError)).toContain("UNSUPPORTED_LOCATION");
+    expect(normalizedAgentCliExitErrorText("gemini", rawError)).not.toContain("Warning: 256-color");
+    expect(normalizedAgentCliExitErrorText("codex", rawError)).toContain("Warning: 256-color");
+  });
+
+  it("marks Gemini unselectable after a persisted unsupported-location auth failure", () => {
+    const dir = mkdtempSync(join(tmpdir(), "rlab-gemini-auth-block-"));
+    try {
+      const cliPath = join(dir, "gemini");
+      const authBlocksFile = join(dir, "agent-auth-blocks.json");
+      writeFileSync(cliPath, "", "utf8");
+
+      expect(
+        recordGeminiAuthBlockFromOutput(
+          "Error authenticating: IneligibleTierError: reasonCode: 'UNSUPPORTED_LOCATION'",
+          { env: {} },
+          {},
+          authBlocksFile,
+        ),
+      ).toBe(true);
+
+      expect(
+        agentCliInfoForDetection(
+          "gemini",
+          {
+            bins: ["gemini"],
+            env: ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENAI_API_KEY"],
+            hasAuth: () => true,
+          },
+          { env: {} },
+          {},
+          dir,
+          "linux",
+          authBlocksFile,
+        ),
+      ).toMatchObject({
+        status: "needs-setup",
+        bins: ["gemini"],
+        resolvedBin: cliPath,
+        runAdapter: true,
+        selectable: false,
+        modelDiscoveryError: expect.stringContaining("UNSUPPORTED_LOCATION"),
+      });
+
+      const apiKeyInfo = agentCliInfoForDetection(
+        "gemini",
+        {
+          bins: ["gemini"],
+          env: ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENAI_API_KEY"],
+          hasAuth: () => true,
+        },
+        { env: {} },
+        { GEMINI_API_KEY: "gemini-api-key" },
+        dir,
+        "linux",
+        authBlocksFile,
+      );
+      expect(apiKeyInfo).toMatchObject({
+        status: "available",
+        selectable: true,
+      });
+      expect(apiKeyInfo.modelDiscoveryError).toBeUndefined();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -3807,6 +3919,29 @@ Built-in agents:
     expect(() => appendJsonBodyChunk(first, "!", 4)).toThrow("JSON request body exceeds 4 bytes.");
   });
 
+  it("bounds buffered preview-proxy HTML responses by bytes", () => {
+    const first = appendPreviewProxyHtmlChunk({ chunks: [], bytes: 0 }, Buffer.from("ab"), 3);
+    expect(first.bytes).toBe(2);
+    expect(Buffer.concat(first.chunks).toString("utf8")).toBe("ab");
+    expect(() => appendPreviewProxyHtmlChunk(first, Buffer.from("cd"), 3)).toThrow("Preview proxy HTML response exceeds 3 bytes.");
+  });
+
+  it("strips hop-by-hop and private preview proxy headers", () => {
+    expect(
+      stripHopByHopHeaders(
+        {
+          connection: "X-Debug, Keep-Alive",
+          "keep-alive": "timeout=5",
+          "x-debug": "drop",
+          cookie: "session=secret",
+          authorization: "Basic secret",
+          accept: "text/html",
+        },
+        new Set(["cookie", "authorization"]),
+      ),
+    ).toEqual({ accept: "text/html" });
+  });
+
   it("classifies oversized JSON request bodies separately from stream errors", () => {
     expect(jsonBodyReadErrorStatus(new Error("JSON request body exceeds 4 bytes."))).toBe(413);
     expect(jsonBodyReadErrorStatus(new Error("socket hang up"))).toBe(500);
@@ -3831,6 +3966,7 @@ Built-in agents:
   it("validates run cancel payloads", () => {
     expect(parseRunCancelPayload(JSON.stringify({ runId: "run-1" }))).toEqual({ runId: "run-1", pauseQueue: true });
     expect(parseRunCancelPayload(JSON.stringify({ runId: "run-1", pauseQueue: false }))).toEqual({ runId: "run-1", pauseQueue: false });
+    expect(parseRunCancelPayload(JSON.stringify({ runId: "run-1", pauseResumeAtMs: 1_234.9 }))).toEqual({ runId: "run-1", pauseQueue: true, pauseResumeAtMs: 1_234 });
     expect(() => parseRunCancelPayload(JSON.stringify({ runId: "" }))).toThrow("Run id is required.");
   });
 

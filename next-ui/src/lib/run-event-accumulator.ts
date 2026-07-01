@@ -264,8 +264,35 @@ export function accumulateRunEvent(accumulator: RunEventAccumulator, event: RunE
       break;
     case "wakeup":
     case "cancel_wakeup":
+    case "tracker":
     case "goal":
       break;
+  }
+}
+
+export function runEventIsErrorSignal(event: RunEvent): boolean {
+  return event.type === "error" || (event.type === "status" && event.level === "error");
+}
+
+export function runEventWritesAgentMessage(event: RunEvent): boolean {
+  switch (event.type) {
+    case "reasoning":
+    case "text":
+    case "tool":
+    case "tool_result":
+    case "diff":
+    case "plan":
+    case "code":
+    case "search":
+    case "suggested":
+    case "approval":
+    case "options":
+    case "error":
+      return true;
+    case "status":
+      return event.level !== "info";
+    default:
+      return false;
   }
 }
 

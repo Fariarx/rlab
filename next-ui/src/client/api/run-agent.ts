@@ -313,11 +313,15 @@ export async function attachRunUpdates(opts: {
   readFinalNdjsonLine(buffer, readLine);
 }
 
-export async function cancelRun(runId: string, options: { readonly pauseQueue?: boolean } = {}): Promise<void> {
+export async function cancelRun(runId: string, options: { readonly pauseQueue?: boolean; readonly pauseResumeAtMs?: number } = {}): Promise<void> {
   const response = await fetch("/api/run-cancel", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ runId, ...(options.pauseQueue === undefined ? {} : { pauseQueue: options.pauseQueue }) }),
+    body: JSON.stringify({
+      runId,
+      ...(options.pauseQueue === undefined ? {} : { pauseQueue: options.pauseQueue }),
+      ...(options.pauseResumeAtMs === undefined ? {} : { pauseResumeAtMs: options.pauseResumeAtMs }),
+    }),
   });
   if (!response.ok && response.status !== 404) {
     throw new Error(await responseErrorMessage(response, `Run cancel failed (${response.status})`));
@@ -414,6 +418,7 @@ export async function runConversation(opts: {
   /** Fires as soon as the agent reports its session id, so it can be persisted
    *  immediately (even if the run later detaches or errors). */
   readonly onSession?: (sessionId: string) => void;
+  readonly onEvent?: (event: RunEvent) => void;
   readonly onBlocks: (blocks: AgentBlock[]) => void;
 }): Promise<RunConversationResult> {
   let sessionId: string | undefined;
@@ -456,6 +461,7 @@ export async function runConversation(opts: {
   };
 
   const onEvent = (e: RunEvent) => {
+    opts.onEvent?.(e);
     if (e.type === "session") {
       sessionId = e.id;
       opts.onSession?.(e.id);

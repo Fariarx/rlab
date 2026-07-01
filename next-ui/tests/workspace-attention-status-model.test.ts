@@ -16,14 +16,14 @@ function conversation(patch: Partial<ConversationSummary> & Pick<ConversationSum
 }
 
 describe("workspaceAttentionStatus", () => {
-  it("prioritizes unread errors, unread actions, running agents, then unread completions", () => {
+  it("prioritizes unread errors, unread actions, then unread completions", () => {
     expect(
       workspaceAttentionStatus([
         conversation({ id: "done", status: "done", unread: true }),
         conversation({ id: "running", status: "running" }),
         conversation({ id: "waiting", status: "waiting", unread: true }),
         conversation({ id: "error", status: "error", unread: true }),
-      ], new Set()),
+      ]),
     ).toBe("error");
 
     expect(
@@ -31,37 +31,35 @@ describe("workspaceAttentionStatus", () => {
         conversation({ id: "done", status: "done", unread: true }),
         conversation({ id: "running", status: "running" }),
         conversation({ id: "waiting", status: "waiting", unread: true }),
-      ], new Set()),
+      ]),
     ).toBe("action");
 
     expect(
       workspaceAttentionStatus([
         conversation({ id: "done", status: "done", unread: true }),
         conversation({ id: "running", status: "running", activeRunId: "run-1" }),
-      ], new Set(["run-1"])),
-    ).toBe("working");
+      ]),
+    ).toBe("done");
 
     expect(
       workspaceAttentionStatus([
         conversation({ id: "done", status: "done", unread: true }),
         conversation({ id: "stale-running", status: "running", activeRunId: "run-stale" }),
-      ], new Set()),
+      ]),
     ).toBe("done");
 
-    expect(workspaceAttentionStatus([conversation({ id: "stale-running", status: "running", activeRunId: "run-stale" })], new Set())).toBeNull();
-    expect(workspaceAttentionStatus([conversation({ id: "stale-running", status: "running" })], new Set())).toBeNull();
+    expect(workspaceAttentionStatus([conversation({ id: "stale-running", status: "running", activeRunId: "run-stale" })])).toBeNull();
+    expect(workspaceAttentionStatus([conversation({ id: "stale-running", status: "running" })])).toBeNull();
 
-    expect(workspaceAttentionStatus([conversation({ id: "done", status: "done", unread: true })], new Set())).toBe("done");
-    expect(workspaceAttentionStatus([conversation({ id: "read-error", status: "error", unread: false })], new Set())).toBeNull();
-    expect(workspaceAttentionStatus([conversation({ id: "read-waiting", status: "waiting", unread: false })], new Set())).toBeNull();
+    expect(workspaceAttentionStatus([conversation({ id: "done", status: "done", unread: true })])).toBe("done");
+    expect(workspaceAttentionStatus([conversation({ id: "read-error", status: "error", unread: false })])).toBeNull();
+    expect(workspaceAttentionStatus([conversation({ id: "read-waiting", status: "waiting", unread: false })])).toBeNull();
   });
 
-  it("builds changing wave frames for attention states and a static one for done", () => {
-    expect(workspaceAttentionFaviconHref("action", true, 0)).not.toBe(workspaceAttentionFaviconHref("action", true, 3));
-    expect(workspaceAttentionFaviconHref("working", true, 0)).not.toBe(workspaceAttentionFaviconHref("working", true, 3));
-    expect(workspaceAttentionFaviconHref("error", true, 0)).not.toBe(workspaceAttentionFaviconHref("error", true, 3));
+  it("builds static favicon hrefs without animated frames", () => {
+    expect(workspaceAttentionFaviconHref("action", true, 0)).toBe(workspaceAttentionFaviconHref("action", true, 3));
+    expect(workspaceAttentionFaviconHref("error", true, 0)).toBe(workspaceAttentionFaviconHref("error", true, 3));
     expect(workspaceAttentionFaviconHref("done", true, 0)).toBe(workspaceAttentionFaviconHref("done", true, 3));
-    expect(decodeURIComponent(workspaceAttentionFaviconHref("working", true, 0))).toContain("stroke-width=\"2.4\"");
-    expect(decodeURIComponent(workspaceAttentionFaviconHref("working", true, 3))).toContain("r=\"7.95\"");
+    expect(decodeURIComponent(workspaceAttentionFaviconHref("action", true, 0))).not.toContain("stroke-width=\"2.4\"");
   });
 });

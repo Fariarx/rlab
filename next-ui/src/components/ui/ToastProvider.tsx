@@ -38,6 +38,9 @@ export const ToastProvider = observer(function ToastProvider({ children }: { rea
     (options: ToastOptions) => {
       toastSeq += 1;
       const id = `toast-${toastSeq}`;
+      if (options.severity === "error") {
+        console.error(options.message);
+      }
       store.addToast({ ...options, id });
 
       const duration = options.duration ?? 5000;

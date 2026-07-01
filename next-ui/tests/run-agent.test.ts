@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_PROFILE, type AgentBlock } from "../src/components/agent";
 import { attachRunUpdates, runConversation } from "../src/client/api/run-agent";
 import { MAX_AGENT_TOOL_OUTPUT_CHARS } from "../src/lib/agent-output";
+import type { RunEvent } from "../src/lib/run-event-accumulator";
 
 function streamResponse(events: readonly unknown[]): Response {
   return new Response(
@@ -116,6 +117,33 @@ describe("runConversation", () => {
 
     expect(result.status).toBe("done");
     expect(blocks.at(-1)).toEqual([{ kind: "status", level: "ok", text: "context compacted · 120k → 38k tokens" }]);
+  });
+
+  it("exposes raw run events before block accumulation", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        streamResponse([
+          { type: "error", text: "agent failed" },
+          { type: "done" },
+        ]),
+      ),
+    );
+    const events: RunEvent[] = [];
+
+    await runConversation({
+      profile: DEFAULT_PROFILE,
+      prompt: "answer",
+      accessMode: "read-only",
+      locale: "ru",
+      onEvent: (event) => events.push(event),
+      onBlocks: () => undefined,
+    });
+
+    expect(events).toEqual([
+      { type: "error", text: "agent failed" },
+      { type: "done" },
+    ]);
   });
 
   it("never leaves a settled turn with zero blocks (no hung thinking bubble)", async () => {

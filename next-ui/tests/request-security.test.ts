@@ -52,4 +52,16 @@ describe("request security guard", () => {
       message: "Cross-origin requests are not allowed.",
     });
   });
+
+  it("allows trusted server-side unsafe requests without weakening cross-origin browser checks", () => {
+    expect(validateRlabRequest(req({ host: "localhost:5187" }, "POST"), {}, { trustedUnsafeRequest: () => true })).toBeNull();
+    expect(validateRlabRequest(req({ host: "localhost:5187", origin: "https://evil.example" }, "POST"), {}, { trustedUnsafeRequest: () => true })).toEqual({
+      statusCode: 403,
+      message: "Cross-origin requests are not allowed.",
+    });
+    expect(validateRlabRequest(req({ host: "localhost:5187", "sec-fetch-site": "cross-site" }, "POST"), {}, { trustedUnsafeRequest: () => true })).toEqual({
+      statusCode: 403,
+      message: "Cross-site requests are not allowed.",
+    });
+  });
 });

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { closestCenter, DndContext, KeyboardSensor, PointerSensor, useSensor, useSensors, type DragEndEvent } from "@dnd-kit/core";
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
@@ -61,13 +61,19 @@ const queuedHeaderButtonSx = {
 const QUEUED_VISIBLE_ROW_COUNT = 5;
 const QUEUED_ROW_HEIGHT_PX = 30;
 const QUEUE_PAUSE_DELAY_OPTIONS = [
-  { key: "5m", delayMs: 5 * 60_000, labelKey: "pauseQueueFor5Minutes" },
-  { key: "15m", delayMs: 15 * 60_000, labelKey: "pauseQueueFor15Minutes" },
+  { key: "10m", delayMs: 10 * 60_000, labelKey: "pauseQueueFor10Minutes" },
+  { key: "30m", delayMs: 30 * 60_000, labelKey: "pauseQueueFor30Minutes" },
   { key: "1h", delayMs: 60 * 60_000, labelKey: "pauseQueueFor1Hour" },
 ] as const;
 
 function formatQueueResumeTime(value: number, locale: string): string {
   return new Intl.DateTimeFormat(locale, { hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(value));
+}
+
+function dateTimeLocalInputValue(value: number): string {
+  const date = new Date(value);
+  const pad = (part: number) => String(part).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
 function messageItems(messages: readonly ChatMessage[]): readonly PendingQueueItem[] {
@@ -101,14 +107,11 @@ function queueItemText(item: PendingQueueItem, emptyText: string, locale: Return
 }
 
 function QueueItemIcon({ item, index }: { readonly item: PendingQueueItem; readonly index: number }) {
-  if (item.kind === "goal" && item.state === "dispatching") {
-    return <ScheduleSendRoundedIcon sx={{ fontSize: 14, color: (theme) => theme.palette.status.info.main }} />;
+  if (item.kind === "goal") {
+    return <FlagRoundedIcon sx={{ fontSize: 14, color: (theme) => theme.palette.status.info.main }} />;
   }
   if (item.kind === "tracker" && item.state === "dispatching") {
     return <ScheduleSendRoundedIcon sx={{ fontSize: 14, color: (theme) => theme.palette.status.ok.main }} />;
-  }
-  if (item.kind === "goal") {
-    return <FlagRoundedIcon sx={{ fontSize: 14, color: (theme) => theme.palette.status.info.main }} />;
   }
   if (item.kind === "tracker") {
     return <ChecklistRoundedIcon sx={{ fontSize: 14, color: (theme) => theme.palette.status.ok.main }} />;
@@ -385,6 +388,7 @@ export function QueuedMessages({ messages, items, paused, resumeAtMs, onCancel, 
   const [wakeupAnchorEl, setWakeupAnchorEl] = useState<HTMLElement | null>(null);
   const [openWakeupId, setOpenWakeupId] = useState<string | null>(null);
   const [pauseAnchorEl, setPauseAnchorEl] = useState<HTMLElement | null>(null);
+  const manualPauseInputRef = useRef<HTMLInputElement | null>(null);
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
@@ -408,6 +412,27 @@ export function QueuedMessages({ messages, items, paused, resumeAtMs, onCancel, 
         : t("queuedTitle", { count: queueItems.length });
   const openedWakeup = openWakeupId ? wakeupItems.find((item) => item.id === openWakeupId) ?? null : null;
   const canSendNow = queueCanSendNow(queueItems);
+  const openManualPausePicker = () => {
+    const input = manualPauseInputRef.current;
+    if (!input) {
+      return;
+    }
+    const picker = input as HTMLInputElement & { showPicker?: () => void };
+    if (picker.showPicker) {
+      picker.showPicker();
+      return;
+    }
+    input.focus();
+    input.click();
+  };
+  const handleManualPauseChange = (value: string) => {
+    const selectedMs = new Date(value).getTime();
+    if (!Number.isFinite(selectedMs) || selectedMs <= Date.now()) {
+      return;
+    }
+    setPauseAnchorEl(null);
+    onTogglePause(selectedMs);
+  };
   const handleDragEnd = (event: DragEndEvent) => {
     if (!onMoveItemAfter || !event.over || event.active.id === event.over.id) {
       return;
@@ -496,7 +521,7 @@ export function QueuedMessages({ messages, items, paused, resumeAtMs, onCancel, 
             },
           }}
         >
-          <Box sx={{ px: 1.25, pt: 0.9, pb: 0.55 }}>
+          <Box sx={{ px: 1.25, pt: 0.55, pb: 0.35 }}>
             <Typography variant="microLabel" sx={{ color: "text.secondary" }}>
               {t("pauseQueueMenuTitle")}
             </Typography>
@@ -511,7 +536,7 @@ export function QueuedMessages({ messages, items, paused, resumeAtMs, onCancel, 
             {t("pauseQueueUntilManual")}
           </MenuItem>
           <Divider sx={{ my: 0.5 }} />
-          <Box sx={{ px: 1.25, py: 0.35 }}>
+          <Box sx={{ px: 1.25, pt: 0.15, pb: 0.25 }}>
             <Typography variant="microLabel" sx={{ color: "text.disabled" }}>
               {t("pauseQueueResumeAfter")}
             </Typography>
@@ -535,6 +560,30 @@ export function QueuedMessages({ messages, items, paused, resumeAtMs, onCancel, 
               </MenuItem>
             );
           })}
+          <MenuItem dense onClick={openManualPausePicker} sx={{ position: "relative" }}>
+            {t("pauseQueueManualChoice")}
+            <Box
+              component="input"
+              ref={manualPauseInputRef}
+              type="datetime-local"
+              aria-hidden="true"
+              tabIndex={-1}
+              data-testid="queued-pause-manual-input"
+              min={dateTimeLocalInputValue(nowMs + 60_000)}
+              defaultValue={dateTimeLocalInputValue(nowMs + 10 * 60_000)}
+              onChange={(event) => {
+                handleManualPauseChange(event.currentTarget.value);
+                event.currentTarget.value = "";
+              }}
+              sx={{
+                position: "absolute",
+                width: 1,
+                height: 1,
+                opacity: 0,
+                pointerEvents: "none",
+              }}
+            />
+          </MenuItem>
         </Menu>
         <Button
           variant="text"

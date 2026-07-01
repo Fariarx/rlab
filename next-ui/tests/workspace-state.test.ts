@@ -29,6 +29,7 @@ describe("workspace state", () => {
         confirmDestructiveActions: true,
         desktopNotifications: true,
         locale: "ru",
+        queueInterruptionPauseMs: 30 * 60_000,
         telemetry: false,
         previewServerHost: "",
         systemPrompt: "",

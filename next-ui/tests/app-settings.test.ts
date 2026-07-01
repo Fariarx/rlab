@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cloneAppSettings, defaultAppSettings, isAppSettings, mergeAppSettings } from "../src/lib/app-settings";
+import { DEFAULT_QUEUE_INTERRUPTION_PAUSE_MS, cloneAppSettings, defaultAppSettings, isAppSettings, mergeAppSettings } from "../src/lib/app-settings";
 
 describe("app settings", () => {
   it("clones and merges agent default profile settings", () => {
@@ -29,8 +29,8 @@ describe("app settings", () => {
     ).toBe(true);
   });
 
-  it("accepts older persisted settings without a system prompt", () => {
-    const { systemPrompt: _systemPrompt, ...legacyGeneral } = defaultAppSettings.general;
+  it("accepts older persisted settings without a system prompt or queue interruption pause", () => {
+    const { systemPrompt: _systemPrompt, queueInterruptionPauseMs: _queueInterruptionPauseMs, ...legacyGeneral } = defaultAppSettings.general;
 
     expect(
       isAppSettings({
@@ -41,14 +41,16 @@ describe("app settings", () => {
   });
 
   it("normalizes missing and patched system prompts", () => {
-    const { systemPrompt: _systemPrompt, ...legacyGeneral } = defaultAppSettings.general;
+    const { systemPrompt: _systemPrompt, queueInterruptionPauseMs: _queueInterruptionPauseMs, ...legacyGeneral } = defaultAppSettings.general;
     const cloned = cloneAppSettings({
       ...defaultAppSettings,
       general: legacyGeneral,
     } as unknown as typeof defaultAppSettings);
 
     expect(cloned.general.systemPrompt).toBe("");
+    expect(cloned.general.queueInterruptionPauseMs).toBe(DEFAULT_QUEUE_INTERRUPTION_PAUSE_MS);
     expect(mergeAppSettings(defaultAppSettings, { general: { systemPrompt: "Use short answers." } }).general.systemPrompt).toBe("Use short answers.");
+    expect(mergeAppSettings(defaultAppSettings, { general: { queueInterruptionPauseMs: 42 * 60_000 } }).general.queueInterruptionPauseMs).toBe(42 * 60_000);
   });
 
   it("rejects incomplete persisted settings", () => {

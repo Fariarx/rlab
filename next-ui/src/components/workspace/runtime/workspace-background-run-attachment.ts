@@ -9,6 +9,7 @@ export interface RunHandle {
   readonly userMessageId: string;
   readonly agentMessageId: string;
   lastUpdateAtMs: number;
+  errorIdleStopTimer: ReturnType<typeof setTimeout> | null;
   serverOwned: boolean;
   canceled: boolean;
 }
@@ -46,6 +47,7 @@ export function attachWorkspaceBackgroundRun({
     userMessageId: run.userMessageId,
     agentMessageId: run.agentMessageId,
     lastUpdateAtMs: Date.now(),
+    errorIdleStopTimer: null,
     serverOwned: true,
     canceled: false,
   };
